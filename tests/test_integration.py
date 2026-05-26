@@ -7,7 +7,7 @@ from unittest.mock import patch, MagicMock
 
 from stream2video.download import download
 from stream2video.silence import detect_silence, SilenceSegment
-from stream2video.concat import cut_and_concat, _generate_keep_segments
+from stream2video.concat import cut_and_concat, _generate_keep_segments, _align_to_keyframes
 
 
 class TestPipelineIntegration:
@@ -115,6 +115,38 @@ class TestErrorRecovery:
                         silence_segments,
                         Path(tmpdir) / "output.mp4",
                     )
+
+
+class TestAlignToKeyframes:
+    """Test keyframe alignment logic."""
+
+    def test_empty_keyframes_no_change(self):
+        """Test that segments are unchanged with empty keyframes."""
+        segments = [(1.0, 5.0), (10.0, 15.0)]
+        assert _align_to_keyframes(segments, []) == segments
+
+    def test_first_segment_start_zero_preserved(self):
+        """Test segment starting at 0.0 is not modified."""
+        keyframes = [0, 2, 4]
+        assert _align_to_keyframes([(0.0, 5.0)], keyframes) == [(0.0, 5.0)]
+
+    def test_no_overlap_after_alignment(self):
+        """Test that alignment doesn't create overlapping segments."""
+        segments = [(0.0, 3.5), (4.0, 8.0)]
+        keyframes = [0, 1, 2, 3, 4, 5]
+        result = _align_to_keyframes(segments, keyframes)
+        for i in range(1, len(result)):
+            assert result[i][0] >= result[i-1][1], f"Overlap: {result[i-1]} -> {result[i]}"
+
+    def test_prevents_overlap_with_prev_segment(self):
+        """Test that alignment snaps to original start if overlap would occur."""
+        segments = [(0.0, 10.2), (10.5, 20.0)]
+        keyframes = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+        result = _align_to_keyframes(segments, keyframes)
+        # Second segment original start = 10.5, nearest keyframe = 10
+        # Snapping to 10 would overlap with segment 1 (ends at 10.2)
+        # So original start (10.5) should be preserved
+        assert result[1][0] == 10.5, f"Expected 10.5, got {result[1][0]}"
 
 
 class TestConfigValidation:

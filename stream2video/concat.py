@@ -156,6 +156,10 @@ def _align_to_keyframes(
             if start - prev_kf <= KEYFRAME_SEARCH_WINDOW:
                 new_start = prev_kf
 
+        # Prevent overlap with previous segment (keyframe before prev end)
+        if aligned and new_start < aligned[-1][1]:
+            new_start = start
+
         if new_start < end:
             aligned.append((new_start, end))
 
