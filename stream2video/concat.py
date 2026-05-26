@@ -2,6 +2,7 @@
 
 import logging
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import List, Tuple, Optional
 
@@ -95,7 +96,8 @@ def _run_ffmpeg_filter_complex(
     keep_segments: List[Tuple[float, float]],
     output_path: Path,
 ):
-    """Execute ffmpeg with filter_complex select/aselect, re-encode both streams."""
+    """Execute ffmpeg with filter_complex select/aselect, re-encode both streams.
+    Uses -filter_complex_script to avoid Windows command-line length limits."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     expr_parts = [f"between(t,{s},{e})" for s, e in keep_segments]
@@ -103,18 +105,27 @@ def _run_ffmpeg_filter_complex(
 
     vcodec, vcodec_opts = _get_video_encoder()
 
+    graph = (
+        f"[0:v]select='{select_expr}',setpts=N/FRAME_RATE/TB[v];\n"
+        f"[0:a]aselect='{select_expr}',asetpts=N/SR/TB[a]"
+    )
+
+    logger.info(f"filter_complex: {len(keep_segments)} segments, {vcodec}")
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".txt", delete=False, encoding="utf-8"
+    ) as f:
+        f.write(graph)
+        script_path = f.name
+
     cmd = [
         "ffmpeg", "-y", "-loglevel", "error", "-stats",
         "-i", str(video_path),
-        "-filter_complex",
-        f"[0:v]select='{select_expr}',setpts=N/FRAME_RATE/TB[v];"
-        f"[0:a]aselect='{select_expr}',asetpts=N/SR/TB[a]",
+        "-filter_complex_script", script_path,
         "-map", "[v]", "-c:v", vcodec, *vcodec_opts,
         "-map", "[a]", "-c:a", "aac", "-b:a", "128k",
         str(output_path),
     ]
-
-    logger.info(f"filter_complex: {len(keep_segments)} segments, {vcodec}")
 
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=28800, check=False)
@@ -125,3 +136,5 @@ def _run_ffmpeg_filter_complex(
         raise FFmpegError(f"ffmpeg timeout after {e.timeout}s") from e
     except FileNotFoundError as e:
         raise FFmpegError("ffmpeg not found in PATH") from e
+    finally:
+        Path(script_path).unlink(missing_ok=True)
