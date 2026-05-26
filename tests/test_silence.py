@@ -6,7 +6,6 @@ from tempfile import TemporaryDirectory
 
 from stream2video.silence import (
     SilenceSegment,
-    _validate_url,
     _apply_margin,
     detect_silence,
     SilenceDetectionError,
@@ -55,8 +54,8 @@ class TestParameterValidation:
             assert not _validate_min_silence(min_s)
 
     def test_margin_valid(self):
-        for margin in [0, 0.1, 1.0, 5.0]:
-            _validate_margin = lambda m: 0 <= m <= 5
+        for margin in [-3, -0.3, 0, 0.1, 1.0, 5.0]:
+            _validate_margin = lambda m: -3 <= m <= 5
             assert _validate_margin(margin)
 
     def test_margin_invalid(self):
@@ -146,7 +145,7 @@ class TestDetectSilenceValidation:
             video_file.write_text("dummy")
 
             with pytest.raises(ValueError, match="Margin"):
-                detect_silence(video_file, margin=-0.1)
+                detect_silence(video_file, margin=-3.1)
 
             with pytest.raises(ValueError, match="Margin"):
                 detect_silence(video_file, margin=5.1)

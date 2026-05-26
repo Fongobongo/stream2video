@@ -15,16 +15,26 @@ Automatically downloads VOD from YouTube/Twitch, detects silence using audio ana
 
 ## Installation
 
+### Windows (automated)
+
+```powershell
+# Run the setup script (installs Python deps + ffmpeg)
+.\setup.ps1
+
+# Or with dev dependencies:
+.\setup.ps1 -Dev
+```
+
+### Manual
+
 ```bash
-# Clone or enter the repository
-cd stream2video
+# Install Python package
+pip install -e .
 
-# Create virtual environment with Python 3.12 via uv
-uv venv --python 3.12 .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-
-# Install package and dependencies
-uv pip install -e .
+# Install ffmpeg (required)
+# Windows: winget install Gyan.FFmpeg  or  choco install ffmpeg
+# macOS:   brew install ffmpeg
+# Linux:   sudo apt install ffmpeg
 
 # Verify installation
 stream2video --help
@@ -33,26 +43,20 @@ stream2video --help
 ## Dependencies
 
 - **yt-dlp** (>=2024.01.01) - Download videos from YouTube/Twitch
-- **auto-editor** (>=29.0.0) - Silence detection
-- **ffmpeg** (system) - Video cutting and concatenation
+- **ffmpeg** (system) - Silence detection (via silencedetect filter) + video cutting
 - **typer** (>=0.12.0) - CLI framework
 - **pyyaml** (>=6.0) - Config file parsing
 - **rich** (>=13.0.0) - Progress bars and logging
 
 ### System Requirements
 
-Ensure ffmpeg and ffprobe are installed:
+ffmpeg (with ffprobe) is required. Install via:
 
-```bash
-# macOS
-brew install ffmpeg
-
-# Ubuntu/Debian
-sudo apt-get install ffmpeg
-
-# Windows
-choco install ffmpeg
-```
+| Platform | Command |
+|----------|---------|
+| Windows  | `winget install Gyan.FFmpeg` |
+| macOS    | `brew install ffmpeg` |
+| Linux    | `sudo apt install ffmpeg` |
 
 ## Quick Start
 

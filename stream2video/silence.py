@@ -1,11 +1,11 @@
-"""Silence detection module using auto-editor."""
+"""Silence detection module using ffmpeg silencedetect filter."""
 
-import json
 import logging
-import subprocess
+import math
 import re
+import subprocess
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List
 
 logger = logging.getLogger(__name__)
 
@@ -16,23 +16,10 @@ class SilenceDetectionError(Exception):
     pass
 
 
-class AutoEditorError(SilenceDetectionError):
-    """Auto-editor execution error."""
-
-    pass
-
-
 class SilenceSegment:
     """Silence segment representation."""
 
     def __init__(self, start: float, end: float):
-        """
-        Initialize silence segment.
-
-        Args:
-            start: Start time in seconds
-            end: End time in seconds
-        """
         self.start = start
         self.end = end
         self.duration = end - start
@@ -48,7 +35,7 @@ def detect_silence(
     margin: float = 0.1,
 ) -> List[SilenceSegment]:
     """
-    Detect silence segments in video using auto-editor.
+    Detect silence segments using ffmpeg silencedetect filter.
 
     Args:
         video_path: Path to video file
@@ -58,58 +45,47 @@ def detect_silence(
 
     Returns:
         List of SilenceSegment objects
-
-    Raises:
-        AutoEditorError: If auto-editor fails
     """
     if not video_path.exists():
         raise SilenceDetectionError(f"Video file not found: {video_path}")
 
-    # Validate parameters
     if not -60 <= threshold <= -5:
         raise ValueError(f"Threshold must be in range [-60, -5], got {threshold}")
 
     if not 0.1 <= min_silence <= 60:
         raise ValueError(f"Min silence must be in range [0.1, 60], got {min_silence}")
 
-    if not 0 <= margin <= 5:
-        raise ValueError(f"Margin must be in range [0, 5], got {margin}")
+    if not -3 <= margin <= 5:
+        raise ValueError(f"Margin must be in range [-3, 5], got {margin}")
 
-    # Build auto-editor command
-    # auto-editor uses: --threshold (in dB), --min_clip_length (in seconds)
+    # Convert dB threshold to linear noise level
+    noise = 10 ** (threshold / 20)
+
     cmd = [
-        "auto-editor",
-        str(video_path),
-        "--output",
-        "/dev/null",  # Don't save output video
-        "--export",
-        "json",  # Export as JSON for parsing
-        "--threshold",
-        str(threshold),
-        "--min_clip_length",
-        str(min_silence),
+        "ffmpeg",
+        "-i", str(video_path),
+        "-af", f"silencedetect=noise={noise}:duration={min_silence}",
+        "-f", "null",
+        "-",
     ]
 
     try:
-        logger.info(f"Running auto-editor: {' '.join(cmd)}")
+        logger.info(f"Running ffmpeg silencedetect: threshold={threshold}dB ({noise}), min_silence={min_silence}s")
 
         result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
-            timeout=600,  # 10 minutes timeout
+            timeout=3600,
             check=False,
         )
 
         if result.returncode != 0:
             error_msg = result.stderr or result.stdout or "Unknown error"
-            logger.error(f"auto-editor failed: {error_msg}")
-            raise AutoEditorError(f"auto-editor failed: {error_msg}")
+            raise SilenceDetectionError(f"ffmpeg silencedetect failed: {error_msg}")
 
-        # Parse output
-        silence_segments = _parse_auto_editor_output(result.stdout, result.stderr)
+        silence_segments = _parse_ffmpeg_output(result.stderr)
 
-        # Apply margin
         if margin > 0:
             silence_segments = _apply_margin(silence_segments, margin)
 
@@ -120,103 +96,53 @@ def detect_silence(
         return silence_segments
 
     except subprocess.TimeoutExpired as e:
-        raise AutoEditorError(f"auto-editor timeout after {e.timeout}s") from e
+        raise SilenceDetectionError(f"ffmpeg timeout after {e.timeout}s") from e
 
     except FileNotFoundError as e:
-        raise AutoEditorError("auto-editor not found in PATH. Install with: pip install auto-editor") from e
+        raise SilenceDetectionError("ffmpeg not found in PATH") from e
 
 
-def _parse_auto_editor_output(stdout: str, stderr: str) -> List[SilenceSegment]:
-    """
-    Parse auto-editor output to extract silence segments.
-
-    Args:
-        stdout: Standard output from auto-editor
-        stderr: Standard error from auto-editor
-
-    Returns:
-        List of SilenceSegment objects
-    """
+def _parse_ffmpeg_output(stderr: str) -> List[SilenceSegment]:
+    """Parse ffmpeg silencedetect output."""
     segments = []
+    start_pattern = re.compile(r"silence_start:\s*([\d.]+)")
+    end_pattern = re.compile(r"silence_end:\s*([\d.]+)")
 
-    # Try JSON parsing first
-    output_lines = stdout.strip().split("\n")
+    starts = [float(m.group(1)) for m in start_pattern.finditer(stderr)]
+    ends = [float(m.group(1)) for m in end_pattern.finditer(stderr)]
 
-    for line in output_lines:
-        if not line.strip():
-            continue
-
-        try:
-            # Try parsing as JSON
-            data = json.loads(line)
-            if isinstance(data, dict):
-                # Extract silence segments from JSON
-                if "silence" in data:
-                    silence_list = data["silence"]
-                    if isinstance(silence_list, list):
-                        for silence in silence_list:
-                            if isinstance(silence, (list, tuple)) and len(silence) >= 2:
-                                start, end = float(silence[0]), float(silence[1])
-                                segments.append(SilenceSegment(start, end))
-            elif isinstance(data, list):
-                # Direct list format
-                if len(data) >= 2:
-                    try:
-                        start, end = float(data[0]), float(data[1])
-                        segments.append(SilenceSegment(start, end))
-                    except (ValueError, TypeError):
-                        pass
-
-        except json.JSONDecodeError:
-            # Fallback: try regex parsing for common formats
-            # Match patterns like: (0.5, 2.5), [0.5-2.5], 0.5-2.5
-            for match in re.finditer(r"[(\[]?\s*(\d+\.?\d*)\s*[-,]\s*(\d+\.?\d*)\s*[)\]]?", line):
-                try:
-                    start, end = float(match.group(1)), float(match.group(2))
-                    if start < end:
-                        segments.append(SilenceSegment(start, end))
-                except ValueError:
-                    pass
-
-    if segments:
-        logger.debug(f"Parsed {len(segments)} silence segments from auto-editor output")
+    for start, end in zip(starts, ends):
+        segments.append(SilenceSegment(start, end))
 
     return segments
 
 
 def _apply_margin(segments: List[SilenceSegment], margin: float) -> List[SilenceSegment]:
-    """
-    Apply margin to silence segments and merge overlapping segments.
-
-    Args:
-        segments: Original silence segments
-        margin: Margin to apply in seconds
-
-    Returns:
-        Adjusted and merged silence segments
-    """
+    """Apply margin and merge overlapping segments. Negative margin shrinks segments."""
     if not segments:
         return segments
 
-    # Expand each segment by margin
-    expanded = [SilenceSegment(max(0, seg.start - margin), seg.end + margin) for seg in segments]
+    expanded = []
+    for seg in segments:
+        start = max(0, seg.start - margin)
+        end = seg.end + margin
+        if start < end:
+            expanded.append(SilenceSegment(start, end))
 
-    # Sort by start time
+    if not expanded:
+        return expanded
+
     expanded.sort(key=lambda s: s.start)
 
-    # Merge overlapping segments
     merged = []
     current = expanded[0]
 
     for seg in expanded[1:]:
         if seg.start <= current.end:
-            # Overlapping or adjacent - merge
             current = SilenceSegment(current.start, max(current.end, seg.end))
         else:
-            # Gap - save current and start new
             merged.append(current)
             current = seg
 
     merged.append(current)
-
     return merged

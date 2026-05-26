@@ -1,6 +1,8 @@
 """CLI entry point using Typer."""
 
 import logging
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Optional
@@ -27,18 +29,27 @@ console = Console()
 app = typer.Typer(help="Compress stream recordings by removing silence")
 
 
+def _check_ffmpeg():
+    """Warn if ffmpeg is missing."""
+    if not shutil.which("ffmpeg"):
+        console.print("[red]Error:[/red] ffmpeg not found in PATH")
+        console.print("  Install: [cyan]winget install Gyan.FFmpeg[/cyan]")
+        console.print("  Or run:  [cyan]setup.ps1[/cyan] (Windows)")
+        raise typer.Exit(1)
+
+
 # Config validation ranges
 CONFIG_RANGES = {
     "threshold": (-60, -5),
     "min_silence": (0.1, 60),
-    "margin": (0, 5),
+    "margin": (-3, 5),
 }
 
 # Config defaults
 CONFIG_DEFAULTS = {
     "threshold": -20,
     "min_silence": 0.5,
-    "margin": 0.1,
+    "margin": -0.3,
 }
 
 
@@ -119,6 +130,9 @@ def main(
     2. Detect silence segments
     3. Cut and concatenate video
     """
+    # Verify ffmpeg is available
+    _check_ffmpeg()
+
     # Set log level
     logger.setLevel(log_level.upper())
 
@@ -146,7 +160,7 @@ def main(
             try:
                 logger.info(f"Processing: {input_video}")
                 video_path = download(input_video, output_dir)
-                progress.update(task1, completed=True, description="[green]✓[/green] Video downloaded")
+                progress.update(task1, completed=True, description="[green]+[/green] Video downloaded")
 
             except DownloadError as e:
                 console.print(f"[red]Download failed:[/red] {e}")
@@ -164,7 +178,7 @@ def main(
                     margin=config["margin"],
                 )
 
-                progress.update(task2, completed=True, description=f"[green]✓[/green] Found {len(silence_segments)} silence segments")
+                progress.update(task2, completed=True, description=f"[green]+[/green] Found {len(silence_segments)} silence segments")
 
             except SilenceDetectionError as e:
                 console.print(f"[red]Silence detection failed:[/red] {e}")
@@ -179,7 +193,7 @@ def main(
 
                 cut_and_concat(video_path, silence_segments, output_video)
 
-                progress.update(task3, completed=True, description="[green]✓[/green] Video compressed")
+                progress.update(task3, completed=True, description="[green]+[/green] Video compressed")
 
             except ConcatError as e:
                 console.print(f"[red]Concatenation failed:[/red] {e}")
@@ -187,7 +201,7 @@ def main(
                 raise typer.Exit(1)
 
         # Summary
-        console.print("\n[bold green]✓ Compression complete![/bold green]")
+        console.print("\n[bold green]+ Compression complete![/bold green]")
         console.print(f"Output: [cyan]{output_video}[/cyan]")
 
         if video_path != Path(input_video):

@@ -105,7 +105,10 @@ class TestErrorRecovery:
                 SilenceSegment(0.0, 100.0),  # Entire video is silence
             ]
 
-            with patch("stream2video.concat._get_video_duration", return_value=100.0):
+            with (
+                patch("stream2video.concat._get_video_duration", return_value=100.0),
+                patch("stream2video.concat._find_keyframes", return_value=[]),
+            ):
                 with pytest.raises(Exception, match="No video segments"):
                     cut_and_concat(
                         video_file,

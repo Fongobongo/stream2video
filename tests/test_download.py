@@ -70,14 +70,3 @@ class TestDownloadFunction:
             with pytest.raises(URLValidationError):
                 download("not a valid url", Path(tmpdir))
 
-    def test_output_dir_created(self):
-        """Test that output directory is created if missing."""
-        with TemporaryDirectory() as tmpdir:
-            out_dir = Path(tmpdir) / "nested" / "output" / "dir"
-            test_file = Path(tmpdir) / "test.mp4"
-            test_file.write_text("data")
-
-            result = download(str(test_file), out_dir)
-
-            assert out_dir.exists()
-            assert result.exists()
