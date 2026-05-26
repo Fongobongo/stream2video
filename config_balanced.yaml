@@ -1,0 +1,6 @@
+# stream2video - balanced config
+# Default balanced approach
+
+threshold: -20  # Medium threshold (range: -60 to -5 dB)
+min_silence: 0.5  # Standard minimum silence duration (range: 0.1 to 60 seconds)
+margin: 0.1  # Standard margin around cuts (range: 0 to 5 seconds)

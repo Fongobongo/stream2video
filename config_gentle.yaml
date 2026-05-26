@@ -1,0 +1,6 @@
+# stream2video - gentle config
+# Conservative approach, preserves more of original video
+
+threshold: -10  # Higher threshold = less aggressive (range: -60 to -5 dB)
+min_silence: 1.0  # Longer minimum silence duration (range: 0.1 to 60 seconds)
+margin: 0.3  # Larger margin around cuts (range: 0 to 5 seconds)

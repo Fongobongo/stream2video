@@ -1,0 +1,6 @@
+# stream2video - default aggressive config
+# Removes more silence, more aggressive cutting
+
+threshold: -30  # Lower threshold = more aggressive (range: -60 to -5 dB)
+min_silence: 0.3  # Shorter minimum silence duration (range: 0.1 to 60 seconds)
+margin: 0.05  # Smaller margin around cuts (range: 0 to 5 seconds)
