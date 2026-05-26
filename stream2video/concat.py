@@ -102,7 +102,7 @@ def _build_chunked_filter_graph(keep_segments: List[Tuple[float, float]], chunk_
     for idx, chunk in enumerate(chunks):
         expr = "+".join(f"between(t,{s},{e})" for s, e in chunk)
         lines.append(f"[0:v]select='{expr}',setpts=N/FRAME_RATE/TB[v{idx}];")
-        lines.append(f"[0:a]aselect='{expr}',asetpts=N/SR/TB[a{idx}]")
+        lines.append(f"[0:a]aselect='{expr}',asetpts=N/SR/TB[a{idx}];")
     labels = "".join(f"[v{i}][a{i}]" for i in range(n))
     lines.append(f"{labels}concat=n={n}:v=1:a=1[v][a]")
     return "\n".join(lines)
