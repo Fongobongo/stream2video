@@ -93,29 +93,38 @@ def _get_video_encoder() -> Tuple[str, List[str]]:
     return "libx264", ["-crf", "23", "-preset", "medium"]
 
 
+def _build_chunked_filter_graph(keep_segments: List[Tuple[float, float]], chunk_size: int = 40) -> str:
+    """Split segments into chunks, each with a select/aselect pair, joined by concat.
+    Avoids ffmpeg expression parser limit on long select expressions."""
+    chunks = [keep_segments[i:i+chunk_size] for i in range(0, len(keep_segments), chunk_size)]
+    n = len(chunks)
+    lines = []
+    for idx, chunk in enumerate(chunks):
+        expr = "+".join(f"between(t,{s},{e})" for s, e in chunk)
+        lines.append(f"[0:v]select='{expr}',setpts=N/FRAME_RATE/TB[v{idx}];")
+        lines.append(f"[0:a]aselect='{expr}',asetpts=N/SR/TB[a{idx}]")
+    labels = "".join(f"[v{i}][a{i}]" for i in range(n))
+    lines.append(f"{labels}concat=n={n}:v=1:a=1[v][a]")
+    return "\n".join(lines)
+
+
 def _run_ffmpeg_filter_complex(
     video_path: Path,
     keep_segments: List[Tuple[float, float]],
     output_path: Path,
     progress_callback: Optional[Callable[[float], None]] = None,
 ):
-    """Execute ffmpeg with filter_complex select/aselect, re-encode both streams.
+    """Execute ffmpeg with chunked filter_complex (select/aselect per chunk + concat).
     Uses -filter_complex_script to avoid Windows command-line length limits.
     Reports progress fraction (0.0-1.0) via callback from ffmpeg's -progress output."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    expr_parts = [f"between(t,{s},{e})" for s, e in keep_segments]
-    select_expr = "+".join(expr_parts)
-
     total_duration = sum(e - s for s, e in keep_segments)
     vcodec, vcodec_opts = _get_video_encoder()
+    graph = _build_chunked_filter_graph(keep_segments)
 
-    graph = (
-        f"[0:v]select='{select_expr}',setpts=N/FRAME_RATE/TB[v];\n"
-        f"[0:a]aselect='{select_expr}',asetpts=N/SR/TB[a]"
-    )
-
-    logger.info(f"filter_complex: {len(keep_segments)} segments, {vcodec}")
+    logger.info(f"filter_complex: {len(keep_segments)} segments in {graph.count('select=')} chunks, {vcodec}")
+    logger.debug(f"Filter graph ({len(graph)} bytes): {graph[:200]}...")
 
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".txt", delete=False, encoding="utf-8"
