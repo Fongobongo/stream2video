@@ -3,8 +3,9 @@
 import logging
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import Callable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ def cut_and_concat(
     video_path: Path,
     silence_segments: List,
     output_path: Path,
+    progress_callback: Optional[Callable[[float], None]] = None,
 ) -> Path:
     """Cut out silence using filter_complex select/aselect, re-encode both streams."""
     if not video_path.exists():
@@ -38,7 +40,7 @@ def cut_and_concat(
 
     logger.info(f"Keeping {len(keep_segments)} segments, removing {len(silence_segments)} silence segments")
 
-    _run_ffmpeg_filter_complex(video_path, keep_segments, output_path)
+    _run_ffmpeg_filter_complex(video_path, keep_segments, output_path, progress_callback)
     return output_path
 
 
@@ -95,14 +97,17 @@ def _run_ffmpeg_filter_complex(
     video_path: Path,
     keep_segments: List[Tuple[float, float]],
     output_path: Path,
+    progress_callback: Optional[Callable[[float], None]] = None,
 ):
     """Execute ffmpeg with filter_complex select/aselect, re-encode both streams.
-    Uses -filter_complex_script to avoid Windows command-line length limits."""
+    Uses -filter_complex_script to avoid Windows command-line length limits.
+    Reports progress fraction (0.0-1.0) via callback from ffmpeg's -progress output."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     expr_parts = [f"between(t,{s},{e})" for s, e in keep_segments]
     select_expr = "+".join(expr_parts)
 
+    total_duration = sum(e - s for s, e in keep_segments)
     vcodec, vcodec_opts = _get_video_encoder()
 
     graph = (
@@ -119,7 +124,8 @@ def _run_ffmpeg_filter_complex(
         script_path = f.name
 
     cmd = [
-        "ffmpeg", "-y", "-loglevel", "error", "-stats",
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-progress", "pipe:1",
         "-i", str(video_path),
         "-filter_complex_script", script_path,
         "-map", "[v]", "-c:v", vcodec, *vcodec_opts,
@@ -128,13 +134,50 @@ def _run_ffmpeg_filter_complex(
     ]
 
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=28800, check=False)
-        if r.returncode != 0:
-            raise FFmpegError(f"ffmpeg failed: {r.stderr.strip()[:1000] or 'unknown error'}")
-        logger.info(f"Successfully created output: {output_path}")
-    except subprocess.TimeoutExpired as e:
-        raise FFmpegError(f"ffmpeg timeout after {e.timeout}s") from e
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
     except FileNotFoundError as e:
         raise FFmpegError("ffmpeg not found in PATH") from e
+
+    stderr_lines = []
+
+    def _read_stderr():
+        for line in process.stderr:
+            stderr_lines.append(line)
+
+    stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
+    stderr_thread.start()
+
+    try:
+        for line in process.stdout:
+            line = line.strip()
+            if line.startswith("out_time_us="):
+                try:
+                    us = int(line.split("=", 1)[1])
+                    if progress_callback and total_duration > 0:
+                        progress_callback(min(us / 1_000_000 / total_duration, 1.0))
+                except (ValueError, IndexError):
+                    pass
+
+        process.wait(timeout=28800)
+        stderr_thread.join(timeout=2)
+
+        if process.returncode != 0:
+            stderr = "".join(stderr_lines)
+            raise FFmpegError(f"ffmpeg failed: {stderr[:1000] or 'unknown error'}")
+
+        logger.info(f"Successfully created output: {output_path}")
+
+    except subprocess.TimeoutExpired as e:
+        process.kill()
+        raise FFmpegError(f"ffmpeg timeout after {e.timeout}s") from e
+
     finally:
+        process.stdout.close()
+        process.stderr.close()
         Path(script_path).unlink(missing_ok=True)

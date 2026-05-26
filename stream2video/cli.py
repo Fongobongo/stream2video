@@ -14,8 +14,13 @@ from rich.logging import RichHandler
 from rich.progress import Progress
 
 from stream2video.download import download, DownloadError
-from stream2video.silence import detect_silence, SilenceDetectionError
-from stream2video.concat import cut_and_concat, ConcatError
+from stream2video.silence import (
+    detect_silence,
+    save_silence_cache,
+    load_silence_cache,
+    SilenceDetectionError,
+)
+from stream2video.concat import cut_and_concat, ConcatError, _generate_keep_segments
 
 # Setup logging
 logging.basicConfig(
@@ -115,6 +120,12 @@ def main(
         "-c",
         help="Path to YAML config file",
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-f",
+        help="Re-detect silence, ignore cache",
+    ),
     log_level: str = typer.Option(
         "INFO",
         "--log-level",
@@ -167,16 +178,22 @@ def main(
                 logger.exception("Download error")
                 raise typer.Exit(1)
 
-            # Step 2: Detect silence
+            # Step 2: Detect silence (with cache support)
             task2 = progress.add_task("[cyan]Detecting silence segments...", total=None)
 
             try:
-                silence_segments = detect_silence(
-                    video_path,
-                    threshold=config["threshold"],
-                    min_silence=config["min_silence"],
-                    margin=config["margin"],
-                )
+                silence_segments = None
+                if not force:
+                    silence_segments = load_silence_cache(video_path, output_dir, config)
+
+                if silence_segments is None:
+                    silence_segments = detect_silence(
+                        video_path,
+                        threshold=config["threshold"],
+                        min_silence=config["min_silence"],
+                        margin=config["margin"],
+                    )
+                    save_silence_cache(video_path, silence_segments, output_dir, config)
 
                 progress.update(task2, completed=True, description=f"[green]+[/green] Found {len(silence_segments)} silence segments")
 
@@ -185,15 +202,29 @@ def main(
                 logger.exception("Silence detection error")
                 raise typer.Exit(1)
 
-            # Step 3: Cut and concatenate
-            task3 = progress.add_task("[cyan]Cutting and concatenating video...", total=None)
+            # Step 3: Cut and concatenate (with progress bar)
+            keep_segments = _generate_keep_segments(video_path, silence_segments)
+            total_duration = sum(e - s for s, e in keep_segments)
+
+            task3 = progress.add_task(
+                "[cyan]Cutting and concatenating video...",
+                total=100,
+            )
+
+            def update_progress(fraction: float):
+                progress.update(task3, completed=min(fraction * 100, 100))
 
             try:
                 output_video = output_dir / f"{video_path.stem}_compressed.mp4"
 
-                cut_and_concat(video_path, silence_segments, output_video)
+                cut_and_concat(
+                    video_path,
+                    silence_segments,
+                    output_video,
+                    progress_callback=update_progress,
+                )
 
-                progress.update(task3, completed=True, description="[green]+[/green] Video compressed")
+                progress.update(task3, completed=100, description="[green]+[/green] Video compressed")
 
             except ConcatError as e:
                 console.print(f"[red]Concatenation failed:[/red] {e}")

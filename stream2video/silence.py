@@ -1,11 +1,12 @@
 """Silence detection module using ffmpeg silencedetect filter."""
 
+import json
 import logging
 import math
 import re
 import subprocess
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -146,3 +147,54 @@ def _apply_margin(segments: List[SilenceSegment], margin: float) -> List[Silence
 
     merged.append(current)
     return merged
+
+
+def _get_cache_path(video_path: Path, output_dir: Path) -> Path:
+    return output_dir / f"{video_path.stem}_silence_cache.json"
+
+
+def save_silence_cache(
+    video_path: Path,
+    segments: List[SilenceSegment],
+    output_dir: Path,
+    config: dict,
+):
+    cache_path = _get_cache_path(video_path, output_dir)
+    data = {
+        "source": video_path.name,
+        "config": {
+            "threshold": config.get("threshold"),
+            "min_silence": config.get("min_silence"),
+            "margin": config.get("margin"),
+        },
+        "segments": [{"start": s.start, "end": s.end} for s in segments],
+    }
+    with open(cache_path, "w") as f:
+        json.dump(data, f, indent=2)
+    logger.info(f"Silence cache saved to {cache_path}")
+
+
+def load_silence_cache(
+    video_path: Path,
+    output_dir: Path,
+    config: dict,
+) -> Optional[List[SilenceSegment]]:
+    cache_path = _get_cache_path(video_path, output_dir)
+    if not cache_path.exists():
+        return None
+    if cache_path.stat().st_mtime < video_path.stat().st_mtime:
+        logger.info("Silence cache outdated (source file newer)")
+        return None
+    try:
+        with open(cache_path) as f:
+            data = json.load(f)
+        for key in ("threshold", "min_silence", "margin"):
+            if data.get("config", {}).get(key) != config.get(key):
+                logger.info(f"Silence cache ignored: config mismatch ({key})")
+                return None
+        segments = [SilenceSegment(s["start"], s["end"]) for s in data["segments"]]
+        logger.info(f"Loaded {len(segments)} silence segments from cache")
+        return segments
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+        logger.warning(f"Invalid silence cache: {e}")
+        return None
