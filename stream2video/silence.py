@@ -86,7 +86,7 @@ def detect_silence(
 
         silence_segments = _parse_ffmpeg_output(result.stderr)
 
-        if margin > 0:
+        if margin != 0:
             silence_segments = _apply_margin(silence_segments, margin)
 
         logger.info(f"Detected {len(silence_segments)} silence segments")
