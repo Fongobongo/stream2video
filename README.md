@@ -1,217 +1,158 @@
-
 # stream2video
 
-CLI tool to compress stream recordings by removing silence segments.
+Compress stream recordings by removing silence segments.
 
-Automatically downloads VOD from YouTube/Twitch, detects silence using audio analysis, cuts out quiet parts, and concatenates the remaining video.
+Downloads VOD from YouTube/Twitch, detects silence via audio analysis, cuts out quiet parts, and concatenates the remaining video.
 
 ## Features
 
-- **Automatic silence detection** - Uses audio analysis to identify and remove silence
-- **Multiple cutting profiles** - Choose aggressive, balanced, or gentle compression
-- **Configuration file support** - YAML/JSON config files for preset options
-- **Robust error handling** - Specific error types with recovery paths
-- **Progress tracking** - Real-time progress bars and logging
+- **Automatic silence detection** — ffmpeg silencedetect filter
+- **Cut methods**: `segment` (fast, ~1.5h) or `batch` (frame-exact, ~6-7h)
+- **Hardware encoders**: NVIDIA NVENC, AMD AMF, Windows Media Foundation
+- **Smart retry** — falls back to libx264 if hardware encoder fails
+- **Silence cache** — skips re-detection if parameters haven't changed
+- **Progress bars** + detailed logging
+- **Cross-platform GUI** (CustomTkinter)
+- **Portable mode** — self-contained `_portable/` with venv + ffmpeg
 
 ## Installation
 
-### Windows (automated)
+### Windows (portable)
 
-```powershell
-# Run the setup script (installs Python deps + ffmpeg)
-.\setup.ps1
-
-# Or with dev dependencies:
-.\setup.ps1 -Dev
+```cmd
+run_gui.cmd
 ```
+
+The script auto-installs Python 3.13 + ffmpeg into `_portable/` on first run.
 
 ### Manual
 
 ```bash
-# Install Python package
 pip install -e .
 
 # Install ffmpeg (required)
-# Windows: winget install Gyan.FFmpeg  or  choco install ffmpeg
+# Windows: winget install Gyan.FFmpeg
 # macOS:   brew install ffmpeg
 # Linux:   sudo apt install ffmpeg
-
-# Verify installation
-stream2video --help
 ```
 
 ## Dependencies
 
-- **yt-dlp** (>=2024.01.01) - Download videos from YouTube/Twitch
-- **ffmpeg** (system) - Silence detection (via silencedetect filter) + video cutting
-- **typer** (>=0.12.0) - CLI framework
-- **pyyaml** (>=6.0) - Config file parsing
-- **rich** (>=13.0.0) - Progress bars and logging
+| Package | Version | Purpose |
+|---------|---------|---------|
+| **yt-dlp** | >=2024.01.01 | Download videos from YouTube/Twitch |
+| **ffmpeg** | system | Silence detection + video cutting |
+| **typer** | >=0.12.0 | CLI framework |
+| **pyyaml** | >=6.0 | Config file parsing |
+| **rich** | >=13.0.0 | Progress bars and logging |
+| **customtkinter** | >=5.2.0 | GUI (optional, `[gui]` extra) |
 
-### System Requirements
+## CLI Usage
 
-ffmpeg (with ffprobe) is required. Install via:
+```bash
+stream2video <input> [options]
+```
 
-| Platform | Command |
-|----------|---------|
-| Windows  | `winget install Gyan.FFmpeg` |
-| macOS    | `brew install ffmpeg` |
-| Linux    | `sudo apt install ffmpeg` |
-
-## Quick Start
-
-### Basic Usage
-
-Compress a YouTube video:
+### Basic
 
 ```bash
 stream2video https://www.youtube.com/watch?v=VIDEO_ID
-```
-
-Compress a local video file:
-
-```bash
 stream2video /path/to/video.mp4
 ```
 
-### Using Config Profiles
+### Options
 
-Aggressive (removes more silence):
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-o, --output` | `./compressed_videos` | Output directory |
+| `-e, --encoder` | `libx264` | `h264_nvenc`, `h264_amf`, `h264_mf`, `libx264` |
+| `-m, --method` | `segment` | `segment` (~1.5h) or `batch` (~6-7h, frame-exact) |
+| `-f, --force` | — | Re-detect silence, ignore cache |
+| `-c, --config` | — | YAML config file |
+| `-l, --log-level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
-```bash
-stream2video video.mp4 --config config_aggressive.yaml
-```
-
-Balanced (default):
-
-```bash
-stream2video video.mp4 --config config_balanced.yaml
-```
-
-Gentle (preserves more):
+### Examples
 
 ```bash
-stream2video video.mp4 --config config_gentle.yaml
+# Choose encoder
+stream2video video.mp4 --encoder h264_nvenc
+
+# Specify output directory
+stream2video video.mp4 -o ./output --method batch
+
+# Custom config
+stream2video video.mp4 --config my_config.yaml
 ```
 
-### Custom Config
+## Configuration
 
-Create a custom YAML file:
+Parameters can be set via YAML config file:
 
 ```yaml
-# my_config.yaml
-threshold: -25    # Silence threshold in dB (-60 to -5)
-min_silence: 0.7  # Minimum silence duration in seconds (0.1 to 60)
-margin: 0.15      # Margin around cuts in seconds (0 to 5)
+threshold: -25
+min_silence: 0.7
+margin: 0.15
 ```
 
-Then use it:
+| Parameter | Range | Default | Description |
+|-----------|-------|---------|-------------|
+| `threshold` (dB) | -60 to -5 | -20 | Audio below this level = silence |
+| `min_silence` (s) | 0.1 to 60 | 1.0 | Minimum silence duration to cut |
+| `margin` (s) | -3 to 5 | -0.5 | Extra context around cuts (negative trims more) |
+
+## GUI
+
+Cross-platform desktop GUI built with CustomTkinter.
+
+### Launch
+
+**Windows** (portable, self-contained):
+
+```cmd
+run_gui.cmd
+```
+
+**Any platform** (with Python):
 
 ```bash
-stream2video video.mp4 --config my_config.yaml --output ./output
+pip install -e ".[gui]"
+python -m stream2video.gui
 ```
 
-## Configuration Parameters
+### GUI Features
 
-### `threshold` (dB)
-- **Range**: -60 to -5
-- **Default**: -20
-- **Effect**: Lower values = more aggressive silence removal
-- **Lower threshold** (-60): Only removes very loud silence
-- **Higher threshold** (-5): Removes even slight background noise
-
-### `min_silence` (seconds)
-- **Range**: 0.1 to 60
-- **Default**: 0.5
-- **Effect**: Minimum duration of silence to remove
-- **Lower values** (0.1): Removes very short pauses
-- **Higher values** (5+): Only removes longer pauses
-
-### `margin` (seconds)
-- **Range**: 0 to 5
-- **Default**: 0.1
-- **Effect**: Safety margin around silence segments
-- **0**: Cut exactly at silence boundary
-- **Higher values**: Keep slight buffer around cuts
-
-## Usage Examples
-
-### Compress 6-hour stream (balanced):
-
-```bash
-stream2video https://www.twitch.tv/recordings/VIDEO_ID \
-  --output ./streams \
-  --config config_balanced.yaml
-```
-
-### Aggressive compression for very talkative content:
-
-```bash
-stream2video recording.mp4 \
-  --config config_aggressive.yaml \
-  --output ./compressed \
-  --log-level DEBUG
-```
-
-### Gentle compression to preserve natural pauses:
-
-```bash
-stream2video video.mp4 \
-  --output ./output \
-  --config config_gentle.yaml
-```
+- **Input**: Local file (Browse) or URL
+- **Output**: Select output directory (defaults to `./compressed_videos`)
+- **Sliders**: Threshold, Min Silence, Margin
+- **Method**: segment (fast) or batch (frame-exact)
+- **Encoder**: h264_nvenc, h264_amf, h264_mf, libx264
+- **Test encoder** button
+- **Progress bar** + **log panel** with real-time output
+- **Theme**: dark/light/system
+- **Copy CLI command** — copies current params as CLI command to clipboard
+- **Persistent settings** — remembers last used values
 
 ## Output
 
-Compressed video is saved as: `{filename}_compressed.mp4`
-
-Logs are saved to: `{output_dir}/stream2video.log`
+Compressed video: `{filename}_compressed.mp4`
+Logs: `{output_dir}/stream2video.log`
 
 ## Error Handling
 
-If compression fails, check the log file for details:
-
-```bash
-tail -f ./compressed_videos/stream2video.log
-```
-
-Common errors:
-
 | Error | Cause | Solution |
 |-------|-------|----------|
-| Video not available | URL is invalid/private | Check URL is public |
-| Insufficient disk space | Not enough storage | Free up disk space |
-| ffmpeg not found | ffmpeg not installed | Install via brew/apt |
-| Permission denied | No write access | Check directory permissions |
+| Video unavailable | URL invalid/private | Check URL is public |
+| ffmpeg not found | ffmpeg missing | Install via winget/brew/apt |
+| Disk full | Not enough space | Free up disk space |
+| Encoder failed | HW encoder unavailable | Auto-falls back to libx264 |
 
 ## Development
 
-### Run tests
-
 ```bash
 pytest -v
-```
-
-### Run with debug logging
-
-```bash
 stream2video video.mp4 --log-level DEBUG
 ```
-
-## Roadmap
-
-- **Phase 1** (Current): Silence detection and removal
-- **Phase 2**: Speech-to-text based filler detection
-- **Phase 3**: Content filtering and smart cutting
 
 ## License
 
 MIT
-
-## Support
-
-For issues or questions:
-
-1. Check the logs: `stream2video.log` in output directory
-2. Run with `--log-level DEBUG` for detailed debugging
-3. Verify ffmpeg is installed and in PATH
