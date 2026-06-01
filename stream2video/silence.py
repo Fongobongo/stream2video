@@ -2,11 +2,13 @@
 
 import json
 import logging
-import math
 import re
 import subprocess
+import threading
 from pathlib import Path
-from typing import List, Optional
+from typing import Callable, List, Optional
+
+from stream2video.concat import get_video_duration as _probe_duration
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +36,7 @@ def detect_silence(
     threshold: int = -20,
     min_silence: float = 0.5,
     margin: float = 0.1,
+    progress_callback: Optional[Callable[[float], None]] = None,
 ) -> List[SilenceSegment]:
     """
     Detect silence segments using ffmpeg silencedetect filter.
@@ -43,6 +46,7 @@ def detect_silence(
         threshold: Silence threshold in dB (default -20, range [-60, -5])
         min_silence: Minimum silence duration in seconds (default 0.5, range [0.1, 60])
         margin: Margin around silence segments in seconds (default 0.1, range [0, 5])
+        progress_callback: Optional callback with progress fraction [0, 1]
 
     Returns:
         List of SilenceSegment objects
@@ -62,8 +66,12 @@ def detect_silence(
     # Convert dB threshold to linear noise level
     noise = 10 ** (threshold / 20)
 
+    # Get video duration for progress reporting
+    duration = _probe_duration(video_path)
+
     cmd = [
         "ffmpeg",
+        "-progress", "pipe:1",
         "-i", str(video_path),
         "-af", f"silencedetect=noise={noise}:duration={min_silence}",
         "-f", "null",
@@ -71,46 +79,90 @@ def detect_silence(
     ]
 
     try:
-        logger.info(f"Running ffmpeg silencedetect: threshold={threshold}dB ({noise}), min_silence={min_silence}s")
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=3600,
-            check=False,
+        logger.info(
+            f"Running ffmpeg silencedetect: threshold={threshold}dB ({noise}), "
+            f"min_silence={min_silence}s, margin={margin}s"
         )
 
-        if result.returncode != 0:
-            error_msg = result.stderr or result.stdout or "Unknown error"
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            bufsize=-1,
+        )
+    except FileNotFoundError as e:
+        raise SilenceDetectionError("ffmpeg not found in PATH") from e
+
+    # Read stderr for silence data + stdout for progress
+    stderr_lines: List[str] = []
+
+    def _read_stderr():
+        for raw_line in iter(process.stderr.readline, b""):
+            try:
+                stderr_lines.append(raw_line.decode("utf-8", errors="replace"))
+            except Exception:
+                pass
+
+    stderr_thread = threading.Thread(target=_read_stderr, daemon=True)
+    stderr_thread.start()
+
+    try:
+        for raw_line in iter(process.stdout.readline, b""):
+            try:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+            except Exception:
+                continue
+            if line.startswith("out_time_us="):
+                try:
+                    us = int(line.split("=", 1)[1])
+                    if progress_callback and duration and duration > 0:
+                        progress_callback(min(us / 1_000_000 / duration, 1.0))
+                except (ValueError, IndexError):
+                    pass
+
+        process.wait(timeout=36000)
+        stderr_thread.join(timeout=5)
+
+        if process.returncode != 0:
+            stderr_text = "".join(stderr_lines)
+            error_msg = stderr_text or "Unknown error"
             raise SilenceDetectionError(f"ffmpeg silencedetect failed: {error_msg}")
 
-        silence_segments = _parse_ffmpeg_output(result.stderr)
+        silence_segments = _parse_ffmpeg_output("".join(stderr_lines))
 
         if margin != 0:
             silence_segments = _apply_margin(silence_segments, margin)
 
-        logger.info(f"Detected {len(silence_segments)} silence segments")
-        for seg in silence_segments:
-            logger.debug(f"  {seg}")
+        if not silence_segments:
+            logger.info("No silence segments detected (video may have no audio track)")
 
         return silence_segments
 
     except subprocess.TimeoutExpired as e:
+        process.kill()
         raise SilenceDetectionError(f"ffmpeg timeout after {e.timeout}s") from e
-
-    except FileNotFoundError as e:
-        raise SilenceDetectionError("ffmpeg not found in PATH") from e
+    finally:
+        process.stdout.close()
+        process.stderr.close()
 
 
 def _parse_ffmpeg_output(stderr: str) -> List[SilenceSegment]:
     """Parse ffmpeg silencedetect output."""
     segments = []
-    start_pattern = re.compile(r"silence_start:\s*([\d.]+)")
-    end_pattern = re.compile(r"silence_end:\s*([\d.]+)")
+    # Accept both dot and comma as decimal separator (locale-independent)
+    start_pattern = re.compile(r"silence_start:\s*([\d.,]+)")
+    end_pattern = re.compile(r"silence_end:\s*([\d.,]+)")
 
-    starts = [float(m.group(1)) for m in start_pattern.finditer(stderr)]
-    ends = [float(m.group(1)) for m in end_pattern.finditer(stderr)]
+    def _to_float(s: str) -> float:
+        return float(s.replace(",", "."))
+
+    starts = [_to_float(m.group(1)) for m in start_pattern.finditer(stderr)]
+    ends = [_to_float(m.group(1)) for m in end_pattern.finditer(stderr)]
+
+    if len(starts) != len(ends):
+        logger.warning(
+            f"Mismatched silence_start ({len(starts)}) and silence_end ({len(ends)}) counts - "
+            "ffmpeg output may be truncated"
+        )
 
     for start, end in zip(starts, ends):
         segments.append(SilenceSegment(start, end))

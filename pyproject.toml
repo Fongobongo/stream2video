@@ -22,9 +22,13 @@ dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
 ]
+gui = [
+    "customtkinter>=5.2.0",
+]
 
 [project.scripts]
 stream2video = "stream2video.cli:app"
+stream2video-gui = "stream2video.gui:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

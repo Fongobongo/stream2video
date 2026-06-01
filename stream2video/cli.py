@@ -2,8 +2,6 @@
 
 import logging
 import shutil
-import subprocess
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -11,7 +9,14 @@ import typer
 import yaml
 from rich.console import Console
 from rich.logging import RichHandler
-from rich.progress import Progress
+from rich.progress import (
+    BarColumn,
+    Progress,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 
 from stream2video.download import download, DownloadError
 from stream2video.silence import (
@@ -20,7 +25,7 @@ from stream2video.silence import (
     load_silence_cache,
     SilenceDetectionError,
 )
-from stream2video.concat import cut_and_concat, ConcatError, _generate_keep_segments
+from stream2video.concat import cut_and_concat, ConcatError
 
 # Setup logging
 logging.basicConfig(
@@ -53,8 +58,8 @@ CONFIG_RANGES = {
 # Config defaults
 CONFIG_DEFAULTS = {
     "threshold": -20,
-    "min_silence": 0.5,
-    "margin": -0.3,
+    "min_silence": 1.0,
+    "margin": -0.5,
 }
 
 
@@ -126,6 +131,19 @@ def main(
         "-f",
         help="Re-detect silence, ignore cache",
     ),
+    method: str = typer.Option(
+        "batch",
+        "--method",
+        "-m",
+        help="Concat method: 'segment' (fast, ~1.5h) or 'batch' (original select/aselect, ~6-7h)",
+    ),
+    encoder: str = typer.Option(
+        "libx264",
+        "--encoder",
+        "-e",
+        help="Video encoder: 'h264_nvenc' (NVIDIA), 'h264_amf' (AMD), 'h264_mf' (Media Foundation), or 'libx264' (CPU, default)",
+    ),
+
     log_level: str = typer.Option(
         "INFO",
         "--log-level",
@@ -141,6 +159,14 @@ def main(
     2. Detect silence segments
     3. Cut and concatenate video
     """
+    # Validate method and encoder
+    if method not in ("segment", "batch"):
+        console.print(f"[red]Invalid method:[/red] {method!r} (use 'segment' or 'batch')")
+        raise typer.Exit(1)
+    if encoder not in ("h264_nvenc", "h264_amf", "h264_mf", "libx264"):
+        console.print(f"[red]Invalid encoder:[/red] {encoder!r} (use h264_nvenc, h264_amf, h264_mf, or libx264)")
+        raise typer.Exit(1)
+
     # Verify ffmpeg is available
     _check_ffmpeg()
 
@@ -164,7 +190,15 @@ def main(
         # Load configuration
         config = load_config(config_file)
 
-        with Progress(console=console) as progress:
+        progress_columns = [
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            TaskProgressColumn(),
+            TimeElapsedColumn(),
+            TimeRemainingColumn(),
+        ]
+
+        with Progress(*progress_columns, console=console) as progress:
             # Step 1: Download video
             task1 = progress.add_task("[cyan]Downloading video...", total=None)
 
@@ -179,7 +213,7 @@ def main(
                 raise typer.Exit(1)
 
             # Step 2: Detect silence (with cache support)
-            task2 = progress.add_task("[cyan]Detecting silence segments...", total=None)
+            task2 = progress.add_task("[cyan]Detecting silence segments...", total=100)
 
             try:
                 silence_segments = None
@@ -187,15 +221,19 @@ def main(
                     silence_segments = load_silence_cache(video_path, output_dir, config)
 
                 if silence_segments is None:
+                    def silence_progress(f: float):
+                        progress.update(task2, completed=min(f * 100, 100))
+
                     silence_segments = detect_silence(
                         video_path,
                         threshold=config["threshold"],
                         min_silence=config["min_silence"],
                         margin=config["margin"],
+                        progress_callback=silence_progress,
                     )
                     save_silence_cache(video_path, silence_segments, output_dir, config)
 
-                progress.update(task2, completed=True, description=f"[green]+[/green] Found {len(silence_segments)} silence segments")
+                progress.update(task2, completed=100, description=f"[green]+[/green] Found {len(silence_segments)} silence segments")
 
             except SilenceDetectionError as e:
                 console.print(f"[red]Silence detection failed:[/red] {e}")
@@ -203,9 +241,6 @@ def main(
                 raise typer.Exit(1)
 
             # Step 3: Cut and concatenate (with progress bar)
-            keep_segments = _generate_keep_segments(video_path, silence_segments)
-            total_duration = sum(e - s for s, e in keep_segments)
-
             task3 = progress.add_task(
                 "[cyan]Cutting and concatenating video...",
                 total=100,
@@ -222,6 +257,8 @@ def main(
                     silence_segments,
                     output_video,
                     progress_callback=update_progress,
+                    method=method,
+                    encoder=encoder,
                 )
 
                 progress.update(task3, completed=100, description="[green]+[/green] Video compressed")
@@ -247,6 +284,10 @@ def main(
         console.print(f"[red]Unexpected error:[/red] {e}")
         logger.exception("Unexpected error")
         raise typer.Exit(1)
+
+    finally:
+        logger.removeHandler(fh)
+        fh.close()
 
 
 if __name__ == "__main__":

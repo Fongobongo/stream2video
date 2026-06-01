@@ -9,8 +9,6 @@ from stream2video.download import (
     _validate_url,
     _is_local_file,
     URLValidationError,
-    VideoNotAvailableError,
-    DownloadError,
 )
 
 

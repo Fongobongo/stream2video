@@ -4,7 +4,6 @@ import re
 import time
 import logging
 from pathlib import Path
-from typing import Optional
 
 import yt_dlp
 
@@ -115,7 +114,18 @@ def download(url: str, out_dir: Path) -> Path:
                 output_path = Path(filename)
 
                 if not output_path.exists():
-                    raise DownloadError(f"Download completed but file not found: {filename}")
+                    video_id = info.get("id", "")
+                    candidates = sorted(
+                        out_dir.glob(f"{video_id}.*"),
+                        key=lambda p: p.stat().st_mtime,
+                        reverse=True,
+                    )
+                    if candidates:
+                        output_path = candidates[0]
+                    else:
+                        raise DownloadError(
+                            f"Download completed but file not found: {filename}"
+                        )
 
                 logger.info(f"Successfully downloaded: {output_path}")
                 return output_path
@@ -165,6 +175,3 @@ def download(url: str, out_dir: Path) -> Path:
                 continue
 
             raise DownloadTimeoutError(f"Download timeout after {max_retries + 1} attempts") from e
-
-    # Should not reach here
-    raise DownloadError("Download failed: maximum retries exceeded")

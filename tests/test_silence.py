@@ -28,42 +28,6 @@ class TestSilenceSegment:
         assert "duration=1.50s" in repr_str
 
 
-class TestParameterValidation:
-    """Test parameter validation."""
-
-    def test_threshold_valid(self):
-        # Valid range: -60 to -5
-        for threshold in [-60, -30, -20, -10, -5]:
-            # Should not raise
-            _validate_threshold = lambda t: -60 <= t <= -5
-            assert _validate_threshold(threshold)
-
-    def test_threshold_invalid(self):
-        for threshold in [-61, -4, 0, 10]:
-            _validate_threshold = lambda t: -60 <= t <= -5
-            assert not _validate_threshold(threshold)
-
-    def test_min_silence_valid(self):
-        for min_s in [0.1, 0.5, 1.0, 30, 60]:
-            _validate_min_silence = lambda m: 0.1 <= m <= 60
-            assert _validate_min_silence(min_s)
-
-    def test_min_silence_invalid(self):
-        for min_s in [0.05, 0.09, 61, 100]:
-            _validate_min_silence = lambda m: 0.1 <= m <= 60
-            assert not _validate_min_silence(min_s)
-
-    def test_margin_valid(self):
-        for margin in [-3, -0.3, 0, 0.1, 1.0, 5.0]:
-            _validate_margin = lambda m: -3 <= m <= 5
-            assert _validate_margin(margin)
-
-    def test_margin_invalid(self):
-        for margin in [-0.1, 5.1, 10]:
-            _validate_margin = lambda m: 0 <= m <= 5
-            assert not _validate_margin(margin)
-
-
 class TestApplyMargin:
     """Test margin application."""
 
