@@ -65,8 +65,8 @@ stream2video /path/to/video.mp4
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-o, --output` | `./compressed_videos` | Output directory |
-| `-e, --encoder` | `libx264` | `h264_nvenc`, `h264_amf`, `h264_mf`, `libx264` |
-| `-m, --method` | `batch` | `segment` (per-segment encode + concat demuxer) or `batch` (frame-exact select/aselect) |
+| `-e, --encoder` | `h264_mf` | `h264_nvenc`, `h264_amf`, `h264_mf`, `libx264` |
+| `-m, --method` | `segment` | `segment` (per-segment encode + concat demuxer) or `batch` (frame-exact select/aselect) |
 | `-f, --force` | — | Re-detect silence, ignore cache |
 | `-c, --config` | — | YAML config file |
 | `-l, --log-level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
@@ -96,8 +96,8 @@ margin: 0.15
 
 | Parameter | Range | Default | Description |
 |-----------|-------|---------|-------------|
-| `threshold` (dB) | -60 to -5 | -20 | Audio below this level = silence |
-| `min_silence` (s) | 0.1 to 60 | 1.0 | Minimum silence duration to cut |
+| `threshold` (dB) | -60 to -5 | -60.0 | Audio below this level = silence |
+| `min_silence` (s) | 0.1 to 60 | 2.0 | Minimum silence duration to cut |
 | `margin` (s) | -3 to 5 | 0.5 | How much to shrink silence zones. Positive = shrink silence (keep more audio around phrases). Negative = expand silence (cut more aggressively). `0` = no adjustment. |
 
 ## GUI

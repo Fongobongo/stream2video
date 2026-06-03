@@ -1,11 +1,11 @@
 """Shared configuration defaults and validation ranges."""
 
 CONFIG_DEFAULTS = {
-    "threshold": -20,
-    "min_silence": 1.0,
+    "threshold": -60.0,
+    "min_silence": 2.0,
     "margin": 0.5,
-    "method": "batch",
-    "encoder": "libx264",
+    "method": "segment",
+    "encoder": "h264_mf",
     "force": False,
     "delete_after": False,
     "output_dir": "",

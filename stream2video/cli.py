@@ -148,16 +148,16 @@ def main(
         help="Re-detect silence, ignore cache",
     ),
     method: str = typer.Option(
-        "batch",
+        "segment",
         "--method",
         "-m",
         help="Concat method: 'segment' (fast, ~1.5h) or 'batch' (select/aselect filter, ~6-7h)",
     ),
     encoder: str = typer.Option(
-        "libx264",
+        "h264_mf",
         "--encoder",
         "-e",
-        help="Video encoder: 'h264_nvenc' (NVIDIA), 'h264_amf' (AMD), 'h264_mf' (Media Foundation), or 'libx264' (CPU, default)",
+        help="Video encoder: 'h264_nvenc' (NVIDIA), 'h264_amf' (AMD), 'h264_mf' (Media Foundation, default), or 'libx264' (CPU fallback)",
     ),
 
     log_level: str = typer.Option(

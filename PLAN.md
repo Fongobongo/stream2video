@@ -459,7 +459,7 @@ CI не критичен на старте (личный инструмент). 
 2. **CLI-флаги для threshold/min_silence/margin убраны.** Параметры берутся только из YAML-конфига (`--config`). Причина: 3 уровня (default/config/CLI) для 3 параметров — overkill для личного инструмента. Encoder/method остались CLI-флагами, потому что переключаются чаще.
 3. **Retry yt-dlp убран.** Fail-fast на сетевых ошибках — проще для пользователя, чем двойной timeout.
 4. **Margin range `[-3, 5]`.** Дефолт `+0.5` — сужает тишину на 0.5с с каждой стороны, сохраняя больше аудио вокруг фраз. Отрицательные значения расширяют тишину (режет агрессивнее).
-5. **Default method = `batch`** (НЕ `segment` как в плане). Frame-exact важнее для чистоты реза. Сегмент-метод — escape hatch, когда `batch` слишком долог.
+5. **Default method = `segment`**, encoder = `h264_mf` (MediaFoundation, Windows). `batch` остаётся frame-exact, но `segment` быстрее на длинных стримах. Threshold=-60 + min_silence=2 — самые мягкие дефолты, почти не режут.
 
 **No expansions proposed.** Phase 1 stays focused on silence-cut. Phase 2 (STT) начнётся отдельно.
 

@@ -4,10 +4,10 @@
   "margin": 0.5,
   "method": "segment",
   "encoder": "h264_mf",
-  "force": true,
+  "force": false,
   "delete_after": false,
   "output_dir": "",
   "theme": "dark",
-  "input_path": "D:/PythonProjects/stream2video/compressed_videos/test_clip.mp4",
+  "input_path": "",
   "window_geometry": "1250x620+424+134"
 }
