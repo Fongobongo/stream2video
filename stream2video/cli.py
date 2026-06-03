@@ -2,8 +2,10 @@
 
 import logging
 import shutil
+import signal
+import threading
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import typer
 import yaml
@@ -18,20 +20,27 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-from stream2video.download import download, DownloadError
+from stream2video.config import CONFIG_DEFAULTS, CONFIG_RANGES
+from stream2video.download import (
+    download,
+    DownloadCancelledError,
+    DownloadError,
+)
 from stream2video.silence import (
     detect_silence,
     save_silence_cache,
     load_silence_cache,
+    SilenceCancelledError,
     SilenceDetectionError,
 )
 from stream2video.concat import cut_and_concat, ConcatError
 
 # Setup logging
+_console_handler = RichHandler(rich_tracebacks=True)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(message)s",
-    handlers=[RichHandler(rich_tracebacks=True)],
+    handlers=[_console_handler],
 )
 logger = logging.getLogger("stream2video")
 
@@ -39,54 +48,61 @@ console = Console()
 app = typer.Typer(help="Compress stream recordings by removing silence")
 
 
+def _make_sigint_cancel() -> tuple[threading.Event, Callable[[], bool]]:
+    """Wire SIGINT to a cancel event so Ctrl+C aborts running ffmpeg/yt-dlp.
+
+    Returns (event, callback). The callback returns True once SIGINT has been
+    received. The event is set by the signal handler in the main thread, but
+    signal handlers in Python can only safely set an event/flag, not raise.
+    """
+    event = threading.Event()
+
+    def _handler(signum, frame):
+        event.set()
+
+    signal.signal(signal.SIGINT, _handler)
+
+    def _cb() -> bool:
+        return event.is_set()
+    return event, _cb
+
+
 def _check_ffmpeg():
-    """Warn if ffmpeg is missing."""
-    if not shutil.which("ffmpeg"):
-        console.print("[red]Error:[/red] ffmpeg not found in PATH")
-        console.print("  Install: [cyan]winget install Gyan.FFmpeg[/cyan]")
-        console.print("  Or run:  [cyan]setup.ps1[/cyan] (Windows)")
-        raise typer.Exit(1)
-
-
-# Config validation ranges
-CONFIG_RANGES = {
-    "threshold": (-60, -5),
-    "min_silence": (0.1, 60),
-    "margin": (-3, 5),
-}
-
-# Config defaults
-CONFIG_DEFAULTS = {
-    "threshold": -20,
-    "min_silence": 1.0,
-    "margin": -0.5,
-}
+    """Warn if ffmpeg or ffprobe is missing."""
+    for tool in ("ffmpeg", "ffprobe"):
+        if not shutil.which(tool):
+            console.print(f"[red]Error:[/red] {tool} not found in PATH")
+            console.print("  Install: [cyan]winget install Gyan.FFmpeg[/cyan]")
+            console.print("  Or run:  [cyan]setup.ps1[/cyan] (Windows)")
+            raise typer.Exit(1)
 
 
 def load_config(config_file: Optional[Path]) -> dict:
     """Load and validate configuration file."""
     config = CONFIG_DEFAULTS.copy()
 
-    if config_file and config_file.exists():
-        try:
-            with open(config_file) as f:
-                file_config = yaml.safe_load(f) or {}
+    if config_file:
+        if not config_file.exists():
+            console.print(f"[yellow]Warning:[/yellow] Config file not found: {config_file}")
+        else:
+            try:
+                with open(config_file) as f:
+                    file_config = yaml.safe_load(f) or {}
 
-            if not isinstance(file_config, dict):
-                raise ValueError("Config file must contain a dictionary")
+                if not isinstance(file_config, dict):
+                    raise ValueError("Config file must contain a dictionary")
 
-            # Update with file config
-            config.update(file_config)
+                config.update(file_config)
 
-            logger.info(f"Loaded config from {config_file}")
+                logger.info(f"Loaded config from {config_file}")
 
-        except yaml.YAMLError as e:
-            console.print(f"[red]Error parsing config file:[/red] {e}")
-            raise typer.Exit(1)
+            except yaml.YAMLError as e:
+                console.print(f"[red]Error parsing config file:[/red] {e}")
+                raise typer.Exit(1)
 
-        except Exception as e:
-            console.print(f"[red]Error loading config file:[/red] {e}")
-            raise typer.Exit(1)
+            except Exception as e:
+                console.print(f"[red]Error loading config file:[/red] {e}")
+                raise typer.Exit(1)
 
     # Validate ranges
     for key, (min_val, max_val) in CONFIG_RANGES.items():
@@ -135,7 +151,7 @@ def main(
         "batch",
         "--method",
         "-m",
-        help="Concat method: 'segment' (fast, ~1.5h) or 'batch' (original select/aselect, ~6-7h)",
+        help="Concat method: 'segment' (fast, ~1.5h) or 'batch' (select/aselect filter, ~6-7h)",
     ),
     encoder: str = typer.Option(
         "libx264",
@@ -170,23 +186,31 @@ def main(
     # Verify ffmpeg is available
     _check_ffmpeg()
 
-    # Set log level
-    logger.setLevel(log_level.upper())
+    # Set log level (apply to console handler, not the logger itself, so the
+    # file handler still receives DEBUG regardless of the user's choice).
+    valid_levels = ("DEBUG", "INFO", "WARNING", "ERROR")
+    level = log_level.upper()
+    if level not in valid_levels:
+        console.print(f"[red]Invalid log level:[/red] {log_level!r} (use DEBUG, INFO, WARNING, or ERROR)")
+        raise typer.Exit(1)
+    _console_handler.setLevel(level)
 
     # Ensure output directory exists
     output_dir.mkdir(parents=True, exist_ok=True)
     log_file = output_dir / "stream2video.log"
 
-    # Add file handler for logs
-    fh = logging.FileHandler(log_file)
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
-    logger.addHandler(fh)
-
     console.print(f"\n[bold cyan]stream2video[/bold cyan] - Compress by removing silence")
     console.print(f"Logs saved to: {log_file}\n")
 
+    cancel_event, cancel_cb = _make_sigint_cancel()
+
+    fh = None
     try:
+        fh = logging.FileHandler(log_file)
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+        logger.addHandler(fh)
+
         # Load configuration
         config = load_config(config_file)
 
@@ -199,14 +223,22 @@ def main(
         ]
 
         with Progress(*progress_columns, console=console) as progress:
-            # Step 1: Download video
+            # Step 1: Download video (indeterminate: yt-dlp does not report progress)
             task1 = progress.add_task("[cyan]Downloading video...", total=None)
 
             try:
                 logger.info(f"Processing: {input_video}")
-                video_path = download(input_video, output_dir)
-                progress.update(task1, completed=True, description="[green]+[/green] Video downloaded")
+                download_result = download(
+                    input_video, output_dir,
+                    cancel_callback=cancel_cb,
+                )
+                video_path = download_result.path
+                progress.update(task1, total=1, completed=1,
+                                description="[green]+[/green] Video downloaded")
 
+            except DownloadCancelledError:
+                console.print("[yellow]Download cancelled.[/yellow]")
+                raise typer.Exit(130)
             except DownloadError as e:
                 console.print(f"[red]Download failed:[/red] {e}")
                 logger.exception("Download error")
@@ -230,11 +262,15 @@ def main(
                         min_silence=config["min_silence"],
                         margin=config["margin"],
                         progress_callback=silence_progress,
+                        cancel_callback=cancel_cb,
                     )
                     save_silence_cache(video_path, silence_segments, output_dir, config)
 
                 progress.update(task2, completed=100, description=f"[green]+[/green] Found {len(silence_segments)} silence segments")
 
+            except SilenceCancelledError:
+                console.print("[yellow]Silence detection cancelled.[/yellow]")
+                raise typer.Exit(130)
             except SilenceDetectionError as e:
                 console.print(f"[red]Silence detection failed:[/red] {e}")
                 logger.exception("Silence detection error")
@@ -259,11 +295,15 @@ def main(
                     progress_callback=update_progress,
                     method=method,
                     encoder=encoder,
+                    cancel_callback=cancel_cb,
                 )
 
                 progress.update(task3, completed=100, description="[green]+[/green] Video compressed")
 
             except ConcatError as e:
+                if cancel_event.is_set():
+                    console.print("[yellow]Concatenation cancelled.[/yellow]")
+                    raise typer.Exit(130)
                 console.print(f"[red]Concatenation failed:[/red] {e}")
                 logger.exception("Concatenation error")
                 raise typer.Exit(1)
@@ -272,7 +312,7 @@ def main(
         console.print("\n[bold green]+ Compression complete![/bold green]")
         console.print(f"Output: [cyan]{output_video}[/cyan]")
 
-        if video_path != Path(input_video):
+        if download_result.is_downloaded:
             logger.info(f"Temporary download file: {video_path}")
 
         logger.info(f"Successfully compressed video to {output_video}")
@@ -286,8 +326,9 @@ def main(
         raise typer.Exit(1)
 
     finally:
-        logger.removeHandler(fh)
-        fh.close()
+        if fh is not None:
+            logger.removeHandler(fh)
+            fh.close()
 
 
 if __name__ == "__main__":

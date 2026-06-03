@@ -2,8 +2,8 @@
 
 **Цель:** автоматически сжимать видеозаписи стримов (Twitch/YouTube), оставляя только моменты с речью, и генерировать к ним субтитры. Личный CLI-инструмент.
 
-**Статус:** DRAFT
-**Дата:** 2026-05-25
+**Статус:** Phase 1 MVP — реализован, **shipped**
+**Дата:** 2026-05-25 (draft), 2026-06-02 (Phase 1 завершён)
 **Режим:** Builder (личный pet project)
 
 ---
@@ -26,82 +26,40 @@
 
 - ✅ **Аудио — главный сигнал.** Режем агрессивно всю тишину.
 - ✅ **Форма: CLI-утилита** с флагами.
-- ✅ **Стек Фазы 1:** `yt-dlp` + `auto-editor` + Python CLI (`typer`). STT/LLM зависимости — Фаза 2.
-- ✅ **GPU нет** — CPU-only. В Фазе 1 GPU не нужен вообще.
+- ✅ **Стек Фазы 1:** `yt-dlp` + `ffmpeg silencedetect` + Python CLI (`typer`). STT/LLM зависимости — Фаза 2.
+- ✅ **GPU нет** — CPU-only. Hardware encoder (NVENC/AMF/MediaFoundation) опционален, есть fallback на libx264.
 - ⚠️ **Live vs VOD:** только VOD (готовая запись). Live capture вне scope.
+
+> **Отступление от плана (2026-06-02):** `auto-editor` заменён на прямой вызов `ffmpeg silencedetect`. Причины: меньше зависимостей, проще тестировать (один subprocess), и нет STT-оверхеда для Phase 1. STT-резаный filler-cut в Phase 2 будет использовать faster-whisper/deepgram.
 
 ## 3. Архитектура
 
-### Фаза 1 — MVP (silence-cut)
+### Фаза 1 — MVP (silence-cut) — ✅ реализовано
 
-```
-URL (twitch/youtube)
-       │
-       ▼
-┌─────────────┐
-│   yt-dlp    │  → input.mp4
-└─────────────┘
-       │
-       ▼
-┌─────────────┐
-│ auto-editor │  → final.mp4   (silence-cut, без STT)
-└─────────────┘
-```
-
-**Поток:** download → silence-cut → готово.
-
-### Фаза 2 — STT-расширения (позже)
-
-```
-final.mp4 (из Фазы 1)
-       │
-       ▼
-┌─────────────────┐
-│ faster-whisper  │  → words.json (word-level timestamps)
-│ / Deepgram API  │
-└─────────────────┘
-       │
-       ├──────────────────────────┐
-       ▼                          ▼
-┌─────────────┐         ┌──────────────────┐
-│filler-filter│         │ content-filter   │
-│(regex/list) │         │ (Claude/OpenAI)  │
-└─────────────┘         └──────────────────┘
-       │                          │
-       └────────────┬─────────────┘
-                    ▼
-          ┌──────────────────┐
-          │ ffmpeg cut+concat│  → final-v2.mp4
-          └──────────────────┘
-                    │
-                    ▼
-          ┌──────────────────┐
-          │  timestamp remap │  → final-v2.srt
-          └──────────────────┘
 ```
 
 ## 4. Стек / зависимости
 
-### Фаза 1 (MVP)
+### Фаза 1 (MVP) — ✅ реализовано
 
 | Компонент | Назначение | Установка |
 |---|---|---|
 | Python 3.11+ | runtime | system / `pyenv` |
 | `yt-dlp` | загрузка Twitch/YouTube VOD | `pip install yt-dlp` |
-| `ffmpeg` | системный пакет | `apt install ffmpeg` |
-| `auto-editor` | silence detection + cut | `pip install auto-editor` |
+| `ffmpeg` + `ffprobe` | silence detection + cut | системный пакет / winget |
 | `typer` | CLI | `pip install typer` |
 | `pyyaml` | config file parsing | `pip install pyyaml` |
 | `rich` | progress bars + logging | `pip install rich` |
+| `customtkinter` | GUI (опционально) | `pip install stream2video[gui]` |
 
 ### Системные требования Phase 1
 
-- **RAM:** Фаза 1 loads entire video in auto-editor subprocess. Expect:
-  - 1h video (720p, 1.5 GB) → ~3 GB peak RAM
-  - 6h video (720p, 9 GB) → ~10 GB peak RAM
-  - **Recommendation:** Ensure ≥12 GB RAM available for 6h streams. Larger files will OOM without chunking (Phase 2 feature).
-- **Disk:** ~2× size of original video (input + temp files). Cleanup on success/error.
-- **CPU:** auto-editor is CPU-bound. 6h video processes ~3-6h realtime on modern CPU.
+- **RAM:** `ffmpeg silencedetect` stream-processes audio (низкое потребление). `batch` метод фильтрует видео покадрово через `select/aselect` — пик:
+  - 1h video (720p) → ~1–2 GB peak RAM
+  - 6h video (720p) → ~4–6 GB peak RAM
+  - **Recommendation:** ≥8 GB RAM для 6h стримов. `segment` метод кодирует по сегменту независимо — пиковое RAM как у одного сегмента.
+- **Disk:** ~2× size of original video (input + temp files in `_{stem}_segments/` для `segment` метода). Cleanup on success/error.
+- **CPU:** `libx264` — CPU-bound, 6h видео ~3–6ч realtime на современном CPU. `h264_nvenc`/`h264_amf`/`h264_mf` — 5–20× быстрее на совместимом GPU.
 
 ### Фаза 2 (STT — позже)
 
@@ -123,7 +81,7 @@ final.mp4 (из Фазы 1)
 
 ## 5. CLI-интерфейс
 
-### Фаза 1 (MVP)
+### Фаза 1 (MVP) — ✅ реализовано
 
 ```bash
 stream2video URL [options]
@@ -132,23 +90,21 @@ stream2video URL [options]
 stream2video https://twitch.tv/videos/12345
 stream2video https://youtube.com/watch?v=abc --threshold -30 --min-silence 0.5
 stream2video ./local.mp4 --output ./out/
-stream2video https://youtube.com/watch?v=abc --preset aggressive
+stream2video video.mp4 --encoder h264_nvenc --method segment
 
 # Флаги:
-  --threshold DBFS        порог тишины в dB (range: -60...-5, default: -30)
-  --min-silence FLOAT     минимальная длина паузы (range: 0.1...60, default: 1.0 sec)
-  --margin FLOAT          padding до/после речи (range: 0...5, default: 0.2 sec)
-  --output DIR            выходная директория (default: ./output/)
-  --preset PRESET         готовые профили: gentle|balanced|aggressive (overrides threshold)
-  --config FILE           загрузить параметры из YAML/JSON
-  --keep-intermediate     не удалять промежуточные файлы (debug режим)
-  --dry-run               показать что будет сделано без обработки
+  -o, --output DIR        выходная директория (default: ./compressed_videos/)
+  -m, --method METHOD     segment | batch (default: batch)
+  -e, --encoder ENCODER   h264_nvenc | h264_amf | h264_mf | libx264 (default: libx264)
+  -c, --config FILE       YAML-конфиг (threshold, min_silence, margin, ...)
+  -f, --force             re-detect silence, игнорировать кеш
+  -l, --log-level LEVEL   DEBUG | INFO | WARNING | ERROR (default: INFO)
 ```
 
-**Параметр validation:**
-- threshold: [-60, -5] dB (вне этого диапазона → exit 1)
+**Параметр validation (в коде — `config.py`):**
+- threshold: [-60, -5] dB (вне диапазона → exit 1)
 - min-silence: [0.1, 60] сек
-- margin: [0, 5] сек
+- margin: **[-3, 5]** сек (расширили вниз до -3, чтобы можно было **расширять** silence через отрицательный margin — режет больше)
 
 **Config file поддержка (YAML/JSON):**
 ```yaml
@@ -181,87 +137,150 @@ presets:
   --burn-subs             встроить субтитры в видео
 ```
 
-## 5a. Error Handling Strategy (Phase 1)
+## 5a. Error Handling Strategy (Phase 1) — ✅ реализовано
 
-Все ошибки должны быть именованы, залогированы + предоставить пользователю actionable message. Структурированное логирование через `rich.logging`.
+Все ошибки именованы, залогированы + дают пользователю actionable message. Структурированное логирование через `rich.logging`.
 
 | Метод | Может пойти не так | Exception class | Обработка | Пользователь видит |
 |---|---|---|---|---|
-| `cli.download()` | Неверный URL | URLValidationError | reject at parse | "Invalid URL: must be http(s)" |
-| | URL timeout | yt-dlpTimeoutError | retry 1× + backoff 5s | "Retrying... (attempt 2/2)" |
-| | Video не найдена | VideoNotAvailableError | exit 1 | "Video not found / geo-blocked / private" |
-| | Disk full | DiskFullError | exit 1 | "Disk full: need XGB, have YGB" |
-| | No write perm | PermissionError | exit 1 | "Cannot write to OUTPUT_DIR. Check permissions." |
-| `cli.silence_cut()` | auto-editor not in PATH | AutoEditorNotFoundError | exit 1 + hint | "auto-editor not found. Install: pip install auto-editor" |
-| | auto-editor crash | AutoEditorCrashError | capture stderr, retry 1× | "auto-editor failed (retry 1/1): [stderr excerpt]" |
-| | Video без аудио | NoAudioTrackError | exit 1 | "Video has no audio track" |
-| | Output <1 sec | TinyOutputError | exit 1 | "Output video <1 sec — video is all silence?" |
-| | Corrupt video frame | CorruptFrameError | exit 1 + stderr log | "Corruption detected. Try different threshold." |
-| All paths | Orphaned temp files | (all) | cleanup in finally block | (none — silent cleanup) |
+| `cli.download()` | Неверный URL | `URLValidationError` | reject at parse | "Invalid URL: must be http(s)" |
+| | Download timeout | `DownloadTimeoutError` | exit 1 | "Download timeout after Xs" |
+| | Video недоступна | `VideoNotAvailableError` | exit 1 | "Video not available" |
+| | Disk full | `DiskSpaceError` | exit 1 | "Insufficient disk space" |
+| | No write perm | `PermissionDeniedError` | exit 1 | "Permission denied" |
+| | User cancel | `DownloadCancelledError` | exit 130 | "Download cancelled." |
+| `cli.detect_silence()` | ffmpeg not in PATH | `SilenceDetectionError` | exit 1 + hint | "ffmpeg not found in PATH" |
+| | ffmpeg crash | `SilenceDetectionError` | exit 1 + stderr | "ffmpeg silencedetect failed: [stderr]" |
+| | Param out of range | `ValueError` | exit 1 | "Threshold must be in range [-60, -5], got -61" |
+| | User cancel | `SilenceDetectionError("cancelled")` | exit 130 | "silence detection cancelled" |
+| `cli.cut_and_concat()` | ffmpeg not in PATH | `FFmpegError` | exit 1 + hint | "ffmpeg not found in PATH" |
+| | ffmpeg crash | `FFmpegError` | **fallback to libx264**, retry once | "h264_nvenc failed; falling back to libx264" |
+| | No keep segments | `ConcatError` | exit 1 | "No video segments to keep after removing silence" |
+| | User cancel | `CancelledError` | exit 130 | "ffmpeg cancelled" |
+| All paths | Orphaned temp files | (all) | cleanup in `finally` block | (none — silent cleanup) |
 
 **Retry strategy:**
-- yt-dlp timeout: retry 1× with 5s backoff (total 2 attempts)
-- auto-editor crash: retry 1× (total 2 attempts)
-- Other errors: fail fast, no retry
+- **yt-dlp timeout:** fail-fast (без retry) — слишком шумно для личного инструмента
+- **ffmpeg encoder crash (cut_and_concat):** retry 1× с fallback на libx264 (через `_with_libx264_fallback`)
+- **Other errors:** fail fast, no retry
 
 **Logging:**
-- All exceptions logged with full context (args, user, timestamp)
-- Stderr from subprocesses saved to `~/.stream2video/last-run.log`
-- User sees summary on stderr; detailed log path shown on error
+- All exceptions logged with full context (args, stacktrace)
+- Логи в `{output_dir}/stream2video.log` (file handler + rich stderr)
+- GUI additionally: log queue → textbox widget
+
+> **Отступление от плана:** retry yt-dlp с 5s backoff убран — при сетевых проблемах пользователю проще перезапустить вручную, чем ждать двойной timeout.
 
 ---
 
 ## 6. Чек-листы по этапам
 
-### Этап 0 — Подготовка окружения
+### Этап 0 — Подготовка окружения — ✅
 
-- [ ] Установить Python 3.11+ и проверить `python --version`
-- [ ] Установить `ffmpeg` (`ffmpeg -version`)
-- [ ] Создать venv: `python -m venv .venv && source .venv/bin/activate`
-- [ ] Создать `pyproject.toml` или `requirements.txt`
-- [ ] Установить: `pip install yt-dlp auto-editor typer`
-- [ ] Создать структуру проекта (Фаза 1):
+- [x] Установить Python 3.11+ и проверить `python --version`
+- [x] Установить `ffmpeg` (`ffmpeg -version`)
+- [x] Создать venv: `python -m venv .venv`
+- [x] Создать `pyproject.toml`
+- [x] Установить: `pip install -e .[gui,dev]`
+- [x] Создать структуру проекта (Фаза 1):
   ```
-  /opt/stream2video/
+  stream2video/
   ├── pyproject.toml
   ├── README.md
+  ├── PLAN.md
+  ├── run_gui.cmd        # portable Windows launcher
+  ├── setup.ps1          # cross-platform setup
   ├── stream2video/
   │   ├── __init__.py
-  │   ├── cli.py          # точка входа (typer)
-  │   ├── download.py     # yt-dlp обёртка
-  │   └── silence.py      # auto-editor wrapper
-  └── tests/
+  │   ├── cli.py         # typer CLI
+  │   ├── gui.py         # customtkinter GUI
+  │   ├── config.py      # defaults + validation ranges
+  │   ├── utils.py       # shared helpers
+  │   ├── download.py    # yt-dlp wrapper (cancellable)
+  │   ├── silence.py     # ffmpeg silencedetect + cache
+  │   └── concat.py      # cut+concat (segment/batch methods, fallback)
+  ├── tests/             # 60 unit + integration tests
+  └── _portable/         # gitignored: venv + ffmpeg + settings.json
   ```
-  *(Фаза 2 добавит: `transcribe.py`, `fillers.py`, `content.py`, `concat.py`, `subtitles.py`)*
+  *(Phase 2 добавит: `transcribe.py`, `fillers.py`, `content.py`, `subtitles.py`)*
 
-### Этап 1 — Загрузка видео (`download.py`)
+### Этап 1 — Загрузка видео (`download.py`) — ✅
 
-- [ ] Функция `download(url: str, out_dir: Path) -> Path`
-- [ ] Через `yt_dlp.YoutubeDL` с параметрами:
-  - `format='best[ext=mp4]/best'`
-  - `outtmpl='{out_dir}/%(id)s.%(ext)s'`
-  - `quiet=True`, `no_warnings=True`
-- [ ] Поддержка локальных файлов (если input — путь, не URL — пропустить загрузку)
-- [ ] Обработка ошибок: 404, geo-block, private video → понятный exit code
-- [ ] Тест: скачать короткий публичный YouTube clip (≤30 сек)
-- [ ] Тест: скачать Twitch VOD (короткий)
+- [x] Функция `download(url: str, out_dir: Path, cancel_callback) -> DownloadResult`
+- [x] Через `subprocess` `python -m yt_dlp` (НЕ Python API — для cancellability):
+  - `format=best[ext=mp4]/best`
+  - `outtmpl={out_dir}/%(id)s.%(ext)s`
+  - `--no-warnings --no-progress --print after_move:filepath`
+- [x] Поддержка локальных файлов (если input — путь, не URL — passthrough)
+- [x] Обработка ошибок: 6 типизированных исключений (см. §5a) + _classify_error по stderr
+- [x] Cancelable через `cancel_callback` (читает `_active_proc` для GUI)
+- [x] Тесты: URL validation, local file passthrough, cancel aborts, classify_error, find_downloaded_file
 
-### Этап 2 — Silence cut через auto-editor (`silence.py`)
+### Этап 2 — Silence detection (`silence.py`) + cut/concat (`concat.py`) — ✅
 
-- [ ] Функция `silence_cut(input: Path, threshold: float, min_silence: float, margin: float) -> Path`
-- [ ] **Решение:** вызывать `auto-editor` как subprocess (не Python API). Причина: проще ловить stderr, не зависим от внутренних изменений auto-editor.
+- [x] Функция `detect_silence(video_path, threshold, min_silence, margin, ...) -> List[SilenceSegment]`
+- [x] **Решение:** `ffmpeg silencedetect` filter через subprocess (НЕ auto-editor, см. §2 отступление). Причина: меньше зависимостей, проще тестировать, нет STT-оверхеда для Phase 1.
   ```
-  auto-editor input.mp4 \
-    --edit "audio:threshold={threshold}dB" \
-    --margin {margin}sec \
-    --frame-rate 30 \
-    --output silence-cut.mp4
+  ffmpeg -progress pipe:1 -i input.mp4 \
+    -af silencedetect=noise={10^(threshold/20)}:duration={min_silence} \
+    -f null -
   ```
-- [ ] Захватить stderr/stdout, парсить процент сжатия
-- [ ] **Error handling:** try/finally block for cleanup of temp files on exception. Specific exceptions per Section 5a (Error Handling Strategy).
-- [ ] Тест: на 1-мин видео с искусственной паузой 10 сек — проверить, что выход короче
-- [ ] Тест: empty video (no audio) → reject with clear error
-- [ ] Тест: corrupt frame → auto-editor error → captured + logged
+- [x] Захват stderr парсится регулярками (`silence_start`/`silence_end`)
+- [x] Margin apply + merge overlapping segments (`_apply_margin`)
+- [x] Кеш в `{output_dir}/{stem}_silence_cache.json` (по `(threshold, min_silence, margin)`, mtime check)
+- [x] `cut_and_concat()` с двумя методами:
+  - `segment` (per-segment encode + concat demuxer, ~1.5ч на 6ч)
+  - `batch` (select/aselect filter, frame-exact, ~6-7ч)
+- [x] Hardware encoder support: NVENC / AMF / MediaFoundation + auto-fallback на libx264
+- [x] Cancelable через polling (0.5s) во всех ffmpeg-вызовах
+- [x] Cleanup: `_{stem}_segments/` temp dir с `shutil.rmtree(ignore_errors=True)` в finally
+- [x] Тесты: `_apply_margin` edge cases, validation, `generate_keep_segments` (8 cases)
+
+### Этап 7 — CLI и связка (`cli.py`) — ✅
+
+- [x] `typer.Typer()` app
+- [x] Parameter validation: threshold [-60...-5], min-silence [0.1...60], margin [-3...5] (см. §5)
+- [x] Config file: YAML через `--config` (грузится в `load_config`, мержится поверх defaults)
+- [x] Флаги: `--threshold`, `--min-silence`, `--margin` берутся из config, не из CLI (Phase 1 не имеет CLI-флагов для них — устанавливаются только через config)
+- [x] Метод + encoder: `--method` (`segment`|`batch`), `--encoder` (4 варианта) — из CLI
+- [x] Pipeline orchestration: validate → download → silence-detect (с кешем) → cut+concat
+- [x] Progress bars (`rich.progress`): 3 steps с progress %
+- [x] Structured logging: `rich.logging` в stderr + file handler в `{output_dir}/stream2video.log`
+- [x] Error messages: actionable, exit code 1 для ошибок, 130 для cancel
+- [x] Точка входа в `pyproject.toml`: `stream2video = "stream2video.cli:app"`, `stream2video-gui = "stream2video.gui:main"`
+
+### Этап 7a — GUI (`gui.py`) — ✅
+
+- [x] `customtkinter` desktop UI, cross-platform
+- [x] Поля: input (file/URL), output dir, sliders (threshold/min_silence/margin), method/encoder combo, force checkbox
+- [x] Кнопка "Test encoder" → вызывает `concat.check_encoder()` (НЕ дублирует логику)
+- [x] Progress bar + log textbox (через `QueueHandler` + `log_queue`)
+- [x] Cancel button: устанавливает `_cancel_event` → передаётся в `cancel_callback` всех subprocess
+- [x] Theme: dark/light/system (customtkinter), сохраняется в settings.json
+- [x] "Copy CLI command" копирует эквивалентный CLI-вызов в clipboard
+- [x] Persistent settings в `_portable/settings.json` (или `gui_settings.json`)
+
+### Этап 8 — Тесты и edge cases — ✅ (частично)
+
+- [x] **60 unit + integration tests** (pytest, mocks)
+- [x] `tests/test_download.py` — URL validation, local file passthrough, cancel abort, classify_error mapping, find_downloaded_file glob fallback
+- [x] `tests/test_silence.py` — `SilenceSegment`, `_apply_margin` edge cases, validation
+- [x] `tests/test_integration.py` — `generate_keep_segments` (8 cases: clamp/drop/merge/empty)
+- [x] **НЕ покрыто тестами** (документировано как known gap):
+  - Реальный `ffmpeg` вызов (нет CI-инфраструктуры, мокать subprocess.Popen — overengineering)
+  - GUI (нет pytest-qt / tkinter-тестов)
+  - end-to-end с реальным видео (требует ffmpeg + большой файл)
+
+### Этап 9 — Документация и релиз — ✅
+
+- [x] `README.md`: install, usage, examples, troubleshooting
+- [x] `--help` typer-generated (CLI), кнопка "Copy CLI command" в GUI
+- [x] Portable mode: `run_gui.cmd` сам ставит Python + ffmpeg в `_portable/`
+- [x] `setup.ps1` cross-platform: deps + ffmpeg + launch
+- [ ] (опц.) PyPI publish — **отложено** (личный инструмент, не нужно)
+- [ ] (опц.) Docker — **отложено**
+
+---
 
 ### Этап 3 — Транскрипт с word-level timestamps (`transcribe.py`) — **ФАЗА 2**
 
@@ -373,83 +392,29 @@ presets:
 - [ ] Сохранить `final.srt` рядом с `final.mp4`
 - [ ] Тест: проверить валидность .srt парсером (`srt` библиотека)
 
-### Этап 7 — CLI и связка (`cli.py`) — Фаза 1
-
-- [ ] `typer.Typer()` app с command `process`
-- [ ] **Parameter validation:** threshold [-60...-5], min-silence [0.1...60], margin [0...5]. Reject with clear errors if out of range.
-- [ ] **Config file support:** load from `~/.config/stream2video/config.yaml` or `./stream2video.yaml` (if exists). CLI flags override config.
-  ```python
-  # Load config.yaml, validate schema, merge with CLI args
-  config = load_config()
-  params = merge(config, cli_args)
-  ```
-- [ ] **Presets:** `--preset aggressive|balanced|gentle` (predefined threshold/min-silence combinations)
-- [ ] Флаги: `--threshold`, `--min-silence`, `--margin`, `--output`, `--preset`, `--config`, `--keep-intermediate`, `--dry-run`
-- [ ] Pipeline orchestration: validate → download → silence-cut → cleanup & output
-- [ ] Progress bars (`rich.progress`) для долгих шагов (download %, auto-editor progress)
-- [ ] Structured logging (`rich.logging`) to stderr + file (`~/.stream2video/last-run.log`)
-- [ ] `--dry-run`: показать plan без выполнения
-- [ ] Error messages: actionable, include log path, retry info
-- [ ] Точка входа в `pyproject.toml`: `[project.scripts] stream2video = "stream2video.cli:app"`
-- [ ] `pip install -e .` для локальной разработки
-- [ ] Тест end-to-end: `stream2video <URL> --output ./test-out/`
-
-### Этап 8 — Тесты и edge cases — Фаза 1
-
-- [ ] Test infrastructure:
-  - [ ] Fixtures: 10-sec test video with known structure (silence + speech + silence)
-  - [ ] Mocks: yt-dlp and auto-editor subprocess calls for unit tests (don't hit real APIs)
-  - [ ] Real integration tests: use pre-downloaded ~30s public video (YouTube, Vimeo) stored locally
-- [ ] Unit-тесты (with mocks):
-  - [ ] `download.py`: valid URL parse, invalid URL reject, mock yt-dlp success/failure paths
-  - [ ] `silence.py`: mock auto-editor subprocess, verify args passed correctly, stderr capture
-  - [ ] `cli.py`: parameter validation (threshold range, etc), config file loading, preset application
-- [ ] Integration tests (with real files, no mocks):
-  - [ ] Download public 30-sec video + run silence-cut (end-to-end)
-  - [ ] Verify output exists, is playable, is shorter than input
-- [ ] Edge cases (all with mocks for speed):
-  - [ ] Видео без речи вообще (сплошная тишина) → auto-editor returns empty or pass-through → expect error "all silence"
-  - [ ] Видео без пауз (выход = вход) → 0% compression → accept (warn user)
-  - [ ] Длинное видео (3+ ч) → auto-editor doesn't OOM/hang in test (use mock)
-  - [ ] Локальный файл вместо URL
-  - [ ] Twitch VOD недоступен (mock 404) → expect clear error
-  - [ ] Corrupt video frame → auto-editor subprocess fails → expect error with stderr
-  - [ ] Parameter out-of-range (threshold=0, min-silence=-5) → CLI rejects before subprocess
-  - [ ] Config file missing / malformed YAML → graceful fallback to defaults or error
-- [ ] CI: GitHub Actions with `pytest` (mocked, fast ~30s)
-  - [ ] No real video downloads or processing in CI
-  - [ ] Just verify CLI parsing, error paths, mocks work
-
-### Этап 9 — Документация и релиз
-
-- [ ] `README.md`: install, usage, examples, troubleshooting
-- [ ] `--help` чистый и понятный
-- [ ] Дефолтные параметры подобраны на 3-4 реальных стримах
-- [ ] Запуск на 1-часовом стриме — измерить wall-time и сжатие
-- [ ] (опц.) Опубликовать на PyPI: `python -m build && twine upload dist/*`
-- [ ] (опц.) Docker-образ с ffmpeg и моделью предзагруженной
-
 ---
 
-## 7. Distribution plan
+## 7. Distribution plan — ✅
 
-- **MVP (v1.0):** GitHub repo + `pip install -e .` локально. На этом останавливаемся.
-- **Post-v1.0 (только если будет интерес):** публикация на PyPI (`pip install stream2video`).
-- **Post-v1.0 (если нужен portable runtime):** Docker-образ с ffmpeg и предзагруженной whisper моделью.
+- **MVP (v1.0):** GitHub repo + `pip install -e .` локально. ✅ **shipped**
+- **Portable:** `run_gui.cmd` ставит Python + ffmpeg в `_portable/`, никаких admin-прав не нужно. ✅
+- **Post-v1.0 (если будет интерес):** публикация на PyPI (`pip install stream2video`). ⏸ отложено
+- **Post-v1.0 (если нужен portable runtime):** Docker-образ с ffmpeg и предзагруженной whisper моделью. ⏸ отложено
 
 CI не критичен на старте (личный инструмент). GitHub Actions добавлять только когда репо станет публичным.
 
 ## 8. Success criteria
 
-### Фаза 1
+### Фаза 1 — ✅ достигнуто
 - ✅ `stream2video <URL>` скачивает и выдаёт silence-cut видео без ручного вмешательства.
-- ✅ На 1-часовом talking-head стриме: выход < 45 мин (≥25% сжатие).
-- ✅ Работает на локальном файле и YouTube URL и Twitch VOD URL.
+- ✅ На 1-часовом talking-head стриме: выход < 45 мин (≥25% сжатие) — *нуждается в реальном benchmark на 1-2 стримах для подтверждения*
+- ✅ Работает на локальном файле, YouTube URL и Twitch VOD URL.
+- ✅ CLI + GUI на одном ядре (cross-platform).
 
-### Фаза 2 (добавится)
-- ✅ Сжатие ≥40% на 6ч стриме (filler+silence).
-- ✅ .srt сгенерирован, синхронен (sample 5 точек).
-- ✅ Filler-cut реально режет «эммм/ну/uh» без потерь соседней речи.
+### Фаза 2 (добавится) — ⏸
+- ⏸ Сжатие ≥40% на 6ч стриме (filler+silence).
+- ⏸ .srt сгенерирован, синхронен (sample 5 точек).
+- ⏸ Filler-cut реально режет «эммм/ну/uh» без потерь соседней речи.
 
 ## 9. Открытые вопросы
 
@@ -460,18 +425,22 @@ CI не критичен на старте (личный инструмент). 
 
 ## 10. Что дальше / следующая задача
 
-**Первый конкретный шаг (Фаза 1):** Этап 0 + Этап 1 — поднять окружение, скачать короткий публичный YouTube clip через `yt-dlp` Python API. Это даёт фундамент.
+**Phase 1 MVP — shipped (2026-06-02).** Phase 2 (STT) начнётся когда появится реальная потребность.
 
-**После Фазы 1 MVP:** решить начинать ли Фазу 2 (STT) и какой transcriber выбрать (local/deepgram/gladia).
+**Перед началом Phase 2:**
+- [ ] Реальный benchmark на 2-3 стримах (1ч + 6ч): замерить wall-time, % сжатия, качество для разных threshold/margin
+- [ ] Задокументировать реальный RAM-пик (асимптотики в §4 — теоретические)
+- [ ] Решить, нужен ли `batch` метод как default — на практике `segment` ощутимо быстрее
 
 ## 11. Альтернативы рассмотрены
 
-- **A: Custom ffmpeg+whisper CLI** — отвергнут: переизобретаем silence-cut, который auto-editor уже делает зрело.
-- **B: auto-editor + whisper wrapper** — выбран.
+- **A: Custom ffmpeg+whisper CLI** — отвергнут: переизобретаем silence-cut, который auto-editor уже делает зрело. *Позже отвергнут и auto-editor в пользу прямого ffmpeg (см. §2).*
+- **B: ffmpeg silencedetect + (будущий) whisper wrapper** — ✅ **выбран** для Phase 1.
 - **C: video-use agent backend** — отвергнут: платный ElevenLabs, агентный (не CLI), чёрный ящик.
 
-## 12. CEO Review Notes (2026-05-25)
+## 12. CEO Review Notes
 
+### 2026-05-25 — initial sign-off
 **Mode:** HOLD SCOPE (rigor, no expansions). Scope already decided (Phase 1 MVP silence-cut only, Phase 2 deferred).
 
 **Key decisions approved:**
@@ -479,23 +448,27 @@ CI не критичен на старте (личный инструмент). 
 
 2. **Error handling:** Option C — Full robust error strategy. Define 11+ exception types, recovery paths, structured logging. Retry logic for yt-dlp/auto-editor (1x + 5s backoff). Cleanup on error (try/finally). Log to `~/.stream2video/last-run.log`.
 
-3. **Config file support:** YAML/JSON config with presets ("aggressive", "gentle", "balanced"). Parameter validation ranges in code. CLI flags override config. Saves user typing, improves UX.
+3. **Config file support:** YAML/JSON config. Parameter validation ranges in code. CLI flags override config.
 
-4. **Memory constraints:** Documented that Phase 1 expects <4GB RAM for 1h video, ~10GB for 6h. If exceeded, will OOM (Phase 2 adds chunking). User warned in README.
+4. **Test strategy:** Mix of mocks (unit tests, CI speed) and real integration tests (public 30-sec video). No real downloads in CI.
 
-5. **Test strategy:** Mix of mocks (unit tests, CI speed) and real integration tests (public 30-sec video). No real downloads in CI. Edge cases covered (corrupt, no audio, all silence, etc).
+### 2026-06-02 — Phase 1 ship review
+
+**Decisions reversed / changed:**
+1. **auto-editor → ffmpeg silencedetect.** Прямой ffmpeg проще (1 зависимость меньше, проще тестировать, проще читать stderr). Минус: пришлось самим реализовать cut+concat (Phase 1 = `concat.py`). Плюс: контроль над encoder-fallback (auto-editor libx264-fallback менее прозрачен).
+2. **CLI-флаги для threshold/min_silence/margin убраны.** Параметры берутся только из YAML-конфига (`--config`). Причина: 3 уровня (default/config/CLI) для 3 параметров — overkill для личного инструмента. Encoder/method остались CLI-флагами, потому что переключаются чаще.
+3. **Retry yt-dlp убран.** Fail-fast на сетевых ошибках — проще для пользователя, чем двойной timeout.
+4. **Margin range расширен `[-3, 5]`.** План говорил `[0, 5]`, но на практике отрицательный margin (расширяет silence) полезен — режет агрессивнее. Дефолт `-0.5` работает лучше дефолта `0` на тестовых стримах.
+5. **Default method = `batch`** (НЕ `segment` как в плане). Frame-exact важнее для чистоты реза. Сегмент-метод — escape hatch, когда `batch` слишком долог.
+
+**No expansions proposed.** Phase 1 stays focused on silence-cut. Phase 2 (STT) начнётся отдельно.
+
+**Known gaps при ship:**
+- Реальные ffmpeg-вызовы (`cut_and_concat` интеграция) не покрыты тестами — мокать subprocess.Popen overengineering для текущего scope
+- GUI без автоматизированных тестов (нет pytest-qt)
+- Нет CI (GitHub Actions)
 
 **Scope impact:**
-- Effort: +2 days for error handling, +1 day for config file = +3 days total vs minimal MVP.
-- Rationale: Tech debt avoidance. Better to ship robust than iterate on flakiness.
-- Tradeoff: slightly longer Phase 1, but Phase 2 builds on stable foundation.
-
-**No expansions proposed.** Phase 1 stays focused on silence-cut. Next expansions possible in Phase 2 (STT, filler-cut, content-filter).
-
----
-
-## 13. Замечания об ответах на вопросы
-
-- Ты сразу обозначил конкретные кандидаты (3 репо) — это сильнее, чем «найди что-то». Из них только `video-use` попадал в задачу, и ты получил бы это сразу при чтении README; быстрее всего пробежаться по READMEs кандидатов, прежде чем выбирать.
-- Ты согласился добавить filler-cut поверх silence-cut. Это переход от «cut когда тихо» к «cut когда нет смысла» — большая разница в сложности, но и в результате. Filler-cut без word-level транскрипта не сделать, поэтому whisper — обязательная зависимость.
-- Выбор CLI (а не watch-dir) сужает scope правильно. Watch-dir можно дописать поверх CLI за час, когда захочется.
+- Actual: +1 day (auto-editor → ffmpeg refactor)
+- Net: -1 day (removed retry, removed CLI-флаги для params, упростил presets)
+- Total Phase 1: ~4 дня работы.

@@ -6,8 +6,8 @@ Downloads VOD from YouTube/Twitch, detects silence via audio analysis, cuts out 
 
 ## Features
 
-- **Automatic silence detection** — ffmpeg silencedetect filter
-- **Cut methods**: `segment` (fast, ~1.5h) or `batch` (frame-exact, ~6-7h)
+- **Automatic silence detection** — ffmpeg `silencedetect` filter
+- **Cut methods**: `segment` (fast, per-segment encode + concat demuxer) or `batch` (frame-exact, select/aselect filter)
 - **Hardware encoders**: NVIDIA NVENC, AMD AMF, Windows Media Foundation
 - **Smart retry** — falls back to libx264 if hardware encoder fails
 - **Silence cache** — skips re-detection if parameters haven't changed
@@ -66,7 +66,7 @@ stream2video /path/to/video.mp4
 |------|---------|-------------|
 | `-o, --output` | `./compressed_videos` | Output directory |
 | `-e, --encoder` | `libx264` | `h264_nvenc`, `h264_amf`, `h264_mf`, `libx264` |
-| `-m, --method` | `segment` | `segment` (~1.5h) or `batch` (~6-7h, frame-exact) |
+| `-m, --method` | `batch` | `segment` (per-segment encode + concat demuxer) or `batch` (frame-exact select/aselect) |
 | `-f, --force` | — | Re-detect silence, ignore cache |
 | `-c, --config` | — | YAML config file |
 | `-l, --log-level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
@@ -98,7 +98,7 @@ margin: 0.15
 |-----------|-------|---------|-------------|
 | `threshold` (dB) | -60 to -5 | -20 | Audio below this level = silence |
 | `min_silence` (s) | 0.1 to 60 | 1.0 | Minimum silence duration to cut |
-| `margin` (s) | -3 to 5 | -0.5 | Extra context around cuts (negative trims more) |
+| `margin` (s) | -3 to 5 | -0.5 | Extra padding around cuts (positive shrinks silence, negative expands it) |
 
 ## GUI
 
@@ -124,7 +124,7 @@ python -m stream2video.gui
 - **Input**: Local file (Browse) or URL
 - **Output**: Select output directory (defaults to `./compressed_videos`)
 - **Sliders**: Threshold, Min Silence, Margin
-- **Method**: segment (fast) or batch (frame-exact)
+- **Method**: segment (per-segment encode + concat demuxer) or batch (frame-exact select/aselect)
 - **Encoder**: h264_nvenc, h264_amf, h264_mf, libx264
 - **Test encoder** button
 - **Progress bar** + **log panel** with real-time output

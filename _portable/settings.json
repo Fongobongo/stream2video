@@ -1,0 +1,12 @@
+{
+  "threshold": -20,
+  "min_silence": 1.0,
+  "margin": -0.5,
+  "method": "batch",
+  "encoder": "h264_mf",
+  "force": true,
+  "output_dir": "",
+  "theme": "dark",
+  "input_path": "https://www.twitch.tv/videos/2786949142",
+  "window_geometry": "1250x620+424+134"
+}

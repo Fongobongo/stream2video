@@ -1,17 +1,32 @@
-"""Video download module using yt-dlp."""
+"""Video download module using yt-dlp CLI subprocess (cancellable)."""
 
-import re
-import time
 import logging
+import re
+import subprocess
+import sys
+import threading
+import time
 from pathlib import Path
+from typing import Callable, NamedTuple, Optional
 
-import yt_dlp
+from stream2video.utils import CANCEL_POLL_INTERVAL, set_active_process
 
 logger = logging.getLogger(__name__)
 
 
+class DownloadResult(NamedTuple):
+    path: Path
+    is_downloaded: bool
+
+
 class DownloadError(Exception):
     """Base download error."""
+
+    pass
+
+
+class DownloadCancelledError(DownloadError):
+    """Download was cancelled by user (not a real failure)."""
 
     pass
 
@@ -47,9 +62,13 @@ class PermissionDeniedError(DownloadError):
 
 
 def _validate_url(url: str) -> bool:
-    """Validate if string is a URL."""
-    url_pattern = r"^https?://|^[a-z]+\.[a-z]+"
-    return bool(re.match(url_pattern, url, re.IGNORECASE))
+    """Validate if string is an http(s) URL.
+
+    Bare domains (e.g. ``youtube.com/...``) are intentionally rejected so that
+    typos like ``myvideo.mp4`` don't get misclassified as a URL once the
+    ``_is_local_file`` check has passed (non-existent local path).
+    """
+    return bool(re.match(r"^https?://", url, re.IGNORECASE))
 
 
 def _is_local_file(path_str: str) -> bool:
@@ -61,16 +80,71 @@ def _is_local_file(path_str: str) -> bool:
         return False
 
 
-def download(url: str, out_dir: Path) -> Path:
+_CANCEL_POLL_INTERVAL = CANCEL_POLL_INTERVAL
+_DOWNLOAD_TIMEOUT = 28800
+
+_VIDEO_EXTENSIONS = frozenset({
+    ".mp4", ".mkv", ".webm", ".mov", ".avi", ".ts",
+    ".m4v", ".flv", ".wmv", ".mpg", ".mpeg", ".3gp",
+})
+
+
+def _classify_error(stderr: str) -> DownloadError:
+    """Map yt-dlp stderr text to a DownloadError subclass."""
+    msg = stderr.lower()
+    unavailable_markers = (
+        "video unavailable",
+        "this video is unavailable",
+        "this video is no longer available",
+        "video is private",
+        "this video is private",
+        "has been removed",
+    )
+    if any(m in msg for m in unavailable_markers):
+        return VideoNotAvailableError("Video not available")
+    if "no space left" in msg or "disk full" in msg or "errno 28" in msg:
+        return DiskSpaceError("Insufficient disk space")
+    if "permission denied" in msg or "errno 13" in msg:
+        return PermissionDeniedError("Permission denied")
+    return DownloadError(f"Download failed: {stderr[:500]}")
+
+
+def _find_downloaded_file(out_dir: Path, expected: Path) -> Optional[Path]:
+    """Locate the downloaded file; fall back to glob by video id (video extensions only)."""
+    if expected.exists():
+        return expected
+    m = re.search(r"[/\\]([\w-]+)\.\w+$", str(expected))
+    if not m:
+        return None
+    video_id = m.group(1)
+    candidates = [
+        p for p in out_dir.glob(f"{video_id}.*")
+        if p.suffix.lower() in _VIDEO_EXTENSIONS
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def download(
+    url: str,
+    out_dir: Path,
+    cancel_callback: Optional[Callable[[], bool]] = None,
+) -> DownloadResult:
     """
-    Download video from URL using yt-dlp.
+    Download video from URL via yt-dlp CLI, or pass through a local file.
+
+    Spawns yt-dlp as a subprocess so the call can be cancelled (via cancel_callback
+    or GUI close) and the OS process can be killed cleanly. The process is
+    registered with set_active_process for external kill.
 
     Args:
         url: Video URL or local file path
         out_dir: Output directory for downloaded video
+        cancel_callback: Optional callable returning True to abort
 
     Returns:
-        Path to downloaded/local video file
+        DownloadResult with `path` to the file and `is_downloaded` flag
 
     Raises:
         URLValidationError: Invalid URL format
@@ -78,100 +152,104 @@ def download(url: str, out_dir: Path) -> Path:
         DownloadTimeoutError: Download timeout
         DiskSpaceError: Insufficient disk space
         PermissionDeniedError: Permission denied
+        DownloadCancelledError: User cancellation (subclass of DownloadError)
+        DownloadError: Generic failure
     """
-    # Check if input is local file
     if _is_local_file(url):
         logger.info(f"Using local file: {url}")
-        return Path(url)
+        return DownloadResult(Path(url), is_downloaded=False)
 
-    # Validate URL
     if not _validate_url(url):
         raise URLValidationError(f"Invalid URL: {url}")
 
-    # Ensure output directory exists
-    out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # yt-dlp configuration
-    ydl_opts = {
-        "format": "best[ext=mp4]/best",
-        "outtmpl": str(out_dir / "%(id)s.%(ext)s"),
-        "quiet": False,
-        "no_warnings": False,
-        "socket_timeout": 30,
-    }
+    cmd = [
+        sys.executable, "-m", "yt_dlp",
+        "--no-warnings",
+        "--no-progress",
+        "--output", str(out_dir / "%(id)s.%(ext)s"),
+        "--format", "best[ext=mp4]/best",
+        "--print", "after_move:filepath",
+        url,
+    ]
 
-    max_retries = 1
-    retry_backoff = 5
+    logger.info(f"Downloading: {url}")
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+    except FileNotFoundError as e:
+        raise DownloadError("yt-dlp not found (install via 'pip install yt-dlp')") from e
 
-    for attempt in range(max_retries + 1):
-        try:
-            logger.info(f"Downloading video: {url} (attempt {attempt + 1}/{max_retries + 1})")
+    set_active_process(process)
+    stdout_lines: list[str] = []
+    stderr_chunks: list[str] = []
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                filename = ydl.prepare_filename(info)
-                output_path = Path(filename)
+    def _drain_stdout():
+        for line in process.stdout:
+            stdout_lines.append(line.rstrip())
 
-                if not output_path.exists():
-                    video_id = info.get("id", "")
-                    candidates = sorted(
-                        out_dir.glob(f"{video_id}.*"),
-                        key=lambda p: p.stat().st_mtime,
-                        reverse=True,
-                    )
-                    if candidates:
-                        output_path = candidates[0]
-                    else:
-                        raise DownloadError(
-                            f"Download completed but file not found: {filename}"
-                        )
+    def _drain_stderr():
+        for line in process.stderr:
+            stderr_chunks.append(line)
 
-                logger.info(f"Successfully downloaded: {output_path}")
-                return output_path
+    stdout_thread = threading.Thread(target=_drain_stdout, daemon=True)
+    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stdout_thread.start()
+    stderr_thread.start()
 
-        except yt_dlp.utils.DownloadError as e:
-            error_msg = str(e)
+    try:
+        deadline = time.monotonic() + _DOWNLOAD_TIMEOUT
+        while True:
+            if cancel_callback and cancel_callback():
+                process.kill()
+                raise DownloadCancelledError("Download cancelled by user")
+            if process.poll() is not None:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                process.kill()
+                raise DownloadTimeoutError(
+                    f"Download timeout after {_DOWNLOAD_TIMEOUT}s"
+                )
+            try:
+                process.wait(timeout=min(_CANCEL_POLL_INTERVAL, remaining))
+            except subprocess.TimeoutExpired:
+                pass
 
-            if "Video unavailable" in error_msg or "not available" in error_msg.lower():
-                raise VideoNotAvailableError(f"Video not available: {url}") from e
+        stdout_thread.join(timeout=2)
+        stderr_thread.join(timeout=2)
 
-            if "No space left" in error_msg or "disk full" in error_msg.lower():
-                raise DiskSpaceError(f"Insufficient disk space in {out_dir}") from e
+        if process.returncode != 0:
+            stderr_text = "".join(stderr_chunks)
+            raise _classify_error(stderr_text) from None
 
-            if "Permission denied" in error_msg:
-                raise PermissionDeniedError(f"Permission denied accessing {url}") from e
+        if not stdout_lines:
+            stderr_text = "".join(stderr_chunks)
+            raise DownloadError(
+                f"yt-dlp produced no file path. stderr: {stderr_text[:300]}"
+            )
 
-            if attempt < max_retries:
-                logger.warning(f"Download error (will retry): {error_msg}")
-                time.sleep(retry_backoff)
-                continue
+        output_path = Path(stdout_lines[-1].strip())
+        resolved = _find_downloaded_file(out_dir, output_path)
+        if resolved is None:
+            raise DownloadError(
+                f"Download completed but file not found: {output_path}"
+            )
 
-            raise DownloadError(f"Download failed: {error_msg}") from e
+        logger.info(f"Successfully downloaded: {resolved}")
+        return DownloadResult(resolved, is_downloaded=True)
 
-        except yt_dlp.utils.ExtractorError as e:
-            error_msg = str(e)
-
-            if "not available" in error_msg.lower() or "removed" in error_msg.lower():
-                raise VideoNotAvailableError(f"Video not available: {url}") from e
-
-            if attempt < max_retries:
-                logger.warning(f"Extractor error (will retry): {error_msg}")
-                time.sleep(retry_backoff)
-                continue
-
-            raise DownloadError(f"Extractor error: {error_msg}") from e
-
-        except (TimeoutError, OSError) as e:
-            if isinstance(e, OSError) and e.errno == 28:  # ENOSPC
-                raise DiskSpaceError(f"Insufficient disk space in {out_dir}") from e
-
-            if isinstance(e, OSError) and e.errno == 13:  # EACCES
-                raise PermissionDeniedError(f"Permission denied accessing {out_dir}") from e
-
-            if attempt < max_retries:
-                logger.warning(f"Network timeout (will retry in {retry_backoff}s): {e}")
-                time.sleep(retry_backoff)
-                continue
-
-            raise DownloadTimeoutError(f"Download timeout after {max_retries + 1} attempts") from e
+    finally:
+        set_active_process(None)
+        for pipe in (process.stdout, process.stderr):
+            if pipe:
+                try:
+                    pipe.close()
+                except OSError:
+                    pass
