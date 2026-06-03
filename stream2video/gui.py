@@ -797,6 +797,7 @@ class Stream2VideoGUI(ctk.CTk):
         method = self.combo_method.get()
         encoder = self.combo_encoder.get()
         force = bool(self.chk_force.get())
+        delete_after = bool(self.chk_delete.get())
 
         out_path = Path(out_raw).expanduser()
         config_path = None
@@ -823,6 +824,8 @@ class Stream2VideoGUI(ctk.CTk):
         parts.extend(["--method", method, "--encoder", encoder])
         if force:
             parts.append("-f")
+        if delete_after:
+            parts.append("--delete-after")
         cmd = " ".join(parts)
         self.clipboard_clear()
         self.clipboard_append(cmd)

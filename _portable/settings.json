@@ -1,13 +1,13 @@
 {
-  "threshold": -60.0,
-  "min_silence": 2.0,
+  "threshold": -20,
+  "min_silence": 1.0,
   "margin": 0.5,
-  "method": "segment",
-  "encoder": "h264_mf",
+  "method": "batch",
+  "encoder": "libx264",
   "force": false,
   "delete_after": false,
   "output_dir": "",
   "theme": "dark",
   "input_path": "",
-  "window_geometry": "1250x620+424+134"
+  "window_geometry": "1250x680+382+126"
 }

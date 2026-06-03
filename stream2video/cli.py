@@ -159,6 +159,11 @@ def main(
         "-e",
         help="Video encoder: 'h264_nvenc' (NVIDIA), 'h264_amf' (AMD), 'h264_mf' (Media Foundation, default), or 'libx264' (CPU fallback)",
     ),
+    delete_after: bool = typer.Option(
+        False,
+        "--delete-after",
+        help="Delete downloaded source file after successful compression",
+    ),
 
     log_level: str = typer.Option(
         "INFO",
@@ -317,7 +322,16 @@ def main(
         console.print(f"Output: [cyan]{output_video}[/cyan]")
 
         if download_result.is_downloaded:
-            logger.info(f"Temporary download file: {video_path}")
+            if delete_after:
+                try:
+                    video_path.unlink()
+                    console.print(f"Deleted source: [dim]{video_path}[/dim]")
+                    logger.info(f"Deleted source: {video_path}")
+                except OSError as e:
+                    console.print(f"[yellow]Warning:[/yellow] Could not delete source: {e}")
+                    logger.warning(f"Could not delete source: {e}")
+            else:
+                logger.info(f"Temporary download file: {video_path}")
 
         logger.info(f"Successfully compressed video to {output_video}")
 
