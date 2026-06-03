@@ -158,6 +158,9 @@ class Stream2VideoGUI(ctk.CTk):
         self.lbl_file = ctk.CTkLabel(info_frame, text="File: —", wraplength=190, justify="left")
         self.lbl_file.pack(anchor="w", fill="x", padx=5, pady=1)
 
+        self.lbl_output = ctk.CTkLabel(info_frame, text="Output: —", wraplength=190, justify="left")
+        self.lbl_output.pack(anchor="w", fill="x", padx=5, pady=1)
+
         self.lbl_size = ctk.CTkLabel(info_frame, text="Size: —", wraplength=190, justify="left")
         self.lbl_size.pack(anchor="w", fill="x", padx=5, pady=1)
 
@@ -457,9 +460,12 @@ class Stream2VideoGUI(ctk.CTk):
         # Read controls
         input_raw = self.entry_input.get().strip()
         output_dir = Path(self.entry_output.get().strip() or "./compressed_videos")
+        output_dir = output_dir.resolve()
         method = self.combo_method.get()
         encoder = self.combo_encoder.get()
         force = bool(self.chk_force.get())
+
+        self._ui_update_output(output_dir)
 
         self._log(
             f"Starting pipeline: input={input_raw}, output_dir={output_dir}, "
@@ -679,6 +685,9 @@ class Stream2VideoGUI(ctk.CTk):
     def _ui_update_file_info(self, path: Path):
         self.after(0, lambda: self._update_file_info(path))
 
+    def _ui_update_output(self, path: Path):
+        self.after(0, lambda p=path: self.lbl_output.configure(text=f"Output: {p}"))
+
     def _log(self, message: str):
         timestamp = time.strftime("%H:%M:%S")
         self.log_queue.put(f"[{timestamp}] {message}")
@@ -786,6 +795,12 @@ class Stream2VideoGUI(ctk.CTk):
                 if ev:
                     ev.delete(0, "end")
                     ev.insert(0, f"{val:.1f}")
+        self.lbl_output.configure(text="Output: —")
+        self.lbl_file.configure(text="File: —")
+        self.lbl_size.configure(text="Size: —")
+        self.lbl_duration.configure(text="Duration: —")
+        self.lbl_silence.configure(text="Silence: —")
+        self.lbl_encoder.configure(text="Encoder: —")
         self._save_settings()
         self._log("Settings restored to defaults")
 
