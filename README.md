@@ -98,7 +98,7 @@ margin: 0.15
 |-----------|-------|---------|-------------|
 | `threshold` (dB) | -60 to -5 | -20 | Audio below this level = silence |
 | `min_silence` (s) | 0.1 to 60 | 1.0 | Minimum silence duration to cut |
-| `margin` (s) | -3 to 5 | -0.5 | Extra padding around cuts (positive shrinks silence, negative expands it) |
+| `margin` (s) | -3 to 5 | 0.5 | How much to shrink silence zones. Positive = shrink silence (keep more audio around phrases). Negative = expand silence (cut more aggressively). `0` = no adjustment. |
 
 ## GUI
 

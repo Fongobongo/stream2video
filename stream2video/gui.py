@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import queue
 import shlex
 import shutil
@@ -106,6 +107,9 @@ class Stream2VideoGUI(ctk.CTk):
         self._test_running = False
         self.config = CONFIG_DEFAULTS.copy()
         self.log_queue: queue.Queue = queue.Queue()
+        self._output_path: Optional[Path] = None
+        self._download_path: Optional[Path] = None
+        self._last_status_update: float = 0.0
 
         self._load_settings()
         ctk.set_appearance_mode(self.config["theme"])
@@ -213,7 +217,7 @@ class Stream2VideoGUI(ctk.CTk):
         self._add_slider(ctrl_frame, "Min Silence (s):", "min_silence", 0.1, 60, self.config["min_silence"],
                          tooltip="Minimum silence duration to cut (seconds). Longer values prevent choppy edits.")
         self._add_slider(ctrl_frame, "Margin (s):", "margin", -3, 5, self.config["margin"],
-                         tooltip="Positive shrinks silence (keeps more audio), negative expands it (cuts more audio).")
+                         tooltip="How much to shrink silence zones. Positive = shrink silence (keep more audio around phrases). Negative = expand silence (cut more aggressively). 0 = no adjustment.")
 
         ctk.CTkFrame(ctrl_frame, height=2, fg_color=("gray70", "gray30")).pack(fill="x", padx=5, pady=3)
 
@@ -253,6 +257,11 @@ class Stream2VideoGUI(ctk.CTk):
             self.chk_force.select()
         self.chk_force.pack(anchor="w", padx=5, pady=(4, 1))
 
+        self.chk_delete = ctk.CTkCheckBox(ctrl_frame, text="Delete downloaded source after success")
+        if self.config.get("delete_after"):
+            self.chk_delete.select()
+        self.chk_delete.pack(anchor="w", padx=5, pady=(4, 1))
+
         ctk.CTkFrame(ctrl_frame, height=2, fg_color=("gray70", "gray30")).pack(fill="x", padx=5, pady=4)
 
         # Action
@@ -267,7 +276,7 @@ class Stream2VideoGUI(ctk.CTk):
                                          state="disabled", fg_color="#d32f2f", hover_color="#b71c1c")
         self.btn_cancel.pack(side="left")
 
-        self.lbl_status = ctk.CTkLabel(action_frame, text="", anchor="w")
+        self.lbl_status = ctk.CTkLabel(action_frame, text="", anchor="w", width=500)
         self.lbl_status.pack(side="right", fill="x", expand=True, padx=(8, 0))
 
         self.progress = ctk.CTkProgressBar(ctrl_frame, mode="determinate")
@@ -296,7 +305,7 @@ class Stream2VideoGUI(ctk.CTk):
         if tooltip:
             _Tooltip(lbl, tooltip)
 
-        slider = ctk.CTkSlider(row, from_=min_v, to=max_v, number_of_steps=200)
+        slider = ctk.CTkSlider(row, from_=min_v, to=max_v, number_of_steps=round((max_v - min_v) * 10))
         slider.set(current)
         slider.pack(side="left", fill="x", expand=True, padx=(0, 8))
 
@@ -320,8 +329,9 @@ class Stream2VideoGUI(ctk.CTk):
             try:
                 val = float(entry_val.get().replace(",", "."))
                 val = max(mn, min(mx, val))
+                val = round(val, 1)
                 sv.set(val)
-                self.config[k] = round(val, 1)
+                self.config[k] = val
                 entry_val.delete(0, "end")
                 entry_val.insert(0, f"{val:.1f}")
             except ValueError:
@@ -337,6 +347,16 @@ class Stream2VideoGUI(ctk.CTk):
         entry.delete(0, "end")
         entry.insert(0, f"{default:.1f}")
         self.config[key] = default
+
+    def _sync_slider_entries(self):
+        for key in ("threshold", "min_silence", "margin"):
+            slider = getattr(self, f"_slider_{key}", None)
+            if slider and hasattr(slider, "_entry_val"):
+                try:
+                    val = float(slider._entry_val.get().replace(",", "."))
+                    self.config[key] = round(val, 1)
+                except ValueError:
+                    pass
 
     # ── Dialogs & Events ─────────────────────────────────────────
 
@@ -431,6 +451,9 @@ class Stream2VideoGUI(ctk.CTk):
         self.progress.set(0)
         self.lbl_status.configure(text="Starting...")
 
+        # Sync slider entries → config (in case FocusOut didn't fire)
+        self._sync_slider_entries()
+
         # Read controls
         input_raw = self.entry_input.get().strip()
         output_dir = Path(self.entry_output.get().strip() or "./compressed_videos")
@@ -438,7 +461,14 @@ class Stream2VideoGUI(ctk.CTk):
         encoder = self.combo_encoder.get()
         force = bool(self.chk_force.get())
 
-        self._log(f"Starting pipeline: method={method}, encoder={encoder}, force={force}")
+        self._log(
+            f"Starting pipeline: input={input_raw}, output_dir={output_dir}, "
+            f"method={method}, encoder={encoder}, force={force}, "
+            f"threshold={self.config['threshold']}, "
+            f"min_silence={self.config['min_silence']}, "
+            f"margin={self.config['margin']}, "
+            f"delete_after={bool(self.chk_delete.get())}"
+        )
 
         threading.Thread(
             target=self._pipeline_worker,
@@ -467,31 +497,56 @@ class Stream2VideoGUI(ctk.CTk):
             # Step 1: Download / resolve path
             self._ui_progress(0.0)
             self._ui_status("Step 1/3: Downloading / resolving video...")
+            self._log("Phase 1/3: Downloading / resolving video...")
+
+            def dl_prog(frac: float, text: str):
+                self._ui_progress(frac * 0.05)
+                self._ui_status(f"Step 1/3: Downloading... {text}")
+
             try:
                 download_result = download(
                     input_raw, output_dir,
                     cancel_callback=lambda: self._cancel_event.is_set(),
+                    progress_callback=dl_prog,
                 )
                 video_path = download_result.path
             except DownloadCancelledError:
                 self._log("Download cancelled")
-                self._ui_status("Cancelled")
+                self._ui_status("Cancelled", force=True)
                 return
             except DownloadError as e:
                 self._log(f"[ERROR] Download failed: {e}")
-                self._ui_status(f"Failed: {e}")
+                self._ui_status(f"Failed: {e}", force=True)
                 return
 
+            self._download_path = video_path if download_result.is_downloaded else None
             self._ui_update_file_info(video_path)
-            self._log(f"Video: {video_path.name} ({video_path.stat().st_size // 1024 // 1024} MB)")
+            file_size_mb = video_path.stat().st_size // 1024 // 1024
+            if download_result.is_downloaded:
+                self._log(f"Downloaded: {input_raw} -> {video_path}")
+            else:
+                self._log(f"Download skipped (file already on disk): {video_path}")
+            self._log(f"Size: {file_size_mb} MB")
+
+            if method == "batch" and file_size_mb > 4096:
+                self._log(
+                    f"[WARN] File is {file_size_mb} MB — batch mode may use a lot of RAM. "
+                    f"If it crashes, re-run with method=segment."
+                )
 
             if self._cancel_event.is_set():
-                self._ui_status("Cancelled")
+                self._ui_status("Cancelled", force=True)
                 return
 
             # Step 2: Silence detection
             self._ui_progress(0.05)
             self._ui_status("Step 2/3: Detecting silence...")
+            self._log(
+                f"Phase 2/3: Detecting silence "
+                f"(threshold={self.config['threshold']}dB, "
+                f"min_silence={self.config['min_silence']}s, "
+                f"margin={self.config['margin']}s)..."
+            )
 
             config = {
                 "threshold": self.config["threshold"],
@@ -503,9 +558,17 @@ class Stream2VideoGUI(ctk.CTk):
             if cache is not None:
                 silence_segments = cache
             else:
+                silence_start = time.monotonic()
+
                 def silence_prog(f: float):
+                    elapsed = time.monotonic() - silence_start
+                    eta = elapsed / f - elapsed if f > 0.01 else 0
+                    total = elapsed + eta
                     self._ui_progress(0.05 + f * 0.35)
-                    self._ui_status(f"Step 2/3: Detecting silence... {f * 100:.0f}%")
+                    self._ui_status(
+                        f"Step 2/3: Silence... {f * 100:.0f}% "
+                        f"({self._fmt_time(elapsed)}/{self._fmt_time(total)})"
+                    )
 
                 silence_segments = detect_silence(
                     video_path, **config,
@@ -516,7 +579,7 @@ class Stream2VideoGUI(ctk.CTk):
                 self._log(f"Detected {len(silence_segments)} silence segments")
 
             if self._cancel_event.is_set():
-                self._ui_status("Cancelled")
+                self._ui_status("Cancelled", force=True)
                 return
 
             # Update info
@@ -527,14 +590,27 @@ class Stream2VideoGUI(ctk.CTk):
             # Step 3: Cut & concat
             self._ui_progress(0.4)
             self._ui_status("Step 3/3: Cutting and concatenating...")
+            self._log(
+                f"Phase 3/3: Cutting & concatenating "
+                f"(method={method}, encoder={encoder})..."
+            )
 
             output_path = output_dir / f"{video_path.stem}_compressed.mp4"
+            self._output_path = output_path
 
             self.after(0, lambda: self.lbl_encoder.configure(text=f"Encoder: {encoder}"))
 
+            cut_start = time.monotonic()
+
             def concat_prog(f: float):
+                elapsed = time.monotonic() - cut_start
+                eta = elapsed / f - elapsed if f > 0.01 else 0
+                total = elapsed + eta
                 self._ui_progress(0.4 + f * 0.6)
-                self._ui_status(f"Step 3/3: Cutting... {f * 100:.0f}%")
+                self._ui_status(
+                    f"Step 3/3: Cutting... {f * 100:.0f}% "
+                    f"({self._fmt_time(elapsed)}/{self._fmt_time(total)})"
+                )
 
             cut_and_concat(
                 video_path, silence_segments, output_path,
@@ -542,9 +618,22 @@ class Stream2VideoGUI(ctk.CTk):
                 cancel_callback=lambda: self._cancel_event.is_set(),
             )
 
+            self._output_path = None
             self._ui_progress(1.0)
-            self._ui_status("Complete!")
-            self._log(f"[SUCCESS] Output: {output_path} ({output_path.stat().st_size // 1024 // 1024} MB)")
+            self._ui_status("Complete!", force=True)
+            self._log(
+                f"[SUCCESS] Output: {output_path} "
+                f"({output_path.stat().st_size // 1024 // 1024} MB)"
+            )
+
+            # Delete downloaded source if requested
+            if bool(self.chk_delete.get()) and self._download_path is not None:
+                try:
+                    self._download_path.unlink()
+                    self._log(f"Deleted source: {self._download_path}")
+                except OSError as e:
+                    self._log(f"[WARN] Could not delete source: {e}")
+            self._download_path = None
 
             # Show completion popup
             self.after(0, lambda: messagebox.showinfo(
@@ -556,18 +645,20 @@ class Stream2VideoGUI(ctk.CTk):
 
         except (CancelledError, SilenceCancelledError):
             self._log("Pipeline cancelled")
-            self._ui_status("Cancelled")
+            self._ui_status("Cancelled", force=True)
         except SilenceDetectionError as e:
             self._log(f"[ERROR] Silence detection failed: {e}")
-            self._ui_status(f"Failed: {e}")
+            self._ui_status(f"Failed: {e}", force=True)
         except ConcatError as e:
             self._log(f"[ERROR] {e}")
-            self._ui_status(f"Failed: {e}")
+            self._ui_status(f"Failed: {e}", force=True)
         except Exception as e:
             self._log(f"[ERROR] Unexpected: {e}")
             logger.exception("Pipeline error")
-            self._ui_status(f"Error: {e}")
+            self._ui_status(f"Error: {e}", force=True)
         finally:
+            self._output_path = None
+            self._download_path = None
             self.after(0, lambda: self._set_running(False))
 
     # ── UI Helpers ───────────────────────────────────────────────
@@ -575,7 +666,11 @@ class Stream2VideoGUI(ctk.CTk):
     def _ui_progress(self, value: float):
         self.after(0, lambda: self.progress.set(max(0.0, min(1.0, value))))
 
-    def _ui_status(self, text: str):
+    def _ui_status(self, text: str, force: bool = False):
+        now = time.monotonic()
+        if not force and now - self._last_status_update < 0.5:
+            return
+        self._last_status_update = now
         self.after(0, lambda: self.lbl_status.configure(text=text[:80]))
 
     def _ui_info(self, text: str):
@@ -648,6 +743,7 @@ class Stream2VideoGUI(ctk.CTk):
         self.config["method"] = self.combo_method.get()
         self.config["encoder"] = self.combo_encoder.get()
         self.config["force"] = bool(self.chk_force.get())
+        self.config["delete_after"] = bool(self.chk_delete.get())
         self.config["theme"] = self.combo_theme.get()
         self.config["window_geometry"] = self.geometry()
         try:
@@ -677,6 +773,7 @@ class Stream2VideoGUI(ctk.CTk):
         self.combo_encoder.set(CONFIG_DEFAULTS["encoder"])
         self._on_encoder_change(CONFIG_DEFAULTS["encoder"])
         self.chk_force.deselect()
+        self.chk_delete.deselect()
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
         self.geometry(f"{min(1250, sw - 40)}x{min(680, sh - 60)}")
@@ -694,6 +791,7 @@ class Stream2VideoGUI(ctk.CTk):
 
 
     def _copy_cli_command(self):
+        self._sync_slider_entries()
         inp = self.entry_input.get().strip()
         out_raw = self.entry_output.get().strip() or "./compressed_videos"
         method = self.combo_method.get()
@@ -735,6 +833,13 @@ class Stream2VideoGUI(ctk.CTk):
         self._log(f"  {cmd}")
 
     def _on_close(self):
+        if self.running:
+            answer = messagebox.askyesno(
+                "Quit?",
+                "Pipeline is running. Stop and quit?",
+            )
+            if not answer:
+                return
         self._cancel_event.set()
         proc = get_active_process()
         if proc is not None and proc.returncode is None:
@@ -742,6 +847,13 @@ class Stream2VideoGUI(ctk.CTk):
             try:
                 proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
+                pass
+        # Clean up incomplete output file
+        if self._output_path is not None and self._output_path.exists():
+            try:
+                self._output_path.unlink()
+                logger.info(f"Cleaned up incomplete output: {self._output_path}")
+            except OSError:
                 pass
         try:
             self._save_settings()

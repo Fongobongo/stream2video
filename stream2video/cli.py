@@ -233,8 +233,12 @@ def main(
                     cancel_callback=cancel_cb,
                 )
                 video_path = download_result.path
-                progress.update(task1, total=1, completed=1,
-                                description="[green]+[/green] Video downloaded")
+                if download_result.is_downloaded:
+                    progress.update(task1, total=1, completed=1,
+                                    description="[green]+[/green] Video downloaded")
+                else:
+                    progress.update(task1, total=1, completed=1,
+                                    description="[green]+[/green] Local file (download skipped)")
 
             except DownloadCancelledError:
                 console.print("[yellow]Download cancelled.[/yellow]")

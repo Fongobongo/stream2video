@@ -2,6 +2,7 @@
 
 import logging
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from typing import IO, Callable, List, Optional
@@ -20,7 +21,10 @@ def get_video_duration(video_path: Path) -> Optional[float]:
         str(video_path),
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30, check=True)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30, check=True,
+            **no_window_kwargs(),
+        )
         return float(result.stdout.strip())
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
             ValueError, FileNotFoundError) as e:
@@ -84,3 +88,10 @@ def set_active_process(proc: Optional[subprocess.Popen]) -> None:
     with _active_proc_lock:
         global _active_proc
         _active_proc = proc
+
+
+def no_window_kwargs() -> dict:
+    """Return subprocess kwargs that suppress console windows on Windows."""
+    if sys.platform == "win32":
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}

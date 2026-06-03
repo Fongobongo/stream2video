@@ -16,6 +16,7 @@ from stream2video.utils import (
     CANCEL_POLL_INTERVAL,
     drain_stderr_lines,
     get_video_duration,
+    no_window_kwargs,
     set_active_process,
 )
 
@@ -61,6 +62,10 @@ _FINAL_CONCAT_TIMEOUT = 86400
 _SEGMENT_ENCODE_TIMEOUT = 600
 _STDERR_TRUNCATE = 1000
 _CANCEL_POLL_INTERVAL = CANCEL_POLL_INTERVAL
+_STALL_WARNING = 120
+_STALL_KILL = 300
+_HYBRID_SEEK_OFFSET = 0.5
+_AUDIO_PAD = 0.1  # extra seconds to let AAC encoder flush its lookahead buffer
 
 _encoder_check_cache: Dict[str, bool] = {}
 _encoder_check_lock = threading.Lock()
@@ -92,8 +97,8 @@ def cut_and_concat(
         _run_segment_with_fallback(video_path, keep_segments, output_path, vcodec, vcodec_opts,
                                    progress_callback, cancel_callback)
     elif method == "batch":
-        _run_batch_concat(video_path, keep_segments, output_path, vcodec, vcodec_opts,
-                          progress_callback, cancel_callback)
+        _run_batch_with_fallback(video_path, keep_segments, output_path, vcodec, vcodec_opts,
+                                progress_callback, cancel_callback)
     else:
         raise ConcatError(f"Unknown method: {method!r} (use 'segment' or 'batch')")
 
@@ -162,6 +167,7 @@ def check_encoder(name: str) -> bool:
                  "-c:v", name, "-frames:v", "1",
                  "-f", "null", "-"],
                 capture_output=True, text=True, timeout=ENCODER_CHECK_TIMEOUT,
+                **no_window_kwargs(),
             )
         except subprocess.TimeoutExpired:
             logger.warning(f"{name} smoke test timed out after {ENCODER_CHECK_TIMEOUT}s")
@@ -203,6 +209,7 @@ def _run_ffmpeg(
     try:
         process = subprocess.Popen(
             cmd, stdout=stdout_target, stderr=subprocess.PIPE, bufsize=-1,
+            **no_window_kwargs(),
         )
     except FileNotFoundError as e:
         raise FFmpegError("ffmpeg not found in PATH") from e
@@ -212,8 +219,10 @@ def _run_ffmpeg(
     cancelled = threading.Event()
     wait_for_drain = drain_stderr_lines(process.stderr, stderr_lines)
     drain_done = False
+    last_progress_time = time.monotonic()
 
     def _cancel_monitor():
+        nonlocal last_progress_time
         if not cancel_callback:
             return
         while not cancelled.wait(_CANCEL_POLL_INTERVAL):
@@ -240,8 +249,21 @@ def _run_ffmpeg(
                     try:
                         us = int(line.split("=", 1)[1])
                         progress_callback(us)
+                        last_progress_time = time.monotonic()
                     except (ValueError, IndexError):
                         pass
+                elapsed_since_progress = time.monotonic() - last_progress_time
+                if elapsed_since_progress > _STALL_KILL:
+                    process.kill()
+                    raise FFmpegError(
+                        f"{label} stalled — no progress for {int(elapsed_since_progress)}s, "
+                        "possible resource exhaustion"
+                    )
+                elif elapsed_since_progress > _STALL_WARNING:
+                    logger.warning(
+                        f"{label}: no progress for {int(elapsed_since_progress)}s — "
+                        "waiting..."
+                    )
 
         if cancelled.is_set():
             raise CancelledError(f"{label} cancelled")
@@ -300,10 +322,11 @@ def _run_segment_concat(
     progress_callback: Optional[Callable[[float], None]] = None,
     cancel_callback: Optional[Callable[[], bool]] = None,
 ):
-    """Single-phase: encode each segment with the target encoder, join with concat demuxer.
+    """Encode each segment, join with concat demuxer.
 
-    One encode per segment, then stream-copy concat. No intermediate re-encode.
-    Cancel is checked before each segment so long pipelines can be aborted.
+    Segments are stored in a dedicated subdirectory.  If a previous run was
+    interrupted, already-encoded segments are reused (resume from where it
+    stopped).  On success all segment files are deleted.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -311,62 +334,88 @@ def _run_segment_concat(
     n_segs = len(keep_segments)
     logger.info(f"segment: {n_segs} segments, {total_duration:.1f}s output, {vcodec}")
 
-    temp_dir = output_path.parent / f"_{output_path.stem}_segments"
-    temp_dir.mkdir(parents=True, exist_ok=True)
+    seg_dir = output_path.parent / f"_{output_path.stem}_segments"
+    seg_dir.mkdir(parents=True, exist_ok=True)
 
-    list_path: Optional[Path] = None
     encoded_keep = 0.0
+    skipped = 0
 
     try:
-        list_path = temp_dir / "concat.txt"
-        with open(list_path, "w", encoding="utf-8") as lf:
-            for i, (start, end) in enumerate(keep_segments):
-                if cancel_callback and cancel_callback():
-                    raise CancelledError("segment encode cancelled")
+        for i, (start, end) in enumerate(keep_segments):
+            if cancel_callback and cancel_callback():
+                raise CancelledError("segment encode cancelled")
 
-                dur = end - start
-                seg_path = temp_dir / f"seg_{i:06d}.mp4"
+            dur = end - start
+            seg_path = seg_dir / f"seg_{i:06d}.mp4"
 
-                _run_ffmpeg(
-                    [
-                        "ffmpeg", "-y", "-loglevel", "error",
-                        "-ss", f"{start:.3f}", "-t", f"{dur:.3f}",
-                        "-i", str(video_path),
-                        "-c:v", vcodec, *vcodec_opts,
-                        "-c:a", "aac", "-b:a", _AUDIO_BITRATE,
-                        str(seg_path),
-                    ],
-                    progress_callback=None,
-                    timeout=_SEGMENT_ENCODE_TIMEOUT,
-                    label=f"segment {i} encode",
-                    cancel_callback=cancel_callback,
-                    track_progress=False,
-                )
-
-                lf.write(f"file {_quote_concat_path(seg_path.as_posix())}\n")
-
+            # Resume: skip already encoded segments
+            if seg_path.exists() and seg_path.stat().st_size > 0:
+                skipped += 1
                 encoded_keep += dur
                 if progress_callback and total_duration > 0:
                     progress_callback(min(encoded_keep / total_duration * 0.9, 0.9))
+                continue
 
-        cmd = [
-            "ffmpeg", "-y", "-loglevel", "error", "-progress", "pipe:1",
-            "-f", "concat", "-safe", "0", "-i", str(list_path),
-            "-c", "copy", "-fflags", "+genpts",
-            str(output_path),
-        ]
+            # Hybrid seek: input -ss for fast keyframe seek, output -ss for exact position
+            seek_before = max(0.0, start - _HYBRID_SEEK_OFFSET)
+            seek_after = min(_HYBRID_SEEK_OFFSET, start)
+
+            _run_ffmpeg(
+                [
+                    "ffmpeg", "-y", "-loglevel", "error",
+                    "-ss", f"{seek_before:.3f}",
+                    "-i", str(video_path),
+                    "-ss", f"{seek_after:.3f}",
+                    "-af", "apad",
+                    "-t", f"{dur + _AUDIO_PAD:.3f}",
+                    "-c:v", vcodec, *vcodec_opts,
+                    "-c:a", "aac", "-b:a", _AUDIO_BITRATE,
+                    str(seg_path),
+                ],
+                progress_callback=None,
+                timeout=_SEGMENT_ENCODE_TIMEOUT,
+                label=f"segment {i} encode",
+                cancel_callback=cancel_callback,
+                track_progress=False,
+            )
+
+            encoded_keep += dur
+            if progress_callback and total_duration > 0:
+                progress_callback(min(encoded_keep / total_duration * 0.9, 0.9))
+
+        if skipped:
+            logger.info(f"segment: resumed {skipped}/{n_segs} already encoded, encoded {n_segs - skipped}")
+
+        # Build concat list
+        list_path = seg_dir / "concat.txt"
+        with open(list_path, "w", encoding="utf-8") as lf:
+            for i in range(n_segs):
+                sp = seg_dir / f"seg_{i:06d}.mp4"
+                lf.write(f"file {_quote_concat_path(sp.name)}\n")
 
         def _concat_prog(us: int):
             if progress_callback and total_duration > 0:
                 progress_callback(min(0.9 + (us / 1_000_000 / total_duration * 0.1), 1.0))
 
         _run_ffmpeg(
-            cmd, progress_callback=_concat_prog, timeout=_FINAL_CONCAT_TIMEOUT,
+            [
+                "ffmpeg", "-y", "-loglevel", "error", "-progress", "pipe:1",
+                "-f", "concat", "-safe", "0", "-i", str(list_path),
+                "-c", "copy", "-fflags", "+genpts",
+                str(output_path),
+            ],
+            progress_callback=_concat_prog, timeout=_FINAL_CONCAT_TIMEOUT,
             label="segment concat", cancel_callback=cancel_callback,
         )
         logger.info(f"Successfully created output: {output_path}")
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+
+        # Cleanup on success
+        shutil.rmtree(seg_dir, ignore_errors=True)
+
+    except Exception:
+        # On failure: keep segments for resume
+        logger.info(f"Segments kept in {seg_dir} for resume on next run")
+        raise
 
 
 def _run_segment_with_fallback(
@@ -385,21 +434,20 @@ def _run_segment_with_fallback(
     _with_libx264_fallback(primary_codec, primary_opts, _try, (ConcatError, OSError))
 
 
-def _build_chunked_filter_graph(
+def _run_batch_with_fallback(
+    video_path: Path,
     keep_segments: List[Tuple[float, float]],
-    chunk_size: int = _BATCH_CHUNK_SIZE,
-) -> str:
-    """Build filter_complex graph: select/aselect chunks + concat."""
-    chunks = [keep_segments[i:i+chunk_size] for i in range(0, len(keep_segments), chunk_size)]
-    n = len(chunks)
-    lines = []
-    for idx, chunk in enumerate(chunks):
-        terms = "+".join(f"between(t,{s},{e})" for s, e in chunk)
-        lines.append(f"[0:v]select='{terms}',setpts=N/FRAME_RATE/TB[v{idx}];")
-        lines.append(f"[0:a]aselect='{terms}',asetpts=N/SR/TB[a{idx}];")
-    labels = "".join(f"[v{i}][a{i}]" for i in range(n))
-    lines.append(f"{labels}concat=n={n}:v=1:a=1[v][a]")
-    return "\n".join(lines)
+    output_path: Path,
+    primary_codec: str,
+    primary_opts: List[str],
+    progress_callback: Optional[Callable[[float], None]] = None,
+    cancel_callback: Optional[Callable[[], bool]] = None,
+):
+    """Run batch concat with primary encoder; fall back to libx264 on failure."""
+    def _try(enc: str, enc_opts: List[str]):
+        _run_batch_concat(video_path, keep_segments, output_path, enc, enc_opts,
+                          progress_callback, cancel_callback)
+    _with_libx264_fallback(primary_codec, primary_opts, _try, (ConcatError, OSError))
 
 
 def _run_batch_concat(
@@ -411,54 +459,126 @@ def _run_batch_concat(
     progress_callback: Optional[Callable[[float], None]] = None,
     cancel_callback: Optional[Callable[[], bool]] = None,
 ):
-    """Execute ffmpeg with chunked filter_complex (select/aselect per chunk + concat)."""
+    """Process chunks sequentially: each chunk → temp file, then concat.
+
+    Previous approach built one giant filter graph with all chunks, causing
+    ffmpeg to decode the entire video for every select/aselect filter in
+    parallel — O(chunks × filesize) RAM.  This version processes one chunk
+    at a time so ffmpeg only holds ~1 chunk worth of decoded frames.
+
+    Supports resume: already-encoded chunks are skipped on re-run.
+    """
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     total_duration = sum(e - s for s, e in keep_segments)
-    n_chunks = math.ceil(len(keep_segments) / _BATCH_CHUNK_SIZE)
-    logger.info(f"batch: {len(keep_segments)} segments in {n_chunks} chunks, {total_duration:.1f}s output, {vcodec}")
+    chunks = [keep_segments[i:i+_BATCH_CHUNK_SIZE]
+              for i in range(0, len(keep_segments), _BATCH_CHUNK_SIZE)]
+    n_chunks = len(chunks)
+    logger.info(
+        f"batch: {len(keep_segments)} segments in {n_chunks} chunks, "
+        f"{total_duration:.1f}s output, {vcodec}"
+    )
 
-    graph = _build_chunked_filter_graph(keep_segments, _BATCH_CHUNK_SIZE)
-
-    script_path: Optional[str] = None
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False, encoding="utf-8") as f:
-        f.write(graph)
-        f.flush()
-        os.fsync(f.fileno())
-        script_path = f.name
-
-    logger.debug(f"Graph ({len(graph)} bytes, {len(keep_segments)} segs in {n_chunks} chunks)")
-
-    def _make_cmd(enc: str, enc_opts: List[str]) -> List[str]:
-        return [
-            "ffmpeg", "-y", "-loglevel", "error",
-            "-progress", "pipe:1",
-            "-i", str(video_path),
-            "-filter_complex_script", script_path,
-            "-map", "[v]", "-c:v", enc, *enc_opts,
-            "-map", "[a]", "-c:a", "aac", "-b:a", _AUDIO_BITRATE,
-            str(output_path),
-        ]
-
-    def _prog(us: int):
-        if progress_callback and total_duration > 0:
-            progress_callback(min(us / 1_000_000 / total_duration, 1.0))
-
-    def _try(enc: str, enc_opts: List[str]):
-        _run_ffmpeg(
-            _make_cmd(enc, enc_opts),
-            progress_callback=_prog,
-            timeout=_BATCH_TIMEOUT,
-            label="batch",
-            cancel_callback=cancel_callback,
-        )
-        logger.info(f"Successfully created output with {enc}")
+    batch_dir = output_path.parent / f"_{output_path.stem}_batch"
+    batch_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        _with_libx264_fallback(vcodec, vcodec_opts, _try, (ConcatError, OSError))
-    finally:
-        if script_path is not None:
-            Path(script_path).unlink(missing_ok=True)
+        encoded_duration = 0.0
+        skipped = 0
+
+        for ci, chunk in enumerate(chunks):
+            if cancel_callback and cancel_callback():
+                raise CancelledError("batch encode cancelled")
+
+            chunk_path = batch_dir / f"chunk_{ci:04d}.mp4"
+
+            # Resume: skip already encoded chunks
+            if chunk_path.exists() and chunk_path.stat().st_size > 0:
+                skipped += 1
+                encoded_duration += sum(e - s for s, e in chunk)
+                if progress_callback and total_duration > 0:
+                    progress_callback(min(encoded_duration / total_duration, 0.9))
+                continue
+
+            terms = "+".join(f"between(t,{s},{e})" for s, e in chunk)
+            graph = (
+                f"[0:v]select='{terms}',setpts=N/FRAME_RATE/TB[v];"
+                f"[0:a]aselect='{terms}',asetpts=N/SR/TB[a];"
+                f"[v][a]concat=n=1:v=1:a=1[outv][outa]"
+            )
+
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".txt", delete=False, encoding="utf-8"
+            ) as f:
+                f.write(graph)
+                f.flush()
+                os.fsync(f.fileno())
+                script_path = f.name
+
+            try:
+                def _chunk_prog(us: int):
+                    chunk_dur = sum(e - s for s, e in chunk)
+                    if progress_callback and total_duration > 0:
+                        base = encoded_duration / total_duration
+                        span = chunk_dur / total_duration
+                        progress_callback(min(base + us / 1_000_000 / total_duration, base + span))
+
+                _run_ffmpeg(
+                    [
+                        "ffmpeg", "-y", "-loglevel", "error",
+                        "-progress", "pipe:1",
+                        "-i", str(video_path),
+                        "-filter_complex_script", script_path,
+                        "-map", "[outv]", "-c:v", vcodec, *vcodec_opts,
+                        "-map", "[outa]", "-c:a", "aac", "-b:a", _AUDIO_BITRATE,
+                        str(chunk_path),
+                    ],
+                    progress_callback=_chunk_prog,
+                    timeout=_SEGMENT_ENCODE_TIMEOUT,
+                    label=f"batch chunk {ci}/{n_chunks}",
+                    cancel_callback=cancel_callback,
+                )
+            finally:
+                Path(script_path).unlink(missing_ok=True)
+
+            encoded_duration += sum(e - s for s, e in chunk)
+            logger.info(f"batch chunk {ci+1}/{n_chunks} done ({chunk_path.stat().st_size // 1024 // 1024} MB)")
+
+        if skipped:
+            logger.info(f"batch: resumed {skipped}/{n_chunks} already encoded, encoded {n_chunks - skipped}")
+
+        # Concat all chunk files
+        list_path = batch_dir / "concat.txt"
+        with open(list_path, "w", encoding="utf-8") as lf:
+            for ci in range(n_chunks):
+                cp = batch_dir / f"chunk_{ci:04d}.mp4"
+                lf.write(f"file {_quote_concat_path(cp.as_posix())}\n")
+
+        def _concat_prog(us: int):
+            if progress_callback and total_duration > 0:
+                progress_callback(min(0.9 + us / 1_000_000 / total_duration * 0.1, 1.0))
+
+        _run_ffmpeg(
+            [
+                "ffmpeg", "-y", "-loglevel", "error", "-progress", "pipe:1",
+                "-f", "concat", "-safe", "0", "-i", str(list_path),
+                "-c", "copy", "-fflags", "+genpts",
+                str(output_path),
+            ],
+            progress_callback=_concat_prog,
+            timeout=_FINAL_CONCAT_TIMEOUT,
+            label="batch concat",
+            cancel_callback=cancel_callback,
+        )
+        logger.info(f"batch: successfully created {output_path}")
+
+        # Cleanup on success
+        shutil.rmtree(batch_dir, ignore_errors=True)
+
+    except Exception:
+        # On failure: keep chunks for resume
+        logger.info(f"Chunks kept in {batch_dir} for resume on next run")
+        raise
 
 
 def _with_libx264_fallback(

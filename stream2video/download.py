@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Callable, NamedTuple, Optional
 
-from stream2video.utils import CANCEL_POLL_INTERVAL, set_active_process
+from stream2video.utils import CANCEL_POLL_INTERVAL, no_window_kwargs, set_active_process
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +130,7 @@ def download(
     url: str,
     out_dir: Path,
     cancel_callback: Optional[Callable[[], bool]] = None,
+    progress_callback: Optional[Callable[[float, str], None]] = None,
 ) -> DownloadResult:
     """
     Download video from URL via yt-dlp CLI, or pass through a local file.
@@ -142,6 +143,7 @@ def download(
         url: Video URL or local file path
         out_dir: Output directory for downloaded video
         cancel_callback: Optional callable returning True to abort
+        progress_callback: Optional callable(progress_fraction, status_text)
 
     Returns:
         DownloadResult with `path` to the file and `is_downloaded` flag
@@ -156,8 +158,10 @@ def download(
         DownloadError: Generic failure
     """
     if _is_local_file(url):
-        logger.info(f"Using local file: {url}")
-        return DownloadResult(Path(url), is_downloaded=False)
+        path = Path(url)
+        size = path.stat().st_size
+        logger.info(f"Using local file: {url} ({size // 1024 // 1024} MB)")
+        return DownloadResult(path, is_downloaded=False)
 
     if not _validate_url(url):
         raise URLValidationError(f"Invalid URL: {url}")
@@ -167,7 +171,7 @@ def download(
     cmd = [
         sys.executable, "-m", "yt_dlp",
         "--no-warnings",
-        "--no-progress",
+        "--newline",
         "--output", str(out_dir / "%(id)s.%(ext)s"),
         "--format", "best[ext=mp4]/best",
         "--print", "after_move:filepath",
@@ -182,6 +186,7 @@ def download(
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
+            **no_window_kwargs(),
         )
     except FileNotFoundError as e:
         raise DownloadError("yt-dlp not found (install via 'pip install yt-dlp')") from e
@@ -190,9 +195,26 @@ def download(
     stdout_lines: list[str] = []
     stderr_chunks: list[str] = []
 
+    _dl_pct_re = re.compile(r"\[download\]\s+([\d.]+)%")
+    _dl_eta_re = re.compile(r"ETA\s+(\S+)")
+    _dl_speed_re = re.compile(r"at\s+(\S+/s)")
+
     def _drain_stdout():
         for line in process.stdout:
-            stdout_lines.append(line.rstrip())
+            text = line.rstrip()
+            stdout_lines.append(text)
+            if progress_callback and "[download]" in text:
+                m_pct = _dl_pct_re.search(text)
+                if m_pct:
+                    pct = float(m_pct.group(1))
+                    parts = [f"{pct:.1f}%"]
+                    m_speed = _dl_speed_re.search(text)
+                    if m_speed:
+                        parts.append(m_speed.group(1))
+                    m_eta = _dl_eta_re.search(text)
+                    if m_eta:
+                        parts.append(f"ETA {m_eta.group(1)}")
+                    progress_callback(pct / 100.0, " ".join(parts))
 
     def _drain_stderr():
         for line in process.stderr:
@@ -242,7 +264,11 @@ def download(
                 f"Download completed but file not found: {output_path}"
             )
 
-        logger.info(f"Successfully downloaded: {resolved}")
+        size = resolved.stat().st_size
+        if size == 0:
+            raise DownloadError(f"Download completed but file is empty: {resolved}")
+
+        logger.info(f"Successfully downloaded: {resolved} ({size // 1024 // 1024} MB)")
         return DownloadResult(resolved, is_downloaded=True)
 
     finally:

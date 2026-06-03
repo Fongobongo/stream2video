@@ -3,10 +3,11 @@
 CONFIG_DEFAULTS = {
     "threshold": -20,
     "min_silence": 1.0,
-    "margin": -0.5,
+    "margin": 0.5,
     "method": "batch",
     "encoder": "libx264",
     "force": False,
+    "delete_after": False,
     "output_dir": "",
     "theme": "dark",
 }

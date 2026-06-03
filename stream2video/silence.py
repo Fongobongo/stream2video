@@ -13,6 +13,7 @@ from typing import Callable, List, Optional
 from stream2video.utils import (
     drain_stderr_lines,
     get_video_duration as _probe_duration,
+    no_window_kwargs,
     set_active_process,
 )
 
@@ -62,9 +63,10 @@ def detect_silence(
         video_path: Path to video file
         threshold: Silence threshold in dB (default -20, range [-60, -5])
         min_silence: Minimum silence duration in seconds (default 0.5, range [0.1, 60])
-        margin: Margin around silence segments in seconds (default -0.5, range [-3, 5]).
-                Positive values shrink silence (keep more audio).
-                Negative values expand silence (cut more audio).
+        margin: How much to shrink silence zones in seconds (default 0.5, range [-3, 5]).
+                Positive = shrink silence (keep more audio around phrases).
+                Negative = expand silence (cut more aggressively).
+                0 = no adjustment.
         progress_callback: Optional callback with progress fraction [0, 1]
         cancel_callback: Optional callable returning True to abort; checked while ffmpeg runs.
 
@@ -108,6 +110,7 @@ def detect_silence(
             cmd,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             bufsize=-1,
+            **no_window_kwargs(),
         )
     except FileNotFoundError as e:
         raise SilenceDetectionError("ffmpeg not found in PATH") from e
@@ -213,8 +216,8 @@ def _parse_ffmpeg_output(stderr: str) -> List[SilenceSegment]:
 def _apply_margin(segments: List[SilenceSegment], margin: float) -> List[SilenceSegment]:
     """Apply margin and merge overlapping segments.
 
-    Positive margin expands silence (remove more audio).
-    Negative margin shrinks silence (keep more audio).
+    Positive margin shrinks silence (keep more audio around phrases).
+    Negative margin expands silence (remove more audio around phrases).
     """
     if not segments:
         return segments
