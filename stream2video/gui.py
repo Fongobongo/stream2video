@@ -129,6 +129,61 @@ class QueueHandler(logging.Handler):
         self.log_queue.put(self.format(record))
 
 
+def _build_completion_summary(
+    src_size_bytes: int,
+    src_duration: Optional[float],
+    dst_size_bytes: int,
+    dst_duration: float,
+    pipeline_seconds: float,
+    output_path: str,
+) -> dict:
+    """Build the four user-facing strings that are emitted on pipeline
+    completion. Pure function — no Tk / no side effects — so it can be
+    unit-tested without instantiating the GUI.
+
+    Returns a dict with keys:
+      - status:        one-line headline for the status bar
+      - log_lines:     list of log lines (with = separators) for grep-ability
+      - popup:         multi-line message for the 'Complete' messagebox
+      - overall_label: 'Total: X' for the bottom-row label
+    """
+    src_size_s = Stream2VideoGUI._fmt_size(src_size_bytes)
+    dst_size_s = Stream2VideoGUI._fmt_size(dst_size_bytes)
+    src_dur_s = Stream2VideoGUI._fmt_clock_time(src_duration)
+    dst_dur_s = Stream2VideoGUI._fmt_clock_time(dst_duration)
+    pipe_s = Stream2VideoGUI._fmt_time(pipeline_seconds)
+
+    status = (
+        f"Complete! {src_size_s} -> {dst_size_s}, "
+        f"{src_dur_s} -> {dst_dur_s} "
+        f"(completed in {pipe_s})"
+    )
+
+    sep = "=" * 60
+    log_lines = [
+        sep,
+        f"[SUCCESS] Output: {output_path}",
+        f"  Size:     {src_size_s} -> {dst_size_s}",
+        f"  Duration: {src_dur_s} -> {dst_dur_s}",
+        f"  Pipeline: {pipe_s}",
+        sep,
+    ]
+
+    popup = (
+        f"Video saved to:\n{output_path}\n\n"
+        f"Source:  {src_size_s}, {src_dur_s}\n"
+        f"Output:  {dst_size_s}, {dst_dur_s}\n\n"
+        f"Pipeline: {pipe_s}"
+    )
+
+    return {
+        "status": status,
+        "log_lines": log_lines,
+        "popup": popup,
+        "overall_label": f"Total: {pipe_s}",
+    }
+
+
 class Stream2VideoGUI(ctk.CTk):
     def __init__(self):
         super().__init__()
@@ -724,42 +779,30 @@ class Stream2VideoGUI(ctk.CTk):
             self._ui_progress(1.0)
 
             # ── Build the final summary ────────────────────────────
-            #   Source: 20.0 GB, 06:04:12
-            #   Output: 1.1 GB, 00:34:11
-            #   Pipeline: 23m 5s
+            # Pure function — builds the status line, log block,
+            # popup body, and overall label from the four metrics.
             dst_size_bytes = output_path.stat().st_size
-            dst_duration = keep_dur
             total_elapsed = time.monotonic() - self._pipeline_start
-            src_size_s = self._fmt_size(src_size_bytes)
-            dst_size_s = self._fmt_size(dst_size_bytes)
-            src_dur_s = self._fmt_clock_time(src_duration)
-            dst_dur_s = self._fmt_clock_time(dst_duration)
-            pipe_s = self._fmt_time(total_elapsed)
-
-            # Status line — fits on one line so the user sees the headline
-            # result without opening the popup.
-            self._ui_status(
-                f"Complete! {src_size_s} -> {dst_size_s}, "
-                f"{src_dur_s} -> {dst_dur_s} "
-                f"(completed in {pipe_s})",
-                force=True,
+            summary = _build_completion_summary(
+                src_size_bytes=src_size_bytes,
+                src_duration=src_duration,
+                dst_size_bytes=dst_size_bytes,
+                dst_duration=keep_dur,
+                pipeline_seconds=total_elapsed,
+                output_path=str(output_path),
             )
 
-            # Log — one [SUCCESS] line with all metrics; also a separator
-            # so the user can grep for it.
-            self._log("=" * 60)
-            self._log(f"[SUCCESS] Output: {output_path}")
-            self._log(
-                f"  Size:     {src_size_s} -> {dst_size_s}"
-            )
-            self._log(
-                f"  Duration: {src_dur_s} -> {dst_dur_s}"
-            )
-            self._log(f"  Pipeline: {pipe_s}")
-            self._log("=" * 60)
+            # Status line — one-line headline so the user sees the result
+            # without opening the popup.
+            self._ui_status(summary["status"], force=True)
+
+            # Log — multi-line, delimited by '=' so the user can grep
+            # for the end of a run.
+            for line in summary["log_lines"]:
+                self._log(line)
 
             self.after(0, lambda: self.lbl_overall.configure(
-                text=f"Total: {pipe_s}"
+                text=summary["overall_label"]
             ))
 
             # Delete downloaded source if requested
@@ -771,15 +814,9 @@ class Stream2VideoGUI(ctk.CTk):
                     self._log(f"[WARN] Could not delete source: {e}")
             self._download_path = None
 
-            # Show completion popup — full breakdown for the user
-            # to copy/screenshot. The source metrics are highlighted
-            # so the compression ratio is obvious at a glance.
+            # Show completion popup
             self.after(0, lambda: messagebox.showinfo(
-                "Complete",
-                f"Video saved to:\n{output_path}\n\n"
-                f"Source:  {src_size_s}, {src_dur_s}\n"
-                f"Output:  {dst_size_s}, {dst_dur_s}\n\n"
-                f"Pipeline: {pipe_s}"
+                "Complete", summary["popup"]
             ))
 
         except (CancelledError, SilenceCancelledError):

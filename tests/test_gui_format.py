@@ -101,3 +101,166 @@ class TestFmtClockTime:
         dst = 34 * 60 + 11                 # 00:34:11
         assert f"{_fmt_clock_time(src)} -> {_fmt_clock_time(dst)}" == \
                "06:04:12 -> 00:34:11"
+
+
+class TestBuildCompletionSummary:
+    """_build_completion_summary — pure function returning the four
+    user-facing strings emitted at pipeline completion. Tested without
+    instantiating the GUI (Tk) — that's the whole point of the refactor."""
+
+    def _summary(self, **overrides):
+        """Default-args helper for readability."""
+        defaults = dict(
+            src_size_bytes=20 * 1024 ** 3,        # 20.0 GB
+            src_duration=6 * 3600 + 4 * 60 + 12,  # 06:04:12
+            dst_size_bytes=int(1.1 * 1024 ** 3),  # 1.1 GB
+            dst_duration=34 * 60 + 11,            # 00:34:11
+            pipeline_seconds=23 * 60 + 5,         # 23m 5s
+            output_path="D:/vids/out.mp4",
+        )
+        defaults.update(overrides)
+        from stream2video.gui import _build_completion_summary
+        return _build_completion_summary(**defaults)
+
+    def test_returns_dict_with_four_keys(self):
+        s = self._summary()
+        assert set(s.keys()) == {"status", "log_lines", "popup", "overall_label"}
+
+    def test_status_line_is_one_liner(self):
+        """Status line must be a single line (no newlines) so it fits
+        in the GUI's status bar."""
+        s = self._summary()
+        assert "\n" not in s["status"]
+        assert s["status"].startswith("Complete!")
+
+    def test_status_contains_all_four_metrics(self):
+        s = self._summary()
+        # 20.0 GB -> 1.1 GB
+        assert "20.0 GB -> 1.1 GB" in s["status"]
+        # 06:04:12 -> 00:34:11
+        assert "06:04:12 -> 00:34:11" in s["status"]
+        # (completed in 23m 5s)
+        assert "(completed in 23m 5s)" in s["status"]
+
+    def test_log_lines_start_and_end_with_separator(self):
+        """Log block must be greppable: '=' delimiter on both sides
+        of the [SUCCESS] block."""
+        s = self._summary()
+        assert len(s["log_lines"]) == 6
+        assert s["log_lines"][0] == "=" * 60
+        assert s["log_lines"][-1] == "=" * 60
+        assert s["log_lines"][1].startswith("[SUCCESS] Output: ")
+
+    def test_log_lines_contain_all_metrics(self):
+        s = self._summary()
+        joined = "\n".join(s["log_lines"])
+        assert "20.0 GB -> 1.1 GB" in joined
+        assert "06:04:12 -> 00:34:11" in joined
+        assert "23m 5s" in joined
+        assert "D:/vids/out.mp4" in joined
+
+    def test_popup_contains_source_and_output_labels(self):
+        s = self._summary()
+        assert "Source:" in s["popup"]
+        assert "Output:" in s["popup"]
+        assert "Pipeline:" in s["popup"]
+        assert "D:/vids/out.mp4" in s["popup"]
+
+    def test_overall_label_format(self):
+        s = self._summary()
+        assert s["overall_label"] == "Total: 23m 5s"
+
+    def test_none_source_duration_renders_as_question_mark(self):
+        """ffprobe can fail; the summary must not crash and must show '?'
+        in the source position. The format is 'src -> dst', so a None
+        src_duration produces '? -> 00:34:11'."""
+        s = self._summary(src_duration=None)
+        assert "? -> 00:34:11" in s["status"]
+        # dst is always known (it's computed from keep-segments locally)
+        assert "06:04:12 -> ?" not in s["status"]
+        joined = "\n".join(s["log_lines"])
+        assert "? -> 00:34:11" in joined
+
+    def test_negative_source_duration_renders_as_question_mark(self):
+        s = self._summary(src_duration=-5)
+        assert "? -> 00:34:11" in s["status"]
+
+    def test_zero_duration_renders_as_zero_clock(self):
+        """00:00:00 is a valid value (corrupted 0-byte file) — must not
+        be replaced with '?'."""
+        s = self._summary(src_duration=0, dst_duration=0)
+        assert "00:00:00 -> 00:00:00" in s["status"]
+
+    def test_subsecond_pipeline_renders_as_zero_seconds(self):
+        """Pipeline that finishes in < 1s — must show '0s', not crash."""
+        s = self._summary(pipeline_seconds=0.4)
+        assert "completed in 0s)" in s["status"]
+        assert s["overall_label"] == "Total: 0s"
+
+    def test_size_uses_bytes_to_bytes_conversion(self):
+        """1 GB = 1024^3 bytes exactly (no rounding issues)."""
+        s = self._summary(
+            src_size_bytes=1024 ** 3,  # exactly 1.0 GB
+            dst_size_bytes=512 * 1024 ** 2,  # exactly 512.0 MB
+        )
+        assert "1.0 GB -> 512.0 MB" in s["status"]
+
+    def test_days_in_duration_uses_day_field(self):
+        """A 30+ hour source must still render cleanly. 30h 4m 12s =
+        1d 6h 4m 12s = '1:06:04:12' (the day field kicks in at >= 24h
+        so the value is never ambiguous)."""
+        s = self._summary(
+            src_duration=30 * 3600 + 4 * 60 + 12,  # 1d 6h 4m 12s
+        )
+        assert "1:06:04:12 -> 00:34:11" in s["status"]
+
+    def test_long_pipeline_uses_d_h_m_s(self):
+        """Pipeline wall-clock >= 24h uses _fmt_time's 'Xd Yh Zm Ws' format."""
+        s = self._summary(pipeline_seconds=86400 + 3600 + 60)  # 1d 1h 1m
+        assert "completed in 1d 1h 1m 0s)" in s["status"]
+        assert s["overall_label"] == "Total: 1d 1h 1m 0s"
+
+
+class TestSetCheckbox:
+    """Stream2VideoGUI._set_checkbox — wrapper around CTkCheckBox.select/
+    deselect. Tested with a MagicMock so no Tk root is required."""
+
+    def test_true_calls_select(self):
+        from unittest.mock import MagicMock
+        from stream2video.gui import Stream2VideoGUI
+        cb = MagicMock()
+        Stream2VideoGUI._set_checkbox(cb, True)
+        cb.select.assert_called_once_with()
+        cb.deselect.assert_not_called()
+
+    def test_false_calls_deselect(self):
+        from unittest.mock import MagicMock
+        from stream2video.gui import Stream2VideoGUI
+        cb = MagicMock()
+        Stream2VideoGUI._set_checkbox(cb, False)
+        cb.deselect.assert_called_once_with()
+        cb.select.assert_not_called()
+
+    def test_truthy_non_bool_calls_select(self):
+        """Any truthy value should select. Defensive — callers may pass
+        e.g. 1 or 'yes' (though the type hint says bool)."""
+        from unittest.mock import MagicMock
+        from stream2video.gui import Stream2VideoGUI
+        cb = MagicMock()
+        Stream2VideoGUI._set_checkbox(cb, 1)
+        cb.select.assert_called_once_with()
+
+    def test_falsy_non_bool_calls_deselect(self):
+        from unittest.mock import MagicMock
+        from stream2video.gui import Stream2VideoGUI
+        cb = MagicMock()
+        Stream2VideoGUI._set_checkbox(cb, 0)
+        cb.deselect.assert_called_once_with()
+
+    def test_none_calls_deselect(self):
+        from unittest.mock import MagicMock
+        from stream2video.gui import Stream2VideoGUI
+        cb = MagicMock()
+        Stream2VideoGUI._set_checkbox(cb, None)
+        cb.deselect.assert_called_once_with()
+
