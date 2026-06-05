@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 CONFIG_DEFAULTS: Dict[str, Any] = {
-    "threshold": -60.0,
+    "threshold": -30.0,
     "min_silence": 2.0,
     "margin": 0.5,
     "method": "segment",
