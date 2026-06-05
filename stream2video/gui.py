@@ -380,33 +380,34 @@ class Stream2VideoGUI(ctk.CTk):
                                          state="disabled", fg_color="#d32f2f", hover_color="#b71c1c")
         self.btn_cancel.pack(side="left")
 
-        # ── Two-line status area: Step/Complete on top, Elapsed/Remaining
-        # below. Both labels share the same right-packed position so the
-        # second line is visually anchored to the first (no jumping). The
-        # lbl_overall text is dimmer to make the hierarchy clear.
-        status_area = ctk.CTkFrame(action_frame, fg_color="transparent")
-        status_area.pack(side="right", fill="x", expand=True, padx=(8, 0))
-        self.lbl_status = ctk.CTkLabel(
-            status_area, text="", anchor="e", width=500,
-        )
-        self.lbl_status.pack(fill="x")
+        # Elapsed/Remaining on the left side of the action row, at the
+        # same vertical level as Step/Complete (which is right-packed).
+        # Fixed width + left anchor so the text never jumps the bar.
         self.lbl_overall = ctk.CTkLabel(
-            status_area, text="", anchor="e", width=500,
+            action_frame, text="", anchor="w", width=300,
             text_color=("gray40", "gray60"),
         )
-        self.lbl_overall.pack(fill="x")
+        self.lbl_overall.pack(side="left", padx=(8, 0))
+
+        self.lbl_status = ctk.CTkLabel(action_frame, text="", anchor="e", width=500)
+        self.lbl_status.pack(side="right", fill="x", expand=True, padx=(8, 0))
 
         self.bottom_frame = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
         self.bottom_frame.pack(fill="x", padx=5, pady=(0, 6))
-        # Full-width progress bar (single column). No label next to it,
-        # so the bar never resizes when text changes.
-        self.bottom_frame.grid_columnconfigure(0, weight=1)
+        # 3:2 grid — progress bar at ~60% width (the original layout
+        # before the no-jump refactor). The right column is empty in
+        # row 0; row 1 holds the Total wall-clock label, also in col 0
+        # (60% wide, left-aligned). The bar doesn't resize because its
+        # column is fixed by the weight.
+        self.bottom_frame.grid_columnconfigure(0, weight=3)
+        self.bottom_frame.grid_columnconfigure(1, weight=2)
         self.progress = ctk.CTkProgressBar(
             self.bottom_frame, mode="determinate", height=10,
         )
         self.progress.set(0)
-        self.progress.grid(row=0, column=0, sticky="ew")
+        self.progress.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         # Total pipeline wall-clock, updated in real time. Empty on idle.
+        # Sits in row 1, below the bar, in the same 60%-wide column.
         self.lbl_total = ctk.CTkLabel(
             self.bottom_frame, text="", anchor="w",
             text_color=("gray40", "gray60"),
