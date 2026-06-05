@@ -137,27 +137,24 @@ def _build_completion_summary(
     pipeline_seconds: float,
     output_path: str,
 ) -> dict:
-    """Build the four user-facing strings that are emitted on pipeline
-    completion. Pure function — no Tk / no side effects — so it can be
-    unit-tested without instantiating the GUI.
+    """Build the user-facing strings emitted on pipeline completion.
+    Pure function — no Tk / no side effects — so it can be unit-tested
+    without instantiating the GUI.
 
     Returns a dict with keys:
-      - status:        one-line headline for the status bar
-      - log_lines:     list of log lines (with = separators) for grep-ability
-      - popup:         multi-line message for the 'Complete' messagebox
-      - overall_label: 'Total: X' for the bottom-row label
+      - status:    exactly 'Complete!' — the status bar stays minimal so
+                   the Elapsed/Remaining line under it stays in sync and
+                   the Total time is shown in its own row below the bar.
+      - log_lines: list of log lines (with '=' separators) for grep-ability.
+                   Contains the full src->dst size/duration breakdown.
+      - popup:     multi-line message for the 'Complete' messagebox.
+                   Full breakdown with Source/Output labels.
     """
     src_size_s = Stream2VideoGUI._fmt_size(src_size_bytes)
     dst_size_s = Stream2VideoGUI._fmt_size(dst_size_bytes)
     src_dur_s = Stream2VideoGUI._fmt_clock_time(src_duration)
     dst_dur_s = Stream2VideoGUI._fmt_clock_time(dst_duration)
     pipe_s = Stream2VideoGUI._fmt_time(pipeline_seconds)
-
-    status = (
-        f"Complete! {src_size_s} -> {dst_size_s}, "
-        f"{src_dur_s} -> {dst_dur_s} "
-        f"(completed in {pipe_s})"
-    )
 
     sep = "=" * 60
     log_lines = [
@@ -177,10 +174,9 @@ def _build_completion_summary(
     )
 
     return {
-        "status": status,
+        "status": "Complete!",
         "log_lines": log_lines,
         "popup": popup,
-        "overall_label": f"Total: {pipe_s}",
     }
 
 
@@ -384,22 +380,38 @@ class Stream2VideoGUI(ctk.CTk):
                                          state="disabled", fg_color="#d32f2f", hover_color="#b71c1c")
         self.btn_cancel.pack(side="left")
 
-        self.lbl_status = ctk.CTkLabel(action_frame, text="", anchor="w", width=500)
-        self.lbl_status.pack(side="right", fill="x", expand=True, padx=(8, 0))
+        # ── Two-line status area: Step/Complete on top, Elapsed/Remaining
+        # below. Both labels share the same right-packed position so the
+        # second line is visually anchored to the first (no jumping). The
+        # lbl_overall text is dimmer to make the hierarchy clear.
+        status_area = ctk.CTkFrame(action_frame, fg_color="transparent")
+        status_area.pack(side="right", fill="x", expand=True, padx=(8, 0))
+        self.lbl_status = ctk.CTkLabel(
+            status_area, text="", anchor="e", width=500,
+        )
+        self.lbl_status.pack(fill="x")
+        self.lbl_overall = ctk.CTkLabel(
+            status_area, text="", anchor="e", width=500,
+            text_color=("gray40", "gray60"),
+        )
+        self.lbl_overall.pack(fill="x")
 
         self.bottom_frame = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
         self.bottom_frame.pack(fill="x", padx=5, pady=(0, 6))
-        self.bottom_frame.grid_columnconfigure(0, weight=3)
-        self.bottom_frame.grid_columnconfigure(1, weight=2)
+        # Full-width progress bar (single column). No label next to it,
+        # so the bar never resizes when text changes.
+        self.bottom_frame.grid_columnconfigure(0, weight=1)
         self.progress = ctk.CTkProgressBar(
             self.bottom_frame, mode="determinate", height=10,
         )
         self.progress.set(0)
-        self.progress.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        self.lbl_overall = ctk.CTkLabel(
-            self.bottom_frame, text="", anchor="e", width=180,
+        self.progress.grid(row=0, column=0, sticky="ew")
+        # Total pipeline wall-clock, updated in real time. Empty on idle.
+        self.lbl_total = ctk.CTkLabel(
+            self.bottom_frame, text="", anchor="w",
+            text_color=("gray40", "gray60"),
         )
-        self.lbl_overall.grid(row=0, column=1, sticky="ew")
+        self.lbl_total.grid(row=1, column=0, sticky="ew", pady=(2, 0))
 
         # ── Right: Log Panel ──
         log_frame = ctk.CTkFrame(self)
@@ -612,10 +624,11 @@ class Stream2VideoGUI(ctk.CTk):
         else:
             self.btn_start.configure(state="normal", text="Start")
             self.btn_cancel.configure(state="disabled")
-            # Clear the overall-time anchor so a stale label is not shown
-            # on the next pipeline's idle state.
+            # Clear the time labels so a stale state is not shown on the
+            # next pipeline's idle state.
             self._pipeline_start = None
             self.after(0, lambda: self.lbl_overall.configure(text=""))
+            self.after(0, lambda: self.lbl_total.configure(text=""))
 
     def _pipeline_worker(
         self, input_raw: str, output_dir: Path, method: str, encoder: str,
@@ -793,7 +806,9 @@ class Stream2VideoGUI(ctk.CTk):
             )
 
             # Status line — one-line headline so the user sees the result
-            # without opening the popup.
+            # without opening the popup. Per the spec, the status line
+            # says "Complete!" and nothing more (size/duration go in the
+            # popup and the log block).
             self._ui_status(summary["status"], force=True)
 
             # Log — multi-line, delimited by '=' so the user can grep
@@ -801,9 +816,11 @@ class Stream2VideoGUI(ctk.CTk):
             for line in summary["log_lines"]:
                 self._log(line)
 
-            self.after(0, lambda: self.lbl_overall.configure(
-                text=summary["overall_label"]
-            ))
+            # Clear the Elapsed/Remaining line (status area 2nd label) —
+            # the user wants nothing below "Complete!" in the status.
+            self.after(0, lambda: self.lbl_overall.configure(text=""))
+            # Freeze the Total wall-clock label at its final value.
+            self._ui_total(total_elapsed)
 
             # Delete downloaded source if requested
             if bool(self.chk_delete.get()) and self._download_path is not None:
@@ -984,13 +1001,14 @@ class Stream2VideoGUI(ctk.CTk):
 
     def _ui_overall(self, phase_elapsed: float, phase_remaining: float,
                      more_phases: bool):
-        """Update the overall-time label next to the progress bar.
+        """Update the Elapsed/Remaining line in the status area (the
+        second label under lbl_status) and the Total wall-clock label
+        below the progress bar.
 
-        Shows wall-clock total elapsed since the pipeline started, plus
-        an ETA for the current phase. If more phases follow, appends " + ?"
-        to make clear that the other phases' durations are unknown.
-        During phase 1 (no progress callback) the label is updated with
-        just elapsed (remaining="?").
+        'phase_remaining' is the ETA for the CURRENT phase; if more
+        phases follow, we append ' + ?' to make clear that the other
+        phases' durations are unknown. During phase 1 (no progress
+        callback) the label is updated with just elapsed (remaining='?').
         """
         if not hasattr(self, "_pipeline_start") or self._pipeline_start is None:
             return
@@ -1002,6 +1020,7 @@ class Stream2VideoGUI(ctk.CTk):
                 else f"~{self._fmt_time(phase_remaining)}"
         text = f"Elapsed: {self._fmt_time(total_elapsed)} | Remaining: {tail}"
         self.after(0, lambda: self.lbl_overall.configure(text=text))
+        self._ui_total(total_elapsed)
 
     def _ui_overall_elapsed_only(self):
         """Update the overall label with only elapsed time (no remaining
@@ -1010,8 +1029,22 @@ class Stream2VideoGUI(ctk.CTk):
         if not hasattr(self, "_pipeline_start") or self._pipeline_start is None:
             return
         total_elapsed = time.monotonic() - self._pipeline_start
-        text = f"Elapsed: {self._fmt_time(total_elapsed)} | Remaining: ?"
-        self.after(0, lambda: self.lbl_overall.configure(text=text))
+        self.after(0, lambda: self.lbl_overall.configure(
+            text=f"Elapsed: {self._fmt_time(total_elapsed)} | Remaining: ?"
+        ))
+        self._ui_total(total_elapsed)
+
+    def _ui_total(self, total_elapsed: float):
+        """Update the Total wall-clock label below the progress bar."""
+        self.after(0, lambda: self.lbl_total.configure(
+            text=Stream2VideoGUI._fmt_total_label(total_elapsed)
+        ))
+
+    @staticmethod
+    def _fmt_total_label(total_elapsed: float) -> str:
+        """Format the Total label — 'Total: X' where X is the wall-clock
+        pipeline duration. Pure helper, easy to unit-test."""
+        return f"Total: {Stream2VideoGUI._fmt_time(total_elapsed)}"
 
     def _ui_status(self, text: str, force: bool = False):
         now = time.monotonic()

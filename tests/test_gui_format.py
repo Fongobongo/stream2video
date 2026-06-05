@@ -104,9 +104,14 @@ class TestFmtClockTime:
 
 
 class TestBuildCompletionSummary:
-    """_build_completion_summary — pure function returning the four
+    """_build_completion_summary — pure function returning the three
     user-facing strings emitted at pipeline completion. Tested without
-    instantiating the GUI (Tk) — that's the whole point of the refactor."""
+    instantiating the GUI (Tk) — that's the whole point of the refactor.
+
+    The status line is intentionally minimal ('Complete!'); size and
+    duration go to the log block and the messagebox popup only. The
+    Total wall-clock is its own label below the progress bar — built
+    separately by _fmt_total_label()."""
 
     def _summary(self, **overrides):
         """Default-args helper for readability."""
@@ -122,25 +127,19 @@ class TestBuildCompletionSummary:
         from stream2video.gui import _build_completion_summary
         return _build_completion_summary(**defaults)
 
-    def test_returns_dict_with_four_keys(self):
+    def test_returns_dict_with_three_keys(self):
         s = self._summary()
-        assert set(s.keys()) == {"status", "log_lines", "popup", "overall_label"}
+        assert set(s.keys()) == {"status", "log_lines", "popup"}
 
-    def test_status_line_is_one_liner(self):
-        """Status line must be a single line (no newlines) so it fits
-        in the GUI's status bar."""
+    def test_status_is_exactly_complete_bang(self):
+        """Per the spec: the status line is just 'Complete!' and nothing
+        more — no file size, no duration, no pipeline time. Those go to
+        the log block, the popup, and the Total label below the bar."""
         s = self._summary()
-        assert "\n" not in s["status"]
-        assert s["status"].startswith("Complete!")
-
-    def test_status_contains_all_four_metrics(self):
-        s = self._summary()
-        # 20.0 GB -> 1.1 GB
-        assert "20.0 GB -> 1.1 GB" in s["status"]
-        # 06:04:12 -> 00:34:11
-        assert "06:04:12 -> 00:34:11" in s["status"]
-        # (completed in 23m 5s)
-        assert "(completed in 23m 5s)" in s["status"]
+        assert s["status"] == "Complete!"
+        assert "GB" not in s["status"]
+        assert ":" not in s["status"]
+        assert "completed" not in s["status"]
 
     def test_log_lines_start_and_end_with_separator(self):
         """Log block must be greppable: '=' delimiter on both sides
@@ -166,36 +165,30 @@ class TestBuildCompletionSummary:
         assert "Pipeline:" in s["popup"]
         assert "D:/vids/out.mp4" in s["popup"]
 
-    def test_overall_label_format(self):
-        s = self._summary()
-        assert s["overall_label"] == "Total: 23m 5s"
-
-    def test_none_source_duration_renders_as_question_mark(self):
-        """ffprobe can fail; the summary must not crash and must show '?'
-        in the source position. The format is 'src -> dst', so a None
-        src_duration produces '? -> 00:34:11'."""
+    def test_none_source_duration_renders_as_question_mark_in_log(self):
+        """ffprobe can fail; the summary must not crash. The '?' shows
+        up in the log and popup (not the status, which is just 'Complete!')."""
         s = self._summary(src_duration=None)
-        assert "? -> 00:34:11" in s["status"]
+        assert "? -> 00:34:11" in "\n".join(s["log_lines"])
+        # Popup uses 'Source: X, Y' / 'Output: X, Y' format — '?' for
+        # the source duration, real value for the output duration.
+        assert "Source:  20.0 GB, ?" in s["popup"]
+        assert "Output:  1.1 GB, 00:34:11" in s["popup"]
+        # The status line is invariant — never contains duration strings.
+        assert s["status"] == "Complete!"
         # dst is always known (it's computed from keep-segments locally)
-        assert "06:04:12 -> ?" not in s["status"]
-        joined = "\n".join(s["log_lines"])
-        assert "? -> 00:34:11" in joined
+        assert "06:04:12 -> ?" not in "\n".join(s["log_lines"])
 
     def test_negative_source_duration_renders_as_question_mark(self):
         s = self._summary(src_duration=-5)
-        assert "? -> 00:34:11" in s["status"]
+        assert "? -> 00:34:11" in "\n".join(s["log_lines"])
+        assert "Source:  20.0 GB, ?" in s["popup"]
 
     def test_zero_duration_renders_as_zero_clock(self):
         """00:00:00 is a valid value (corrupted 0-byte file) — must not
         be replaced with '?'."""
         s = self._summary(src_duration=0, dst_duration=0)
-        assert "00:00:00 -> 00:00:00" in s["status"]
-
-    def test_subsecond_pipeline_renders_as_zero_seconds(self):
-        """Pipeline that finishes in < 1s — must show '0s', not crash."""
-        s = self._summary(pipeline_seconds=0.4)
-        assert "completed in 0s)" in s["status"]
-        assert s["overall_label"] == "Total: 0s"
+        assert "00:00:00 -> 00:00:00" in "\n".join(s["log_lines"])
 
     def test_size_uses_bytes_to_bytes_conversion(self):
         """1 GB = 1024^3 bytes exactly (no rounding issues)."""
@@ -203,7 +196,7 @@ class TestBuildCompletionSummary:
             src_size_bytes=1024 ** 3,  # exactly 1.0 GB
             dst_size_bytes=512 * 1024 ** 2,  # exactly 512.0 MB
         )
-        assert "1.0 GB -> 512.0 MB" in s["status"]
+        assert "1.0 GB -> 512.0 MB" in "\n".join(s["log_lines"])
 
     def test_days_in_duration_uses_day_field(self):
         """A 30+ hour source must still render cleanly. 30h 4m 12s =
@@ -212,13 +205,35 @@ class TestBuildCompletionSummary:
         s = self._summary(
             src_duration=30 * 3600 + 4 * 60 + 12,  # 1d 6h 4m 12s
         )
-        assert "1:06:04:12 -> 00:34:11" in s["status"]
+        assert "1:06:04:12 -> 00:34:11" in "\n".join(s["log_lines"])
 
-    def test_long_pipeline_uses_d_h_m_s(self):
-        """Pipeline wall-clock >= 24h uses _fmt_time's 'Xd Yh Zm Ws' format."""
-        s = self._summary(pipeline_seconds=86400 + 3600 + 60)  # 1d 1h 1m
-        assert "completed in 1d 1h 1m 0s)" in s["status"]
-        assert s["overall_label"] == "Total: 1d 1h 1m 0s"
+
+class TestFmtTotalLabel:
+    """_fmt_total_label — formats the Total wall-clock label that lives
+    below the progress bar. Updated in real time during the pipeline
+    and frozen at the final value on completion."""
+
+    def test_basic(self):
+        from stream2video.gui import Stream2VideoGUI
+        assert Stream2VideoGUI._fmt_total_label(23 * 60 + 5) == "Total: 23m 5s"
+
+    def test_zero(self):
+        from stream2video.gui import Stream2VideoGUI
+        assert Stream2VideoGUI._fmt_total_label(0) == "Total: 0s"
+
+    def test_subsecond(self):
+        from stream2video.gui import Stream2VideoGUI
+        assert Stream2VideoGUI._fmt_total_label(0.4) == "Total: 0s"
+
+    def test_long_pipeline(self):
+        from stream2video.gui import Stream2VideoGUI
+        # 1d 1h 1m 0s
+        assert Stream2VideoGUI._fmt_total_label(86400 + 3600 + 60) == \
+            "Total: 1d 1h 1m 0s"
+
+    def test_seconds_only(self):
+        from stream2video.gui import Stream2VideoGUI
+        assert Stream2VideoGUI._fmt_total_label(42) == "Total: 42s"
 
 
 class TestSetCheckbox:
