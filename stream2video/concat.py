@@ -360,9 +360,22 @@ def _run_segment_concat(
             seek_before = max(0.0, start - _HYBRID_SEEK_OFFSET)
             seek_after = min(_HYBRID_SEEK_OFFSET, start)
 
+            def _seg_prog(us: int):
+                # ffmpeg -progress reports `out_time_us` — the position within
+                # this segment's output, NOT the original video. Map it to
+                # absolute progress across the whole video so the GUI/CLI
+                # bar moves smoothly even when a single segment takes an
+                # hour (e.g. 0 silence segments → 1 keep segment = the
+                # whole video).
+                if progress_callback and total_duration > 0 and dur > 0:
+                    seg_frac = min(us / 1_000_000 / dur, 1.0)
+                    abs_time = encoded_keep + seg_frac * dur
+                    progress_callback(min(abs_time / total_duration * 0.9, 0.9))
+
             _run_ffmpeg(
                 [
                     "ffmpeg", "-y", "-loglevel", "error",
+                    "-progress", "pipe:1",
                     "-ss", f"{seek_before:.3f}",
                     "-i", str(video_path),
                     "-ss", f"{seek_after:.3f}",
@@ -372,11 +385,10 @@ def _run_segment_concat(
                     "-c:a", "aac", "-b:a", _AUDIO_BITRATE,
                     str(seg_path),
                 ],
-                progress_callback=None,
+                progress_callback=_seg_prog,
                 timeout=_SEGMENT_ENCODE_TIMEOUT,
                 label=f"segment {i} encode",
                 cancel_callback=cancel_callback,
-                track_progress=False,
             )
 
             encoded_keep += dur

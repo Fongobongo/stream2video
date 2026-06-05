@@ -255,4 +255,79 @@ class TestFfmpegInvocation:
         assert elapsed < 5.0, f"Cancel took {elapsed:.1f}s, expected <5s"
 
 
+class TestSegmentModeProgressStreaming:
+    """Regression: with 0 silence segments the whole video is ONE keep segment.
+    Previously the per-segment encode ffmpeg call used track_progress=False, so
+    the progress callback never fired during the 1.5h+ encode — the user saw
+    'Cutting 0%' the entire time, then a sudden jump to 100%.
+
+    The fix streams -progress pipe:1 from the per-segment ffmpeg and maps
+    out_time_us (time within the segment) to absolute progress across the
+    whole video. The concat step at the end still uses 0.9..1.0 for the
+    final progress, so segment encode maxes at 0.9.
+    """
+
+    @pytest.fixture
+    def has_ffmpeg(self):
+        import shutil
+        return shutil.which("ffmpeg") is not None
+
+    def _make_video(self, out_path: Path, duration: int = 5) -> None:
+        import shutil
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            pytest.skip("ffmpeg not available")
+        import subprocess
+        cmd = [
+            ffmpeg, "-y", "-v", "error",
+            "-f", "lavfi", "-i", f"sine=frequency=1000:duration={duration}",
+            "-f", "lavfi", "-i", "color=c=black:s=160x120:r=10",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-t", str(duration),
+            str(out_path),
+        ]
+        subprocess.run(
+            cmd, check=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            timeout=60,
+        )
+
+    def test_progress_fires_during_single_segment_encode(self, has_ffmpeg):
+        """With 0 silence segments, the single keep-segment encode must
+        report multiple progress updates (not just 0% and 100%)."""
+        if not has_ffmpeg:
+            pytest.skip("ffmpeg not available")
+
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "in.mp4"
+            self._make_video(video, duration=4)
+            out = Path(tmp) / "out.mp4"
+
+            progress_calls: list = []
+
+            cut_and_concat(
+                video,
+                silence_segments=[],
+                output_path=out,
+                progress_callback=progress_calls.append,
+                method="segment",
+                encoder="libx264",
+            )
+
+            # Must have more than 2 progress reports (the start and end).
+            assert len(progress_calls) > 2, (
+                f"Expected multiple progress reports during 1-segment encode, "
+                f"got {len(progress_calls)}: {progress_calls}"
+            )
+            # Values must be monotonically non-decreasing and within [0, 1].
+            assert all(0.0 <= p <= 1.0 for p in progress_calls), progress_calls
+            assert progress_calls == sorted(progress_calls), (
+                f"Progress not monotonic: {progress_calls}"
+            )
+            # Final progress must reach >= 0.9 (concat step covers 0.9..1.0).
+            assert progress_calls[-1] >= 0.9, (
+                f"Final progress {progress_calls[-1]} should reach >= 0.9"
+            )
+
+
 
