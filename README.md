@@ -99,12 +99,32 @@ margin: 0.15
 | `threshold` (dB) | -60 to -5 | -60.0 | Audio below this level = silence |
 | `min_silence` (s) | 0.1 to 60 | 2.0 | Minimum silence duration to cut |
 | `margin` (s) | -3 to 5 | 0.5 | How much to shrink silence zones. Positive = shrink silence (keep more audio around phrases). Negative = expand silence (cut more aggressively). `0` = no adjustment. |
+| `per_video_dir` | bool | `false` | When true, all artifacts (downloaded source, WAV, JSON, log, compressed, temp dirs) are collected into `{output_dir}/{stem}/` instead of living in the base `output_dir`. Local source files are never moved/copied — they stay where you put them. |
+
+## Project directory
+
+Set `per_video_dir: true` in config (or tick the checkbox in the GUI) to keep each video's artifacts in its own subdirectory:
+
+```
+output_dir/
+└── myvideo/                       # per-video project dir
+    ├── myvideo.mp4                # downloaded source (or local file untouched)
+    ├── myvideo_audio.wav          # cached audio extract
+    ├── myvideo_silence_cache.json
+    ├── myvideo_compressed.mp4     # final output
+    ├── stream2video.log           # per-video log
+    └── _myvideo_segments/         # temp dir, cleaned on success
+```
+
+Useful for keeping many videos in one `output_dir` without mixing their WAVs / logs / temp segments. Cache behavior is the same — just lives one level deeper. Local source files are never moved or copied.
 
 ## Performance & Caching
 
 stream2video caches work in two layers so that re-running on the same video is fast, even with different `threshold` / `min_silence` / `margin` settings.
 
-### Two cache files (in `{output_dir}/`)
+### Two cache files
+
+By default the cache files live in `{output_dir}/`. If `per_video_dir: true` is set, they live in `{output_dir}/{stem}/` instead (see "Project directory" below).
 
 | File | Key | What it stores |
 |------|-----|----------------|
@@ -171,6 +191,7 @@ python -m stream2video.gui
 - **Input**: Local file (Browse) or URL
 - **Output**: Select output directory (defaults to `./compressed_videos`)
 - **Sliders**: Threshold, Min Silence, Margin
+- **Per-video project directory** checkbox — group all of a video's artifacts into `{output_dir}/{stem}/`
 - **Method**: segment (per-segment encode + concat demuxer) or batch (frame-exact select/aselect)
 - **Encoder**: h264_nvenc, h264_amf, h264_mf, libx264
 - **Test encoder** button

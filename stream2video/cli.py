@@ -34,6 +34,7 @@ from stream2video.silence import (
     SilenceDetectionError,
 )
 from stream2video.concat import cut_and_concat, ConcatError
+from stream2video.paths import ensure_project_dir, move_into_project
 
 # Setup logging
 _console_handler = RichHandler(rich_tracebacks=True)
@@ -252,6 +253,37 @@ def main(
                 console.print(f"[red]Download failed:[/red] {e}")
                 logger.exception("Download error")
                 raise typer.Exit(1)
+
+            # Step 1.5: Apply per-video project directory (if enabled).
+            # The downloaded file (if any) is moved into the project dir;
+            # the log file is also relocated so it ends up next to the
+            # artifacts. For local files the source is never moved — only
+            # the output_dir for downstream calls is reassigned.
+            per_video_dir = config.get("per_video_dir", False)
+            if per_video_dir:
+                project_dir = ensure_project_dir(
+                    output_dir, video_path.stem, per_video_dir,
+                )
+                if project_dir != output_dir:
+                    if download_result.is_downloaded:
+                        video_path = move_into_project(video_path, project_dir)
+                        logger.info(f"Moved source into project dir: {video_path}")
+                    if fh is not None:
+                        fh.close()
+                        logger.removeHandler(fh)
+                        new_log = project_dir / "stream2video.log"
+                        if new_log.exists():
+                            new_log.unlink()
+                        if log_file.exists():
+                            shutil.move(str(log_file), str(new_log))
+                        fh = logging.FileHandler(new_log)
+                        fh.setLevel(logging.DEBUG)
+                        fh.setFormatter(logging.Formatter(
+                            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+                        ))
+                        logger.addHandler(fh)
+                    output_dir = project_dir
+                    console.print(f"Project directory: [cyan]{output_dir}[/cyan]")
 
             # Step 2: Detect silence (with cache support)
             task2 = progress.add_task("[cyan]Detecting silence segments...", total=100)

@@ -197,7 +197,7 @@ presets:
   │   ├── config.py      # defaults + validation ranges
   │   ├── utils.py       # shared helpers
   │   ├── download.py    # yt-dlp wrapper (cancellable)
-  │   ├── silence.py     # ffmpeg silencedetect + cache
+  │   ├── paths.py       # per-video project dir resolution
   │   └── concat.py      # cut+concat (segment/batch methods, fallback)
   ├── tests/             # 90 unit + integration tests
   └── _portable/         # gitignored: venv + ffmpeg + settings.json

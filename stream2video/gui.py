@@ -31,6 +31,7 @@ from stream2video.concat import (
     cut_and_concat,
     generate_keep_segments,
 )
+from stream2video.paths import ensure_project_dir, move_into_project
 from stream2video.utils import get_active_process, get_video_duration
 
 logger = logging.getLogger("stream2video.gui")
@@ -265,6 +266,13 @@ class Stream2VideoGUI(ctk.CTk):
             self.chk_delete.select()
         self.chk_delete.pack(anchor="w", padx=5, pady=(4, 1))
 
+        self.chk_per_video_dir = ctk.CTkCheckBox(
+            ctrl_frame, text="Create separate subdirectory for this video's project",
+        )
+        if self.config.get("per_video_dir"):
+            self.chk_per_video_dir.select()
+        self.chk_per_video_dir.pack(anchor="w", padx=5, pady=(4, 1))
+
         ctk.CTkFrame(ctrl_frame, height=2, fg_color=("gray70", "gray30")).pack(fill="x", padx=5, pady=4)
 
         # Action
@@ -464,6 +472,7 @@ class Stream2VideoGUI(ctk.CTk):
         method = self.combo_method.get()
         encoder = self.combo_encoder.get()
         force = bool(self.chk_force.get())
+        per_video_dir = bool(self.chk_per_video_dir.get())
 
         self._ui_update_output(output_dir)
 
@@ -473,12 +482,13 @@ class Stream2VideoGUI(ctk.CTk):
             f"threshold={self.config['threshold']}, "
             f"min_silence={self.config['min_silence']}, "
             f"margin={self.config['margin']}, "
-            f"delete_after={bool(self.chk_delete.get())}"
+            f"delete_after={bool(self.chk_delete.get())}, "
+            f"per_video_dir={per_video_dir}"
         )
 
         threading.Thread(
             target=self._pipeline_worker,
-            args=(input_raw, output_dir, method, encoder, force),
+            args=(input_raw, output_dir, method, encoder, force, per_video_dir),
             daemon=True,
         ).start()
 
@@ -496,7 +506,10 @@ class Stream2VideoGUI(ctk.CTk):
             self.btn_start.configure(state="normal", text="Start")
             self.btn_cancel.configure(state="disabled")
 
-    def _pipeline_worker(self, input_raw: str, output_dir: Path, method: str, encoder: str, force: bool):
+    def _pipeline_worker(
+        self, input_raw: str, output_dir: Path, method: str, encoder: str,
+        force: bool, per_video_dir: bool = False,
+    ):
         try:
             output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -524,6 +537,21 @@ class Stream2VideoGUI(ctk.CTk):
                 self._log(f"[ERROR] Download failed: {e}")
                 self._ui_status(f"Failed: {e}", force=True)
                 return
+
+            # Step 1.5: Apply per-video project directory (if enabled).
+            # Downloaded source is moved; local file is untouched but the
+            # project dir is still used for WAV / JSON / compressed / log.
+            if per_video_dir:
+                project_dir = ensure_project_dir(
+                    output_dir, video_path.stem, per_video_dir,
+                )
+                if project_dir != output_dir:
+                    if download_result.is_downloaded:
+                        video_path = move_into_project(video_path, project_dir)
+                        self._log(f"Moved source into project dir: {video_path}")
+                    output_dir = project_dir
+                    self._ui_update_output(output_dir)
+                    self._log(f"Project directory: {output_dir}")
 
             self._download_path = video_path if download_result.is_downloaded else None
             self._ui_update_file_info(video_path)
@@ -754,6 +782,7 @@ class Stream2VideoGUI(ctk.CTk):
         self.config["encoder"] = self.combo_encoder.get()
         self.config["force"] = bool(self.chk_force.get())
         self.config["delete_after"] = bool(self.chk_delete.get())
+        self.config["per_video_dir"] = bool(self.chk_per_video_dir.get())
         self.config["theme"] = self.combo_theme.get()
         self.config["window_geometry"] = self.geometry()
         try:
@@ -784,6 +813,7 @@ class Stream2VideoGUI(ctk.CTk):
         self._on_encoder_change(CONFIG_DEFAULTS["encoder"])
         self.chk_force.deselect()
         self.chk_delete.deselect()
+        self.chk_per_video_dir.deselect()
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
         self.geometry(f"{min(1250, sw - 40)}x{min(680, sh - 60)}")

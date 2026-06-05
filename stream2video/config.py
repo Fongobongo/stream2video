@@ -8,6 +8,7 @@ CONFIG_DEFAULTS = {
     "encoder": "h264_mf",
     "force": False,
     "delete_after": False,
+    "per_video_dir": False,
     "output_dir": "",
     "theme": "dark",
 }
