@@ -16,7 +16,14 @@ from typing import Optional
 
 import customtkinter as ctk
 
-from stream2video.config import CONFIG_DEFAULTS
+from stream2video.config import (
+    CONFIG_DEFAULTS,
+    USER_DEFAULT_KEYS,
+    effective_defaults,
+    load_user_defaults,
+    save_user_defaults,
+    user_defaults_path,
+)
 from stream2video.download import download, DownloadCancelledError, DownloadError
 from stream2video.silence import (
     detect_silence,
@@ -131,7 +138,7 @@ class Stream2VideoGUI(ctk.CTk):
         self.running = False
         self._cancel_event = threading.Event()
         self._test_running = False
-        self.config = CONFIG_DEFAULTS.copy()
+        self.config = effective_defaults()
         self.log_queue: queue.Queue = queue.Queue()
         self._output_path: Optional[Path] = None
         self._download_path: Optional[Path] = None
@@ -216,6 +223,7 @@ class Stream2VideoGUI(ctk.CTk):
         self.combo_theme.set(self.config["theme"])
         self.combo_theme.pack(fill="x", padx=5, pady=(0, 4))
 
+        ctk.CTkButton(info_frame, text="Save current as defaults", command=self._save_user_defaults).pack(fill="x", padx=5, pady=(0, 4))
         ctk.CTkButton(info_frame, text="Restore defaults", command=self._restore_defaults).pack(fill="x", padx=5, pady=(0, 4))
         ctk.CTkButton(info_frame, text="Copy CLI command", command=self._copy_cli_command).pack(fill="x", padx=5, pady=(0, 4))
 
@@ -1031,25 +1039,25 @@ class Stream2VideoGUI(ctk.CTk):
                 logger.warning("Failed to load settings: %s", e)
 
     def _restore_defaults(self):
-        self.config = CONFIG_DEFAULTS.copy()
-        ctk.set_appearance_mode(CONFIG_DEFAULTS["theme"])
-        self.combo_theme.set(CONFIG_DEFAULTS["theme"])
+        self.config = effective_defaults()
+        ctk.set_appearance_mode(self.config["theme"])
+        self.combo_theme.set(self.config["theme"])
         self.entry_input.delete(0, "end")
         self.entry_output.delete(0, "end")
 
-        self.combo_method.set(CONFIG_DEFAULTS["method"])
-        self.combo_encoder.set(CONFIG_DEFAULTS["encoder"])
-        self._on_encoder_change(CONFIG_DEFAULTS["encoder"])
-        self.chk_force.deselect()
-        self.chk_delete.deselect()
-        self.chk_per_video_dir.deselect()
+        self.combo_method.set(self.config["method"])
+        self.combo_encoder.set(self.config["encoder"])
+        self._on_encoder_change(self.config["encoder"])
+        self._set_checkbox(self.chk_force, self.config["force"])
+        self._set_checkbox(self.chk_delete, self.config["delete_after"])
+        self._set_checkbox(self.chk_per_video_dir, self.config["per_video_dir"])
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
         self.geometry(f"{min(1250, sw - 40)}x{min(680, sh - 60)}")
         for key in ("threshold", "min_silence", "margin"):
             slider = getattr(self, f"_slider_{key}", None)
             if slider:
-                val = CONFIG_DEFAULTS[key]
+                val = self.config[key]
                 slider.set(val)
                 ev = getattr(slider, "_entry_val", None)
                 if ev:
@@ -1063,6 +1071,45 @@ class Stream2VideoGUI(ctk.CTk):
         self.lbl_encoder.configure(text="Encoder: —")
         self._save_settings()
         self._log("Settings restored to defaults")
+
+    @staticmethod
+    def _set_checkbox(checkbox, value: bool) -> None:
+        """Set a CTkCheckBox to True/False (deselect/select) — same widget,
+        different state. CTk's select/deselect don't accept a value, so
+        this is a tiny helper to keep callers readable."""
+        if value:
+            checkbox.select()
+        else:
+            checkbox.deselect()
+
+    def _save_user_defaults(self):
+        """Snapshot the current tunable GUI values to user_defaults.json.
+        This is the per-user "factory defaults" file — it overrides
+        CONFIG_DEFAULTS on next startup. Per-session state (output_dir,
+        recent_projects, input_path) is intentionally NOT saved here."""
+        try:
+            self._sync_slider_entries()
+        except Exception:
+            pass
+        snapshot = {
+            "threshold": float(self.config["threshold"]),
+            "min_silence": float(self.config["min_silence"]),
+            "margin": float(self.config["margin"]),
+            "method": self.combo_method.get(),
+            "encoder": self.combo_encoder.get(),
+            "force": bool(self.chk_force.get()),
+            "delete_after": bool(self.chk_delete.get()),
+            "per_video_dir": bool(self.chk_per_video_dir.get()),
+            "theme": self.combo_theme.get(),
+        }
+        try:
+            save_user_defaults(snapshot)
+        except Exception as e:
+            self._log(f"[WARN] Could not save user defaults: {e}")
+            return
+        self._log(
+            f"Saved current settings as user defaults ({user_defaults_path()})"
+        )
 
 
     def _copy_cli_command(self):

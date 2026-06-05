@@ -199,7 +199,7 @@ presets:
   │   ├── download.py    # yt-dlp wrapper (cancellable)
   │   ├── paths.py       # per-video project dir resolution
   │   └── concat.py      # cut+concat (segment/batch methods, fallback)
-  ├── tests/             # 90 unit + integration tests
+  ├── tests/             # 143 unit + integration tests
   └── _portable/         # gitignored: venv + ffmpeg + settings.json
   ```
   *(Phase 2 добавит: `transcribe.py`, `fillers.py`, `content.py`, `subtitles.py`)*
@@ -272,10 +272,12 @@ presets:
 
 ### Этап 8 — Тесты и edge cases — ✅ (частично)
 
-- [x] **90 unit + integration tests** (pytest, mocks)
+- [x] **143 unit + integration tests** (pytest, mocks)
 - [x] `tests/test_download.py` — URL validation, local file passthrough, cancel abort, classify_error mapping, find_downloaded_file glob fallback
 - [x] `tests/test_silence.py` — `SilenceSegment`, `_apply_margin` edge cases, validation, `_sample_segments_match` (7 cases: start-only compare, itsoffset shift, boundary clip, count mismatch, tolerance), `_segments_match` (8 cases), WAV cache path/validity (5 cases), `TestWavCacheFallback` (4 cases: cache hit, sample-verify pass, sample-verify mismatch + full A fallback, no output_dir), `TestEndToEndRealFfmpeg` (3 cases: D matches A, WAV cache reused, long-silence crossing sample boundary)
-- [x] `tests/test_integration.py` — `generate_keep_segments` (8 cases: clamp/drop/merge/empty)
+- [x] `tests/test_integration.py` — `generate_keep_segments` (8 cases: clamp/drop/merge/empty), `TestSegmentModeProgressStreaming`, `TestEncoderFallbackCleanup`, `TestCliPerVideoDir`
+- [x] `tests/test_paths.py` — `project_dir`, `ensure_project_dir`, `move_into_project`, `add_recent_project`, `prune_recent_projects`, `_truncate` recent-name
+- [x] `tests/test_config.py` — `load_user_defaults` type guards, `save_user_defaults` atomicity + filtering, `effective_defaults` overlay
 - [x] **НЕ покрыто тестами** (документировано как known gap):
   - GUI (нет pytest-qt / tkinter-тестов)
   - end-to-end с реальным (не lavfi) видео — частично покрыто, реальный stream-файл требует CI infra

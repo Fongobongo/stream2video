@@ -127,6 +127,17 @@ The GUI's left info panel has a **Recent Projects** section showing the 5 most r
 
 Entries are pruned automatically when their directory no longer exists. The list persists in `_portable/settings.json`.
 
+### User defaults (GUI)
+
+The GUI's left info panel has two related buttons:
+
+- **Save current as defaults** — writes the current tunable settings (threshold, min_silence, margin, method, encoder, force, delete_after, per_video_dir, theme) to `_portable/user_defaults.json`. Per-session state (output_dir, recent_projects, input_path) is intentionally not saved.
+- **Restore defaults** — restores those user defaults (or the factory `CONFIG_DEFAULTS` if no user defaults file exists).
+
+This lets you set your preferred workflow once (e.g. `per_video_dir=True`, `encoder=libx264`) and have it stick across restarts, projects, and "Restore defaults" clicks — without having to edit code.
+
+The file is plain JSON, type-validated on load, and atomic-written (via `os.replace`).
+
 ## Performance & Caching
 
 stream2video caches work in two layers so that re-running on the same video is fast, even with different `threshold` / `min_silence` / `margin` settings.
@@ -208,6 +219,10 @@ python -m stream2video.gui
 - **Theme**: dark/light/system
 - **Copy CLI command** — copies current params as CLI command to clipboard
 - **Persistent settings** — remembers last used values
+- **Save current as defaults** — snapshot current tunables to `user_defaults.json` for cross-session use
+- **Recent Projects** — click-to-open or trash your last 5 project directories
+- **Status line** — shows `elapsed / remaining` time per phase
+- **Bottom overall label** — `Elapsed: X | Remaining: ~Y + ?` (or `Total: X` on completion)
 
 ## Output
 
