@@ -9,10 +9,12 @@ from unittest.mock import patch
 from stream2video.download import download
 from stream2video.silence import SilenceSegment
 from stream2video.concat import (
+    CancelledError,
     ConcatError,
     cut_and_concat,
     generate_keep_segments,
     _run_ffmpeg,
+    _with_libx264_fallback,
 )
 
 
@@ -328,6 +330,100 @@ class TestSegmentModeProgressStreaming:
             assert progress_calls[-1] >= 0.9, (
                 f"Final progress {progress_calls[-1]} should reach >= 0.9"
             )
+
+
+class TestEncoderFallbackCleanup:
+    """Regression: when the primary encoder (e.g. h264_mf) writes corrupt
+    output (e.g. MP4 without moov atom) the fallback to libx264 must
+    re-encode from scratch — the resume-skip logic in _run_segment_concat
+    would otherwise reuse the corrupt seg files and the libx264 retry
+    would also fail with the same moov-atom error.
+    """
+
+    def test_fallback_calls_on_fallback_with_failing_encoder(self):
+        """on_fallback is invoked with the failing encoder name, BEFORE
+        the libx264 retry runs. CancelledError skips fallback (and
+        skips on_fallback)."""
+        from stream2video.concat import ENCODER_OPTS
+
+        calls = {"try": [], "cleanup": []}
+
+        def _try(enc, opts):
+            calls["try"].append(enc)
+            if enc == "h264_mf":
+                raise ConcatError("moov atom not found")
+            # libx264 succeeds
+
+        def _cleanup(failed_enc):
+            calls["cleanup"].append(failed_enc)
+
+        _with_libx264_fallback(
+            "h264_mf", ENCODER_OPTS["h264_mf"][:], _try,
+            (ConcatError, OSError), _cleanup,
+        )
+        assert calls["try"] == ["h264_mf", "libx264"]
+        assert calls["cleanup"] == ["h264_mf"], (
+            "on_fallback must be called once with the failing encoder name "
+            "before the libx264 retry"
+        )
+
+    def test_no_cleanup_when_primary_succeeds(self):
+        from stream2video.concat import ENCODER_OPTS
+
+        calls = {"cleanup": []}
+
+        def _try(enc, opts):
+            pass  # primary succeeds
+
+        _with_libx264_fallback(
+            "h264_mf", ENCODER_OPTS["h264_mf"][:], _try,
+            (ConcatError, OSError), lambda e: calls["cleanup"].append(e),
+        )
+        assert calls["cleanup"] == [], (
+            "on_fallback must not be called when the primary encoder succeeds"
+        )
+
+    def test_no_cleanup_on_cancelled(self):
+        from stream2video.concat import ENCODER_OPTS
+
+        calls = {"cleanup": []}
+
+        def _try(enc, opts):
+            raise CancelledError("user pressed cancel")
+
+        def _cleanup(name):
+            calls["cleanup"].append(name)
+
+        with pytest.raises(CancelledError):
+            _with_libx264_fallback(
+                "h264_mf", ENCODER_OPTS["h264_mf"][:], _try,
+                (ConcatError, OSError), _cleanup,
+            )
+        assert calls["cleanup"] == [], (
+            "on_fallback must not run on CancelledError (no fallback retry)"
+        )
+
+    def test_libx264_failure_propagates_after_cleanup(self):
+        """If libx264 also fails, the exception propagates — but
+        on_fallback is NOT called again (libx264 is the last attempt)."""
+        from stream2video.concat import ENCODER_OPTS
+
+        calls = {"cleanup": []}
+
+        def _try(enc, opts):
+            raise ConcatError(f"{enc} failed")
+
+        def _cleanup(name):
+            calls["cleanup"].append(name)
+
+        with pytest.raises(ConcatError, match="libx264 failed"):
+            _with_libx264_fallback(
+                "h264_mf", ENCODER_OPTS["h264_mf"][:], _try,
+                (ConcatError, OSError), _cleanup,
+            )
+        assert calls["cleanup"] == ["h264_mf"], (
+            "on_fallback should only fire once (before the libx264 retry)"
+        )
 
 
 

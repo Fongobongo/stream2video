@@ -439,11 +439,29 @@ def _run_segment_with_fallback(
     progress_callback: Optional[Callable[[float], None]] = None,
     cancel_callback: Optional[Callable[[], bool]] = None,
 ):
-    """Run segment concat with primary encoder; fall back to libx264 on failure."""
+    """Run segment concat with primary encoder; fall back to libx264 on failure.
+
+    On encoder fallback the segment directory is wiped — the segments
+    written by the failing encoder may be corrupt (e.g. h264_mf produces
+    MP4s without a moov atom on some Windows builds) and the resume-skip
+    check in _run_segment_concat would otherwise reuse them.
+    """
+    seg_dir = output_path.parent / f"_{output_path.stem}_segments"
+
+    def _cleanup(failed_enc: str):
+        if seg_dir.exists():
+            logger.info(
+                f"Removing partial segment dir from failed {failed_enc} encode: "
+                f"{seg_dir}"
+            )
+            shutil.rmtree(seg_dir, ignore_errors=True)
+
     def _try(enc: str, enc_opts: List[str]):
         _run_segment_concat(video_path, keep_segments, output_path, enc, enc_opts,
                             progress_callback, cancel_callback)
-    _with_libx264_fallback(primary_codec, primary_opts, _try, (ConcatError, OSError))
+    _with_libx264_fallback(
+        primary_codec, primary_opts, _try, (ConcatError, OSError), _cleanup,
+    )
 
 
 def _run_batch_with_fallback(
@@ -455,11 +473,27 @@ def _run_batch_with_fallback(
     progress_callback: Optional[Callable[[float], None]] = None,
     cancel_callback: Optional[Callable[[], bool]] = None,
 ):
-    """Run batch concat with primary encoder; fall back to libx264 on failure."""
+    """Run batch concat with primary encoder; fall back to libx264 on failure.
+
+    Same cleanup-on-fallback logic as segment method — corrupt chunks from
+    the failing encoder must not be reused by the libx264 retry.
+    """
+    batch_dir = output_path.parent / f"_{output_path.stem}_batch"
+
+    def _cleanup(failed_enc: str):
+        if batch_dir.exists():
+            logger.info(
+                f"Removing partial batch dir from failed {failed_enc} encode: "
+                f"{batch_dir}"
+            )
+            shutil.rmtree(batch_dir, ignore_errors=True)
+
     def _try(enc: str, enc_opts: List[str]):
         _run_batch_concat(video_path, keep_segments, output_path, enc, enc_opts,
                           progress_callback, cancel_callback)
-    _with_libx264_fallback(primary_codec, primary_opts, _try, (ConcatError, OSError))
+    _with_libx264_fallback(
+        primary_codec, primary_opts, _try, (ConcatError, OSError), _cleanup,
+    )
 
 
 def _run_batch_concat(
@@ -598,11 +632,16 @@ def _with_libx264_fallback(
     primary_opts: List[str],
     try_fn: Callable[[str, List[str]], None],
     exc_types: Tuple[type, ...],
+    on_fallback: Optional[Callable[[str], None]] = None,
 ):
     """Run try_fn(primary_codec, primary_opts); on failure, retry once with libx264.
 
     try_fn must raise one of exc_types (or CancelledError, which is re-raised)
     to trigger fallback. If try_fn fails on libx264, the exception propagates.
+
+    on_fallback (optional): called with the failing encoder name BEFORE
+    retrying with libx264. Use this to clean up partial / corrupt output
+    (e.g. delete a segment directory of MP4s that have a missing moov atom).
     """
     enc, enc_opts = primary_codec, primary_opts
     while True:
@@ -615,4 +654,11 @@ def _with_libx264_fallback(
             if enc == "libx264":
                 raise
             logger.warning(f"{enc} failed: {str(e)[:200]}; falling back to libx264")
+            if on_fallback is not None:
+                try:
+                    on_fallback(enc)
+                except Exception as cleanup_err:  # noqa: BLE001
+                    logger.warning(
+                        f"Cleanup before libx264 retry failed: {cleanup_err}"
+                    )
             enc, enc_opts = "libx264", ENCODER_OPTS["libx264"][:]
