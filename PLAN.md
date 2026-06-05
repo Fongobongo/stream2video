@@ -232,7 +232,7 @@ presets:
     -af silencedetect=noise={10^(threshold/20)}:duration={min_silence} \
     -f null -
   ```
-- [x] **D path с verification fallback:** на первом запуске (или при инвалидации WAV) D и A запускаются параллельно. Если результаты совпадают (±0.05s) — WAV кешируется, используется D. Если нет (broken PTS, itsoffset) — WAV удаляется, используется A. Гарантирует identical output к pre-D поведению на edge-cases.
+- [x] **D path с sample-verify:** на первом запуске (или при инвалидации WAV) extract + D + A-sample (первые 60с видео через `-t 60`). Если D-sample и A-sample совпадают (±0.05s) — WAV кешируется, используется D. Если нет — WAV удаляется, запускается full A. На 6h стриме sample-verify добавляет ~1мин vs ~1ч full A. Гарантирует identical output на edge-cases.
 - [x] WAV кеш: `{output_dir}/{stem}_audio.wav` (~10MB/час, mono 16kHz s16le) keyed by source mtime. Reused on subsequent runs (включая разные threshold/min_silence/margin). Также готовый артефакт для Phase 2 STT.
 - [x] `-copyts` обязателен при extract — иначе ffmpeg нормализует PTS к 0 и timestamps в WAV расходятся с video (типичный баг itsoffset, silent corruption).
 - [x] Захват stderr парсится регулярками (`silence_start`/`silence_end` — patterns hoisted to module level)
@@ -244,7 +244,7 @@ presets:
 - [x] Hardware encoder support: NVENC / AMF / MediaFoundation + auto-fallback на libx264
 - [x] Cancelable через polling (0.5s) во всех ffmpeg-вызовах
 - [x] Cleanup: `_{stem}_segments/` temp dir с `shutil.rmtree(ignore_errors=True)` в finally
-- [x] Тесты: `_apply_margin` edge cases, validation, `generate_keep_segments` (8 cases), `_segments_match` (8 cases), WAV cache validity (4 cases), WAV cache fallback (3 cases), end-to-end real ffmpeg (2 cases)
+- [x] Тесты: `_apply_margin` edge cases, validation, `generate_keep_segments` (8 cases), `_segments_match` (8 cases), WAV cache validity (4 cases), WAV cache fallback (4 cases: cache hit, sample-verify pass, sample-verify mismatch + full A fallback, no output_dir), end-to-end real ffmpeg (2 cases)
 
 ### Этап 7 — CLI и связка (`cli.py`) — ✅
 

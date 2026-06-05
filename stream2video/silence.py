@@ -1,14 +1,20 @@
 """Silence detection module using ffmpeg silencedetect filter.
 
 Pipeline (D — fast, audio-only):
-  1. Extract audio to WAV (mono 16kHz, -fflags +copyts to preserve timestamps).
+  1. Extract audio to WAV (mono 16kHz, -copyts to preserve timestamps).
   2. Run ffmpeg silencedetect on the WAV.
-  3. Compare with a "verification" run directly on the video (A path) to detect
-     sources with broken timestamps; fall back to A's result on mismatch.
-  4. Cache the WAV keyed by source mtime so subsequent runs skip the extract.
+  3. Sample-verify: run silencedetect on the first
+     `_SAMPLE_VERIFY_DURATION` seconds of the original video and compare
+     against the corresponding window of D's segments. On match, trust D and
+     keep the WAV cache. On mismatch (e.g., source has broken timestamps or
+     an unexpected `itsoffset`), invalidate the WAV and fall back to a full
+     A-path detection on the original video.
+  4. Cache the WAV keyed by source mtime so subsequent runs skip extract
+     and sample-verify.
 
-The A path (direct on video) remains available as `output_dir=None` for callers
-that don't want WAV caching, and is the canonical result used on mismatch.
+The A path (direct on video, no cache) is also available via `output_dir=None`
+for callers that don't want WAV caching. It is the canonical result used on
+sample-verify mismatch.
 """
 
 import json
@@ -58,6 +64,7 @@ class SilenceSegment:
 _SILENCE_POLL_INTERVAL = 0.5
 _SILENCE_TIMEOUT = 36000
 _SEGMENT_MATCH_TOLERANCE = 0.05
+_SAMPLE_VERIFY_DURATION = 60.0
 
 _NUM = r"\d+(?:[.,]\d+)?"
 _SILENCE_START_RE = re.compile(rf"silence_start:\s*({_NUM})")
@@ -82,9 +89,10 @@ def detect_silence(
 
     When `output_dir` is provided, the audio is first extracted to a cached WAV
     file ({stem}_audio.wav) and silencedetect runs on the WAV. The first time
-    the WAV is created (or whenever the source mtime is newer), a "verification"
-    pass also runs silencedetect directly on the original video so that sources
-    with broken timestamps fall back to the canonical A-path result.
+    the WAV is created (or whenever the source mtime is newer), a "sample-verify"
+    pass runs silencedetect on the first `_SAMPLE_VERIFY_DURATION` seconds of
+    the original video to detect sources with broken timestamps; on mismatch
+    the WAV is invalidated and a full direct detection is run on the video.
 
     Args:
         video_path: Path to video file
@@ -132,26 +140,34 @@ def detect_silence(
                 wav_path, threshold, min_silence, duration,
                 None, cancel_callback, "WAV",
             )
-            segments_A = _run_silencedetect(
+            segments_A_sample = _run_silencedetect(
                 video_path, threshold, min_silence, duration,
-                progress_callback, cancel_callback, "video",
+                progress_callback, cancel_callback, "video (sample)",
+                duration_limit=_SAMPLE_VERIFY_DURATION,
             )
-            if _segments_match(segments_D, segments_A, _SEGMENT_MATCH_TOLERANCE):
+            segments_D_sample = [
+                s for s in segments_D if s.start < _SAMPLE_VERIFY_DURATION
+            ]
+            if _segments_match(segments_D_sample, segments_A_sample, _SEGMENT_MATCH_TOLERANCE):
                 logger.debug(
-                    f"WAV detection matches video detection "
-                    f"({len(segments_D)} segments) — keeping WAV cache"
+                    f"Sample-verify passed (D: {len(segments_D_sample)} segments in first "
+                    f"{_SAMPLE_VERIFY_DURATION:.0f}s match A-sample: {len(segments_A_sample)}) "
+                    f"— using D result, keeping WAV cache"
                 )
                 segments = segments_D
             else:
                 logger.warning(
-                    f"WAV detection did not match video detection "
-                    f"(D: {len(segments_D)}, A: {len(segments_A)} segments, "
-                    f"tolerance={_SEGMENT_MATCH_TOLERANCE}s). "
-                    f"Source may have broken timestamps — falling back to direct "
+                    f"Sample-verify failed (D-sample: {len(segments_D_sample)}, "
+                    f"A-sample: {len(segments_A_sample)} segments in first "
+                    f"{_SAMPLE_VERIFY_DURATION:.0f}s, tolerance={_SEGMENT_MATCH_TOLERANCE}s). "
+                    f"Source may have broken timestamps — falling back to full direct "
                     f"detection. WAV cache invalidated."
                 )
                 wav_path.unlink(missing_ok=True)
-                segments = segments_A
+                segments = _run_silencedetect(
+                    video_path, threshold, min_silence, duration,
+                    progress_callback, cancel_callback, "video",
+                )
     else:
         segments = _run_silencedetect(
             video_path, threshold, min_silence, duration,
@@ -174,10 +190,17 @@ def _run_silencedetect(
     progress_callback: Optional[Callable[[float], None]],
     cancel_callback: Optional[Callable[[], bool]],
     label: str,
+    duration_limit: Optional[float] = None,
 ) -> List[SilenceSegment]:
     """Run ffmpeg silencedetect on `input_path` and return parsed segments.
 
-    `label` is used for log/error messages ("WAV", "video", "WAV cache").
+    `label` is used for log/error messages ("WAV", "video", "WAV cache",
+    "video (sample)").
+
+    `duration_limit`: if set, ffmpeg processes at most this many seconds of
+    input (added as `-t` flag). Used for sample-verification, where running
+    silencedetect on the full video would be wasteful. Progress is reported
+    relative to `duration_limit` in that case, not the full `duration`.
     """
     noise = 10 ** (threshold / 20)
 
@@ -189,6 +212,12 @@ def _run_silencedetect(
         "-f", "null",
         "-",
     ]
+    if duration_limit is not None:
+        # Insert "-t <duration>" right before "-f null" so it's interpreted
+        # as a global output option, not a value for "-f".
+        cmd[7:7] = ["-t", str(duration_limit)]
+
+    progress_divisor = duration_limit if duration_limit is not None else duration
 
     try:
         logger.info(
@@ -228,8 +257,8 @@ def _run_silencedetect(
             if line.startswith("out_time_us="):
                 try:
                     us = int(line.split("=", 1)[1])
-                    if progress_callback and duration and duration > 0:
-                        progress_callback(min(us / 1_000_000 / duration, 1.0))
+                    if progress_callback and progress_divisor and progress_divisor > 0:
+                        progress_callback(min(us / 1_000_000 / progress_divisor, 1.0))
                 except (ValueError, IndexError):
                     pass
             if cancelled.is_set():

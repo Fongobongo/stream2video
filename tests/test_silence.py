@@ -279,11 +279,14 @@ class TestWavCacheFallback:
     control per-call, so we can simulate D-match-A and D-mismatch-A scenarios.
     """
 
-    def _fake_popen_factory(self, stderr_outputs: list):
+    def _fake_popen_factory(self, stderr_outputs: list, extract_wav_to: Path = None):
         """Return a fake Popen whose .stderr.readline yields the i-th canned
         output then EOF, .stdout.readline yields 'progress=end' then EOF.
 
-        Each Popen() call advances through `stderr_outputs`.
+        Each Popen() call advances through `stderr_outputs`. If
+        `extract_wav_to` is set, the first Popen call (assumed to be the WAV
+        extract) writes a placeholder file at that path so subsequent WAV
+        cache validity checks pass.
         """
         call_index = {"i": 0}
 
@@ -301,6 +304,10 @@ class TestWavCacheFallback:
                     self.stdout = _FakeStdout()
                     self.returncode = 0
                     self._killed = False
+                    # Mimic ffmpeg: when called as the extract step, write the
+                    # WAV file so WAV cache validity checks succeed later.
+                    if extract_wav_to is not None and idx == 0:
+                        extract_wav_to.write_text("fake-wav")
 
                 def poll(self):
                     return self.returncode
@@ -345,37 +352,43 @@ class TestWavCacheFallback:
             assert wav.exists()  # cache kept
 
     def test_d_mismatch_a_invalidates_wav_and_uses_a(self):
-        """No WAV cache → full D + A verification. On mismatch, A is used and
-        the freshly-extracted WAV is deleted."""
+        """No WAV cache → extract + D + A-sample. On sample mismatch, the WAV
+        is invalidated and a full A detection is run. The full A result is
+        used."""
         with TemporaryDirectory() as tmp:
             video = Path(tmp) / "video.mp4"
             video.write_text("dummy")
             out = Path(tmp)
             wav = out / "video_audio.wav"
-            # No pre-existing WAV → extract step will run, then D, then A.
+            # No pre-existing WAV → extract step will run.
 
-            # 3 ffmpeg calls: extract (writes WAV — fake returns success),
-            # D (returns one shifted segment simulating broken PTS),
-            # A (returns the canonical unshifted segment).
+            # 4 ffmpeg calls: extract, D (returns shifted segment simulating
+            # broken PTS), A-sample (canonical), full A (after mismatch).
             stderr_extract = ""
             stderr_D = (
                 "[silencedetect @ 0x0] silence_start: 0.000\n"
                 "[silencedetect @ 0x0] silence_end: 1.500\n"
             )
-            stderr_A = (
+            stderr_A_sample = (
                 "[silencedetect @ 0x0] silence_start: 2.000\n"
                 "[silencedetect @ 0x0] silence_end: 3.500\n"
             )
-            factory = self._fake_popen_factory([stderr_extract, stderr_D, stderr_A])
+            stderr_A_full = (
+                "[silencedetect @ 0x0] silence_start: 4.000\n"
+                "[silencedetect @ 0x0] silence_end: 5.500\n"
+            )
+            factory = self._fake_popen_factory(
+                [stderr_extract, stderr_D, stderr_A_sample, stderr_A_full]
+            )
 
             with patch("stream2video.silence._probe_duration", return_value=100.0), \
                  patch("stream2video.silence.subprocess.Popen", side_effect=factory):
                 segs = detect_silence(video, output_dir=out, threshold=-20, min_silence=0.5, margin=0)
 
-            # A's result must be used (canonical, unshifted)
+            # Full A's result must be used (canonical, unshifted, all-time)
             assert len(segs) == 1
-            assert segs[0].start == 2.0
-            assert segs[0].end == 3.5
+            assert segs[0].start == 4.0
+            assert segs[0].end == 5.5
             # WAV cache must be invalidated on mismatch
             assert not wav.exists()
 
@@ -399,6 +412,55 @@ class TestWavCacheFallback:
             assert len(segs) == 1
             assert segs[0].start == 1.0
             assert segs[0].end == 2.0
+
+    def test_sample_verify_pass_keeps_d_and_wav(self):
+        """On cache miss with matching D-sample and A-sample, D's full result
+        is used and the WAV cache is kept (no full A run needed)."""
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "video.mp4"
+            video.write_text("dummy")
+            out = Path(tmp)
+            wav = out / "video_audio.wav"
+
+            # 3 ffmpeg calls: extract, D (full), A-sample. If sample matches
+            # D, no full A is run.
+            stderr_extract = ""
+            # D returns 2 segments within the first 60s + 1 outside
+            stderr_D = (
+                "[silencedetect @ 0x0] silence_start: 5.000\n"
+                "[silencedetect @ 0x0] silence_end: 10.000\n"
+                "[silencedetect @ 0x0] silence_start: 30.000\n"
+                "[silencedetect @ 0x0] silence_end: 35.000\n"
+                "[silencedetect @ 0x0] silence_start: 80.000\n"
+                "[silencedetect @ 0x0] silence_end: 85.000\n"
+            )
+            # A-sample (first 60s) sees the same 2 segments as D-sample
+            stderr_A_sample = (
+                "[silencedetect @ 0x0] silence_start: 5.000\n"
+                "[silencedetect @ 0x0] silence_end: 10.000\n"
+                "[silencedetect @ 0x0] silence_start: 30.000\n"
+                "[silencedetect @ 0x0] silence_end: 35.000\n"
+            )
+            factory = self._fake_popen_factory(
+                [stderr_extract, stderr_D, stderr_A_sample],
+                extract_wav_to=wav,
+            )
+
+            with patch("stream2video.silence._probe_duration", return_value=100.0), \
+                 patch("stream2video.silence.subprocess.Popen", side_effect=factory):
+                segs = detect_silence(video, output_dir=out, threshold=-20, min_silence=0.5, margin=0)
+
+            # D's full result (3 segments) is used; 2 of those are within
+            # the sample window and matched A-sample.
+            assert len(segs) == 3
+            assert segs[0].start == 5.0
+            assert segs[0].end == 10.0
+            assert segs[1].start == 30.0
+            assert segs[1].end == 35.0
+            assert segs[2].start == 80.0
+            assert segs[2].end == 85.0
+            # WAV cache must be kept on sample-verify pass
+            assert wav.exists()
 
 
 class TestEndToEndRealFfmpeg:
