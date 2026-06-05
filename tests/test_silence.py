@@ -17,6 +17,7 @@ from stream2video.silence import (
     _apply_margin,
     _get_wav_cache_path,
     _is_wav_cache_valid,
+    _sample_segments_match,
     _segments_match,
     detect_silence,
 )
@@ -216,6 +217,53 @@ class TestSegmentsMatch:
         a = [SilenceSegment(10.0, 12.0), SilenceSegment(20.0, 22.0)]
         b = [SilenceSegment(8.0, 10.0), SilenceSegment(18.0, 20.0)]  # shifted by -2.0
         assert _segments_match(a, b, tolerance=0.05) is False
+
+
+class TestSampleSegmentsMatch:
+    """_sample_segments_match is the sample-verify gate.
+
+    It compares only START times (and counts), not ENDs, because A-sample's
+    ends are clipped by the -t flag (e.g., a real (50, 80) becomes (50, 60)).
+    START comparison still catches constant itsoffset broken-PTS.
+    """
+
+    def test_identical_segments_match(self):
+        seg = [SilenceSegment(1.0, 2.0), SilenceSegment(5.0, 6.0)]
+        assert _sample_segments_match(seg, seg[:]) is True
+
+    def test_boundary_clipped_a_segment_matches_full_d_segment(self):
+        """The case that broke the original sample-verify: A-sample has
+        (50, 60) (clipped at -t boundary) while D has the real (50, 80).
+        Same start (50), same count → match, trust D's full end."""
+        a = [SilenceSegment(50.0, 60.0)]  # clipped by -t
+        b = [SilenceSegment(50.0, 80.0)]  # real end
+        assert _sample_segments_match(a, b, tolerance=0.05) is True
+
+    def test_itsoffset_caught_by_start_shift(self):
+        """Constant 2s itsoffset must trigger mismatch (shifts all starts)."""
+        a = [SilenceSegment(5.0, 8.0), SilenceSegment(30.0, 35.0)]
+        b = [SilenceSegment(3.0, 8.0), SilenceSegment(28.0, 35.0)]  # shifted -2
+        assert _sample_segments_match(a, b, tolerance=0.05) is False
+
+    def test_count_mismatch(self):
+        a = [SilenceSegment(5.0, 10.0)]
+        b = [SilenceSegment(5.0, 10.0), SilenceSegment(20.0, 25.0)]
+        assert _sample_segments_match(a, b) is False
+
+    def test_empty_lists_match(self):
+        assert _sample_segments_match([], []) is True
+
+    def test_different_ends_same_starts_match(self):
+        """ENDS can differ wildly (A's are clipped) but same STARTS → match."""
+        a = [SilenceSegment(5.0, 60.0), SilenceSegment(20.0, 25.0)]
+        b = [SilenceSegment(5.0, 300.0), SilenceSegment(20.0, 25.0)]
+        assert _sample_segments_match(a, b, tolerance=0.05) is True
+
+    def test_start_within_tolerance_matches(self):
+        """Sub-50ms drift on starts is tolerated (resampling precision)."""
+        a = [SilenceSegment(5.000, 10.0), SilenceSegment(30.000, 35.0)]
+        b = [SilenceSegment(5.030, 10.0), SilenceSegment(30.010, 35.0)]
+        assert _sample_segments_match(a, b, tolerance=0.05) is True
 
 
 class TestWavCachePath:
@@ -578,6 +626,64 @@ class TestEndToEndRealFfmpeg:
             # both are non-empty lists of segments
             assert len(segs_first) > 0
             assert len(segs_second) > 0
+
+    def test_long_silence_crossing_sample_boundary_passes_sample_verify(self, has_ffmpeg):
+        """Regression: a long silence that crosses the 60s sample window must
+        not cause a false-positive sample-verify mismatch (previously the
+        test would fail because A-sample's end (60) differed from D's real
+        end by tens of seconds). The fix compares START times only, so
+        the long silence is correctly identified as healthy."""
+        if not has_ffmpeg:
+            pytest.skip("ffmpeg/ffmpeg not available")
+
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "long_silence.mp4"
+            out = Path(tmp)
+
+            # 5min video, all silence — produces ONE segment (0, 300)
+            # that crosses the 60s sample-verify boundary.
+            cmd = [
+                shutil_which("ffmpeg"), "-y", "-v", "error",
+                "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo:duration=300",
+                "-f", "lavfi", "-i", "color=c=black:s=320x240:r=10",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-t", "300",
+                str(video),
+            ]
+            subprocess.run(
+                cmd, check=True, timeout=60,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+
+            # 1st run: should pass sample-verify, keep WAV
+            segs = detect_silence(
+                video, threshold=-30, min_silence=0.5, margin=0,
+                output_dir=out,
+            )
+            wav = out / f"{video.stem}_audio.wav"
+            assert wav.exists(), "WAV must be kept on sample-verify pass"
+
+            # 2nd run with different threshold: should hit cache, no verify
+            wav_mtime_before = wav.stat().st_mtime
+            segs2 = detect_silence(
+                video, threshold=-40, min_silence=0.5, margin=0,
+                output_dir=out,
+            )
+            assert wav.stat().st_mtime == wav_mtime_before, (
+                "WAV must not be re-extracted on cache hit"
+            )
+
+            # Both runs should find the single all-video silence
+            assert len(segs) == 1
+            assert len(segs2) == 1
+
+
+def shutil_which(name: str) -> str:
+    import shutil
+    path = shutil.which(name)
+    if not path:
+        pytest.skip(f"{name} not available")
+    return path
 
 
 class _FakeStderr:

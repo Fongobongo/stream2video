@@ -148,9 +148,9 @@ def detect_silence(
             segments_D_sample = [
                 s for s in segments_D if s.start < _SAMPLE_VERIFY_DURATION
             ]
-            if _segments_match(segments_D_sample, segments_A_sample, _SEGMENT_MATCH_TOLERANCE):
+            if _sample_segments_match(segments_D_sample, segments_A_sample, _SEGMENT_MATCH_TOLERANCE):
                 logger.debug(
-                    f"Sample-verify passed (D: {len(segments_D_sample)} segments in first "
+                    f"Sample-verify passed (D-sample: {len(segments_D_sample)} starts in first "
                     f"{_SAMPLE_VERIFY_DURATION:.0f}s match A-sample: {len(segments_A_sample)}) "
                     f"— using D result, keeping WAV cache"
                 )
@@ -158,7 +158,7 @@ def detect_silence(
             else:
                 logger.warning(
                     f"Sample-verify failed (D-sample: {len(segments_D_sample)}, "
-                    f"A-sample: {len(segments_A_sample)} segments in first "
+                    f"A-sample: {len(segments_A_sample)} segment starts in first "
                     f"{_SAMPLE_VERIFY_DURATION:.0f}s, tolerance={_SEGMENT_MATCH_TOLERANCE}s). "
                     f"Source may have broken timestamps — falling back to full direct "
                     f"detection. WAV cache invalidated."
@@ -420,6 +420,32 @@ def _segments_match(
         if abs(a_start - b_start) > tolerance:
             return False
         if abs(a_end - b_end) > tolerance:
+            return False
+
+    return True
+
+
+def _sample_segments_match(
+    seg_a: List[SilenceSegment],
+    seg_b: List[SilenceSegment],
+    tolerance: float = _SEGMENT_MATCH_TOLERANCE,
+) -> bool:
+    """True if two segment lists have matching START times within `tolerance`.
+
+    Used for sample-verify where A's segments are clipped at the `-t` boundary
+    (e.g., a real `(50, 80)` becomes `(50, 60)` in A-sample), so END times are
+    not directly comparable. Comparing START times (and counts) is sufficient
+    to detect the common case of constant itsoffset broken-PTS, which shifts
+    every start by the same offset.
+    """
+    if len(seg_a) != len(seg_b):
+        return False
+
+    starts_a = sorted(s.start for s in seg_a)
+    starts_b = sorted(s.start for s in seg_b)
+
+    for a_start, b_start in zip(starts_a, starts_b):
+        if abs(a_start - b_start) > tolerance:
             return False
 
     return True
