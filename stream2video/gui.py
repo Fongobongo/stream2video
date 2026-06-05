@@ -7,6 +7,7 @@ import queue
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -31,7 +32,12 @@ from stream2video.concat import (
     cut_and_concat,
     generate_keep_segments,
 )
-from stream2video.paths import ensure_project_dir, move_into_project
+from stream2video.paths import (
+    add_recent_project,
+    ensure_project_dir,
+    move_into_project,
+    prune_recent_projects,
+)
 from stream2video.utils import get_active_process, get_video_duration
 
 logger = logging.getLogger("stream2video.gui")
@@ -184,6 +190,13 @@ class Stream2VideoGUI(ctk.CTk):
 
         ctk.CTkButton(info_frame, text="Restore defaults", command=self._restore_defaults).pack(fill="x", padx=5, pady=(0, 4))
         ctk.CTkButton(info_frame, text="Copy CLI command", command=self._copy_cli_command).pack(fill="x", padx=5, pady=(0, 4))
+
+        # Recent Projects section
+        ctk.CTkFrame(info_frame, height=2, fg_color=("gray70", "gray30")).pack(fill="x", padx=5, pady=(6, 4))
+        ctk.CTkLabel(info_frame, text="Recent Projects", anchor="w").pack(fill="x", padx=5, pady=(0, 2))
+        self.recent_frame = ctk.CTkFrame(info_frame, fg_color="transparent")
+        self.recent_frame.pack(fill="x", padx=2, pady=(0, 4))
+        self._render_recent_projects()
 
         # ── Center: Controls ──
         ctrl_frame = ctk.CTkFrame(self)
@@ -552,6 +565,7 @@ class Stream2VideoGUI(ctk.CTk):
                     output_dir = project_dir
                     self._ui_update_output(output_dir)
                     self._log(f"Project directory: {output_dir}")
+                self._add_to_recent_projects(output_dir)
 
             self._download_path = video_path if download_result.is_downloaded else None
             self._ui_update_file_info(video_path)
@@ -695,6 +709,134 @@ class Stream2VideoGUI(ctk.CTk):
             self._output_path = None
             self._download_path = None
             self.after(0, lambda: self._set_running(False))
+
+    # ── Recent Projects ───────────────────────────────────────────
+
+    def _render_recent_projects(self):
+        """Rebuild the Recent Projects sub-section from self.config.
+
+        Prunes entries whose directory no longer exists. Rows have a label
+        (project name + tooltip with full path) and a trash button that
+        asks for confirmation before deleting the whole subdirectory.
+        """
+        for child in self.recent_frame.winfo_children():
+            child.destroy()
+        pruned = prune_recent_projects(self.config.get("recent_projects", []))
+        if pruned != self.config.get("recent_projects", []):
+            self.config["recent_projects"] = pruned
+        if not pruned:
+            ctk.CTkLabel(
+                self.recent_frame, text="(no recent projects)",
+                text_color=("gray50", "gray60"), anchor="w",
+            ).pack(fill="x", padx=5, pady=2)
+            return
+        for path_str in pruned:
+            row = ctk.CTkFrame(self.recent_frame, fg_color="transparent")
+            row.pack(fill="x", padx=2, pady=1)
+            display = Path(path_str).name or path_str
+            lbl = ctk.CTkLabel(row, text=display, anchor="w", cursor="hand2")
+            lbl.pack(side="left", fill="x", expand=True, padx=(3, 2))
+            lbl.bind(
+                "<Button-1>",
+                lambda e, p=path_str: self._open_in_explorer(p),
+            )
+            _Tooltip(lbl, path_str)
+            del_btn = ctk.CTkButton(
+                row, text="X", width=22, height=22,
+                fg_color=("gray70", "gray30"),
+                hover_color=("#c0392b", "#922B21"),
+                text_color=("gray10", "gray90"),
+                command=lambda p=path_str: self._delete_recent_project(p),
+            )
+            del_btn.pack(side="right", padx=(0, 3))
+
+    def _add_to_recent_projects(self, project_path):
+        """Add or move ``project_path`` to the top of the recent list (max 5)."""
+        if not project_path:
+            return
+        path_str = str(project_path)
+        self.config["recent_projects"] = add_recent_project(
+            self.config.get("recent_projects", []), path_str,
+        )
+        self._render_recent_projects()
+
+    def _delete_recent_project(self, path_str: str):
+        """Confirm with the user, then recursively delete the project dir."""
+        if self.running:
+            self._log("Cannot delete a project while pipeline is running")
+            return
+        path = Path(path_str)
+        if not path.is_dir():
+            self._log(f"Project no longer exists, dropping from list: {path_str}")
+            self.config["recent_projects"] = [
+                p for p in self.config.get("recent_projects", [])
+                if p != path_str
+            ]
+            self._render_recent_projects()
+            return
+        size_mb = self._dir_size_mb(path)
+        msg = (
+            f"Delete project '{path.name}' and ALL its contents?\n\n"
+            f"Location: {path}\n"
+            f"Approx size: {size_mb:.1f} MB\n\n"
+            f"This will permanently remove the source video (if downloaded), "
+            f"the compressed output, the audio cache, the silence cache, "
+            f"and the log file.\n\n"
+            f"This cannot be undone."
+        )
+        ok = messagebox.askyesno("Delete project?", msg, icon="warning")
+        if not ok:
+            return
+        try:
+            shutil.rmtree(path)
+            self._log(f"Deleted project: {path}")
+        except OSError as e:
+            self._log(f"[ERROR] Failed to delete {path}: {e}")
+            messagebox.showerror("Delete failed", f"Could not delete {path}:\n{e}")
+            return
+        self.config["recent_projects"] = [
+            p for p in self.config.get("recent_projects", [])
+            if p != path_str
+        ]
+        self._render_recent_projects()
+
+    def _dir_size_mb(self, path: Path) -> float:
+        """Approximate directory size in MB. Fast — sums stat().st_size."""
+        total = 0
+        try:
+            for p in path.rglob("*"):
+                if p.is_file():
+                    try:
+                        total += p.stat().st_size
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        return total / 1024 / 1024
+
+    def _open_in_explorer(self, path_str: str):
+        """Open the project directory in the platform's file manager."""
+        path = Path(path_str)
+        if not path.is_dir():
+            messagebox.showwarning(
+                "Folder not found",
+                f"Directory no longer exists:\n{path_str}",
+            )
+            self.config["recent_projects"] = [
+                p for p in self.config.get("recent_projects", [])
+                if p != path_str
+            ]
+            self._render_recent_projects()
+            return
+        try:
+            if os.name == "nt":
+                os.startfile(str(path))  # noqa: S606
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(path)])
+            else:
+                subprocess.Popen(["xdg-open", str(path)])
+        except OSError as e:
+            self._log(f"[ERROR] Could not open {path}: {e}")
 
     # ── UI Helpers ───────────────────────────────────────────────
 

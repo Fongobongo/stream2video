@@ -118,6 +118,15 @@ output_dir/
 
 Useful for keeping many videos in one `output_dir` without mixing their WAVs / logs / temp segments. Cache behavior is the same — just lives one level deeper. Local source files are never moved or copied.
 
+### Recent Projects (GUI)
+
+The GUI's left info panel has a **Recent Projects** section showing the 5 most recent project directories (those still on disk). Each entry has:
+
+- **Click on the name** — opens the folder in your file manager.
+- **Trash button (`X`)** — confirmation dialog ("This cannot be undone.") then recursively deletes the project dir, including the downloaded source (if applicable), the compressed output, the audio cache, the silence cache, and the log.
+
+Entries are pruned automatically when their directory no longer exists. The list persists in `_portable/settings.json`.
+
 ## Performance & Caching
 
 stream2video caches work in two layers so that re-running on the same video is fast, even with different `threshold` / `min_silence` / `margin` settings.

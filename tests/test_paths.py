@@ -4,9 +4,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from stream2video.paths import (
+    add_recent_project,
     ensure_project_dir,
     move_into_project,
     project_dir,
+    prune_recent_projects,
 )
 
 
@@ -110,3 +112,78 @@ class TestMoveIntoProject:
             result = move_into_project(src, project)
             assert project.is_dir()
             assert result == project / "video1.mp4"
+
+
+class TestAddRecentProject:
+    """add_recent_project() — MRU semantics, dedup, capped."""
+
+    def test_empty_list_gets_new_entry(self):
+        assert add_recent_project([], "/a/b") == ["/a/b"]
+
+    def test_new_path_goes_to_front(self):
+        result = add_recent_project(["/a", "/b", "/c"], "/d")
+        assert result == ["/d", "/a", "/b", "/c"]
+
+    def test_existing_path_moves_to_front_dedup(self):
+        result = add_recent_project(["/a", "/b", "/c"], "/b")
+        assert result == ["/b", "/a", "/c"]
+
+    def test_existing_first_path_is_noop(self):
+        result = add_recent_project(["/a", "/b"], "/a")
+        assert result == ["/a", "/b"]
+
+    def test_caps_at_max_keep(self):
+        result = add_recent_project(["/a", "/b", "/c", "/d"], "/e", max_keep=3)
+        assert result == ["/e", "/a", "/b"]
+
+    def test_default_max_keep_is_5(self):
+        result = add_recent_project(["/a", "/b", "/c", "/d", "/e"], "/f")
+        assert result == ["/f", "/a", "/b", "/c", "/d"]
+        assert len(result) == 5
+
+    def test_accepts_path_object(self):
+        with TemporaryDirectory() as tmp:
+            target = Path(tmp) / "video1"
+            target.mkdir()
+            result = add_recent_project([], target)
+            assert result == [str(target)]
+            assert all(isinstance(x, str) for x in result)
+
+    def test_does_not_mutate_input(self):
+        original = ["/a", "/b"]
+        add_recent_project(original, "/c")
+        assert original == ["/a", "/b"]
+
+
+class TestPruneRecentProjects:
+    """prune_recent_projects() — drop entries whose directory is gone."""
+
+    def test_drops_nonexistent_dirs(self):
+        with TemporaryDirectory() as tmp:
+            existing = Path(tmp) / "exists"
+            existing.mkdir()
+            result = prune_recent_projects([str(existing), "/nonexistent/path"])
+            assert result == [str(existing)]
+
+    def test_keeps_all_existing(self):
+        with TemporaryDirectory() as tmp:
+            a = Path(tmp) / "a"; a.mkdir()
+            b = Path(tmp) / "b"; b.mkdir()
+            result = prune_recent_projects([str(a), str(b)])
+            assert result == [str(a), str(b)]
+
+    def test_drops_non_string_entries(self):
+        with TemporaryDirectory() as tmp:
+            a = Path(tmp) / "a"; a.mkdir()
+            result = prune_recent_projects([str(a), None, 42, "/missing"])
+            assert result == [str(a)]
+
+    def test_empty_list_returns_empty(self):
+        assert prune_recent_projects([]) == []
+
+    def test_does_not_mutate_input(self):
+        with TemporaryDirectory() as tmp:
+            a = Path(tmp) / "a"; a.mkdir()
+            original = [str(a), "/nonexistent"]
+            prune_recent_projects(original)
+            assert original == [str(a), "/nonexistent"]

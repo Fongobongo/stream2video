@@ -22,6 +22,7 @@ user put it, but WAV / JSON / compressed / log / temp dirs all go into
 the per-video subdir.
 """
 from pathlib import Path
+from typing import List
 
 
 def project_dir(output_dir: Path, video_stem: str, per_video_dir: bool) -> Path:
@@ -70,3 +71,39 @@ def move_into_project(file_path: Path, project_dir: Path) -> Path:
     project_dir.mkdir(parents=True, exist_ok=True)
     file_path.rename(new_path)
     return new_path
+
+
+def add_recent_project(
+    recent: List[str], project_path, max_keep: int = 5,
+) -> List[str]:
+    """Return a new list with ``project_path`` at the front.
+
+    - Dedups: if the path is already in the list, it is moved to the front
+      (most-recently-used semantics), not duplicated.
+    - Caps at ``max_keep`` entries (oldest dropped).
+    - The input list is not modified.
+
+    Accepts either a str or a Path; always stores as str.
+    """
+    path_str = str(project_path)
+    out = [path_str]
+    for p in recent:
+        if str(p) != path_str:
+            out.append(str(p))
+        if len(out) >= max_keep:
+            break
+    return out
+
+
+def prune_recent_projects(recent: List[str]) -> List[str]:
+    """Return a new list with entries whose directory no longer exists removed.
+
+    Also drops non-string entries defensively. The input list is not modified.
+    """
+    out: List[str] = []
+    for p in recent:
+        if not isinstance(p, str):
+            continue
+        if Path(p).is_dir():
+            out.append(p)
+    return out

@@ -11,6 +11,7 @@ CONFIG_DEFAULTS = {
     "per_video_dir": False,
     "output_dir": "",
     "theme": "dark",
+    "recent_projects": [],
 }
 
 CONFIG_RANGES = {
