@@ -616,12 +616,17 @@ class Stream2VideoGUI(ctk.CTk):
 
             self._download_path = video_path if download_result.is_downloaded else None
             self._ui_update_file_info(video_path)
-            file_size_mb = video_path.stat().st_size // 1024 // 1024
+            src_size_bytes = video_path.stat().st_size
+            file_size_mb = src_size_bytes // 1024 // 1024
+            # Probe source duration synchronously so the final summary
+            # has both size and duration. ffprobe on a local file is fast
+            # (< 100ms typically); if it fails we show '?' in the summary.
+            src_duration = get_video_duration(video_path)
             if download_result.is_downloaded:
                 self._log(f"Downloaded: {input_raw} -> {video_path}")
             else:
                 self._log(f"Download skipped (file already on disk): {video_path}")
-            self._log(f"Size: {file_size_mb} MB")
+            self._log(f"Size: {self._fmt_size(src_size_bytes)}")
 
             if method == "batch" and file_size_mb > 4096:
                 self._log(
@@ -717,14 +722,44 @@ class Stream2VideoGUI(ctk.CTk):
 
             self._output_path = None
             self._ui_progress(1.0)
-            self._ui_status("Complete!", force=True)
-            self._log(
-                f"[SUCCESS] Output: {output_path} "
-                f"({output_path.stat().st_size // 1024 // 1024} MB)"
-            )
+
+            # ── Build the final summary ────────────────────────────
+            #   Source: 20.0 GB, 06:04:12
+            #   Output: 1.1 GB, 00:34:11
+            #   Pipeline: 23m 5s
+            dst_size_bytes = output_path.stat().st_size
+            dst_duration = keep_dur
             total_elapsed = time.monotonic() - self._pipeline_start
+            src_size_s = self._fmt_size(src_size_bytes)
+            dst_size_s = self._fmt_size(dst_size_bytes)
+            src_dur_s = self._fmt_clock_time(src_duration)
+            dst_dur_s = self._fmt_clock_time(dst_duration)
+            pipe_s = self._fmt_time(total_elapsed)
+
+            # Status line — fits on one line so the user sees the headline
+            # result without opening the popup.
+            self._ui_status(
+                f"Complete! {src_size_s} -> {dst_size_s}, "
+                f"{src_dur_s} -> {dst_dur_s} "
+                f"(completed in {pipe_s})",
+                force=True,
+            )
+
+            # Log — one [SUCCESS] line with all metrics; also a separator
+            # so the user can grep for it.
+            self._log("=" * 60)
+            self._log(f"[SUCCESS] Output: {output_path}")
+            self._log(
+                f"  Size:     {src_size_s} -> {dst_size_s}"
+            )
+            self._log(
+                f"  Duration: {src_dur_s} -> {dst_dur_s}"
+            )
+            self._log(f"  Pipeline: {pipe_s}")
+            self._log("=" * 60)
+
             self.after(0, lambda: self.lbl_overall.configure(
-                text=f"Total: {self._fmt_time(total_elapsed)}"
+                text=f"Total: {pipe_s}"
             ))
 
             # Delete downloaded source if requested
@@ -736,12 +771,15 @@ class Stream2VideoGUI(ctk.CTk):
                     self._log(f"[WARN] Could not delete source: {e}")
             self._download_path = None
 
-            # Show completion popup
+            # Show completion popup — full breakdown for the user
+            # to copy/screenshot. The source metrics are highlighted
+            # so the compression ratio is obvious at a glance.
             self.after(0, lambda: messagebox.showinfo(
                 "Complete",
                 f"Video saved to:\n{output_path}\n\n"
-                f"Size: {output_path.stat().st_size // 1024 // 1024} MB\n"
-                f"Duration: {self._fmt_time(keep_dur)}"
+                f"Source:  {src_size_s}, {src_dur_s}\n"
+                f"Output:  {dst_size_s}, {dst_dur_s}\n\n"
+                f"Pipeline: {pipe_s}"
             ))
 
         except (CancelledError, SilenceCancelledError):
@@ -1003,6 +1041,21 @@ class Stream2VideoGUI(ctk.CTk):
         if m:
             return f"{m}m {s}s"
         return f"{s}s"
+
+    @staticmethod
+    def _fmt_clock_time(secs: Optional[float]) -> str:
+        """Format a duration as HH:MM:SS (or D:HH:MM:SS if >= 24h),
+        zero-padded. Used in the final summary so '06:04:12 -> 00:34:11'
+        is scannable. Returns '?' for None (e.g. ffprobe failed)."""
+        if secs is None or secs < 0:
+            return "?"
+        total = int(secs)
+        d, r = divmod(total, 86400)
+        h, r = divmod(r, 3600)
+        m, s = divmod(r, 60)
+        if d:
+            return f"{d}:{h:02d}:{m:02d}:{s:02d}"
+        return f"{h:02d}:{m:02d}:{s:02d}"
 
     # ── Settings Persistence ─────────────────────────────────────
 
