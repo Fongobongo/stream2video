@@ -578,6 +578,7 @@ class Stream2VideoGUI(ctk.CTk):
 
                 silence_segments = detect_silence(
                     video_path, **config,
+                    output_dir=output_dir,
                     progress_callback=silence_prog,
                     cancel_callback=lambda: self._cancel_event.is_set(),
                 )
