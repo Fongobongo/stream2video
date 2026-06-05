@@ -10,7 +10,7 @@ Downloads VOD from YouTube/Twitch, detects silence via audio analysis, cuts out 
 - **Cut methods**: `segment` (fast, per-segment encode + concat demuxer) or `batch` (frame-exact, select/aselect filter)
 - **Hardware encoders**: NVIDIA NVENC, AMD AMF, Windows Media Foundation
 - **Smart retry** — falls back to libx264 if hardware encoder fails
-- **Silence cache** — skips re-detection if parameters haven't changed
+- **Two-layer cache** — audio-extract WAV + silence-segments, with safe fallback on broken timestamps
 - **Progress bars** + detailed logging
 - **Cross-platform GUI** (CustomTkinter)
 - **Portable mode** — self-contained `_portable/` with venv + ffmpeg
@@ -99,6 +99,53 @@ margin: 0.15
 | `threshold` (dB) | -60 to -5 | -60.0 | Audio below this level = silence |
 | `min_silence` (s) | 0.1 to 60 | 2.0 | Minimum silence duration to cut |
 | `margin` (s) | -3 to 5 | 0.5 | How much to shrink silence zones. Positive = shrink silence (keep more audio around phrases). Negative = expand silence (cut more aggressively). `0` = no adjustment. |
+
+## Performance & Caching
+
+stream2video caches work in two layers so that re-running on the same video is fast, even with different `threshold` / `min_silence` / `margin` settings.
+
+### Two cache files (in `{output_dir}/`)
+
+| File | Key | What it stores |
+|------|-----|----------------|
+| `{stem}_audio.wav` | Source video mtime | Mono 16 kHz PCM audio extracted from the video (~10 MB per hour). Reused for any silence-detect parameters, and ready-made input for Phase 2 STT. |
+| `{stem}_silence_cache.json` | `(threshold, min_silence, margin)` | Parsed silence segments. Skip re-running ffmpeg entirely when parameters haven't changed. |
+
+### What happens on each run
+
+**1st run, new video** (WAV cache miss, silence cache miss)
+1. Extract audio to `{stem}_audio.wav` (with `-copyts` to preserve original timestamps).
+2. Run ffmpeg `silencedetect` on the **WAV** (fast — audio-only, small file).
+3. **Sample-verify**: run ffmpeg `silencedetect` on the **first 60 s of the original video** (with `-t 60`) and compare against the corresponding window of the WAV-based result.
+   - Match → trust the WAV result, keep the cache.
+   - Mismatch (rare — broken timestamps, unexpected `itsoffset`, etc.) → delete the WAV, fall back to a full direct detection on the video. A `WARNING` is logged naming the mismatch.
+
+**2nd+ run, same video, same parameters** (WAV + silence cache hit)
+- Load silence segments straight from JSON. No ffmpeg runs. **~instant.**
+
+**2nd+ run, same video, different `threshold` / `min_silence`** (WAV hit, silence cache miss)
+- Skip audio extract, skip sample-verify, skip video decode.
+- Run ffmpeg `silencedetect` on the cached WAV only.
+- Save the new segments to JSON.
+
+### Typical speedups
+
+On a 30 min 17 MB test video (lavfi sine + black):
+
+| Run | Time | vs A-only |
+|-----|------|-----------|
+| 1st (cache miss) | 4.7 s | 0.74× |
+| 2nd+ on cached WAV (different `threshold`) | 0.6 s | **10× faster** |
+| A-only baseline (no WAV cache) | 6.4 s | 1.0× |
+
+The first run costs slightly less than A-only because silencedetect on a small WAV is faster than on a full video even with one extract. Subsequent runs skip the expensive video decode entirely.
+
+### Forcing a fresh run
+
+- **GUI**: enable the `Force` checkbox.
+- **CLI**: pass `-f` / `--force`.
+
+This skips the silence-segment cache (the WAV is still kept and reused if its mtime is still valid).
 
 ## GUI
 
