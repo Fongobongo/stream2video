@@ -43,6 +43,25 @@ from stream2video.utils import get_active_process, get_video_duration
 logger = logging.getLogger("stream2video.gui")
 
 
+# Max length of the displayed name in a Recent Projects row. Long
+# filenames (e.g. "<id>_compressed_4_30_<more>") are truncated with
+# an ellipsis so the column doesn't grow to fit the longest name.
+# The full name is still available on hover via the tooltip.
+_RECENT_NAME_MAX = 24
+
+
+def _truncate(text: str, max_len: int) -> str:
+    """Truncate ``text`` to ``max_len`` chars, appending an ellipsis if cut.
+
+    If ``text`` is shorter than or equal to ``max_len``, it is returned
+    unchanged. Otherwise the first ``max_len - 1`` characters are kept
+    and "…" is appended (so the result is exactly ``max_len`` chars).
+    """
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1] + "…"
+
+
 class _Tooltip:
     """A hover tooltip for any tkinter/ctk widget."""
 
@@ -735,7 +754,10 @@ class Stream2VideoGUI(ctk.CTk):
             row = ctk.CTkFrame(self.recent_frame, fg_color="transparent")
             row.pack(fill="x", padx=2, pady=1)
             display = Path(path_str).name or path_str
-            lbl = ctk.CTkLabel(row, text=display, anchor="w", cursor="hand2")
+            lbl = ctk.CTkLabel(
+                row, text=_truncate(display, _RECENT_NAME_MAX),
+                anchor="w", cursor="hand2",
+            )
             lbl.pack(side="left", fill="x", expand=True, padx=(3, 2))
             lbl.bind(
                 "<Button-1>",

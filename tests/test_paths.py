@@ -187,3 +187,36 @@ class TestPruneRecentProjects:
             original = [str(a), "/nonexistent"]
             prune_recent_projects(original)
             assert original == [str(a), "/nonexistent"]
+
+
+class TestTruncateRecentName:
+    """_truncate — display-name truncation for Recent Projects rows."""
+
+    def test_short_text_unchanged(self):
+        from stream2video.gui import _truncate, _RECENT_NAME_MAX
+        for text in ("", "a", "video", "x" * _RECENT_NAME_MAX):
+            assert _truncate(text, _RECENT_NAME_MAX) == text
+
+    def test_long_text_truncated_with_ellipsis(self):
+        from stream2video.gui import _truncate, _RECENT_NAME_MAX
+        text = "x" * (_RECENT_NAME_MAX + 10)
+        result = _truncate(text, _RECENT_NAME_MAX)
+        assert len(result) == _RECENT_NAME_MAX
+        assert result.endswith("\u2026")  # unicode horizontal ellipsis
+        assert result == "x" * (_RECENT_NAME_MAX - 1) + "\u2026"
+
+    def test_realistic_long_filename(self):
+        """The user's actual filename pattern is <id>_compressed_<n>_<m>."""
+        from stream2video.gui import _truncate
+        long_name = "v2786949142_compressed_4_30_extra_long_suffix.mp4"
+        truncated = _truncate(long_name, 24)
+        assert len(truncated) == 24
+        # The ellipsis replaces the file extension — that's fine since
+        # the tooltip shows the full path; the column doesn't grow.
+        assert truncated.endswith("\u2026")
+
+    def test_custom_max_len(self):
+        from stream2video.gui import _truncate
+        assert _truncate("abcdef", 3) == "ab\u2026"
+        assert _truncate("abc", 3) == "abc"
+        assert _truncate("", 3) == ""
