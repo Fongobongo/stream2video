@@ -182,6 +182,14 @@ class Stream2VideoGUI(ctk.CTk):
 
         ctk.CTkFrame(info_frame, height=2, fg_color=("gray70", "gray30")).pack(fill="x", padx=5, pady=6)
 
+        # Recent Projects section
+        ctk.CTkLabel(info_frame, text="Recent Projects", anchor="w").pack(fill="x", padx=5, pady=(0, 2))
+        self.recent_frame = ctk.CTkFrame(info_frame, fg_color="transparent")
+        self.recent_frame.pack(fill="x", padx=2, pady=(0, 4))
+        self._render_recent_projects()
+
+        ctk.CTkFrame(info_frame, height=2, fg_color=("gray70", "gray30")).pack(fill="x", padx=5, pady=(6, 4))
+
         ctk.CTkLabel(info_frame, text="Theme:", anchor="w").pack(fill="x", padx=5, pady=(0, 1))
         self.combo_theme = ctk.CTkComboBox(info_frame, values=["dark", "light", "system"], state="readonly",
                                              command=self._on_theme_change)
@@ -190,13 +198,6 @@ class Stream2VideoGUI(ctk.CTk):
 
         ctk.CTkButton(info_frame, text="Restore defaults", command=self._restore_defaults).pack(fill="x", padx=5, pady=(0, 4))
         ctk.CTkButton(info_frame, text="Copy CLI command", command=self._copy_cli_command).pack(fill="x", padx=5, pady=(0, 4))
-
-        # Recent Projects section
-        ctk.CTkFrame(info_frame, height=2, fg_color=("gray70", "gray30")).pack(fill="x", padx=5, pady=(6, 4))
-        ctk.CTkLabel(info_frame, text="Recent Projects", anchor="w").pack(fill="x", padx=5, pady=(0, 2))
-        self.recent_frame = ctk.CTkFrame(info_frame, fg_color="transparent")
-        self.recent_frame.pack(fill="x", padx=2, pady=(0, 4))
-        self._render_recent_projects()
 
         # ── Center: Controls ──
         ctrl_frame = ctk.CTkFrame(self)
