@@ -136,6 +136,7 @@ class Stream2VideoGUI(ctk.CTk):
         self._output_path: Optional[Path] = None
         self._download_path: Optional[Path] = None
         self._last_status_update: float = 0.0
+        self._pipeline_start: Optional[float] = None
 
         self._load_settings()
         ctk.set_appearance_mode(self.config["theme"])
@@ -323,9 +324,19 @@ class Stream2VideoGUI(ctk.CTk):
         self.lbl_status = ctk.CTkLabel(action_frame, text="", anchor="w", width=500)
         self.lbl_status.pack(side="right", fill="x", expand=True, padx=(8, 0))
 
-        self.progress = ctk.CTkProgressBar(ctrl_frame, mode="determinate")
+        self.bottom_frame = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
+        self.bottom_frame.pack(fill="x", padx=5, pady=(0, 6))
+        self.bottom_frame.grid_columnconfigure(0, weight=3)
+        self.bottom_frame.grid_columnconfigure(1, weight=2)
+        self.progress = ctk.CTkProgressBar(
+            self.bottom_frame, mode="determinate", height=10,
+        )
         self.progress.set(0)
-        self.progress.pack(fill="x", padx=5, pady=(0, 6))
+        self.progress.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.lbl_overall = ctk.CTkLabel(
+            self.bottom_frame, text="", anchor="e", width=180,
+        )
+        self.lbl_overall.grid(row=0, column=1, sticky="ew")
 
         # ── Right: Log Panel ──
         log_frame = ctk.CTkFrame(self)
@@ -538,11 +549,17 @@ class Stream2VideoGUI(ctk.CTk):
         else:
             self.btn_start.configure(state="normal", text="Start")
             self.btn_cancel.configure(state="disabled")
+            # Clear the overall-time anchor so a stale label is not shown
+            # on the next pipeline's idle state.
+            self._pipeline_start = None
+            self.after(0, lambda: self.lbl_overall.configure(text=""))
 
     def _pipeline_worker(
         self, input_raw: str, output_dir: Path, method: str, encoder: str,
         force: bool, per_video_dir: bool = False,
     ):
+        # Wall-clock anchor for the overall-time label.
+        self._pipeline_start = time.monotonic()
         try:
             output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -550,10 +567,12 @@ class Stream2VideoGUI(ctk.CTk):
             self._ui_progress(0.0)
             self._ui_status("Step 1/3: Downloading / resolving video...", force=True)
             self._log("Phase 1/3: Downloading / resolving video...")
+            self._ui_overall_elapsed_only()
 
             def dl_prog(frac: float, text: str):
                 self._ui_progress(frac * 0.05)
                 self._ui_status(f"Step 1/3: Downloading... {text}")
+                self._ui_overall_elapsed_only()
 
             try:
                 download_result = download(
@@ -630,13 +649,13 @@ class Stream2VideoGUI(ctk.CTk):
 
                 def silence_prog(f: float):
                     elapsed = time.monotonic() - silence_start
-                    eta = elapsed / f - elapsed if f > 0.01 else 0
-                    total = elapsed + eta
+                    remaining = elapsed / f - elapsed if f > 0.01 else 0
                     self._ui_progress(0.05 + f * 0.35)
                     self._ui_status(
                         f"Step 2/3: Silence... {f * 100:.0f}% "
-                        f"({self._fmt_time(elapsed)}/{self._fmt_time(total)})"
+                        f"({self._fmt_time(elapsed)}/{self._fmt_time(remaining)})"
                     )
+                    self._ui_overall(elapsed, remaining, more_phases=True)
 
                 silence_segments = detect_silence(
                     video_path, **config,
@@ -673,13 +692,14 @@ class Stream2VideoGUI(ctk.CTk):
 
             def concat_prog(f: float):
                 elapsed = time.monotonic() - cut_start
-                eta = elapsed / f - elapsed if f > 0.01 else 0
-                total = elapsed + eta
+                remaining = elapsed / f - elapsed if f > 0.01 else 0
                 self._ui_progress(0.4 + f * 0.6)
                 self._ui_status(
                     f"Step 3/3: Cutting... {f * 100:.0f}% "
-                    f"({self._fmt_time(elapsed)}/{self._fmt_time(total)})"
+                    f"({self._fmt_time(elapsed)}/{self._fmt_time(remaining)})"
                 )
+                # Phase 3 is the last one — no "more phases" after it.
+                self._ui_overall(elapsed, remaining, more_phases=False)
 
             cut_and_concat(
                 video_path, silence_segments, output_path,
@@ -694,6 +714,10 @@ class Stream2VideoGUI(ctk.CTk):
                 f"[SUCCESS] Output: {output_path} "
                 f"({output_path.stat().st_size // 1024 // 1024} MB)"
             )
+            total_elapsed = time.monotonic() - self._pipeline_start
+            self.after(0, lambda: self.lbl_overall.configure(
+                text=f"Total: {self._fmt_time(total_elapsed)}"
+            ))
 
             # Delete downloaded source if requested
             if bool(self.chk_delete.get()) and self._download_path is not None:
@@ -874,6 +898,37 @@ class Stream2VideoGUI(ctk.CTk):
 
     def _ui_progress(self, value: float):
         self.after(0, lambda: self.progress.set(max(0.0, min(1.0, value))))
+
+    def _ui_overall(self, phase_elapsed: float, phase_remaining: float,
+                     more_phases: bool):
+        """Update the overall-time label next to the progress bar.
+
+        Shows wall-clock total elapsed since the pipeline started, plus
+        an ETA for the current phase. If more phases follow, appends " + ?"
+        to make clear that the other phases' durations are unknown.
+        During phase 1 (no progress callback) the label is updated with
+        just elapsed (remaining="?").
+        """
+        if not hasattr(self, "_pipeline_start") or self._pipeline_start is None:
+            return
+        total_elapsed = time.monotonic() - self._pipeline_start
+        if phase_remaining <= 0:
+            tail = "?" if more_phases else "—"
+        else:
+            tail = f"~{self._fmt_time(phase_remaining)} + ?" if more_phases \
+                else f"~{self._fmt_time(phase_remaining)}"
+        text = f"Elapsed: {self._fmt_time(total_elapsed)} | Remaining: {tail}"
+        self.after(0, lambda: self.lbl_overall.configure(text=text))
+
+    def _ui_overall_elapsed_only(self):
+        """Update the overall label with only elapsed time (no remaining
+        estimate available — used during phase 1 download when progress
+        is indeterminate)."""
+        if not hasattr(self, "_pipeline_start") or self._pipeline_start is None:
+            return
+        total_elapsed = time.monotonic() - self._pipeline_start
+        text = f"Elapsed: {self._fmt_time(total_elapsed)} | Remaining: ?"
+        self.after(0, lambda: self.lbl_overall.configure(text=text))
 
     def _ui_status(self, text: str, force: bool = False):
         now = time.monotonic()
