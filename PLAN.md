@@ -199,7 +199,7 @@ presets:
   │   ├── download.py    # yt-dlp wrapper (cancellable)
   │   ├── silence.py     # ffmpeg silencedetect + cache
   │   └── concat.py      # cut+concat (segment/batch methods, fallback)
-  ├── tests/             # 60 unit + integration tests
+  ├── tests/             # 90 unit + integration tests
   └── _portable/         # gitignored: venv + ffmpeg + settings.json
   ```
   *(Phase 2 добавит: `transcribe.py`, `fillers.py`, `content.py`, `subtitles.py`)*
@@ -272,14 +272,13 @@ presets:
 
 ### Этап 8 — Тесты и edge cases — ✅ (частично)
 
-- [x] **60 unit + integration tests** (pytest, mocks)
+- [x] **90 unit + integration tests** (pytest, mocks)
 - [x] `tests/test_download.py` — URL validation, local file passthrough, cancel abort, classify_error mapping, find_downloaded_file glob fallback
-- [x] `tests/test_silence.py` — `SilenceSegment`, `_apply_margin` edge cases, validation
+- [x] `tests/test_silence.py` — `SilenceSegment`, `_apply_margin` edge cases, validation, `_sample_segments_match` (7 cases: start-only compare, itsoffset shift, boundary clip, count mismatch, tolerance), `_segments_match` (8 cases), WAV cache path/validity (5 cases), `TestWavCacheFallback` (4 cases: cache hit, sample-verify pass, sample-verify mismatch + full A fallback, no output_dir), `TestEndToEndRealFfmpeg` (3 cases: D matches A, WAV cache reused, long-silence crossing sample boundary)
 - [x] `tests/test_integration.py` — `generate_keep_segments` (8 cases: clamp/drop/merge/empty)
 - [x] **НЕ покрыто тестами** (документировано как known gap):
-  - Реальный `ffmpeg` вызов (нет CI-инфраструктуры, мокать subprocess.Popen — overengineering)
   - GUI (нет pytest-qt / tkinter-тестов)
-  - end-to-end с реальным видео (требует ffmpeg + большой файл)
+  - end-to-end с реальным (не lavfi) видео — частично покрыто, реальный stream-файл требует CI infra
 
 ### Этап 9 — Документация и релиз — ✅
 
