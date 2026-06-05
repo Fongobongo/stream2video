@@ -752,7 +752,12 @@ class Stream2VideoGUI(ctk.CTk):
             del_btn.pack(side="right", padx=(0, 3))
 
     def _add_to_recent_projects(self, project_path):
-        """Add or move ``project_path`` to the top of the recent list (max 5)."""
+        """Add or move ``project_path`` to the top of the recent list (max 5).
+
+        Also persists to settings.json eagerly so a GUI crash/kill does not
+        lose the list. (Final save still happens in _on_close, but we
+        want every pipeline run's project to survive a restart.)
+        """
         if not project_path:
             return
         path_str = str(project_path)
@@ -760,6 +765,10 @@ class Stream2VideoGUI(ctk.CTk):
             self.config.get("recent_projects", []), path_str,
         )
         self._render_recent_projects()
+        try:
+            self._save_settings()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Failed to save settings after adding recent project: %s", e)
 
     def _delete_recent_project(self, path_str: str):
         """Confirm with the user, then recursively delete the project dir."""
