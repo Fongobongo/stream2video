@@ -1,4 +1,15 @@
-"""Silence detection module using ffmpeg silencedetect filter."""
+"""Silence detection module using ffmpeg silencedetect filter.
+
+Pipeline (D — fast, audio-only):
+  1. Extract audio to WAV (mono 16kHz, -fflags +copyts to preserve timestamps).
+  2. Run ffmpeg silencedetect on the WAV.
+  3. Compare with a "verification" run directly on the video (A path) to detect
+     sources with broken timestamps; fall back to A's result on mismatch.
+  4. Cache the WAV keyed by source mtime so subsequent runs skip the extract.
+
+The A path (direct on video) remains available as `output_dir=None` for callers
+that don't want WAV caching, and is the canonical result used on mismatch.
+"""
 
 import json
 import logging
@@ -46,6 +57,15 @@ class SilenceSegment:
 
 _SILENCE_POLL_INTERVAL = 0.5
 _SILENCE_TIMEOUT = 36000
+_SEGMENT_MATCH_TOLERANCE = 0.05
+
+_NUM = r"\d+(?:[.,]\d+)?"
+_SILENCE_START_RE = re.compile(rf"silence_start:\s*({_NUM})")
+_SILENCE_END_RE = re.compile(rf"silence_end:\s*({_NUM})")
+
+
+def _to_float(s: str) -> float:
+    return float(s.replace(",", "."))
 
 
 def detect_silence(
@@ -53,11 +73,18 @@ def detect_silence(
     threshold: float = -20,
     min_silence: float = 0.5,
     margin: float = -0.5,
+    output_dir: Optional[Path] = None,
     progress_callback: Optional[Callable[[float], None]] = None,
     cancel_callback: Optional[Callable[[], bool]] = None,
 ) -> List[SilenceSegment]:
     """
     Detect silence segments using ffmpeg silencedetect filter.
+
+    When `output_dir` is provided, the audio is first extracted to a cached WAV
+    file ({stem}_audio.wav) and silencedetect runs on the WAV. The first time
+    the WAV is created (or whenever the source mtime is newer), a "verification"
+    pass also runs silencedetect directly on the original video so that sources
+    with broken timestamps fall back to the canonical A-path result.
 
     Args:
         video_path: Path to video file
@@ -67,6 +94,10 @@ def detect_silence(
                 Positive = shrink silence (keep more audio around phrases).
                 Negative = expand silence (cut more aggressively).
                 0 = no adjustment.
+        output_dir: If provided, enable the cached-WAV pipeline. The WAV is created
+                    on the first run (or whenever the source mtime is newer) and
+                    re-used on subsequent runs. If None, silencedetect runs
+                    directly on the video (A path, no WAV caching).
         progress_callback: Optional callback with progress fraction [0, 1]
         cancel_callback: Optional callable returning True to abort; checked while ffmpeg runs.
 
@@ -85,16 +116,75 @@ def detect_silence(
     if not -3 <= margin <= 5:
         raise ValueError(f"Margin must be in range [-3, 5], got {margin}")
 
-    # Convert dB threshold to linear noise level
-    noise = 10 ** (threshold / 20)
-
-    # Get video duration for progress reporting
     duration = _probe_duration(video_path)
+
+    if output_dir is not None:
+        wav_path = _get_wav_cache_path(video_path, output_dir)
+        if _is_wav_cache_valid(wav_path, video_path):
+            logger.debug(f"Using cached WAV: {wav_path}")
+            segments = _run_silencedetect(
+                wav_path, threshold, min_silence, duration,
+                progress_callback, cancel_callback, "WAV cache",
+            )
+        else:
+            _extract_audio_wav(video_path, wav_path, cancel_callback)
+            segments_D = _run_silencedetect(
+                wav_path, threshold, min_silence, duration,
+                None, cancel_callback, "WAV",
+            )
+            segments_A = _run_silencedetect(
+                video_path, threshold, min_silence, duration,
+                progress_callback, cancel_callback, "video",
+            )
+            if _segments_match(segments_D, segments_A, _SEGMENT_MATCH_TOLERANCE):
+                logger.debug(
+                    f"WAV detection matches video detection "
+                    f"({len(segments_D)} segments) — keeping WAV cache"
+                )
+                segments = segments_D
+            else:
+                logger.warning(
+                    f"WAV detection did not match video detection "
+                    f"(D: {len(segments_D)}, A: {len(segments_A)} segments, "
+                    f"tolerance={_SEGMENT_MATCH_TOLERANCE}s). "
+                    f"Source may have broken timestamps — falling back to direct "
+                    f"detection. WAV cache invalidated."
+                )
+                wav_path.unlink(missing_ok=True)
+                segments = segments_A
+    else:
+        segments = _run_silencedetect(
+            video_path, threshold, min_silence, duration,
+            progress_callback, cancel_callback, "video",
+        )
+
+    segments = _apply_margin(segments, margin)
+
+    if not segments:
+        logger.info("No silence segments detected (video may have no audio track)")
+
+    return segments
+
+
+def _run_silencedetect(
+    input_path: Path,
+    threshold: float,
+    min_silence: float,
+    duration: Optional[float],
+    progress_callback: Optional[Callable[[float], None]],
+    cancel_callback: Optional[Callable[[], bool]],
+    label: str,
+) -> List[SilenceSegment]:
+    """Run ffmpeg silencedetect on `input_path` and return parsed segments.
+
+    `label` is used for log/error messages ("WAV", "video", "WAV cache").
+    """
+    noise = 10 ** (threshold / 20)
 
     cmd = [
         "ffmpeg",
         "-progress", "pipe:1",
-        "-i", str(video_path),
+        "-i", str(input_path),
         "-af", f"silencedetect=noise={noise}:duration={min_silence}",
         "-f", "null",
         "-",
@@ -102,14 +192,11 @@ def detect_silence(
 
     try:
         logger.info(
-            f"Running ffmpeg silencedetect: threshold={threshold}dB ({noise}), "
-            f"min_silence={min_silence}s, margin={margin}s"
+            f"Running ffmpeg silencedetect on {label}: "
+            f"threshold={threshold}dB ({noise}), min_silence={min_silence}s"
         )
-
         process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            bufsize=-1,
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=-1,
             **no_window_kwargs(),
         )
     except FileNotFoundError as e:
@@ -160,13 +247,7 @@ def detect_silence(
             error_msg = stderr_text or "Unknown error"
             raise SilenceDetectionError(f"ffmpeg silencedetect failed: {error_msg}")
 
-        silence_segments = _parse_ffmpeg_output("".join(stderr_lines))
-        silence_segments = _apply_margin(silence_segments, margin)
-
-        if not silence_segments:
-            logger.info("No silence segments detected (video may have no audio track)")
-
-        return silence_segments
+        return _parse_ffmpeg_output("".join(stderr_lines))
 
     except subprocess.TimeoutExpired as e:
         process.kill()
@@ -181,19 +262,98 @@ def detect_silence(
         process.stderr.close()
 
 
+def _extract_audio_wav(
+    video_path: Path,
+    wav_path: Path,
+    cancel_callback: Optional[Callable[[], bool]] = None,
+) -> None:
+    """Extract audio from `video_path` to a 16kHz mono PCM WAV at `wav_path`.
+
+    Uses `-fflags +copyts` to preserve input PTS so that timestamps in the WAV
+    match the original video's timeline (required for silence detection results
+    to align with the video when used as cut points in cut_and_concat).
+
+    The WAV is the cached artifact for the D (audio-only) path. On broken-PTS
+    sources the verification pass at the call site detects the mismatch and
+    deletes this file.
+    """
+    wav_path.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-copyts",
+        "-i", str(video_path),
+        "-vn",
+        "-ar", "16000",
+        "-ac", "1",
+        "-c:a", "pcm_s16le",
+        str(wav_path),
+    ]
+
+    try:
+        logger.info(
+            f"Extracting audio: {video_path.name} → {wav_path.name} "
+            f"(16kHz mono pcm_s16le, -fflags +copyts)"
+        )
+        process = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, bufsize=-1,
+            **no_window_kwargs(),
+        )
+    except FileNotFoundError as e:
+        raise SilenceDetectionError("ffmpeg not found in PATH") from e
+
+    set_active_process(process)
+    stderr_lines: List[str] = []
+    wait_for_drain = drain_stderr_lines(process.stderr, stderr_lines)
+    drain_done = False
+    cancelled = threading.Event()
+
+    def _cancel_monitor():
+        if not cancel_callback:
+            return
+        while not cancelled.wait(_SILENCE_POLL_INTERVAL):
+            if process.poll() is not None:
+                return
+            if cancel_callback():
+                process.kill()
+                cancelled.set()
+                return
+
+    cancel_thread = threading.Thread(target=_cancel_monitor, daemon=True)
+    cancel_thread.start()
+
+    try:
+        if cancelled.is_set():
+            raise SilenceCancelledError("audio extraction cancelled")
+        process.wait(timeout=_SILENCE_TIMEOUT)
+        wait_for_drain()
+        drain_done = True
+
+        if process.returncode != 0:
+            stderr_text = "".join(stderr_lines)
+            error_msg = stderr_text or "Unknown error"
+            wav_path.unlink(missing_ok=True)
+            raise SilenceDetectionError(f"ffmpeg extract failed: {error_msg}")
+    except subprocess.TimeoutExpired as e:
+        process.kill()
+        wav_path.unlink(missing_ok=True)
+        raise SilenceDetectionError(f"ffmpeg extract timeout after {e.timeout}s") from e
+    finally:
+        if not drain_done:
+            wait_for_drain()
+        cancelled.set()
+        cancel_thread.join(timeout=1)
+        set_active_process(None)
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+
+
 def _parse_ffmpeg_output(stderr: str) -> List[SilenceSegment]:
     """Parse ffmpeg silencedetect output."""
-    segments = []
-    # Match an integer or a single-decimal (dot or comma) number, not malformed "1.2.3"
-    num = r"\d+(?:[.,]\d+)?"
-    start_pattern = re.compile(rf"silence_start:\s*({num})")
-    end_pattern = re.compile(rf"silence_end:\s*({num})")
-
-    def _to_float(s: str) -> float:
-        return float(s.replace(",", "."))
-
-    starts = [_to_float(m.group(1)) for m in start_pattern.finditer(stderr)]
-    ends = [_to_float(m.group(1)) for m in end_pattern.finditer(stderr)]
+    starts = [_to_float(m.group(1)) for m in _SILENCE_START_RE.finditer(stderr)]
+    ends = [_to_float(m.group(1)) for m in _SILENCE_END_RE.finditer(stderr)]
 
     if len(starts) != len(ends):
         if len(starts) > len(ends):
@@ -207,10 +367,33 @@ def _parse_ffmpeg_output(stderr: str) -> List[SilenceSegment]:
             f"dropping {dropped} {dropped_kind} — ffmpeg output may be truncated"
         )
 
-    for start, end in zip(starts, ends):
-        segments.append(SilenceSegment(start, end))
+    return [SilenceSegment(start, end) for start, end in zip(starts, ends)]
 
-    return segments
+
+def _segments_match(
+    seg_a: List[SilenceSegment],
+    seg_b: List[SilenceSegment],
+    tolerance: float = _SEGMENT_MATCH_TOLERANCE,
+) -> bool:
+    """True if two segment lists are equivalent within `tolerance` seconds.
+
+    Used to verify that the WAV-based detection (D) matches the video-based
+    detection (A). If they differ, the source likely has broken timestamps and
+    the caller should fall back to A's result and invalidate the WAV cache.
+    """
+    if len(seg_a) != len(seg_b):
+        return False
+
+    sorted_a = sorted([(s.start, s.end) for s in seg_a])
+    sorted_b = sorted([(s.start, s.end) for s in seg_b])
+
+    for (a_start, a_end), (b_start, b_end) in zip(sorted_a, sorted_b):
+        if abs(a_start - b_start) > tolerance:
+            return False
+        if abs(a_end - b_end) > tolerance:
+            return False
+
+    return True
 
 
 def _apply_margin(segments: List[SilenceSegment], margin: float) -> List[SilenceSegment]:
@@ -246,6 +429,17 @@ def _apply_margin(segments: List[SilenceSegment], margin: float) -> List[Silence
 
     merged.append(current)
     return merged
+
+
+def _get_wav_cache_path(video_path: Path, output_dir: Path) -> Path:
+    return output_dir / f"{video_path.stem}_audio.wav"
+
+
+def _is_wav_cache_valid(wav_path: Path, video_path: Path) -> bool:
+    """WAV cache is valid if it exists and is at least as new as the source video."""
+    if not wav_path.exists():
+        return False
+    return wav_path.stat().st_mtime >= video_path.stat().st_mtime
 
 
 def _get_cache_path(video_path: Path, output_dir: Path) -> Path:

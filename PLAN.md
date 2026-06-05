@@ -218,14 +218,24 @@ presets:
 
 ### Этап 2 — Silence detection (`silence.py`) + cut/concat (`concat.py`) — ✅
 
-- [x] Функция `detect_silence(video_path, threshold, min_silence, margin, ...) -> List[SilenceSegment]`
+- [x] Функция `detect_silence(video_path, threshold, min_silence, margin, output_dir=None, ...) -> List[SilenceSegment]`
 - [x] **Решение:** `ffmpeg silencedetect` filter через subprocess (НЕ auto-editor, см. §2 отступление). Причина: меньше зависимостей, проще тестировать, нет STT-оверхеда для Phase 1.
   ```
+  # A path (output_dir=None) — direct detection on video
   ffmpeg -progress pipe:1 -i input.mp4 \
     -af silencedetect=noise={10^(threshold/20)}:duration={min_silence} \
     -f null -
+
+  # D path (output_dir=...) — extract WAV first, then detect on it
+  ffmpeg -y -copyts -i input.mp4 -vn -ar 16000 -ac 1 -c:a pcm_s16le {stem}_audio.wav
+  ffmpeg -progress pipe:1 -i {stem}_audio.wav \
+    -af silencedetect=noise={10^(threshold/20)}:duration={min_silence} \
+    -f null -
   ```
-- [x] Захват stderr парсится регулярками (`silence_start`/`silence_end`)
+- [x] **D path с verification fallback:** на первом запуске (или при инвалидации WAV) D и A запускаются параллельно. Если результаты совпадают (±0.05s) — WAV кешируется, используется D. Если нет (broken PTS, itsoffset) — WAV удаляется, используется A. Гарантирует identical output к pre-D поведению на edge-cases.
+- [x] WAV кеш: `{output_dir}/{stem}_audio.wav` (~10MB/час, mono 16kHz s16le) keyed by source mtime. Reused on subsequent runs (включая разные threshold/min_silence/margin). Также готовый артефакт для Phase 2 STT.
+- [x] `-copyts` обязателен при extract — иначе ffmpeg нормализует PTS к 0 и timestamps в WAV расходятся с video (типичный баг itsoffset, silent corruption).
+- [x] Захват stderr парсится регулярками (`silence_start`/`silence_end` — patterns hoisted to module level)
 - [x] Margin apply + merge overlapping segments (`_apply_margin`)
 - [x] Кеш в `{output_dir}/{stem}_silence_cache.json` (по `(threshold, min_silence, margin)`, mtime check)
 - [x] `cut_and_concat()` с двумя методами:
@@ -234,7 +244,7 @@ presets:
 - [x] Hardware encoder support: NVENC / AMF / MediaFoundation + auto-fallback на libx264
 - [x] Cancelable через polling (0.5s) во всех ffmpeg-вызовах
 - [x] Cleanup: `_{stem}_segments/` temp dir с `shutil.rmtree(ignore_errors=True)` в finally
-- [x] Тесты: `_apply_margin` edge cases, validation, `generate_keep_segments` (8 cases)
+- [x] Тесты: `_apply_margin` edge cases, validation, `generate_keep_segments` (8 cases), `_segments_match` (8 cases), WAV cache validity (4 cases), WAV cache fallback (3 cases), end-to-end real ffmpeg (2 cases)
 
 ### Этап 7 — CLI и связка (`cli.py`) — ✅
 

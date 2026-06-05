@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- **Silence detection — audio-only pipeline (D path)** — `detect_silence()` now optionally extracts audio to a 16kHz mono WAV (via ffmpeg `-vn -ar 16000 -ac 1 -copyts`) and runs `silencedetect` on the WAV instead of the full video. Avoids video decode/discard on every call. The WAV is cached at `{stem}_audio.wav` keyed by source mtime; re-runs with the same (or different) detection params skip the extract step.
+
+### Added
+- **`output_dir` parameter on `detect_silence()`** — enables the WAV cache pipeline. When provided, the first call extracts the WAV, runs both D (on WAV) and A (on the video) for verification, and keeps the WAV cache if the two results match within `0.05s` per-segment tolerance. Subsequent calls with the same source reuse the cached WAV.
+- **Broken-PTS fallback** — if D and A disagree (e.g., sources with `itsoffset` or corrupted timestamps), the freshly-extracted WAV is deleted and A's result is used. Logs a WARNING naming the segment count mismatch.
+- **Phase 2 STT prep** — the cached WAV is exactly the format Phase 2 will need for `faster-whisper`/Deepgram STT, so the extract step won't be repeated there.
+- **Module-level compiled regex** for `silence_start` / `silence_end` parsing (was being recompiled on every detect call).
+- **Tests** — `_segments_match` (8 cases: identity, reordering, tolerance, count mismatch, broken-PTS shift), `_get_wav_cache_path` / `_is_wav_cache_valid` (4 cases: missing/newer/older/equal mtime), `TestWavCacheFallback` (3 cases: cache hit, cache miss with verification mismatch, `output_dir=None`), and `TestEndToEndRealFfmpeg` (2 cases: D matches A on real lavfi-generated video, WAV cache reused on second run).
+
 ## [0.1.1] - 2026-06-04
 
 ### Fixed

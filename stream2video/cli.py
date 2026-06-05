@@ -270,6 +270,7 @@ def main(
                         threshold=config["threshold"],
                         min_silence=config["min_silence"],
                         margin=config["margin"],
+                        output_dir=output_dir,
                         progress_callback=silence_progress,
                         cancel_callback=cancel_cb,
                     )
