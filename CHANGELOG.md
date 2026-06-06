@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **Waveform preview tab (GUI)** — a new "Waveform" tab in the right panel renders the audio waveform of the selected input file with detected silence regions overlaid as semi-transparent red bars and a time axis. Lets users tune `threshold` / `min_silence` / `margin` visually instead of running a full encode. The "Render preview" button extracts the WAV (if not cached) and runs silence detection on it with the current slider values; results are saved to the silence cache so the next real pipeline run is instant. Pillow is a new optional `[gui]` extra.
+- **CI workflow** — GitHub Actions runs `ruff check`, `ruff format --check`, `mypy`, and `pytest` on push/PR to `main`. Uses `uv` for fast, reproducible installs (committed `uv.lock`).
+- **24 unit tests for `stream2video.waveform`** — covers peak downsampling, silence pixel mapping, image rendering with overlays, theme colors, and edge cases (missing file, stereo mixing, empty WAV, subpixel silences).
+
 ## [0.2] - 2026-06-06
 
 ### Added

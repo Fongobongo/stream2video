@@ -46,6 +46,7 @@ pip install -e .
 | **pyyaml** | >=6.0 | Config file parsing |
 | **rich** | >=13.0.0 | Progress bars and logging |
 | **customtkinter** | >=5.2.0 | GUI (optional, `[gui]` extra) |
+| **Pillow** | >=10.0.0 | Waveform rendering in GUI (optional, `[gui]` extra) |
 
 ## CLI Usage
 
@@ -226,6 +227,7 @@ python -m stream2video.gui
 - **Recent Projects** — click-to-open or trash your last 5 project directories
 - **Status line** — shows `elapsed / remaining` time per phase
 - **Bottom overall label** — `Elapsed: X | Remaining: ~Y + ?` (or `Total: X` on completion)
+- **Waveform preview tab** — visualises the audio with detected silence regions overlaid, so you can tune `threshold` / `min_silence` / `margin` without running a full encode
 
 ## Output
 

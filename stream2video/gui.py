@@ -15,6 +15,7 @@ from tkinter import filedialog, messagebox
 from typing import ClassVar
 
 import customtkinter as ctk
+from PIL import Image
 
 from stream2video.concat import (
     CancelledError,
@@ -48,6 +49,10 @@ from stream2video.silence import (
     save_silence_cache,
 )
 from stream2video.utils import get_active_process, get_video_duration
+from stream2video.waveform import (
+    read_waveform_peaks,
+    render_waveform_image,
+)
 
 logger = logging.getLogger("stream2video.gui")
 
@@ -523,18 +528,67 @@ class Stream2VideoGUI(ctk.CTk):
         )
         self.lbl_total.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 0))
 
-        # ── Right: Log Panel ──
-        log_frame = ctk.CTkFrame(self)
-        log_header = ctk.CTkLabel(
-            log_frame, text="Log", anchor="w", font=ctk.CTkFont(size=12, weight="bold")
-        )
-        log_header.grid(row=0, column=0, sticky="ew", padx=4, pady=(3, 0))
-        log_frame.grid_rowconfigure(1, weight=1)
-        log_frame.grid_columnconfigure(0, weight=1)
-        log_frame.grid(row=0, column=2, sticky="nsew", padx=(3, 4), pady=4)
+        # ── Right: Tabbed panel (Log + Waveform) ──
+        right_frame = ctk.CTkFrame(self)
+        right_frame.grid_rowconfigure(1, weight=1)
+        right_frame.grid_columnconfigure(0, weight=1)
+        right_frame.grid(row=0, column=2, sticky="nsew", padx=(3, 4), pady=4)
 
-        self.txt_log = ctk.CTkTextbox(log_frame, wrap="word", state="disabled")
-        self.txt_log.grid(row=1, column=0, sticky="nsew", padx=4, pady=3)
+        self.right_tabs = ctk.CTkTabview(right_frame, height=100)
+        self.right_tabs.grid(row=0, column=0, sticky="nsew", padx=3, pady=(3, 0))
+        self.right_tabs.add("Log")
+        self.right_tabs.add("Waveform")
+
+        # Log tab — existing textbox.
+        log_tab = self.right_tabs.tab("Log")
+        log_tab.grid_rowconfigure(0, weight=1)
+        log_tab.grid_columnconfigure(0, weight=1)
+        self.txt_log = ctk.CTkTextbox(log_tab, wrap="word", state="disabled")
+        self.txt_log.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+
+        # Waveform tab — image label, render button, status hint.
+        wave_tab = self.right_tabs.tab("Waveform")
+        wave_tab.grid_rowconfigure(1, weight=1)
+        wave_tab.grid_columnconfigure(0, weight=1)
+        self._build_waveform_tab(wave_tab)
+
+    def _build_waveform_tab(self, parent):
+        """Build the Waveform tab UI: a render button, status line, and
+        an image label that displays the rendered waveform.
+
+        The image is held in ``self._waveform_ctk_image`` (a CTkImage) so
+        CustomTkinter keeps a strong reference (otherwise the image is
+        garbage-collected and the label shows nothing).
+        """
+        # Row 0: button + status. Row 1: image area.
+        controls = ctk.CTkFrame(parent, fg_color="transparent")
+        controls.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 2))
+        controls.grid_columnconfigure(1, weight=1)
+
+        self.btn_render_wave = ctk.CTkButton(
+            controls,
+            text="Render preview",
+            width=130,
+            command=self._render_waveform_preview,
+        )
+        self.btn_render_wave.grid(row=0, column=0, padx=(0, 6))
+
+        self.lbl_wave_status = ctk.CTkLabel(
+            controls,
+            text="No preview yet",
+            anchor="w",
+            text_color=("gray40", "gray60"),
+        )
+        self.lbl_wave_status.grid(row=0, column=1, sticky="ew")
+
+        # Image area. Use a CTkLabel; swap the image after each render.
+        self._waveform_ctk_image: ctk.CTkImage | None = None
+        self.lbl_wave_image = ctk.CTkLabel(parent, text="", anchor="nw")
+        self.lbl_wave_image.grid(row=1, column=0, sticky="nsew", padx=4, pady=(2, 4))
+
+        # Per-tab state.
+        self._waveform_render_token = 0
+        self._waveform_running = False
 
     def _add_slider(
         self,
@@ -1256,6 +1310,147 @@ class Stream2VideoGUI(ctk.CTk):
         handler = QueueHandler(self.log_queue)
         handler.setFormatter(logging.Formatter("%(message)s"))
         logging.getLogger("stream2video").addHandler(handler)
+
+    # ── Waveform tab ────────────────────────────────────────────
+
+    def _render_waveform_preview(self):
+        """Extract audio (if needed), run silence detection with the
+        current slider values, and render the waveform with overlay.
+
+        Runs on a background thread so the GUI stays responsive during
+        the (potentially long) first extract. Re-runs are debounced by
+        ``_waveform_render_token`` — if the user clicks "Render" again
+        before the previous run finishes, the older one is invalidated.
+        """
+        if self._waveform_running:
+            self._log("Waveform render already running")
+            return
+        if self.running:
+            self._log("Cannot preview waveform while pipeline is running")
+            return
+
+        # Need an input file (must be a local file — previewing a fresh
+        # download would be a separate flow). Local file → reuse it.
+        input_raw = self.entry_input.get().strip()
+        if not input_raw:
+            self._log("Set an input video (local file) first")
+            return
+        in_path = Path(input_raw)
+        if not in_path.is_file():
+            self._log(f"Input not a local file (downloads not previewable): {input_raw}")
+            return
+
+        # Read current slider values (sync first in case FocusOut didn't fire).
+        self._sync_slider_entries()
+        config = {
+            "threshold": float(self.config["threshold"]),
+            "min_silence": float(self.config["min_silence"]),
+            "margin": float(self.config["margin"]),
+        }
+
+        # Output dir: where the cached WAV will live. Same resolution as
+        # the pipeline (resolve + per-video dir if enabled).
+        out_raw = self.entry_output.get().strip() or "./compressed_videos"
+        out_dir = Path(out_raw).expanduser().resolve()
+        if bool(self.chk_per_video_dir.get()):
+            out_dir = out_dir / in_path.stem
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        wav_path = out_dir / f"{in_path.stem}_audio.wav"
+        token = self._waveform_render_token + 1
+        self._waveform_render_token = token
+        self._waveform_running = True
+        self.btn_render_wave.configure(state="disabled", text="Rendering...")
+        self.lbl_wave_status.configure(text="Preparing audio...")
+        self._log("Waveform preview: preparing audio...")
+
+        def _run():
+            try:
+                # Phase 1: ensure WAV exists.
+                if not wav_path.is_file() or wav_path.stat().st_mtime < in_path.stat().st_mtime:
+                    self.after(
+                        0, lambda: self.lbl_wave_status.configure(text="Extracting audio...")
+                    )
+                    self._log(f"  Extracting {in_path.name} -> {wav_path.name}...")
+                    from stream2video.silence import _extract_audio_wav
+
+                    _extract_audio_wav(in_path, wav_path)
+                if token != self._waveform_render_token:
+                    return
+
+                # Phase 2: silence detection.
+                self.after(0, lambda: self.lbl_wave_status.configure(text="Detecting silence..."))
+                self._log(
+                    f"  Detecting silence (threshold={config['threshold']}dB, "
+                    f"min_silence={config['min_silence']}s, margin={config['margin']}s)..."
+                )
+                from stream2video.silence import detect_silence, save_silence_cache
+
+                segments = detect_silence(
+                    wav_path,
+                    threshold=config["threshold"],
+                    min_silence=config["min_silence"],
+                    margin=config["margin"],
+                    progress_callback=lambda f: self.after(
+                        0,
+                        lambda: self.lbl_wave_status.configure(
+                            text=f"Detecting silence... {int(f * 100)}%"
+                        ),
+                    ),
+                )
+                # Save to cache so a subsequent real pipeline run with
+                # these same params is instant.
+                save_silence_cache(wav_path, segments, out_dir, config)
+                if token != self._waveform_render_token:
+                    return
+
+                # Phase 3: read peaks + render.
+                self.after(0, lambda: self.lbl_wave_status.configure(text="Rendering..."))
+                duration = wav_path.stat().st_size / (16000 * 2)  # 16kHz mono s16le
+                peaks = read_waveform_peaks(wav_path, target_buckets=800)
+                img = render_waveform_image(
+                    peaks,
+                    width=800,
+                    height=200,
+                    total_duration=duration,
+                    silence_segments=segments,
+                    title=f"{in_path.name}  •  {len(segments)} silences",
+                )
+                if token != self._waveform_render_token:
+                    return
+
+                self.after(0, lambda: self._apply_waveform_image(img, duration, len(segments)))
+                self._log(
+                    f"  Waveform ready: {len(segments)} silence segments, "
+                    f"{Stream2VideoGUI._fmt_time(duration)} duration"
+                )
+            except Exception as e:
+                logger.exception("Waveform render failed")
+                self.after(0, lambda err=e: self.lbl_wave_status.configure(text=f"Error: {err}"))
+                self._log(f"[ERROR] Waveform render failed: {e}")
+            finally:
+                self._waveform_running = False
+                self.after(
+                    0,
+                    lambda: self.btn_render_wave.configure(state="normal", text="Render preview"),
+                )
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _apply_waveform_image(self, img: Image.Image, duration: float, n_segments: int):
+        """Swap the displayed image and update the status label.
+
+        Keeps a strong reference on ``self._waveform_ctk_image`` —
+        CustomTkinter's ``CTkLabel.configure(image=...)`` only borrows
+        the image, so without the ref Python GC's the underlying Pillow
+        object and the label goes blank.
+        """
+        ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
+        self._waveform_ctk_image = ctk_img
+        self.lbl_wave_image.configure(image=ctk_img, text="")
+        self.lbl_wave_status.configure(
+            text=f"{n_segments} silences • {Stream2VideoGUI._fmt_clock_time(duration)}"
+        )
 
     # ── Utilities ────────────────────────────────────────────────
 
