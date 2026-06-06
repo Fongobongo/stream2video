@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.2] - 2026-06-06
 
 ### Added
 - **Audio-only silence detection with WAV cache** — first run extracts a 16kHz mono WAV and runs silence detection on it instead of decoding the full video. Subsequent runs skip the extract and re-run on the cached WAV. A 60s sample-verify on the source catches broken-timestamp videos and falls back to full re-detection. Significantly faster on long videos. The cached WAV is the same format the upcoming STT phase will need, so the extract step won't be repeated there.
