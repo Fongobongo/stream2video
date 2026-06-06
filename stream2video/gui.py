@@ -380,17 +380,35 @@ class Stream2VideoGUI(ctk.CTk):
                                          state="disabled", fg_color="#d32f2f", hover_color="#b71c1c")
         self.btn_cancel.pack(side="left")
 
-        # Elapsed/Remaining on the left side of the action row, at the
-        # same vertical level as Step/Complete (which is right-packed).
-        # Fixed width + left anchor so the text never jumps the bar.
+        # Action row: two-column grid.
+        #   col 0: [Start] [Cancel] [Elapsed]   — left cluster, natural width
+        #   col 1: [Step / Complete]             — right side, expand=True
+        # With grid, col 1 always gets the remaining space regardless of
+        # how wide col 0 is, so the Step label is never pushed off-screen
+        # by the left cluster.
+        action_frame.grid_columnconfigure(0, weight=0)
+        action_frame.grid_columnconfigure(1, weight=1)
+        left_cluster = ctk.CTkFrame(action_frame, fg_color="transparent")
+        left_cluster.grid(row=0, column=0, sticky="w")
+
+        self.btn_start = ctk.CTkButton(left_cluster, text="Start", command=self._start_pipeline,
+                                        height=36, font=("", 13, "bold"))
+        self.btn_start.pack(side="left", padx=(0, 8))
+
+        self.btn_cancel = ctk.CTkButton(left_cluster, text="Cancel", command=self._cancel_pipeline,
+                                         state="disabled", fg_color="#d32f2f", hover_color="#b71c1c")
+        self.btn_cancel.pack(side="left")
+
+        # Elapsed/Remaining on the left, at the same vertical level as Step.
+        # Fixed width + left anchor so the text doesn't jump the bar.
         self.lbl_overall = ctk.CTkLabel(
-            action_frame, text="", anchor="w", width=300,
+            left_cluster, text="", anchor="w", width=300,
             text_color=("gray40", "gray60"),
         )
         self.lbl_overall.pack(side="left", padx=(8, 0))
 
-        self.lbl_status = ctk.CTkLabel(action_frame, text="", anchor="e", width=500)
-        self.lbl_status.pack(side="right", fill="x", expand=True, padx=(8, 0))
+        self.lbl_status = ctk.CTkLabel(action_frame, text="", anchor="e")
+        self.lbl_status.grid(row=0, column=1, sticky="ew", padx=(8, 0))
 
         self.bottom_frame = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
         self.bottom_frame.pack(fill="x", padx=5, pady=(0, 6))
