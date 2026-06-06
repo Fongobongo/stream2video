@@ -108,10 +108,11 @@ class TestBuildCompletionSummary:
     user-facing strings emitted at pipeline completion. Tested without
     instantiating the GUI (Tk) — that's the whole point of the refactor.
 
-    The status line is intentionally minimal ('Complete!'); size and
-    duration go to the log block and the messagebox popup only. The
-    Total wall-clock is its own label below the progress bar — built
-    separately by _fmt_total_label()."""
+    The status line is 'Complete!' plus the total wall-clock in
+    parentheses, e.g. 'Complete! (23m 5s)'. Size and duration go to the
+    log block and the messagebox popup only. The Total wall-clock is
+    also its own label below the progress bar — built separately by
+    _fmt_total_label()."""
 
     def _summary(self, **overrides):
         """Default-args helper for readability."""
@@ -131,15 +132,15 @@ class TestBuildCompletionSummary:
         s = self._summary()
         assert set(s.keys()) == {"status", "log_lines", "popup"}
 
-    def test_status_is_exactly_complete_bang(self):
-        """Per the spec: the status line is just 'Complete!' and nothing
-        more — no file size, no duration, no pipeline time. Those go to
-        the log block, the popup, and the Total label below the bar."""
+    def test_status_is_complete_plus_pipeline_time(self):
+        """The status line is 'Complete!' plus the total wall-clock in
+        parentheses, e.g. 'Complete! (23m 5s)'. Size and duration stay
+        out of the status line — those go to the log block and popup."""
         s = self._summary()
-        assert s["status"] == "Complete!"
+        assert s["status"] == "Complete! (23m 5s)"
+        assert s["status"].startswith("Complete!")
         assert "GB" not in s["status"]
         assert ":" not in s["status"]
-        assert "completed" not in s["status"]
 
     def test_log_lines_start_and_end_with_separator(self):
         """Log block must be greppable: '=' delimiter on both sides
@@ -174,8 +175,11 @@ class TestBuildCompletionSummary:
         # the source duration, real value for the output duration.
         assert "Source:  20.0 GB, ?" in s["popup"]
         assert "Output:  1.1 GB, 00:34:11" in s["popup"]
-        # The status line is invariant — never contains duration strings.
-        assert s["status"] == "Complete!"
+        # The status line carries only the headline + total wall-clock —
+        # never file size or duration strings.
+        assert s["status"] == "Complete! (23m 5s)"
+        assert "GB" not in s["status"]
+        assert ":" not in s["status"]
         # dst is always known (it's computed from keep-segments locally)
         assert "06:04:12 -> ?" not in "\n".join(s["log_lines"])
 
@@ -183,6 +187,14 @@ class TestBuildCompletionSummary:
         s = self._summary(src_duration=-5)
         assert "? -> 00:34:11" in "\n".join(s["log_lines"])
         assert "Source:  20.0 GB, ?" in s["popup"]
+
+    def test_status_reflects_pipeline_seconds(self):
+        """The status line must include the total wall-clock so the user
+        sees the headline result at a glance, without opening the popup."""
+        assert self._summary(pipeline_seconds=5)["status"] == "Complete! (5s)"
+        assert self._summary(pipeline_seconds=90)["status"] == "Complete! (1m 30s)"
+        assert self._summary(pipeline_seconds=23 * 60 + 5)["status"] == "Complete! (23m 5s)"
+        assert self._summary(pipeline_seconds=3600 + 30 * 60 + 12)["status"] == "Complete! (1h 30m 12s)"
 
     def test_zero_duration_renders_as_zero_clock(self):
         """00:00:00 is a valid value (corrupted 0-byte file) — must not

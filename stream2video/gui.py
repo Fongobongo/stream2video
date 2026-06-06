@@ -142,9 +142,9 @@ def _build_completion_summary(
     without instantiating the GUI.
 
     Returns a dict with keys:
-      - status:    exactly 'Complete!' — the status bar stays minimal so
-                   the Elapsed/Remaining line under it stays in sync and
-                   the Total time is shown in its own row below the bar.
+      - status:    one-line headline for the status bar: 'Complete!' plus
+                   the total wall-clock in parentheses, e.g. 'Complete! (23m 5s)'.
+                   Size and duration go in the log block and the popup only.
       - log_lines: list of log lines (with '=' separators) for grep-ability.
                    Contains the full src->dst size/duration breakdown.
       - popup:     multi-line message for the 'Complete' messagebox.
@@ -174,7 +174,7 @@ def _build_completion_summary(
     )
 
     return {
-        "status": "Complete!",
+        "status": f"Complete! ({pipe_s})",
         "log_lines": log_lines,
         "popup": popup,
     }
@@ -202,9 +202,9 @@ class Stream2VideoGUI(ctk.CTk):
         # Fit window to screen if resolution is small
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
-        win_w = max(1, min(1250, sw - 40))
+        win_w = max(1, min(1080, sw - 40))
         win_h = max(1, min(680, sh - 60))
-        self.minsize(max(1, min(1130, sw - 40)), max(1, min(620, sh - 60)))
+        self.minsize(max(1, min(1000, sw - 40)), max(1, min(620, sh - 60)))
 
         geom = self.config.get("window_geometry")
         if geom:
@@ -325,18 +325,19 @@ class Stream2VideoGUI(ctk.CTk):
         opt_frame.pack(fill="x", padx=5, pady=1)
 
         ctk.CTkLabel(opt_frame, text="Method:").grid(row=0, column=0, sticky="w", padx=(0, 5))
-        self.combo_method = ctk.CTkComboBox(opt_frame, values=["segment", "batch"], state="readonly")
+        self.combo_method = ctk.CTkComboBox(opt_frame, values=["segment", "batch"], state="readonly",
+                                             width=120)
         self.combo_method.set(self.config["method"])
-        self.combo_method.grid(row=0, column=1, sticky="ew", padx=(0, 5))
+        self.combo_method.grid(row=0, column=1, sticky="w", padx=(0, 5))
         _Tooltip(self.combo_method, "Segment: faster, ~1.5h, encodes each segment then joins.\nBatch: frame-exact, ~6-7h, uses select/aselect filter.")
 
         ctk.CTkLabel(opt_frame, text="Encoder:").grid(row=1, column=0, sticky="w", padx=(0, 5))
         self.combo_encoder = ctk.CTkComboBox(
             opt_frame, values=["h264_nvenc", "h264_amf", "h264_mf", "libx264"], state="readonly",
-            command=self._on_encoder_change,
+            command=self._on_encoder_change, width=120,
         )
         self.combo_encoder.set(self.config["encoder"])
-        self.combo_encoder.grid(row=1, column=1, sticky="ew", padx=(0, 5))
+        self.combo_encoder.grid(row=1, column=1, sticky="w", padx=(0, 5))
         _Tooltip(self.combo_encoder, "h264_nvenc — NVIDIA GPU (GTX 1000+, RTX)\nh264_amf — AMD GPU (RX 400+, Ryzen APU)\nh264_mf — Windows Media Foundation (any GPU)\nlibx264 — CPU software encode (most compatible)")
 
         self.btn_test_encoders = ctk.CTkButton(opt_frame, text="Test encoder", width=90,
@@ -346,7 +347,7 @@ class Stream2VideoGUI(ctk.CTk):
         self.lbl_encoder_desc = ctk.CTkLabel(opt_frame, text="", font=("", 10, "italic"))
         self.lbl_encoder_desc.grid(row=2, column=0, columnspan=4, sticky="w", padx=(0, 5), pady=(1, 0))
 
-        opt_frame.grid_columnconfigure(1, weight=1)
+        opt_frame.grid_columnconfigure(1, weight=0)
         self._on_encoder_change(self.config["encoder"])
 
         self.chk_force = ctk.CTkCheckBox(ctrl_frame, text="Force re-detect silence (ignore cache)")
@@ -372,57 +373,57 @@ class Stream2VideoGUI(ctk.CTk):
         action_frame = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
         action_frame.pack(fill="x", padx=5, pady=(0, 6))
 
-        # Action row: two-column grid.
-        #   col 0: [Start] [Cancel] [Elapsed]   — left cluster, natural width
-        #   col 1: [Step / Complete]             — right side, expand=True
-        # With grid, col 1 always gets the remaining space regardless of
-        # how wide col 0 is, so the Step label is never pushed off-screen
-        # by the left cluster.
-        action_frame.grid_columnconfigure(0, weight=0)
-        action_frame.grid_columnconfigure(1, weight=1)
+        # Action row: single-row pack in a left cluster.
+        #   [Start] [Cancel] [Step / Complete ...]   — left-aligned, Step
+        #   has a fixed max width (no fill/expand) so the text caps out
+        #   instead of stretching across the whole row. Step sits
+        #   immediately to the right of Cancel (4 px gap).
         left_cluster = ctk.CTkFrame(action_frame, fg_color="transparent")
-        left_cluster.grid(row=0, column=0, sticky="w")
+        left_cluster.pack(side="left", fill="x", expand=True)
 
         self.btn_start = ctk.CTkButton(left_cluster, text="Start", command=self._start_pipeline,
-                                        height=36, font=("", 13, "bold"))
+                                        height=36, font=("", 13, "bold"),
+                                        width=70)
         self.btn_start.pack(side="left", padx=(0, 8))
 
         self.btn_cancel = ctk.CTkButton(left_cluster, text="Cancel", command=self._cancel_pipeline,
-                                         state="disabled", fg_color="#d32f2f", hover_color="#b71c1c")
+                                         state="disabled", fg_color="#d32f2f", hover_color="#b71c1c",
+                                         width=70)
         self.btn_cancel.pack(side="left")
 
-        # Elapsed/Remaining on the left, at the same vertical level as Step.
-        # Fixed width + left anchor so the text doesn't jump the bar.
-        self.lbl_overall = ctk.CTkLabel(
-            left_cluster, text="", anchor="w", width=300,
-            text_color=("gray40", "gray60"),
-        )
-        self.lbl_overall.pack(side="left", padx=(8, 0))
-
-        self.lbl_status = ctk.CTkLabel(action_frame, text="", anchor="e")
-        self.lbl_status.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        # Step / Complete label, left-anchored, immediately after Cancel.
+        # Fixed max width (no fill/expand) so the text caps out instead of
+        # stretching across the whole row.
+        self.lbl_status = ctk.CTkLabel(left_cluster, text="", anchor="w", width=400)
+        self.lbl_status.pack(side="left", padx=(4, 0))
 
         self.bottom_frame = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
         self.bottom_frame.pack(fill="x", padx=5, pady=(0, 6))
-        # 3:2 grid — progress bar at ~60% width (the original layout
-        # before the no-jump refactor). The right column is empty in
-        # row 0; row 1 holds the Total wall-clock label, also in col 0
-        # (60% wide, left-aligned). The bar doesn't resize because its
-        # column is fixed by the weight.
-        self.bottom_frame.grid_columnconfigure(0, weight=3)
-        self.bottom_frame.grid_columnconfigure(1, weight=2)
+        # 1:5 grid — progress bar at ~17% width (half of the previous 33%).
+        # Row 0 holds the bar in col 0 and the live Elapsed/Remaining label
+        # in col 1, left-anchored, immediately to the right of the bar.
+        # Row 1 holds the Total wall-clock label, full width.
+        self.bottom_frame.grid_columnconfigure(0, weight=1)
+        self.bottom_frame.grid_columnconfigure(1, weight=5)
         self.progress = ctk.CTkProgressBar(
             self.bottom_frame, mode="determinate", height=10,
         )
         self.progress.set(0)
         self.progress.grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        # Total pipeline wall-clock, updated in real time. Empty on idle.
-        # Sits in row 1, below the bar, in the same 60%-wide column.
+        # Live Elapsed/Remaining for the current phase. Same row as the
+        # bar, left-anchored, immediately to the right of the bar.
+        self.lbl_overall = ctk.CTkLabel(
+            self.bottom_frame, text="", anchor="w",
+            text_color=("gray40", "gray60"),
+        )
+        self.lbl_overall.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        # Total pipeline wall-clock, updated in real time. Row 1, full width.
         self.lbl_total = ctk.CTkLabel(
             self.bottom_frame, text="", anchor="w",
             text_color=("gray40", "gray60"),
         )
-        self.lbl_total.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+        self.lbl_total.grid(row=1, column=0, columnspan=2, sticky="ew",
+                             pady=(2, 0))
 
         # ── Right: Log Panel ──
         log_frame = ctk.CTkFrame(self)
@@ -817,9 +818,9 @@ class Stream2VideoGUI(ctk.CTk):
             )
 
             # Status line — one-line headline so the user sees the result
-            # without opening the popup. Per the spec, the status line
-            # says "Complete!" and nothing more (size/duration go in the
-            # popup and the log block).
+            # without opening the popup. Format: "Complete! (23m 5s)" —
+            # headline + total wall-clock in parentheses. Size and duration
+            # go in the popup and the log block.
             self._ui_status(summary["status"], force=True)
 
             # Log — multi-line, delimited by '=' so the user can grep
@@ -827,8 +828,8 @@ class Stream2VideoGUI(ctk.CTk):
             for line in summary["log_lines"]:
                 self._log(line)
 
-            # Clear the Elapsed/Remaining line (status area 2nd label) —
-            # the user wants nothing below "Complete!" in the status.
+            # Clear the Elapsed/Remaining line — its job is done once
+            # the status line carries the final pipeline time.
             self.after(0, lambda: self.lbl_overall.configure(text=""))
             # Freeze the Total wall-clock label at its final value.
             self._ui_total(total_elapsed)
@@ -1012,16 +1013,16 @@ class Stream2VideoGUI(ctk.CTk):
 
     def _ui_overall(self, phase_elapsed: float, phase_remaining: float,
                      more_phases: bool):
-        """Update the Elapsed/Remaining line in the status area (the
-        second label under lbl_status) and the Total wall-clock label
-        below the progress bar.
+        """Update the live Elapsed/Remaining line in bottom_frame (the
+        label sitting immediately to the right of the progress bar) and
+        the Total wall-clock label below the bar.
 
         'phase_remaining' is the ETA for the CURRENT phase; if more
         phases follow, we append ' + ?' to make clear that the other
         phases' durations are unknown. During phase 1 (no progress
         callback) the label is updated with just elapsed (remaining='?').
         """
-        if not hasattr(self, "_pipeline_start") or self._pipeline_start is None:
+        if self._pipeline_start is None:
             return
         total_elapsed = time.monotonic() - self._pipeline_start
         if phase_remaining <= 0:
@@ -1037,7 +1038,7 @@ class Stream2VideoGUI(ctk.CTk):
         """Update the overall label with only elapsed time (no remaining
         estimate available — used during phase 1 download when progress
         is indeterminate)."""
-        if not hasattr(self, "_pipeline_start") or self._pipeline_start is None:
+        if self._pipeline_start is None:
             return
         total_elapsed = time.monotonic() - self._pipeline_start
         self.after(0, lambda: self.lbl_overall.configure(
@@ -1062,7 +1063,7 @@ class Stream2VideoGUI(ctk.CTk):
         if not force and now - self._last_status_update < 0.5:
             return
         self._last_status_update = now
-        self.after(0, lambda: self.lbl_status.configure(text=text[:80]))
+        self.after(0, lambda: self.lbl_status.configure(text=text[:50]))
 
     def _ui_info(self, text: str):
         self.after(0, lambda t=text: self.lbl_silence.configure(text=t))
@@ -1187,7 +1188,7 @@ class Stream2VideoGUI(ctk.CTk):
         self._set_checkbox(self.chk_per_video_dir, self.config["per_video_dir"])
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
-        self.geometry(f"{min(1250, sw - 40)}x{min(680, sh - 60)}")
+        self.geometry(f"{min(1080, sw - 40)}x{min(680, sh - 60)}")
         for key in ("threshold", "min_silence", "margin"):
             slider = getattr(self, f"_slider_{key}", None)
             if slider:
