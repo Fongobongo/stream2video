@@ -23,11 +23,12 @@ import os
 import re
 import subprocess
 import tempfile
-import threading
 from pathlib import Path
 from typing import Callable, List, Optional
 
 from stream2video.utils import (
+    CANCEL_POLL_INTERVAL,
+    cancel_monitor,
     drain_stderr_lines,
     get_video_duration as _probe_duration,
     no_window_kwargs,
@@ -61,7 +62,7 @@ class SilenceSegment:
         return f"SilenceSegment({self.start:.2f}s - {self.end:.2f}s, duration={self.duration:.2f}s)"
 
 
-_SILENCE_POLL_INTERVAL = 0.5
+_SILENCE_POLL_INTERVAL = CANCEL_POLL_INTERVAL
 _SILENCE_TIMEOUT = 36000
 _SEGMENT_MATCH_TOLERANCE = 0.05
 _SAMPLE_VERIFY_DURATION = 60.0
@@ -233,50 +234,36 @@ def _run_silencedetect(
 
     set_active_process(process)
     stderr_lines: List[str] = []
-    cancelled = threading.Event()
     wait_for_drain = drain_stderr_lines(process.stderr, stderr_lines)
     drain_done = False
 
-    def _cancel_monitor():
-        if not cancel_callback:
-            return
-        while not cancelled.wait(_SILENCE_POLL_INTERVAL):
-            if process.poll() is not None:
-                return
-            if cancel_callback():
-                process.kill()
-                cancelled.set()
-                return
-
-    cancel_thread = threading.Thread(target=_cancel_monitor, daemon=True)
-    cancel_thread.start()
-
     try:
-        for raw_line in iter(process.stdout.readline, b""):
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if line.startswith("out_time_us="):
-                try:
-                    us = int(line.split("=", 1)[1])
-                    if progress_callback and progress_divisor and progress_divisor > 0:
-                        progress_callback(min(us / 1_000_000 / progress_divisor, 1.0))
-                except (ValueError, IndexError):
-                    pass
+        with cancel_monitor(process, cancel_callback) as cancelled:
+            for raw_line in iter(process.stdout.readline, b""):
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if line.startswith("out_time_us="):
+                    try:
+                        us = int(line.split("=", 1)[1])
+                        if progress_callback and progress_divisor and progress_divisor > 0:
+                            progress_callback(min(us / 1_000_000 / progress_divisor, 1.0))
+                    except (ValueError, IndexError):
+                        pass
+                if cancelled.is_set():
+                    raise SilenceCancelledError("silence detection cancelled")
+
             if cancelled.is_set():
                 raise SilenceCancelledError("silence detection cancelled")
 
-        if cancelled.is_set():
-            raise SilenceCancelledError("silence detection cancelled")
+            process.wait(timeout=_SILENCE_TIMEOUT)
+            wait_for_drain()
+            drain_done = True
 
-        process.wait(timeout=_SILENCE_TIMEOUT)
-        wait_for_drain()
-        drain_done = True
+            if process.returncode != 0:
+                stderr_text = "".join(stderr_lines)
+                error_msg = stderr_text or "Unknown error"
+                raise SilenceDetectionError(f"ffmpeg silencedetect failed: {error_msg}")
 
-        if process.returncode != 0:
-            stderr_text = "".join(stderr_lines)
-            error_msg = stderr_text or "Unknown error"
-            raise SilenceDetectionError(f"ffmpeg silencedetect failed: {error_msg}")
-
-        return _parse_ffmpeg_output("".join(stderr_lines))
+            return _parse_ffmpeg_output("".join(stderr_lines))
 
     except subprocess.TimeoutExpired as e:
         process.kill()
@@ -284,8 +271,6 @@ def _run_silencedetect(
     finally:
         if not drain_done:
             wait_for_drain()
-        cancelled.set()
-        cancel_thread.join(timeout=1)
         set_active_process(None)
         process.stdout.close()
         process.stderr.close()
@@ -335,34 +320,20 @@ def _extract_audio_wav(
     stderr_lines: List[str] = []
     wait_for_drain = drain_stderr_lines(process.stderr, stderr_lines)
     drain_done = False
-    cancelled = threading.Event()
-
-    def _cancel_monitor():
-        if not cancel_callback:
-            return
-        while not cancelled.wait(_SILENCE_POLL_INTERVAL):
-            if process.poll() is not None:
-                return
-            if cancel_callback():
-                process.kill()
-                cancelled.set()
-                return
-
-    cancel_thread = threading.Thread(target=_cancel_monitor, daemon=True)
-    cancel_thread.start()
 
     try:
-        if cancelled.is_set():
-            raise SilenceCancelledError("audio extraction cancelled")
-        process.wait(timeout=_SILENCE_TIMEOUT)
-        wait_for_drain()
-        drain_done = True
+        with cancel_monitor(process, cancel_callback) as cancelled:
+            if cancelled.is_set():
+                raise SilenceCancelledError("audio extraction cancelled")
+            process.wait(timeout=_SILENCE_TIMEOUT)
+            wait_for_drain()
+            drain_done = True
 
-        if process.returncode != 0:
-            stderr_text = "".join(stderr_lines)
-            error_msg = stderr_text or "Unknown error"
-            wav_path.unlink(missing_ok=True)
-            raise SilenceDetectionError(f"ffmpeg extract failed: {error_msg}")
+            if process.returncode != 0:
+                stderr_text = "".join(stderr_lines)
+                error_msg = stderr_text or "Unknown error"
+                wav_path.unlink(missing_ok=True)
+                raise SilenceDetectionError(f"ffmpeg extract failed: {error_msg}")
     except subprocess.TimeoutExpired as e:
         process.kill()
         wav_path.unlink(missing_ok=True)
@@ -370,8 +341,6 @@ def _extract_audio_wav(
     finally:
         if not drain_done:
             wait_for_drain()
-        cancelled.set()
-        cancel_thread.join(timeout=1)
         set_active_process(None)
         if process.stdout is not None:
             process.stdout.close()

@@ -1,7 +1,6 @@
 """Video cutting and concatenation module using ffmpeg."""
 
 import logging
-import math
 import os
 import shutil
 import subprocess
@@ -14,11 +13,13 @@ from typing import Callable, Dict, List, Optional, Tuple
 from stream2video.silence import SilenceSegment
 from stream2video.utils import (
     CANCEL_POLL_INTERVAL,
+    cancel_monitor,
     drain_stderr_lines,
     get_video_duration,
     no_window_kwargs,
     set_active_process,
 )
+from stream2video.config import VALID_ENCODERS, VALID_METHODS
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,6 @@ ENCODER_CHECK_TIMEOUT = 10
 _FINAL_CONCAT_TIMEOUT = 86400
 _SEGMENT_ENCODE_TIMEOUT = 600
 _STDERR_TRUNCATE = 1000
-_CANCEL_POLL_INTERVAL = CANCEL_POLL_INTERVAL
 _STALL_WARNING = 120
 _STALL_KILL = 300
 _HYBRID_SEEK_OFFSET = 0.5
@@ -98,9 +98,11 @@ def cut_and_concat(
                                    progress_callback, cancel_callback)
     elif method == "batch":
         _run_batch_with_fallback(video_path, keep_segments, output_path, vcodec, vcodec_opts,
-                                progress_callback, cancel_callback)
+                                 progress_callback, cancel_callback)
     else:
-        raise ConcatError(f"Unknown method: {method!r} (use 'segment' or 'batch')")
+        raise ConcatError(
+            f"Unknown method: {method!r} (use {' or '.join(repr(m) for m in VALID_METHODS)})"
+        )
 
     return output_path
 
@@ -181,7 +183,7 @@ def check_encoder(name: str) -> bool:
 def get_video_encoder(preferred: str) -> Tuple[str, List[str]]:
     if preferred not in ENCODER_OPTS:
         raise ConcatError(
-            f"Unknown encoder {preferred!r} (known: {', '.join(ENCODER_OPTS)})"
+            f"Unknown encoder {preferred!r} (known: {', '.join(VALID_ENCODERS)})"
         )
     if check_encoder(preferred):
         return preferred, ENCODER_OPTS[preferred][:]
@@ -202,8 +204,11 @@ def _run_ffmpeg(
     stdout is discarded — use for per-segment encodes where the segment index
     already implies progress.
 
-    Polls cancel_callback every _CANCEL_POLL_INTERVAL seconds during the final
-    wait so long-running encodes can be aborted promptly.
+    Polls cancel_callback every CANCEL_POLL_INTERVAL seconds during the final
+    wait so long-running encodes can be aborted promptly. Stall detection
+    (no progress for _STALL_KILL seconds -> kill) only runs in the
+    track_progress=True branch: per-segment encodes get their progress
+    implicitly from the segment index, so per-byte stalls aren't meaningful.
     """
     stdout_target = subprocess.PIPE if track_progress else subprocess.DEVNULL
     try:
@@ -216,71 +221,55 @@ def _run_ffmpeg(
 
     set_active_process(process)
     stderr_lines: List[str] = []
-    cancelled = threading.Event()
     wait_for_drain = drain_stderr_lines(process.stderr, stderr_lines)
     drain_done = False
     last_progress_time = time.monotonic()
 
-    def _cancel_monitor():
-        nonlocal last_progress_time
-        if not cancel_callback:
-            return
-        while not cancelled.wait(_CANCEL_POLL_INTERVAL):
-            if process.poll() is not None:
-                return
-            if cancel_callback():
-                process.kill()
-                cancelled.set()
-                return
-
-    cancel_thread = threading.Thread(target=_cancel_monitor, daemon=True)
-    cancel_thread.start()
-
     try:
-        if track_progress:
-            for raw_line in iter(process.stdout.readline, b""):
-                if cancel_callback and cancel_callback():
-                    process.kill()
-                    raise CancelledError(f"{label} cancelled")
-                if cancelled.is_set():
-                    raise CancelledError(f"{label} cancelled")
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if line.startswith("out_time_us=") and progress_callback:
-                    try:
-                        us = int(line.split("=", 1)[1])
-                        progress_callback(us)
-                        last_progress_time = time.monotonic()
-                    except (ValueError, IndexError):
-                        pass
-                elapsed_since_progress = time.monotonic() - last_progress_time
-                if elapsed_since_progress > _STALL_KILL:
-                    process.kill()
-                    raise FFmpegError(
-                        f"{label} stalled — no progress for {int(elapsed_since_progress)}s, "
-                        "possible resource exhaustion"
-                    )
-                elif elapsed_since_progress > _STALL_WARNING:
-                    logger.warning(
-                        f"{label}: no progress for {int(elapsed_since_progress)}s — "
-                        "waiting..."
-                    )
+        with cancel_monitor(process, cancel_callback) as cancelled:
+            if track_progress:
+                for raw_line in iter(process.stdout.readline, b""):
+                    if cancel_callback and cancel_callback():
+                        process.kill()
+                        raise CancelledError(f"{label} cancelled")
+                    if cancelled.is_set():
+                        raise CancelledError(f"{label} cancelled")
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if line.startswith("out_time_us=") and progress_callback:
+                        try:
+                            us = int(line.split("=", 1)[1])
+                            progress_callback(us)
+                            last_progress_time = time.monotonic()
+                        except (ValueError, IndexError):
+                            pass
+                    elapsed_since_progress = time.monotonic() - last_progress_time
+                    if elapsed_since_progress > _STALL_KILL:
+                        process.kill()
+                        raise FFmpegError(
+                            f"{label} stalled — no progress for {int(elapsed_since_progress)}s, "
+                            "possible resource exhaustion"
+                        )
+                    elif elapsed_since_progress > _STALL_WARNING:
+                        logger.warning(
+                            f"{label}: no progress for {int(elapsed_since_progress)}s — "
+                            "waiting..."
+                        )
 
-        if cancelled.is_set():
-            raise CancelledError(f"{label} cancelled")
-        _wait_with_cancel(process, timeout, cancel_callback, label)
-        wait_for_drain()
-        drain_done = True
+            if cancelled.is_set():
+                raise CancelledError(f"{label} cancelled")
+            _wait_with_cancel(process, timeout, cancel_callback, label)
+            wait_for_drain()
+            drain_done = True
 
-        if process.returncode != 0:
-            stderr_text = "".join(stderr_lines)
-            msg = stderr_text[:_STDERR_TRUNCATE] if stderr_text else "unknown error (no stderr)"
-            raise FFmpegError(f"{label} failed: {msg}")
+            if process.returncode != 0:
+                stderr_text = "".join(stderr_lines)
+                msg = stderr_text[:_STDERR_TRUNCATE] if stderr_text else "unknown error (no stderr)"
+                raise FFmpegError(f"{label} failed: {msg}")
 
     except subprocess.TimeoutExpired as e:
         process.kill()
         raise FFmpegError(f"{label} timeout after {e.timeout}s")
     finally:
-        cancelled.set()
         if not drain_done:
             wait_for_drain()
         set_active_process(None)
@@ -306,7 +295,7 @@ def _wait_with_cancel(
         if remaining <= 0:
             raise subprocess.TimeoutExpired(process.args, timeout)
         try:
-            return process.wait(timeout=min(_CANCEL_POLL_INTERVAL, remaining))
+            return process.wait(timeout=min(CANCEL_POLL_INTERVAL, remaining))
         except subprocess.TimeoutExpired:
             if cancel_callback and cancel_callback():
                 process.kill()

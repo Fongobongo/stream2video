@@ -20,7 +20,12 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-from stream2video.config import CONFIG_DEFAULTS, CONFIG_RANGES
+from stream2video.config import (
+    CONFIG_DEFAULTS,
+    CONFIG_RANGES,
+    VALID_ENCODERS,
+    VALID_METHODS,
+)
 from stream2video.download import (
     download,
     DownloadCancelledError,
@@ -165,6 +170,12 @@ def main(
         "--delete-after",
         help="Delete downloaded source file after successful compression",
     ),
+    per_video_dir: bool = typer.Option(
+        CONFIG_DEFAULTS["per_video_dir"],
+        "--per-video-dir/--no-per-video-dir",
+        help="Group all artifacts (source, WAV cache, JSON cache, output, log) "
+             "into a per-video subdirectory. Default follows config/per_video_dir.",
+    ),
 
     log_level: str = typer.Option(
         "INFO",
@@ -182,11 +193,17 @@ def main(
     3. Cut and concatenate video
     """
     # Validate method and encoder
-    if method not in ("segment", "batch"):
-        console.print(f"[red]Invalid method:[/red] {method!r} (use 'segment' or 'batch')")
+    if method not in VALID_METHODS:
+        console.print(
+            f"[red]Invalid method:[/red] {method!r} "
+            f"(use {' or '.join(repr(m) for m in VALID_METHODS)})"
+        )
         raise typer.Exit(1)
-    if encoder not in ("h264_nvenc", "h264_amf", "h264_mf", "libx264"):
-        console.print(f"[red]Invalid encoder:[/red] {encoder!r} (use h264_nvenc, h264_amf, h264_mf, or libx264)")
+    if encoder not in VALID_ENCODERS:
+        console.print(
+            f"[red]Invalid encoder:[/red] {encoder!r} "
+            f"(use {', '.join(VALID_ENCODERS)})"
+        )
         raise typer.Exit(1)
 
     # Verify ffmpeg is available
@@ -219,6 +236,8 @@ def main(
 
         # Load configuration
         config = load_config(config_file)
+        # CLI flag overrides config (CLI flags are the user-facing truth).
+        config["per_video_dir"] = per_video_dir
 
         progress_columns = [
             TextColumn("[progress.description]{task.description}"),
@@ -259,7 +278,7 @@ def main(
             # the log file is also relocated so it ends up next to the
             # artifacts. For local files the source is never moved — only
             # the output_dir for downstream calls is reassigned.
-            per_video_dir = config.get("per_video_dir", False)
+            per_video_dir = config.get("per_video_dir", CONFIG_DEFAULTS["per_video_dir"])
             if per_video_dir:
                 project_dir = ensure_project_dir(
                     output_dir, video_path.stem, per_video_dir,

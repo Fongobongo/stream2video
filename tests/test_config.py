@@ -8,6 +8,10 @@ from stream2video.config import (
     CONFIG_DEFAULTS,
     CONFIG_RANGES,
     USER_DEFAULT_KEYS,
+    VALID_ENCODERS,
+    VALID_METHODS,
+    VALID_THEMES,
+    coerce_typed_value,
     effective_defaults,
     load_user_defaults,
     save_user_defaults,
@@ -36,6 +40,81 @@ class TestConfigDefaults:
                 f"default for {key} ({CONFIG_DEFAULTS[key]}) is outside range "
                 f"({lo}, {hi})"
             )
+
+
+class TestValidLists:
+    """The VALID_* lists are the single source of truth for what
+    values the CLI / GUI will accept. They must include the defaults
+    and stay in sync with concat.py's ENCODER_OPTS."""
+
+    def test_valid_methods_default_in_list(self):
+        assert CONFIG_DEFAULTS["method"] in VALID_METHODS
+
+    def test_valid_encoders_default_in_list(self):
+        assert CONFIG_DEFAULTS["encoder"] in VALID_ENCODERS
+
+    def test_valid_themes_default_in_list(self):
+        assert CONFIG_DEFAULTS["theme"] in VALID_THEMES
+
+    def test_valid_encoders_match_encoder_opts(self):
+        # concat.py builds ENCODER_OPTS from the same set; if you add
+        # a new encoder, update both.
+        from stream2video.concat import ENCODER_OPTS
+        assert set(VALID_ENCODERS) == set(ENCODER_OPTS.keys())
+
+    def test_valid_methods_content(self):
+        assert set(VALID_METHODS) == {"segment", "batch"}
+
+    def test_valid_themes_content(self):
+        assert set(VALID_THEMES) == {"dark", "light", "system"}
+
+
+class TestCoerceTypedValue:
+    """coerce_typed_value — single-key type guard used by both
+    load_user_defaults and the GUI's _load_settings."""
+
+    def test_unknown_key_returns_none(self):
+        assert coerce_typed_value("not_a_real_key", 42) is None
+
+    def test_float_key_accepts_float(self):
+        assert coerce_typed_value("threshold", -30.0) == -30.0
+
+    def test_float_key_accepts_int(self):
+        assert coerce_typed_value("threshold", -30) == -30
+
+    def test_float_key_rejects_bool(self):
+        # bool is a subclass of int in Python; guard explicitly rejects it
+        # so True can't masquerade as a numeric setting.
+        assert coerce_typed_value("threshold", True) is None
+
+    def test_float_key_rejects_string(self):
+        assert coerce_typed_value("threshold", "abc") is None
+
+    def test_float_key_rejects_none(self):
+        assert coerce_typed_value("threshold", None) is None
+
+    def test_str_key_accepts_str(self):
+        assert coerce_typed_value("output_dir", "/tmp/foo") == "/tmp/foo"
+
+    def test_str_key_rejects_int(self):
+        assert coerce_typed_value("output_dir", 123) is None
+
+    def test_bool_key_accepts_bool(self):
+        assert coerce_typed_value("per_video_dir", True) is True
+        assert coerce_typed_value("per_video_dir", False) is False
+
+    def test_bool_key_rejects_int(self):
+        # 1 is truthy but is not a bool — strict type match.
+        assert coerce_typed_value("per_video_dir", 1) is None
+
+    def test_bool_key_rejects_str(self):
+        assert coerce_typed_value("per_video_dir", "yes") is None
+
+    def test_list_key_accepts_list(self):
+        assert coerce_typed_value("recent_projects", ["a", "b"]) == ["a", "b"]
+
+    def test_list_key_rejects_str(self):
+        assert coerce_typed_value("recent_projects", "a,b") is None
 
     def test_user_default_keys_are_a_subset_of_defaults(self):
         for key in USER_DEFAULT_KEYS:

@@ -4,12 +4,49 @@ import logging
 import subprocess
 import sys
 import threading
+from contextlib import contextmanager
 from pathlib import Path
-from typing import IO, Callable, List, Optional
+from typing import IO, Callable, Iterator, List, Optional
 
 logger = logging.getLogger(__name__)
 
 CANCEL_POLL_INTERVAL = 0.5
+
+
+@contextmanager
+def cancel_monitor(
+    process: subprocess.Popen,
+    cancel_callback: Optional[Callable[[], bool]] = None,
+) -> Iterator[threading.Event]:
+    """Start a daemon thread that kills ``process`` when ``cancel_callback`` returns True.
+
+    Yields a ``threading.Event`` that is set the moment cancellation occurs.
+    Callers can check it with ``cancelled.is_set()`` or just call
+    ``cancel_callback()`` directly. The event is also set automatically on
+    context exit so the monitor thread terminates cleanly.
+
+    No thread is started when ``cancel_callback`` is None — the yielded
+    event simply stays unset forever.
+    """
+    cancelled = threading.Event()
+
+    def _monitor():
+        if cancel_callback is None:
+            return
+        while not cancelled.wait(CANCEL_POLL_INTERVAL):
+            if process.poll() is not None:
+                return
+            if cancel_callback():
+                process.kill()
+                cancelled.set()
+                return
+
+    thread = threading.Thread(target=_monitor, daemon=True)
+    thread.start()
+    try:
+        yield cancelled
+    finally:
+        cancelled.set()
 
 
 def get_video_duration(video_path: Path) -> Optional[float]:

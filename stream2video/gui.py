@@ -18,9 +18,11 @@ import customtkinter as ctk
 
 from stream2video.config import (
     CONFIG_DEFAULTS,
-    USER_DEFAULT_KEYS,
+    VALID_ENCODERS,
+    VALID_METHODS,
+    VALID_THEMES,
+    coerce_typed_value,
     effective_defaults,
-    load_user_defaults,
     save_user_defaults,
     user_defaults_path,
 )
@@ -269,7 +271,7 @@ class Stream2VideoGUI(ctk.CTk):
         ctk.CTkFrame(info_frame, height=2, fg_color=("gray70", "gray30")).pack(fill="x", padx=5, pady=(6, 4))
 
         ctk.CTkLabel(info_frame, text="Theme:", anchor="w").pack(fill="x", padx=5, pady=(0, 1))
-        self.combo_theme = ctk.CTkComboBox(info_frame, values=["dark", "light", "system"], state="readonly",
+        self.combo_theme = ctk.CTkComboBox(info_frame, values=VALID_THEMES, state="readonly",
                                              command=self._on_theme_change)
         self.combo_theme.set(self.config["theme"])
         self.combo_theme.pack(fill="x", padx=5, pady=(0, 4))
@@ -325,7 +327,7 @@ class Stream2VideoGUI(ctk.CTk):
         opt_frame.pack(fill="x", padx=5, pady=1)
 
         ctk.CTkLabel(opt_frame, text="Method:").grid(row=0, column=0, sticky="w", padx=(0, 5))
-        self.combo_method = ctk.CTkComboBox(opt_frame, values=["segment", "batch"], state="readonly",
+        self.combo_method = ctk.CTkComboBox(opt_frame, values=VALID_METHODS, state="readonly",
                                              width=120)
         self.combo_method.set(self.config["method"])
         self.combo_method.grid(row=0, column=1, sticky="w", padx=(0, 5))
@@ -333,7 +335,7 @@ class Stream2VideoGUI(ctk.CTk):
 
         ctk.CTkLabel(opt_frame, text="Encoder:").grid(row=1, column=0, sticky="w", padx=(0, 5))
         self.combo_encoder = ctk.CTkComboBox(
-            opt_frame, values=["h264_nvenc", "h264_amf", "h264_mf", "libx264"], state="readonly",
+            opt_frame, values=VALID_ENCODERS, state="readonly",
             command=self._on_encoder_change, width=120,
         )
         self.combo_encoder.set(self.config["encoder"])
@@ -456,7 +458,7 @@ class Stream2VideoGUI(ctk.CTk):
         entry_val.pack(side="right")
 
         btn_default = ctk.CTkButton(row, text="D", width=28, height=24, font=("", 10, "bold"),
-                                     command=lambda k=key, d=CONFIG_DEFAULTS.get(key, current), sv=slider, ev=entry_val: self._reset_default(k, d, sv, ev))
+                                     command=lambda k=key, d=CONFIG_DEFAULTS.get(key, current), sv=slider, ev=entry_val: self._reset_default(d, sv, ev, k))
         btn_default.pack(side="right", padx=(4, 0))
 
         slider._entry_val = entry_val
@@ -467,7 +469,7 @@ class Stream2VideoGUI(ctk.CTk):
             ev.insert(0, f"{float(v):.1f}")
             self.config[k] = round(float(v), 1)
 
-        def on_entry_confirm(event=None, sv=slider, mn=min_v, mx=max_v):
+        def on_entry_confirm(event=None, sv=slider, mn=min_v, mx=max_v, k=key):
             try:
                 val = float(entry_val.get().replace(",", "."))
                 val = max(mn, min(mx, val))
@@ -484,7 +486,7 @@ class Stream2VideoGUI(ctk.CTk):
         entry_val.bind("<FocusOut>", on_entry_confirm)
         slider.configure(command=on_change)
 
-    def _reset_default(self, key: str, default: float, slider, entry):
+    def _reset_default(self, default: float, slider, entry, key: str):
         slider.set(default)
         entry.delete(0, "end")
         entry.insert(0, f"{default:.1f}")
@@ -692,7 +694,11 @@ class Stream2VideoGUI(ctk.CTk):
                     output_dir = project_dir
                     self._ui_update_output(output_dir)
                     self._log(f"Project directory: {output_dir}")
-                self._add_to_recent_projects(output_dir)
+
+            # Always track the final output dir in recent projects, so
+            # users who toggle per_video_dir off still see their work
+            # surfaces in the panel.
+            self._add_to_recent_projects(output_dir)
 
             self._download_path = video_path if download_result.is_downloaded else None
             self._ui_update_file_info(video_path)
@@ -1058,12 +1064,16 @@ class Stream2VideoGUI(ctk.CTk):
         pipeline duration. Pure helper, easy to unit-test."""
         return f"Total: {Stream2VideoGUI._fmt_time(total_elapsed)}"
 
+    _STATUS_MAX = 50
+
     def _ui_status(self, text: str, force: bool = False):
         now = time.monotonic()
         if not force and now - self._last_status_update < 0.5:
             return
         self._last_status_update = now
-        self.after(0, lambda: self.lbl_status.configure(text=text[:50]))
+        if len(text) > self._STATUS_MAX:
+            text = text[: self._STATUS_MAX - 1] + "…"
+        self.after(0, lambda: self.lbl_status.configure(text=text))
 
     def _ui_info(self, text: str):
         self.after(0, lambda t=text: self.lbl_silence.configure(text=t))
@@ -1165,13 +1175,23 @@ class Stream2VideoGUI(ctk.CTk):
 
     def _load_settings(self):
         sp = self._settings_path()
-        if sp.exists():
-            try:
-                with open(sp) as f:
-                    loaded = json.load(f)
-                    self.config.update(loaded)
-            except Exception as e:
-                logger.warning("Failed to load settings: %s", e)
+        if not sp.exists():
+            return
+        try:
+            with open(sp, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("Failed to load settings: %s", e)
+            return
+        if not isinstance(loaded, dict):
+            logger.warning("Settings file is not a JSON object; ignoring")
+            return
+        for key, value in loaded.items():
+            coerced = coerce_typed_value(key, value)
+            if coerced is not None:
+                self.config[key] = coerced
+            else:
+                logger.debug("Dropping settings[%r] with wrong type: %r", key, value)
 
     def _restore_defaults(self):
         self.config = effective_defaults()
