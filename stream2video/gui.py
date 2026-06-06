@@ -372,14 +372,6 @@ class Stream2VideoGUI(ctk.CTk):
         action_frame = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
         action_frame.pack(fill="x", padx=5, pady=(0, 6))
 
-        self.btn_start = ctk.CTkButton(action_frame, text="Start", command=self._start_pipeline,
-                                        height=36, font=("", 13, "bold"))
-        self.btn_start.pack(side="left", padx=(0, 8))
-
-        self.btn_cancel = ctk.CTkButton(action_frame, text="Cancel", command=self._cancel_pipeline,
-                                         state="disabled", fg_color="#d32f2f", hover_color="#b71c1c")
-        self.btn_cancel.pack(side="left")
-
         # Action row: two-column grid.
         #   col 0: [Start] [Cancel] [Elapsed]   — left cluster, natural width
         #   col 1: [Step / Complete]             — right side, expand=True
