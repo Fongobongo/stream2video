@@ -653,7 +653,7 @@ class Stream2VideoGUI(ctk.CTk):
             # Step 1: Download / resolve path
             self._ui_progress(0.0)
             self._ui_status("Step 1/3: Downloading / resolving video...", force=True)
-            self._log("Phase 1/3: Downloading / resolving video...")
+            self._log("Step 1/3: Downloading / resolving video...")
             self._ui_overall_elapsed_only()
 
             def dl_prog(frac: float, text: str):
@@ -721,7 +721,7 @@ class Stream2VideoGUI(ctk.CTk):
             self._ui_progress(0.05)
             self._ui_status("Step 2/3: Detecting silence...", force=True)
             self._log(
-                f"Phase 2/3: Detecting silence "
+                f"Step 2/3: Detecting silence "
                 f"(threshold={self.config['threshold']}dB, "
                 f"min_silence={self.config['min_silence']}s, "
                 f"margin={self.config['margin']}s)..."
@@ -771,7 +771,7 @@ class Stream2VideoGUI(ctk.CTk):
             self._ui_progress(0.4)
             self._ui_status("Step 3/3: Cutting and concatenating...", force=True)
             self._log(
-                f"Phase 3/3: Cutting & concatenating "
+                f"Step 3/3: Cutting & concatenating "
                 f"(method={method}, encoder={encoder})..."
             )
 
