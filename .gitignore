@@ -63,6 +63,7 @@ env/
 # Project specific
 compressed_videos/
 _portable/
+PLAN.md
 *.log
 *.mp4
 *.mkv
