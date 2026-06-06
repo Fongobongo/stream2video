@@ -69,6 +69,8 @@ stream2video /path/to/video.mp4
 | `-m, --method` | `segment` | `segment` (per-segment encode + concat demuxer) or `batch` (frame-exact select/aselect) |
 | `-f, --force` | — | Re-detect silence, ignore cache |
 | `-c, --config` | — | YAML config file |
+| `--delete-after` | — | Delete downloaded source after successful compression |
+| `--per-video-dir` / `--no-per-video-dir` | (follows `per_video_dir` config) | Group all artifacts into `{output_dir}/{stem}/` |
 | `-l, --log-level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 
 ### Examples
@@ -96,10 +98,10 @@ margin: 0.15
 
 | Parameter | Range | Default | Description |
 |-----------|-------|---------|-------------|
-| `threshold` (dB) | -60 to -5 | -60.0 | Audio below this level = silence |
+| `threshold` (dB) | -60 to -5 | -30.0 | Audio below this level = silence |
 | `min_silence` (s) | 0.1 to 60 | 2.0 | Minimum silence duration to cut |
 | `margin` (s) | -3 to 5 | 0.5 | How much to shrink silence zones. Positive = shrink silence (keep more audio around phrases). Negative = expand silence (cut more aggressively). `0` = no adjustment. |
-| `per_video_dir` | bool | `false` | When true, all artifacts (downloaded source, WAV, JSON, log, compressed, temp dirs) are collected into `{output_dir}/{stem}/` instead of living in the base `output_dir`. Local source files are never moved/copied — they stay where you put them. |
+| `per_video_dir` | bool | `true` | When true, all artifacts (downloaded source, WAV, JSON, log, compressed, temp dirs) are collected into `{output_dir}/{stem}/` instead of living in the base `output_dir`. Local source files are never moved/copied — they stay where you put them. |
 
 ## Project directory
 
@@ -113,7 +115,8 @@ output_dir/
     ├── myvideo_silence_cache.json
     ├── myvideo_compressed.mp4     # final output
     ├── stream2video.log           # per-video log
-    └── _myvideo_segments/         # temp dir, cleaned on success
+    ├── _myvideo_segments/         # temp dir (segment method), cleaned on success
+    └── _myvideo_batch/            # temp dir (batch method), cleaned on success
 ```
 
 Useful for keeping many videos in one `output_dir` without mixing their WAVs / logs / temp segments. Cache behavior is the same — just lives one level deeper. Local source files are never moved or copied.
