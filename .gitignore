@@ -62,6 +62,7 @@ env/
 
 # Project specific
 compressed_videos/
+_portable/
 *.log
 *.mp4
 *.mkv
