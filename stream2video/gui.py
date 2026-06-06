@@ -12,10 +12,17 @@ import threading
 import time
 from pathlib import Path
 from tkinter import filedialog, messagebox
-from typing import Optional
+from typing import ClassVar
 
 import customtkinter as ctk
 
+from stream2video.concat import (
+    CancelledError,
+    ConcatError,
+    check_encoder,
+    cut_and_concat,
+    generate_keep_segments,
+)
 from stream2video.config import (
     CONFIG_DEFAULTS,
     VALID_ENCODERS,
@@ -26,26 +33,19 @@ from stream2video.config import (
     save_user_defaults,
     user_defaults_path,
 )
-from stream2video.download import download, DownloadCancelledError, DownloadError
-from stream2video.silence import (
-    detect_silence,
-    load_silence_cache,
-    save_silence_cache,
-    SilenceCancelledError,
-    SilenceDetectionError,
-)
-from stream2video.concat import (
-    CancelledError,
-    ConcatError,
-    check_encoder,
-    cut_and_concat,
-    generate_keep_segments,
-)
+from stream2video.download import DownloadCancelledError, DownloadError, download
 from stream2video.paths import (
     add_recent_project,
     ensure_project_dir,
     move_into_project,
     prune_recent_projects,
+)
+from stream2video.silence import (
+    SilenceCancelledError,
+    SilenceDetectionError,
+    detect_silence,
+    load_silence_cache,
+    save_silence_cache,
 )
 from stream2video.utils import get_active_process, get_video_duration
 
@@ -77,8 +77,8 @@ class _Tooltip:
     def __init__(self, widget, text: str):
         self.widget = widget
         self.text = text
-        self._tip: Optional[ctk.CTkToplevel] = None
-        self._after_id: Optional[str] = None
+        self._tip: ctk.CTkToplevel | None = None
+        self._after_id: str | None = None
         widget.bind("<Enter>", self._schedule_show, add="+")
         widget.bind("<Leave>", self._schedule_hide, add="+")
 
@@ -106,10 +106,16 @@ class _Tooltip:
         tw.wm_overrideredirect(True)
         tw.wm_geometry(f"+{x}+{y}")
         tw.attributes("-topmost", True)
-        ctk.CTkLabel(tw, text=self.text, wraplength=320,
-                     fg_color=("gray85", "gray15"),
-                     text_color=("gray10", "gray90"),
-                     corner_radius=4, padx=8, pady=4).pack()
+        ctk.CTkLabel(
+            tw,
+            text=self.text,
+            wraplength=320,
+            fg_color=("gray85", "gray15"),
+            text_color=("gray10", "gray90"),
+            corner_radius=4,
+            padx=8,
+            pady=4,
+        ).pack()
         tw.bind("<Enter>", self._cancel_scheduled, add="+")
         tw.bind("<Leave>", self._schedule_hide, add="+")
 
@@ -133,7 +139,7 @@ class QueueHandler(logging.Handler):
 
 def _build_completion_summary(
     src_size_bytes: int,
-    src_duration: Optional[float],
+    src_duration: float | None,
     dst_size_bytes: int,
     dst_duration: float,
     pipeline_seconds: float,
@@ -193,10 +199,10 @@ class Stream2VideoGUI(ctk.CTk):
         self._test_running = False
         self.config = effective_defaults()
         self.log_queue: queue.Queue = queue.Queue()
-        self._output_path: Optional[Path] = None
-        self._download_path: Optional[Path] = None
+        self._output_path: Path | None = None
+        self._download_path: Path | None = None
         self._last_status_update: float = 0.0
-        self._pipeline_start: Optional[float] = None
+        self._pipeline_start: float | None = None
 
         self._load_settings()
         ctk.set_appearance_mode(self.config["theme"])
@@ -237,8 +243,9 @@ class Stream2VideoGUI(ctk.CTk):
 
         # ── Left: Info Panel ──
         info_frame = ctk.CTkFrame(self)
-        info_header = ctk.CTkLabel(info_frame, text="Info", anchor="w",
-                                    font=ctk.CTkFont(size=12, weight="bold"))
+        info_header = ctk.CTkLabel(
+            info_frame, text="Info", anchor="w", font=ctk.CTkFont(size=12, weight="bold")
+        )
         info_header.pack(fill="x", padx=5, pady=(4, 2))
         info_frame.grid(row=0, column=0, sticky="nsew", padx=(4, 3), pady=4)
 
@@ -251,103 +258,173 @@ class Stream2VideoGUI(ctk.CTk):
         self.lbl_size = ctk.CTkLabel(info_frame, text="Size: —", wraplength=190, justify="left")
         self.lbl_size.pack(anchor="w", fill="x", padx=5, pady=1)
 
-        self.lbl_duration = ctk.CTkLabel(info_frame, text="Duration: —", wraplength=190, justify="left")
+        self.lbl_duration = ctk.CTkLabel(
+            info_frame, text="Duration: —", wraplength=190, justify="left"
+        )
         self.lbl_duration.pack(anchor="w", fill="x", padx=5, pady=1)
 
-        self.lbl_silence = ctk.CTkLabel(info_frame, text="Silence: —", wraplength=190, justify="left")
+        self.lbl_silence = ctk.CTkLabel(
+            info_frame, text="Silence: —", wraplength=190, justify="left"
+        )
         self.lbl_silence.pack(anchor="w", fill="x", padx=5, pady=1)
 
-        self.lbl_encoder = ctk.CTkLabel(info_frame, text="Encoder: —", wraplength=190, justify="left")
+        self.lbl_encoder = ctk.CTkLabel(
+            info_frame, text="Encoder: —", wraplength=190, justify="left"
+        )
         self.lbl_encoder.pack(anchor="w", fill="x", padx=5, pady=1)
 
-        ctk.CTkFrame(info_frame, height=2, fg_color=("gray70", "gray30")).pack(fill="x", padx=5, pady=6)
+        ctk.CTkFrame(info_frame, height=2, fg_color=("gray70", "gray30")).pack(
+            fill="x", padx=5, pady=6
+        )
 
         # Recent Projects section
-        ctk.CTkLabel(info_frame, text="Recent Projects", anchor="w").pack(fill="x", padx=5, pady=(0, 2))
+        ctk.CTkLabel(info_frame, text="Recent Projects", anchor="w").pack(
+            fill="x", padx=5, pady=(0, 2)
+        )
         self.recent_frame = ctk.CTkFrame(info_frame, fg_color="transparent")
         self.recent_frame.pack(fill="x", padx=2, pady=(0, 4))
         self._render_recent_projects()
 
-        ctk.CTkFrame(info_frame, height=2, fg_color=("gray70", "gray30")).pack(fill="x", padx=5, pady=(6, 4))
+        ctk.CTkFrame(info_frame, height=2, fg_color=("gray70", "gray30")).pack(
+            fill="x", padx=5, pady=(6, 4)
+        )
 
         ctk.CTkLabel(info_frame, text="Theme:", anchor="w").pack(fill="x", padx=5, pady=(0, 1))
-        self.combo_theme = ctk.CTkComboBox(info_frame, values=VALID_THEMES, state="readonly",
-                                             command=self._on_theme_change)
+        self.combo_theme = ctk.CTkComboBox(
+            info_frame, values=VALID_THEMES, state="readonly", command=self._on_theme_change
+        )
         self.combo_theme.set(self.config["theme"])
         self.combo_theme.pack(fill="x", padx=5, pady=(0, 4))
 
-        ctk.CTkButton(info_frame, text="Save current as defaults", command=self._save_user_defaults).pack(fill="x", padx=5, pady=(0, 4))
-        ctk.CTkButton(info_frame, text="Restore defaults", command=self._restore_defaults).pack(fill="x", padx=5, pady=(0, 4))
-        ctk.CTkButton(info_frame, text="Copy CLI command", command=self._copy_cli_command).pack(fill="x", padx=5, pady=(0, 4))
+        ctk.CTkButton(
+            info_frame, text="Save current as defaults", command=self._save_user_defaults
+        ).pack(fill="x", padx=5, pady=(0, 4))
+        ctk.CTkButton(info_frame, text="Restore defaults", command=self._restore_defaults).pack(
+            fill="x", padx=5, pady=(0, 4)
+        )
+        ctk.CTkButton(info_frame, text="Copy CLI command", command=self._copy_cli_command).pack(
+            fill="x", padx=5, pady=(0, 4)
+        )
 
         # ── Center: Controls ──
         ctrl_frame = ctk.CTkFrame(self)
         ctrl_frame.grid(row=0, column=1, sticky="nsew", padx=3, pady=4)
 
-        ctk.CTkLabel(ctrl_frame, text="Controls", anchor="w",
-                      font=ctk.CTkFont(size=12, weight="bold")).pack(fill="x", padx=5, pady=(6, 2))
+        ctk.CTkLabel(
+            ctrl_frame, text="Controls", anchor="w", font=ctk.CTkFont(size=12, weight="bold")
+        ).pack(fill="x", padx=5, pady=(6, 2))
         # Input
-        ctk.CTkLabel(ctrl_frame, text="Input Video (Twitch/YouTube URL or local path):", anchor="w").pack(fill="x", padx=5, pady=(1, 1))
+        ctk.CTkLabel(
+            ctrl_frame, text="Input Video (Twitch/YouTube URL or local path):", anchor="w"
+        ).pack(fill="x", padx=5, pady=(1, 1))
         row = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
         row.pack(fill="x", padx=5, pady=(0, 5))
         self.entry_input = ctk.CTkEntry(row, placeholder_text="video.mp4 or https://...")
         self.entry_input.pack(side="left", fill="x", expand=True)
         if self.config.get("input_path"):
             self.entry_input.insert(0, self.config["input_path"])
-        ctk.CTkButton(row, text="Browse", width=70, command=self._browse_input).pack(side="right", padx=(5, 0))
+        ctk.CTkButton(row, text="Browse", width=70, command=self._browse_input).pack(
+            side="right", padx=(5, 0)
+        )
 
         # Output dir
-        ctk.CTkLabel(ctrl_frame, text="Output Directory:", anchor="w").pack(fill="x", padx=5, pady=(0, 1))
+        ctk.CTkLabel(ctrl_frame, text="Output Directory:", anchor="w").pack(
+            fill="x", padx=5, pady=(0, 1)
+        )
         row2 = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
         row2.pack(fill="x", padx=5, pady=(0, 6))
         self.entry_output = ctk.CTkEntry(row2, placeholder_text="compressed_videos")
         self.entry_output.pack(side="left", fill="x", expand=True)
         if self.config.get("output_dir"):
             self.entry_output.insert(0, self.config["output_dir"])
-        ctk.CTkButton(row2, text="Browse", width=70, command=self._browse_output).pack(side="right", padx=(5, 0))
+        ctk.CTkButton(row2, text="Browse", width=70, command=self._browse_output).pack(
+            side="right", padx=(5, 0)
+        )
 
-        ctk.CTkFrame(ctrl_frame, height=2, fg_color=("gray70", "gray30")).pack(fill="x", padx=5, pady=3)
+        ctk.CTkFrame(ctrl_frame, height=2, fg_color=("gray70", "gray30")).pack(
+            fill="x", padx=5, pady=3
+        )
 
         # Config
-        ctk.CTkLabel(ctrl_frame, text="Silence Detection", anchor="w", font=("", 13, "bold")).pack(fill="x", padx=5, pady=(3, 1))
+        ctk.CTkLabel(ctrl_frame, text="Silence Detection", anchor="w", font=("", 13, "bold")).pack(
+            fill="x", padx=5, pady=(3, 1)
+        )
 
-        self._add_slider(ctrl_frame, "Threshold (dB):", "threshold", -60, -5, self.config["threshold"],
-                         tooltip="Audio below this level is considered silence. Lower (-30) removes more noise, higher (-5) only cuts loud pauses.")
-        self._add_slider(ctrl_frame, "Min Silence (s):", "min_silence", 0.1, 60, self.config["min_silence"],
-                         tooltip="Minimum silence duration to cut (seconds). Longer values prevent choppy edits.")
-        self._add_slider(ctrl_frame, "Margin (s):", "margin", -3, 5, self.config["margin"],
-                         tooltip="How much to shrink silence zones. Positive = shrink silence (keep more audio around phrases). Negative = expand silence (cut more aggressively). 0 = no adjustment.")
+        self._add_slider(
+            ctrl_frame,
+            "Threshold (dB):",
+            "threshold",
+            -60,
+            -5,
+            self.config["threshold"],
+            tooltip="Audio below this level is considered silence. Lower (-30) removes more noise, higher (-5) only cuts loud pauses.",
+        )
+        self._add_slider(
+            ctrl_frame,
+            "Min Silence (s):",
+            "min_silence",
+            0.1,
+            60,
+            self.config["min_silence"],
+            tooltip="Minimum silence duration to cut (seconds). Longer values prevent choppy edits.",
+        )
+        self._add_slider(
+            ctrl_frame,
+            "Margin (s):",
+            "margin",
+            -3,
+            5,
+            self.config["margin"],
+            tooltip="How much to shrink silence zones. Positive = shrink silence (keep more audio around phrases). Negative = expand silence (cut more aggressively). 0 = no adjustment.",
+        )
 
-        ctk.CTkFrame(ctrl_frame, height=2, fg_color=("gray70", "gray30")).pack(fill="x", padx=5, pady=3)
+        ctk.CTkFrame(ctrl_frame, height=2, fg_color=("gray70", "gray30")).pack(
+            fill="x", padx=5, pady=3
+        )
 
         # Options
-        ctk.CTkLabel(ctrl_frame, text="Options", anchor="w", font=("", 13, "bold")).pack(fill="x", padx=5, pady=(3, 1))
+        ctk.CTkLabel(ctrl_frame, text="Options", anchor="w", font=("", 13, "bold")).pack(
+            fill="x", padx=5, pady=(3, 1)
+        )
 
         opt_frame = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
         opt_frame.pack(fill="x", padx=5, pady=1)
 
         ctk.CTkLabel(opt_frame, text="Method:").grid(row=0, column=0, sticky="w", padx=(0, 5))
-        self.combo_method = ctk.CTkComboBox(opt_frame, values=VALID_METHODS, state="readonly",
-                                             width=120)
+        self.combo_method = ctk.CTkComboBox(
+            opt_frame, values=VALID_METHODS, state="readonly", width=120
+        )
         self.combo_method.set(self.config["method"])
         self.combo_method.grid(row=0, column=1, sticky="w", padx=(0, 5))
-        _Tooltip(self.combo_method, "Segment: faster, ~1.5h, encodes each segment then joins.\nBatch: frame-exact, ~6-7h, uses select/aselect filter.")
+        _Tooltip(
+            self.combo_method,
+            "Segment: faster, ~1.5h, encodes each segment then joins.\nBatch: frame-exact, ~6-7h, uses select/aselect filter.",
+        )
 
         ctk.CTkLabel(opt_frame, text="Encoder:").grid(row=1, column=0, sticky="w", padx=(0, 5))
         self.combo_encoder = ctk.CTkComboBox(
-            opt_frame, values=VALID_ENCODERS, state="readonly",
-            command=self._on_encoder_change, width=120,
+            opt_frame,
+            values=VALID_ENCODERS,
+            state="readonly",
+            command=self._on_encoder_change,
+            width=120,
         )
         self.combo_encoder.set(self.config["encoder"])
         self.combo_encoder.grid(row=1, column=1, sticky="w", padx=(0, 5))
-        _Tooltip(self.combo_encoder, "h264_nvenc — NVIDIA GPU (GTX 1000+, RTX)\nh264_amf — AMD GPU (RX 400+, Ryzen APU)\nh264_mf — Windows Media Foundation (any GPU)\nlibx264 — CPU software encode (most compatible)")
+        _Tooltip(
+            self.combo_encoder,
+            "h264_nvenc — NVIDIA GPU (GTX 1000+, RTX)\nh264_amf — AMD GPU (RX 400+, Ryzen APU)\nh264_mf — Windows Media Foundation (any GPU)\nlibx264 — CPU software encode (most compatible)",
+        )
 
-        self.btn_test_encoders = ctk.CTkButton(opt_frame, text="Test encoder", width=90,
-                                                 command=self._test_encoders)
+        self.btn_test_encoders = ctk.CTkButton(
+            opt_frame, text="Test encoder", width=90, command=self._test_encoders
+        )
         self.btn_test_encoders.grid(row=1, column=2, padx=(5, 0))
 
         self.lbl_encoder_desc = ctk.CTkLabel(opt_frame, text="", font=("", 10, "italic"))
-        self.lbl_encoder_desc.grid(row=2, column=0, columnspan=4, sticky="w", padx=(0, 5), pady=(1, 0))
+        self.lbl_encoder_desc.grid(
+            row=2, column=0, columnspan=4, sticky="w", padx=(0, 5), pady=(1, 0)
+        )
 
         opt_frame.grid_columnconfigure(1, weight=0)
         self._on_encoder_change(self.config["encoder"])
@@ -363,13 +440,16 @@ class Stream2VideoGUI(ctk.CTk):
         self.chk_delete.pack(anchor="w", padx=5, pady=(4, 1))
 
         self.chk_per_video_dir = ctk.CTkCheckBox(
-            ctrl_frame, text="Create separate subdirectory for this video's project",
+            ctrl_frame,
+            text="Create separate subdirectory for this video's project",
         )
         if self.config.get("per_video_dir"):
             self.chk_per_video_dir.select()
         self.chk_per_video_dir.pack(anchor="w", padx=5, pady=(4, 1))
 
-        ctk.CTkFrame(ctrl_frame, height=2, fg_color=("gray70", "gray30")).pack(fill="x", padx=5, pady=4)
+        ctk.CTkFrame(ctrl_frame, height=2, fg_color=("gray70", "gray30")).pack(
+            fill="x", padx=5, pady=4
+        )
 
         # Action
         action_frame = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
@@ -383,14 +463,25 @@ class Stream2VideoGUI(ctk.CTk):
         left_cluster = ctk.CTkFrame(action_frame, fg_color="transparent")
         left_cluster.pack(side="left", fill="x", expand=True)
 
-        self.btn_start = ctk.CTkButton(left_cluster, text="Start", command=self._start_pipeline,
-                                        height=36, font=("", 13, "bold"),
-                                        width=70)
+        self.btn_start = ctk.CTkButton(
+            left_cluster,
+            text="Start",
+            command=self._start_pipeline,
+            height=36,
+            font=("", 13, "bold"),
+            width=70,
+        )
         self.btn_start.pack(side="left", padx=(0, 8))
 
-        self.btn_cancel = ctk.CTkButton(left_cluster, text="Cancel", command=self._cancel_pipeline,
-                                         state="disabled", fg_color="#d32f2f", hover_color="#b71c1c",
-                                         width=70)
+        self.btn_cancel = ctk.CTkButton(
+            left_cluster,
+            text="Cancel",
+            command=self._cancel_pipeline,
+            state="disabled",
+            fg_color="#d32f2f",
+            hover_color="#b71c1c",
+            width=70,
+        )
         self.btn_cancel.pack(side="left")
 
         # Step / Complete label, left-anchored, immediately after Cancel.
@@ -408,29 +499,35 @@ class Stream2VideoGUI(ctk.CTk):
         self.bottom_frame.grid_columnconfigure(0, weight=1)
         self.bottom_frame.grid_columnconfigure(1, weight=5)
         self.progress = ctk.CTkProgressBar(
-            self.bottom_frame, mode="determinate", height=10,
+            self.bottom_frame,
+            mode="determinate",
+            height=10,
         )
         self.progress.set(0)
         self.progress.grid(row=0, column=0, sticky="ew", padx=(0, 6))
         # Live Elapsed/Remaining for the current phase. Same row as the
         # bar, left-anchored, immediately to the right of the bar.
         self.lbl_overall = ctk.CTkLabel(
-            self.bottom_frame, text="", anchor="w",
+            self.bottom_frame,
+            text="",
+            anchor="w",
             text_color=("gray40", "gray60"),
         )
         self.lbl_overall.grid(row=0, column=1, sticky="w", padx=(8, 0))
         # Total pipeline wall-clock, updated in real time. Row 1, full width.
         self.lbl_total = ctk.CTkLabel(
-            self.bottom_frame, text="", anchor="w",
+            self.bottom_frame,
+            text="",
+            anchor="w",
             text_color=("gray40", "gray60"),
         )
-        self.lbl_total.grid(row=1, column=0, columnspan=2, sticky="ew",
-                             pady=(2, 0))
+        self.lbl_total.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 0))
 
         # ── Right: Log Panel ──
         log_frame = ctk.CTkFrame(self)
-        log_header = ctk.CTkLabel(log_frame, text="Log", anchor="w",
-                                   font=ctk.CTkFont(size=12, weight="bold"))
+        log_header = ctk.CTkLabel(
+            log_frame, text="Log", anchor="w", font=ctk.CTkFont(size=12, weight="bold")
+        )
         log_header.grid(row=0, column=0, sticky="ew", padx=4, pady=(3, 0))
         log_frame.grid_rowconfigure(1, weight=1)
         log_frame.grid_columnconfigure(0, weight=1)
@@ -439,7 +536,16 @@ class Stream2VideoGUI(ctk.CTk):
         self.txt_log = ctk.CTkTextbox(log_frame, wrap="word", state="disabled")
         self.txt_log.grid(row=1, column=0, sticky="nsew", padx=4, pady=3)
 
-    def _add_slider(self, parent, label: str, key: str, min_v: float, max_v: float, current: float, tooltip: str = ""):
+    def _add_slider(
+        self,
+        parent,
+        label: str,
+        key: str,
+        min_v: float,
+        max_v: float,
+        current: float,
+        tooltip: str = "",
+    ):
         """Add a labelled slider row with editable value field and default button."""
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=6, pady=(2, 0))
@@ -449,7 +555,9 @@ class Stream2VideoGUI(ctk.CTk):
         if tooltip:
             _Tooltip(lbl, tooltip)
 
-        slider = ctk.CTkSlider(row, from_=min_v, to=max_v, number_of_steps=round((max_v - min_v) * 10))
+        slider = ctk.CTkSlider(
+            row, from_=min_v, to=max_v, number_of_steps=round((max_v - min_v) * 10)
+        )
         slider.set(current)
         slider.pack(side="left", fill="x", expand=True, padx=(0, 8))
 
@@ -457,8 +565,16 @@ class Stream2VideoGUI(ctk.CTk):
         entry_val.insert(0, f"{current:.1f}")
         entry_val.pack(side="right")
 
-        btn_default = ctk.CTkButton(row, text="D", width=28, height=24, font=("", 10, "bold"),
-                                     command=lambda k=key, d=CONFIG_DEFAULTS.get(key, current), sv=slider, ev=entry_val: self._reset_default(d, sv, ev, k))
+        btn_default = ctk.CTkButton(
+            row,
+            text="D",
+            width=28,
+            height=24,
+            font=("", 10, "bold"),
+            command=lambda k=key, d=CONFIG_DEFAULTS.get(key, current), sv=slider, ev=entry_val: (
+                self._reset_default(d, sv, ev, k)
+            ),
+        )
         btn_default.pack(side="right", padx=(4, 0))
 
         slider._entry_val = entry_val
@@ -507,7 +623,10 @@ class Stream2VideoGUI(ctk.CTk):
     def _browse_input(self):
         path = filedialog.askopenfilename(
             title="Select Video File",
-            filetypes=[("Video files", "*.mp4 *.mkv *.avi *.mov *.webm *.ts"), ("All files", "*.*")]
+            filetypes=[
+                ("Video files", "*.mp4 *.mkv *.avi *.mov *.webm *.ts"),
+                ("All files", "*.*"),
+            ],
         )
         if path:
             self.entry_input.delete(0, "end")
@@ -524,7 +643,7 @@ class Stream2VideoGUI(ctk.CTk):
         ctk.set_appearance_mode(choice)
         self.config["theme"] = choice
 
-    ENCODER_DESCRIPTIONS = {
+    ENCODER_DESCRIPTIONS: ClassVar[dict[str, str]] = {
         "h264_nvenc": "NVIDIA NVENC (GTX 1000+, RTX)",
         "h264_amf": "AMD AMF (RX 400+, Ryzen APU)",
         "h264_mf": "Media Foundation (any GPU, Windows only)",
@@ -556,8 +675,9 @@ class Stream2VideoGUI(ctk.CTk):
                 logger.exception("Encoder test crashed")
             finally:
                 self._test_running = False
-                self.after(0, lambda: self.btn_test_encoders.configure(
-                    state="normal", text="Test encoder"))
+                self.after(
+                    0, lambda: self.btn_test_encoders.configure(state="normal", text="Test encoder")
+                )
 
         threading.Thread(target=_run, daemon=True).start()
 
@@ -568,10 +688,17 @@ class Stream2VideoGUI(ctk.CTk):
         size = path.stat().st_size
         self.lbl_size.configure(text=f"Size: {self._fmt_size(size)}")
         self.lbl_duration.configure(text="Duration: ...")
+
         def _get_dur():
             dur = get_video_duration(path)
             if dur:
-                self.after(0, lambda d=dur: self.lbl_duration.configure(text=f"Duration: {self._fmt_time(d)}"))
+                self.after(
+                    0,
+                    lambda d=dur: self.lbl_duration.configure(
+                        text=f"Duration: {self._fmt_time(d)}"
+                    ),
+                )
+
         threading.Thread(target=_get_dur, daemon=True).start()
 
     # ── Pipeline ─────────────────────────────────────────────────
@@ -645,8 +772,13 @@ class Stream2VideoGUI(ctk.CTk):
             self.after(0, lambda: self.lbl_total.configure(text=""))
 
     def _pipeline_worker(
-        self, input_raw: str, output_dir: Path, method: str, encoder: str,
-        force: bool, per_video_dir: bool = False,
+        self,
+        input_raw: str,
+        output_dir: Path,
+        method: str,
+        encoder: str,
+        force: bool,
+        per_video_dir: bool = False,
     ):
         # Wall-clock anchor for the overall-time label.
         self._pipeline_start = time.monotonic()
@@ -666,7 +798,8 @@ class Stream2VideoGUI(ctk.CTk):
 
             try:
                 download_result = download(
-                    input_raw, output_dir,
+                    input_raw,
+                    output_dir,
                     cancel_callback=lambda: self._cancel_event.is_set(),
                     progress_callback=dl_prog,
                 )
@@ -685,7 +818,9 @@ class Stream2VideoGUI(ctk.CTk):
             # project dir is still used for WAV / JSON / compressed / log.
             if per_video_dir:
                 project_dir = ensure_project_dir(
-                    output_dir, video_path.stem, per_video_dir,
+                    output_dir,
+                    video_path.stem,
+                    per_video_dir,
                 )
                 if project_dir != output_dir:
                     if download_result.is_downloaded:
@@ -757,7 +892,8 @@ class Stream2VideoGUI(ctk.CTk):
                     self._ui_overall(elapsed, remaining, more_phases=True)
 
                 silence_segments = detect_silence(
-                    video_path, **config,
+                    video_path,
+                    **config,
                     output_dir=output_dir,
                     progress_callback=silence_prog,
                     cancel_callback=lambda: self._cancel_event.is_set(),
@@ -772,15 +908,14 @@ class Stream2VideoGUI(ctk.CTk):
             # Update info
             keep = generate_keep_segments(video_path, silence_segments)
             keep_dur = sum(e - s for s, e in keep)
-            self._ui_info(f"Silence: {len(silence_segments)} segments\nKeep: {len(keep)} segments ({self._fmt_time(keep_dur)})")
+            self._ui_info(
+                f"Silence: {len(silence_segments)} segments\nKeep: {len(keep)} segments ({self._fmt_time(keep_dur)})"
+            )
 
             # Step 3: Cut & concat
             self._ui_progress(0.4)
             self._ui_status("Step 3/3: Cutting and concatenating...", force=True)
-            self._log(
-                f"Step 3/3: Cutting & concatenating "
-                f"(method={method}, encoder={encoder})..."
-            )
+            self._log(f"Step 3/3: Cutting & concatenating (method={method}, encoder={encoder})...")
 
             output_path = output_dir / f"{video_path.stem}_compressed.mp4"
             self._output_path = output_path
@@ -801,8 +936,12 @@ class Stream2VideoGUI(ctk.CTk):
                 self._ui_overall(elapsed, remaining, more_phases=False)
 
             cut_and_concat(
-                video_path, silence_segments, output_path,
-                progress_callback=concat_prog, method=method, encoder=encoder,
+                video_path,
+                silence_segments,
+                output_path,
+                progress_callback=concat_prog,
+                method=method,
+                encoder=encoder,
                 cancel_callback=lambda: self._cancel_event.is_set(),
             )
 
@@ -850,9 +989,7 @@ class Stream2VideoGUI(ctk.CTk):
             self._download_path = None
 
             # Show completion popup
-            self.after(0, lambda: messagebox.showinfo(
-                "Complete", summary["popup"]
-            ))
+            self.after(0, lambda: messagebox.showinfo("Complete", summary["popup"]))
 
         except (CancelledError, SilenceCancelledError):
             self._log("Pipeline cancelled")
@@ -888,8 +1025,10 @@ class Stream2VideoGUI(ctk.CTk):
             self.config["recent_projects"] = pruned
         if not pruned:
             ctk.CTkLabel(
-                self.recent_frame, text="(no recent projects)",
-                text_color=("gray50", "gray60"), anchor="w",
+                self.recent_frame,
+                text="(no recent projects)",
+                text_color=("gray50", "gray60"),
+                anchor="w",
             ).pack(fill="x", padx=5, pady=2)
             return
         for path_str in pruned:
@@ -897,8 +1036,10 @@ class Stream2VideoGUI(ctk.CTk):
             row.pack(fill="x", padx=2, pady=1)
             display = Path(path_str).name or path_str
             lbl = ctk.CTkLabel(
-                row, text=_truncate(display, _RECENT_NAME_MAX),
-                anchor="w", cursor="hand2",
+                row,
+                text=_truncate(display, _RECENT_NAME_MAX),
+                anchor="w",
+                cursor="hand2",
             )
             lbl.pack(side="left", fill="x", expand=True, padx=(3, 2))
             lbl.bind(
@@ -907,7 +1048,10 @@ class Stream2VideoGUI(ctk.CTk):
             )
             _Tooltip(lbl, path_str)
             del_btn = ctk.CTkButton(
-                row, text="X", width=22, height=22,
+                row,
+                text="X",
+                width=22,
+                height=22,
                 fg_color=("gray70", "gray30"),
                 hover_color=("#c0392b", "#922B21"),
                 text_color=("gray10", "gray90"),
@@ -926,12 +1070,13 @@ class Stream2VideoGUI(ctk.CTk):
             return
         path_str = str(project_path)
         self.config["recent_projects"] = add_recent_project(
-            self.config.get("recent_projects", []), path_str,
+            self.config.get("recent_projects", []),
+            path_str,
         )
         self._render_recent_projects()
         try:
             self._save_settings()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             logger.warning("Failed to save settings after adding recent project: %s", e)
 
     def _delete_recent_project(self, path_str: str):
@@ -943,8 +1088,7 @@ class Stream2VideoGUI(ctk.CTk):
         if not path.is_dir():
             self._log(f"Project no longer exists, dropping from list: {path_str}")
             self.config["recent_projects"] = [
-                p for p in self.config.get("recent_projects", [])
-                if p != path_str
+                p for p in self.config.get("recent_projects", []) if p != path_str
             ]
             self._render_recent_projects()
             return
@@ -969,8 +1113,7 @@ class Stream2VideoGUI(ctk.CTk):
             messagebox.showerror("Delete failed", f"Could not delete {path}:\n{e}")
             return
         self.config["recent_projects"] = [
-            p for p in self.config.get("recent_projects", [])
-            if p != path_str
+            p for p in self.config.get("recent_projects", []) if p != path_str
         ]
         self._render_recent_projects()
 
@@ -997,14 +1140,13 @@ class Stream2VideoGUI(ctk.CTk):
                 f"Directory no longer exists:\n{path_str}",
             )
             self.config["recent_projects"] = [
-                p for p in self.config.get("recent_projects", [])
-                if p != path_str
+                p for p in self.config.get("recent_projects", []) if p != path_str
             ]
             self._render_recent_projects()
             return
         try:
             if os.name == "nt":
-                os.startfile(str(path))  # noqa: S606
+                os.startfile(str(path))
             elif sys.platform == "darwin":
                 subprocess.Popen(["open", str(path)])
             else:
@@ -1017,8 +1159,7 @@ class Stream2VideoGUI(ctk.CTk):
     def _ui_progress(self, value: float):
         self.after(0, lambda: self.progress.set(max(0.0, min(1.0, value))))
 
-    def _ui_overall(self, phase_elapsed: float, phase_remaining: float,
-                     more_phases: bool):
+    def _ui_overall(self, phase_elapsed: float, phase_remaining: float, more_phases: bool):
         """Update the live Elapsed/Remaining line in bottom_frame (the
         label sitting immediately to the right of the progress bar) and
         the Total wall-clock label below the bar.
@@ -1034,8 +1175,11 @@ class Stream2VideoGUI(ctk.CTk):
         if phase_remaining <= 0:
             tail = "?" if more_phases else "—"
         else:
-            tail = f"~{self._fmt_time(phase_remaining)} + ?" if more_phases \
+            tail = (
+                f"~{self._fmt_time(phase_remaining)} + ?"
+                if more_phases
                 else f"~{self._fmt_time(phase_remaining)}"
+            )
         text = f"Elapsed: {self._fmt_time(total_elapsed)} | Remaining: {tail}"
         self.after(0, lambda: self.lbl_overall.configure(text=text))
         self._ui_total(total_elapsed)
@@ -1047,16 +1191,20 @@ class Stream2VideoGUI(ctk.CTk):
         if self._pipeline_start is None:
             return
         total_elapsed = time.monotonic() - self._pipeline_start
-        self.after(0, lambda: self.lbl_overall.configure(
-            text=f"Elapsed: {self._fmt_time(total_elapsed)} | Remaining: ?"
-        ))
+        self.after(
+            0,
+            lambda: self.lbl_overall.configure(
+                text=f"Elapsed: {self._fmt_time(total_elapsed)} | Remaining: ?"
+            ),
+        )
         self._ui_total(total_elapsed)
 
     def _ui_total(self, total_elapsed: float):
         """Update the Total wall-clock label below the progress bar."""
-        self.after(0, lambda: self.lbl_total.configure(
-            text=Stream2VideoGUI._fmt_total_label(total_elapsed)
-        ))
+        self.after(
+            0,
+            lambda: self.lbl_total.configure(text=Stream2VideoGUI._fmt_total_label(total_elapsed)),
+        )
 
     @staticmethod
     def _fmt_total_label(total_elapsed: float) -> str:
@@ -1135,7 +1283,7 @@ class Stream2VideoGUI(ctk.CTk):
         return f"{s}s"
 
     @staticmethod
-    def _fmt_clock_time(secs: Optional[float]) -> str:
+    def _fmt_clock_time(secs: float | None) -> str:
         """Format a duration as HH:MM:SS (or D:HH:MM:SS if >= 24h),
         zero-padded. Used in the final summary so '06:04:12 -> 00:34:11'
         is scannable. Returns '?' for None (e.g. ffprobe failed)."""
@@ -1178,7 +1326,7 @@ class Stream2VideoGUI(ctk.CTk):
         if not sp.exists():
             return
         try:
-            with open(sp, "r", encoding="utf-8") as f:
+            with open(sp, encoding="utf-8") as f:
                 loaded = json.load(f)
         except (OSError, json.JSONDecodeError) as e:
             logger.warning("Failed to load settings: %s", e)
@@ -1262,10 +1410,7 @@ class Stream2VideoGUI(ctk.CTk):
         except Exception as e:
             self._log(f"[WARN] Could not save user defaults: {e}")
             return
-        self._log(
-            f"Saved current settings as user defaults ({user_defaults_path()})"
-        )
-
+        self._log(f"Saved current settings as user defaults ({user_defaults_path()})")
 
     def _copy_cli_command(self):
         self._sync_slider_entries()

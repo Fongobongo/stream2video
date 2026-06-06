@@ -1,5 +1,5 @@
 """Tests for stream2video.paths — per-video project directory helpers."""
-import pytest
+
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -167,14 +167,17 @@ class TestPruneRecentProjects:
 
     def test_keeps_all_existing(self):
         with TemporaryDirectory() as tmp:
-            a = Path(tmp) / "a"; a.mkdir()
-            b = Path(tmp) / "b"; b.mkdir()
+            a = Path(tmp) / "a"
+            a.mkdir()
+            b = Path(tmp) / "b"
+            b.mkdir()
             result = prune_recent_projects([str(a), str(b)])
             assert result == [str(a), str(b)]
 
     def test_drops_non_string_entries(self):
         with TemporaryDirectory() as tmp:
-            a = Path(tmp) / "a"; a.mkdir()
+            a = Path(tmp) / "a"
+            a.mkdir()
             result = prune_recent_projects([str(a), None, 42, "/missing"])
             assert result == [str(a)]
 
@@ -183,7 +186,8 @@ class TestPruneRecentProjects:
 
     def test_does_not_mutate_input(self):
         with TemporaryDirectory() as tmp:
-            a = Path(tmp) / "a"; a.mkdir()
+            a = Path(tmp) / "a"
+            a.mkdir()
             original = [str(a), "/nonexistent"]
             prune_recent_projects(original)
             assert original == [str(a), "/nonexistent"]
@@ -193,12 +197,14 @@ class TestTruncateRecentName:
     """_truncate — display-name truncation for Recent Projects rows."""
 
     def test_short_text_unchanged(self):
-        from stream2video.gui import _truncate, _RECENT_NAME_MAX
+        from stream2video.gui import _RECENT_NAME_MAX, _truncate
+
         for text in ("", "a", "video", "x" * _RECENT_NAME_MAX):
             assert _truncate(text, _RECENT_NAME_MAX) == text
 
     def test_long_text_truncated_with_ellipsis(self):
-        from stream2video.gui import _truncate, _RECENT_NAME_MAX
+        from stream2video.gui import _RECENT_NAME_MAX, _truncate
+
         text = "x" * (_RECENT_NAME_MAX + 10)
         result = _truncate(text, _RECENT_NAME_MAX)
         assert len(result) == _RECENT_NAME_MAX
@@ -208,6 +214,7 @@ class TestTruncateRecentName:
     def test_realistic_long_filename(self):
         """The user's actual filename pattern is <id>_compressed_<n>_<m>."""
         from stream2video.gui import _truncate
+
         long_name = "v2786949142_compressed_4_30_extra_long_suffix.mp4"
         truncated = _truncate(long_name, 24)
         assert len(truncated) == 24
@@ -217,6 +224,7 @@ class TestTruncateRecentName:
 
     def test_custom_max_len(self):
         from stream2video.gui import _truncate
+
         assert _truncate("abcdef", 3) == "ab\u2026"
         assert _truncate("abc", 3) == "abc"
         assert _truncate("", 3) == ""

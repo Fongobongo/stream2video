@@ -30,4 +30,3 @@ class TestModuleImports:
 
     def test_import_gui(self):
         importlib.import_module("stream2video.gui")
-

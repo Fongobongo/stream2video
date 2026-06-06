@@ -1,4 +1,5 @@
 """Tests for stream2video.utils — cancel_monitor, get_video_duration, etc."""
+
 import subprocess
 import sys
 import threading
@@ -60,11 +61,14 @@ class TestCancelMonitor:
         )
         try:
             callback_calls = []
-            cb = lambda: callback_calls.append(True) or True
+
+            def cb() -> bool:
+                callback_calls.append(True)
+                return True
 
             def runner():
                 time.sleep(CANCEL_POLL_INTERVAL * 2)
-                # We can't call the lambda from outside; the monitor
+                # We can't call cb from outside; the monitor
                 # thread polls it on its own. Just wait for the event.
 
             t = threading.Thread(target=runner, daemon=True)
@@ -95,9 +99,8 @@ class TestCancelMonitor:
     def test_exception_in_block_still_sets_event(self):
         proc = _spawn_quick_proc()
         try:
-            with pytest.raises(RuntimeError):
-                with cancel_monitor(proc) as cancelled:
-                    raise RuntimeError("boom")
+            with pytest.raises(RuntimeError), cancel_monitor(proc) as cancelled:
+                raise RuntimeError("boom")
             assert cancelled.is_set()
         finally:
             if proc.poll() is None:

@@ -6,8 +6,9 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, NamedTuple, Optional
+from typing import NamedTuple
 
 from stream2video.utils import CANCEL_POLL_INTERVAL, no_window_kwargs, set_active_process
 
@@ -83,10 +84,22 @@ def _is_local_file(path_str: str) -> bool:
 _CANCEL_POLL_INTERVAL = CANCEL_POLL_INTERVAL
 _DOWNLOAD_TIMEOUT = 28800
 
-_VIDEO_EXTENSIONS = frozenset({
-    ".mp4", ".mkv", ".webm", ".mov", ".avi", ".ts",
-    ".m4v", ".flv", ".wmv", ".mpg", ".mpeg", ".3gp",
-})
+_VIDEO_EXTENSIONS = frozenset(
+    {
+        ".mp4",
+        ".mkv",
+        ".webm",
+        ".mov",
+        ".avi",
+        ".ts",
+        ".m4v",
+        ".flv",
+        ".wmv",
+        ".mpg",
+        ".mpeg",
+        ".3gp",
+    }
+)
 
 
 def _classify_error(stderr: str) -> DownloadError:
@@ -109,7 +122,7 @@ def _classify_error(stderr: str) -> DownloadError:
     return DownloadError(f"Download failed: {stderr[:500]}")
 
 
-def _find_downloaded_file(out_dir: Path, expected: Path) -> Optional[Path]:
+def _find_downloaded_file(out_dir: Path, expected: Path) -> Path | None:
     """Locate the downloaded file; fall back to glob by video id (video extensions only)."""
     if expected.exists():
         return expected
@@ -117,10 +130,7 @@ def _find_downloaded_file(out_dir: Path, expected: Path) -> Optional[Path]:
     if not m:
         return None
     video_id = m.group(1)
-    candidates = [
-        p for p in out_dir.glob(f"{video_id}.*")
-        if p.suffix.lower() in _VIDEO_EXTENSIONS
-    ]
+    candidates = [p for p in out_dir.glob(f"{video_id}.*") if p.suffix.lower() in _VIDEO_EXTENSIONS]
     if not candidates:
         return None
     return max(candidates, key=lambda p: p.stat().st_mtime)
@@ -129,8 +139,8 @@ def _find_downloaded_file(out_dir: Path, expected: Path) -> Optional[Path]:
 def download(
     url: str,
     out_dir: Path,
-    cancel_callback: Optional[Callable[[], bool]] = None,
-    progress_callback: Optional[Callable[[float, str], None]] = None,
+    cancel_callback: Callable[[], bool] | None = None,
+    progress_callback: Callable[[float, str], None] | None = None,
 ) -> DownloadResult:
     """
     Download video from URL via yt-dlp CLI, or pass through a local file.
@@ -169,12 +179,17 @@ def download(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     cmd = [
-        sys.executable, "-m", "yt_dlp",
+        sys.executable,
+        "-m",
+        "yt_dlp",
         "--no-warnings",
         "--newline",
-        "--output", str(out_dir / "%(id)s.%(ext)s"),
-        "--format", "best[ext=mp4]/best",
-        "--print", "after_move:filepath",
+        "--output",
+        str(out_dir / "%(id)s.%(ext)s"),
+        "--format",
+        "best[ext=mp4]/best",
+        "--print",
+        "after_move:filepath",
         url,
     ]
 
@@ -236,9 +251,7 @@ def download(
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 process.kill()
-                raise DownloadTimeoutError(
-                    f"Download timeout after {_DOWNLOAD_TIMEOUT}s"
-                )
+                raise DownloadTimeoutError(f"Download timeout after {_DOWNLOAD_TIMEOUT}s")
             try:
                 process.wait(timeout=min(_CANCEL_POLL_INTERVAL, remaining))
             except subprocess.TimeoutExpired:
@@ -253,16 +266,12 @@ def download(
 
         if not stdout_lines:
             stderr_text = "".join(stderr_chunks)
-            raise DownloadError(
-                f"yt-dlp produced no file path. stderr: {stderr_text[:300]}"
-            )
+            raise DownloadError(f"yt-dlp produced no file path. stderr: {stderr_text[:300]}")
 
         output_path = Path(stdout_lines[-1].strip())
         resolved = _find_downloaded_file(out_dir, output_path)
         if resolved is None:
-            raise DownloadError(
-                f"Download completed but file not found: {output_path}"
-            )
+            raise DownloadError(f"Download completed but file not found: {output_path}")
 
         size = resolved.stat().st_size
         if size == 0:

@@ -21,8 +21,8 @@ Local input files are NEVER moved or copied — the source stays where the
 user put it, but WAV / JSON / compressed / log / temp dirs all go into
 the per-video subdir.
 """
+
 from pathlib import Path
-from typing import List
 
 
 def project_dir(output_dir: Path, video_stem: str, per_video_dir: bool) -> Path:
@@ -74,8 +74,10 @@ def move_into_project(file_path: Path, project_dir: Path) -> Path:
 
 
 def add_recent_project(
-    recent: List[str], project_path, max_keep: int = 5,
-) -> List[str]:
+    recent: list[str],
+    project_path,
+    max_keep: int = 5,
+) -> list[str]:
     """Return a new list with ``project_path`` at the front.
 
     - Dedups: if the path is already in the list, it is moved to the front
@@ -95,12 +97,12 @@ def add_recent_project(
     return out
 
 
-def prune_recent_projects(recent: List[str]) -> List[str]:
+def prune_recent_projects(recent: list[str]) -> list[str]:
     """Return a new list with entries whose directory no longer exists removed.
 
     Also drops non-string entries defensively. The input list is not modified.
     """
-    out: List[str] = []
+    out: list[str] = []
     for p in recent:
         if not isinstance(p, str):
             continue

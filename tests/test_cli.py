@@ -18,6 +18,7 @@ class TestCliLoggingSetup:
 
     def test_console_handler_is_distinct_from_logger(self):
         from stream2video import cli
+
         assert cli._console_handler is not None
         assert isinstance(cli._console_handler, logging.Handler)
         assert cli._console_handler is not cli.logger
@@ -27,6 +28,7 @@ class TestCliLoggingSetup:
         level — the file handler relies on the logger staying open at DEBUG.
         """
         from stream2video import cli
+
         original_handler_level = cli._console_handler.level
         original_logger_level = cli.logger.level
         try:
@@ -53,15 +55,33 @@ class TestCliPerVideoDir:
 
     def _make_test_video(self, path: Path):
         cmd = [
-            self.ffmpeg_path, "-y", "-v", "error",
-            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono:duration=2",
-            "-f", "lavfi", "-i", "color=c=black:s=64x64:r=10",
-            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-t", "2",
+            self.ffmpeg_path,
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=48000:cl=mono:duration=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=64x64:r=10",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-t",
+            "2",
             str(path),
         ]
         subprocess.run(
-            cmd, check=True,
+            cmd,
+            check=True,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
 
@@ -70,6 +90,7 @@ class TestCliPerVideoDir:
     def test_local_file_artifacts_land_in_project_dir(self, ffmpeg):
         self.ffmpeg_path = ffmpeg
         from typer.testing import CliRunner
+
         from stream2video.cli import app
 
         with TemporaryDirectory() as tmp:
@@ -86,8 +107,7 @@ class TestCliPerVideoDir:
             runner = CliRunner()
             result = runner.invoke(
                 app,
-                [str(src), "-o", str(out), "-c", str(cfg),
-                 "-e", "libx264", "-m", "segment"],
+                [str(src), "-o", str(out), "-c", str(cfg), "-e", "libx264", "-m", "segment"],
                 catch_exceptions=False,
             )
             assert result.exit_code == 0, f"CLI failed: {result.output}"

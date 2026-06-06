@@ -3,9 +3,9 @@
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
-CONFIG_DEFAULTS: Dict[str, Any] = {
+CONFIG_DEFAULTS: dict[str, Any] = {
     "threshold": -30.0,
     "min_silence": 2.0,
     "margin": 0.5,
@@ -25,16 +25,16 @@ CONFIG_RANGES = {
     "margin": (-3, 5),
 }
 
-VALID_METHODS: List[str] = ["segment", "batch"]
+VALID_METHODS: list[str] = ["segment", "batch"]
 
-VALID_ENCODERS: List[str] = ["h264_nvenc", "h264_amf", "h264_mf", "libx264"]
+VALID_ENCODERS: list[str] = ["h264_nvenc", "h264_amf", "h264_mf", "libx264"]
 
-VALID_THEMES: List[str] = ["dark", "light", "system"]
+VALID_THEMES: list[str] = ["dark", "light", "system"]
 
 # Keys that are user-tunable defaults (exclude per-session state like
 # output_dir / recent_projects / input_path). Used by the GUI's
 # "Save current as defaults" button.
-USER_DEFAULT_KEYS: List[str] = [
+USER_DEFAULT_KEYS: list[str] = [
     "threshold",
     "min_silence",
     "margin",
@@ -79,7 +79,7 @@ def coerce_typed_value(key: str, value: Any) -> Any:
     return None
 
 
-def load_user_defaults() -> Dict[str, Any]:
+def load_user_defaults() -> dict[str, Any]:
     """Read user_defaults.json and return a dict of overrides, applied
     on top of CONFIG_DEFAULTS. Missing or invalid file = no overrides.
     Unknown keys are ignored. Type validation: a key is accepted only
@@ -88,23 +88,21 @@ def load_user_defaults() -> Dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError):
         return {}
     if not isinstance(data, dict):
         return {}
     return {
-        k: v for k, v in
-        ((k, coerce_typed_value(k, v)) for k, v in data.items())
-        if v is not None
+        k: v for k, v in ((k, coerce_typed_value(k, v)) for k, v in data.items()) if v is not None
     }
 
 
-def save_user_defaults(values: Dict[str, Any]) -> None:
+def save_user_defaults(values: dict[str, Any]) -> None:
     """Persist a subset of values (filtered to USER_DEFAULT_KEYS) to
     user_defaults.json. Missing keys are dropped (not written as nulls)."""
-    payload: Dict[str, Any] = {}
+    payload: dict[str, Any] = {}
     for key in USER_DEFAULT_KEYS:
         if key in values:
             payload[key] = values[key]
@@ -116,9 +114,8 @@ def save_user_defaults(values: Dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
-def effective_defaults() -> Dict[str, Any]:
+def effective_defaults() -> dict[str, Any]:
     """CONFIG_DEFAULTS overlaid with user_defaults.json overrides."""
     out = CONFIG_DEFAULTS.copy()
     out.update(load_user_defaults())
     return out
-

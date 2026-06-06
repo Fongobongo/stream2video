@@ -1,21 +1,22 @@
 """Integration tests for stream2video pipeline."""
 
 import sys
-import pytest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from stream2video.download import download
-from stream2video.silence import SilenceSegment
+import pytest
+
 from stream2video.concat import (
     CancelledError,
     ConcatError,
-    cut_and_concat,
-    generate_keep_segments,
     _run_ffmpeg,
     _with_libx264_fallback,
+    cut_and_concat,
+    generate_keep_segments,
 )
+from stream2video.download import download
+from stream2video.silence import SilenceSegment
 
 
 class TestPipelineIntegration:
@@ -107,9 +108,9 @@ class TestPipelineIntegration:
     def test_generate_keep_segments_drops_invalid(self):
         """Silence with end <= start should be dropped."""
         silence_segments = [
-            SilenceSegment(5.0, 5.0),   # zero-duration
-            SilenceSegment(6.0, 4.0),   # inverted
-            SilenceSegment(2.0, 3.0),   # valid
+            SilenceSegment(5.0, 5.0),  # zero-duration
+            SilenceSegment(6.0, 4.0),  # inverted
+            SilenceSegment(2.0, 3.0),  # valid
         ]
         with patch("stream2video.concat.get_video_duration", return_value=10.0):
             keep = generate_keep_segments(Path("dummy.mp4"), silence_segments)
@@ -127,15 +128,19 @@ class TestPipelineIntegration:
 
     def test_generate_keep_segments_invalid_duration(self):
         """Should raise on non-positive duration."""
-        with patch("stream2video.concat.get_video_duration", return_value=0.0):
-            with pytest.raises(Exception, match="Invalid video duration"):
-                generate_keep_segments(Path("dummy.mp4"), [])
+        with (
+            patch("stream2video.concat.get_video_duration", return_value=0.0),
+            pytest.raises(Exception, match="Invalid video duration"),
+        ):
+            generate_keep_segments(Path("dummy.mp4"), [])
 
     def test_generate_keep_segments_no_duration(self):
         """Should raise when ffprobe can't determine duration."""
-        with patch("stream2video.concat.get_video_duration", return_value=None):
-            with pytest.raises(Exception, match="Could not determine"):
-                generate_keep_segments(Path("dummy.mp4"), [])
+        with (
+            patch("stream2video.concat.get_video_duration", return_value=None),
+            pytest.raises(Exception, match="Could not determine"),
+        ):
+            generate_keep_segments(Path("dummy.mp4"), [])
 
 
 class TestErrorRecovery:
@@ -143,13 +148,12 @@ class TestErrorRecovery:
 
     def test_missing_video_file_error(self):
         """Test appropriate error when video file not found."""
-        with TemporaryDirectory() as tmpdir:
-            with pytest.raises(ConcatError, match="not found"):
-                cut_and_concat(
-                    Path(tmpdir) / "nonexistent.mp4",
-                    [],
-                    Path(tmpdir) / "output.mp4",
-                )
+        with TemporaryDirectory() as tmpdir, pytest.raises(ConcatError, match="not found"):
+            cut_and_concat(
+                Path(tmpdir) / "nonexistent.mp4",
+                [],
+                Path(tmpdir) / "output.mp4",
+            )
 
     def test_concat_with_no_keep_segments(self):
         """Test error when no segments to keep after silence removal."""
@@ -161,13 +165,15 @@ class TestErrorRecovery:
                 SilenceSegment(0.0, 100.0),  # Entire video is silence
             ]
 
-            with patch("stream2video.concat.get_video_duration", return_value=100.0):
-                with pytest.raises(ConcatError, match="No video segments"):
-                    cut_and_concat(
-                        video_file,
-                        silence_segments,
-                        Path(tmpdir) / "output.mp4",
-                    )
+            with (
+                patch("stream2video.concat.get_video_duration", return_value=100.0),
+                pytest.raises(ConcatError, match="No video segments"),
+            ):
+                cut_and_concat(
+                    video_file,
+                    silence_segments,
+                    Path(tmpdir) / "output.mp4",
+                )
 
 
 class TestFfmpegInvocation:
@@ -183,6 +189,7 @@ class TestFfmpegInvocation:
         """track_progress=False (segment path) must not raise AttributeError
         when process.stdout is None after the encode finishes."""
         import subprocess
+
         real_popen = subprocess.Popen
 
         def fake_popen(cmd, **kwargs):
@@ -204,6 +211,7 @@ class TestFfmpegInvocation:
     def test_run_ffmpeg_with_progress_still_works(self):
         """track_progress=True (default) must keep working unchanged."""
         import subprocess
+
         real_popen = subprocess.Popen
 
         def fake_popen(cmd, **kwargs):
@@ -232,6 +240,7 @@ class TestFfmpegInvocation:
         """
         import subprocess
         import time
+
         from stream2video.concat import CancelledError
 
         real_popen = subprocess.Popen
@@ -244,15 +253,17 @@ class TestFfmpegInvocation:
             )
 
         start = time.monotonic()
-        with patch("stream2video.concat.subprocess.Popen", side_effect=fake_popen):
-            with pytest.raises(CancelledError):
-                _run_ffmpeg(
-                    [sys.executable, "-c", "pass"],
-                    progress_callback=lambda us: None,
-                    timeout=60,
-                    label="silent",
-                    cancel_callback=lambda: True,
-                )
+        with (
+            patch("stream2video.concat.subprocess.Popen", side_effect=fake_popen),
+            pytest.raises(CancelledError),
+        ):
+            _run_ffmpeg(
+                [sys.executable, "-c", "pass"],
+                progress_callback=lambda us: None,
+                timeout=60,
+                label="silent",
+                cancel_callback=lambda: True,
+            )
         elapsed = time.monotonic() - start
         assert elapsed < 5.0, f"Cancel took {elapsed:.1f}s, expected <5s"
 
@@ -272,24 +283,45 @@ class TestSegmentModeProgressStreaming:
     @pytest.fixture
     def has_ffmpeg(self):
         import shutil
+
         return shutil.which("ffmpeg") is not None
 
     def _make_video(self, out_path: Path, duration: int = 5) -> None:
         import shutil
+
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
             pytest.skip("ffmpeg not available")
         import subprocess
+
         cmd = [
-            ffmpeg, "-y", "-v", "error",
-            "-f", "lavfi", "-i", f"sine=frequency=1000:duration={duration}",
-            "-f", "lavfi", "-i", "color=c=black:s=160x120:r=10",
-            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-t", str(duration),
+            ffmpeg,
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=1000:duration={duration}",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=160x120:r=10",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-t",
+            str(duration),
             str(out_path),
         ]
         subprocess.run(
-            cmd, check=True,
+            cmd,
+            check=True,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             timeout=60,
         )
@@ -358,13 +390,15 @@ class TestEncoderFallbackCleanup:
             calls["cleanup"].append(failed_enc)
 
         _with_libx264_fallback(
-            "h264_mf", ENCODER_OPTS["h264_mf"][:], _try,
-            (ConcatError, OSError), _cleanup,
+            "h264_mf",
+            ENCODER_OPTS["h264_mf"][:],
+            _try,
+            (ConcatError, OSError),
+            _cleanup,
         )
         assert calls["try"] == ["h264_mf", "libx264"]
         assert calls["cleanup"] == ["h264_mf"], (
-            "on_fallback must be called once with the failing encoder name "
-            "before the libx264 retry"
+            "on_fallback must be called once with the failing encoder name before the libx264 retry"
         )
 
     def test_no_cleanup_when_primary_succeeds(self):
@@ -376,8 +410,11 @@ class TestEncoderFallbackCleanup:
             pass  # primary succeeds
 
         _with_libx264_fallback(
-            "h264_mf", ENCODER_OPTS["h264_mf"][:], _try,
-            (ConcatError, OSError), lambda e: calls["cleanup"].append(e),
+            "h264_mf",
+            ENCODER_OPTS["h264_mf"][:],
+            _try,
+            (ConcatError, OSError),
+            lambda e: calls["cleanup"].append(e),
         )
         assert calls["cleanup"] == [], (
             "on_fallback must not be called when the primary encoder succeeds"
@@ -396,8 +433,11 @@ class TestEncoderFallbackCleanup:
 
         with pytest.raises(CancelledError):
             _with_libx264_fallback(
-                "h264_mf", ENCODER_OPTS["h264_mf"][:], _try,
-                (ConcatError, OSError), _cleanup,
+                "h264_mf",
+                ENCODER_OPTS["h264_mf"][:],
+                _try,
+                (ConcatError, OSError),
+                _cleanup,
             )
         assert calls["cleanup"] == [], (
             "on_fallback must not run on CancelledError (no fallback retry)"
@@ -418,12 +458,12 @@ class TestEncoderFallbackCleanup:
 
         with pytest.raises(ConcatError, match="libx264 failed"):
             _with_libx264_fallback(
-                "h264_mf", ENCODER_OPTS["h264_mf"][:], _try,
-                (ConcatError, OSError), _cleanup,
+                "h264_mf",
+                ENCODER_OPTS["h264_mf"][:],
+                _try,
+                (ConcatError, OSError),
+                _cleanup,
             )
         assert calls["cleanup"] == ["h264_mf"], (
             "on_fallback should only fire once (before the libx264 retry)"
         )
-
-
-

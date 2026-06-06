@@ -7,9 +7,10 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Tuple
 
+from stream2video.config import VALID_ENCODERS, VALID_METHODS
 from stream2video.silence import SilenceSegment
 from stream2video.utils import (
     CANCEL_POLL_INTERVAL,
@@ -19,7 +20,6 @@ from stream2video.utils import (
     no_window_kwargs,
     set_active_process,
 )
-from stream2video.config import VALID_ENCODERS, VALID_METHODS
 
 logger = logging.getLogger(__name__)
 
@@ -67,18 +67,18 @@ _STALL_KILL = 300
 _HYBRID_SEEK_OFFSET = 0.5
 _AUDIO_PAD = 0.1  # extra seconds to let AAC encoder flush its lookahead buffer
 
-_encoder_check_cache: Dict[str, bool] = {}
+_encoder_check_cache: dict[str, bool] = {}
 _encoder_check_lock = threading.Lock()
 
 
 def cut_and_concat(
     video_path: Path,
-    silence_segments: List[SilenceSegment],
+    silence_segments: list[SilenceSegment],
     output_path: Path,
-    progress_callback: Optional[Callable[[float], None]] = None,
+    progress_callback: Callable[[float], None] | None = None,
     method: str = "batch",
     encoder: str = "libx264",
-    cancel_callback: Optional[Callable[[], bool]] = None,
+    cancel_callback: Callable[[], bool] | None = None,
 ) -> Path:
     if not video_path.exists():
         raise ConcatError(f"Input video not found: {video_path}")
@@ -88,17 +88,33 @@ def cut_and_concat(
     if not keep_segments:
         raise ConcatError("No video segments to keep after removing silence")
 
-    logger.info(f"Keeping {len(keep_segments)} segments, removing {len(silence_segments)} silence segments")
+    logger.info(
+        f"Keeping {len(keep_segments)} segments, removing {len(silence_segments)} silence segments"
+    )
 
     vcodec, vcodec_opts = get_video_encoder(encoder)
     logger.info(f"Encoder: {vcodec} {vcodec_opts}")
 
     if method == "segment":
-        _run_segment_with_fallback(video_path, keep_segments, output_path, vcodec, vcodec_opts,
-                                   progress_callback, cancel_callback)
+        _run_segment_with_fallback(
+            video_path,
+            keep_segments,
+            output_path,
+            vcodec,
+            vcodec_opts,
+            progress_callback,
+            cancel_callback,
+        )
     elif method == "batch":
-        _run_batch_with_fallback(video_path, keep_segments, output_path, vcodec, vcodec_opts,
-                                 progress_callback, cancel_callback)
+        _run_batch_with_fallback(
+            video_path,
+            keep_segments,
+            output_path,
+            vcodec,
+            vcodec_opts,
+            progress_callback,
+            cancel_callback,
+        )
     else:
         raise ConcatError(
             f"Unknown method: {method!r} (use {' or '.join(repr(m) for m in VALID_METHODS)})"
@@ -109,8 +125,8 @@ def cut_and_concat(
 
 def generate_keep_segments(
     video_path: Path,
-    silence_segments: List[SilenceSegment],
-) -> List[Tuple[float, float]]:
+    silence_segments: list[SilenceSegment],
+) -> list[tuple[float, float]]:
     duration = get_video_duration(video_path)
     if duration is None:
         raise ConcatError("Could not determine video duration via ffprobe")
@@ -146,11 +162,21 @@ def generate_keep_segments(
     return keep_segments
 
 
-ENCODER_OPTS: Dict[str, List[str]] = {
+ENCODER_OPTS: dict[str, list[str]] = {
     "h264_mf": ["-b:v", VIDEO_BITRATE, "-quality", "100"],
     "h264_amf": ["-usage", "transcoding", "-quality", "speed", "-b:v", VIDEO_BITRATE],
-    "h264_nvenc": ["-preset", "p7", "-rc", "vbr", "-b:v", VIDEO_BITRATE,
-                   "-maxrate", VIDEO_BITRATE, "-cq", "18"],
+    "h264_nvenc": [
+        "-preset",
+        "p7",
+        "-rc",
+        "vbr",
+        "-b:v",
+        VIDEO_BITRATE,
+        "-maxrate",
+        VIDEO_BITRATE,
+        "-cq",
+        "18",
+    ],
     "libx264": ["-crf", "23", "-preset", "medium"],
 }
 
@@ -164,11 +190,26 @@ def check_encoder(name: str) -> bool:
             return _encoder_check_cache[name]
         try:
             r = subprocess.run(
-                ["ffmpeg", "-y", "-v", "error",
-                 "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.1",
-                 "-c:v", name, "-frames:v", "1",
-                 "-f", "null", "-"],
-                capture_output=True, text=True, timeout=ENCODER_CHECK_TIMEOUT,
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=c=black:s=64x64:d=0.1",
+                    "-c:v",
+                    name,
+                    "-frames:v",
+                    "1",
+                    "-f",
+                    "null",
+                    "-",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=ENCODER_CHECK_TIMEOUT,
                 **no_window_kwargs(),
             )
         except subprocess.TimeoutExpired:
@@ -180,11 +221,9 @@ def check_encoder(name: str) -> bool:
         return ok
 
 
-def get_video_encoder(preferred: str) -> Tuple[str, List[str]]:
+def get_video_encoder(preferred: str) -> tuple[str, list[str]]:
     if preferred not in ENCODER_OPTS:
-        raise ConcatError(
-            f"Unknown encoder {preferred!r} (known: {', '.join(VALID_ENCODERS)})"
-        )
+        raise ConcatError(f"Unknown encoder {preferred!r} (known: {', '.join(VALID_ENCODERS)})")
     if check_encoder(preferred):
         return preferred, ENCODER_OPTS[preferred][:]
     logger.warning(f"{preferred} not available, falling back to libx264")
@@ -192,11 +231,11 @@ def get_video_encoder(preferred: str) -> Tuple[str, List[str]]:
 
 
 def _run_ffmpeg(
-    cmd: List[str],
-    progress_callback: Optional[Callable[[int], None]],
+    cmd: list[str],
+    progress_callback: Callable[[int], None] | None,
     timeout: int,
     label: str = "ffmpeg",
-    cancel_callback: Optional[Callable[[], bool]] = None,
+    cancel_callback: Callable[[], bool] | None = None,
     track_progress: bool = True,
 ) -> None:
     """Run an ffmpeg command. With track_progress=True (default), parses ffmpeg's
@@ -213,22 +252,29 @@ def _run_ffmpeg(
     stdout_target = subprocess.PIPE if track_progress else subprocess.DEVNULL
     try:
         process = subprocess.Popen(
-            cmd, stdout=stdout_target, stderr=subprocess.PIPE, bufsize=-1,
+            cmd,
+            stdout=stdout_target,
+            stderr=subprocess.PIPE,
+            bufsize=-1,
             **no_window_kwargs(),
         )
     except FileNotFoundError as e:
         raise FFmpegError("ffmpeg not found in PATH") from e
 
     set_active_process(process)
-    stderr_lines: List[str] = []
-    wait_for_drain = drain_stderr_lines(process.stderr, stderr_lines)
+    stderr_pipe = process.stderr
+    assert stderr_pipe is not None
+    stderr_lines: list[str] = []
+    wait_for_drain = drain_stderr_lines(stderr_pipe, stderr_lines)
     drain_done = False
     last_progress_time = time.monotonic()
 
     try:
         with cancel_monitor(process, cancel_callback) as cancelled:
             if track_progress:
-                for raw_line in iter(process.stdout.readline, b""):
+                stdout_pipe = process.stdout
+                assert stdout_pipe is not None
+                for raw_line in iter(stdout_pipe.readline, b""):
                     if cancel_callback and cancel_callback():
                         process.kill()
                         raise CancelledError(f"{label} cancelled")
@@ -251,8 +297,7 @@ def _run_ffmpeg(
                         )
                     elif elapsed_since_progress > _STALL_WARNING:
                         logger.warning(
-                            f"{label}: no progress for {int(elapsed_since_progress)}s — "
-                            "waiting..."
+                            f"{label}: no progress for {int(elapsed_since_progress)}s — waiting..."
                         )
 
             if cancelled.is_set():
@@ -268,21 +313,20 @@ def _run_ffmpeg(
 
     except subprocess.TimeoutExpired as e:
         process.kill()
-        raise FFmpegError(f"{label} timeout after {e.timeout}s")
+        raise FFmpegError(f"{label} timeout after {e.timeout}s") from None
     finally:
         if not drain_done:
             wait_for_drain()
         set_active_process(None)
         if process.stdout is not None:
             process.stdout.close()
-        if process.stderr is not None:
-            process.stderr.close()
+        stderr_pipe.close()
 
 
 def _wait_with_cancel(
     process: subprocess.Popen,
     timeout: int,
-    cancel_callback: Optional[Callable[[], bool]],
+    cancel_callback: Callable[[], bool] | None,
     label: str,
 ) -> int:
     """Poll process.wait() so cancel_callback is checked periodically.
@@ -299,17 +343,17 @@ def _wait_with_cancel(
         except subprocess.TimeoutExpired:
             if cancel_callback and cancel_callback():
                 process.kill()
-                raise CancelledError(f"{label} cancelled")
+                raise CancelledError(f"{label} cancelled") from None
 
 
 def _run_segment_concat(
     video_path: Path,
-    keep_segments: List[Tuple[float, float]],
+    keep_segments: list[tuple[float, float]],
     output_path: Path,
     vcodec: str,
-    vcodec_opts: List[str],
-    progress_callback: Optional[Callable[[float], None]] = None,
-    cancel_callback: Optional[Callable[[], bool]] = None,
+    vcodec_opts: list[str],
+    progress_callback: Callable[[float], None] | None = None,
+    cancel_callback: Callable[[], bool] | None = None,
 ):
     """Encode each segment, join with concat demuxer.
 
@@ -349,29 +393,43 @@ def _run_segment_concat(
             seek_before = max(0.0, start - _HYBRID_SEEK_OFFSET)
             seek_after = min(_HYBRID_SEEK_OFFSET, start)
 
-            def _seg_prog(us: int):
+            def _seg_prog(us: int, _dur=dur, _encoded_keep=encoded_keep):
                 # ffmpeg -progress reports `out_time_us` — the position within
                 # this segment's output, NOT the original video. Map it to
                 # absolute progress across the whole video so the GUI/CLI
                 # bar moves smoothly even when a single segment takes an
                 # hour (e.g. 0 silence segments → 1 keep segment = the
                 # whole video).
-                if progress_callback and total_duration > 0 and dur > 0:
-                    seg_frac = min(us / 1_000_000 / dur, 1.0)
-                    abs_time = encoded_keep + seg_frac * dur
+                if progress_callback and total_duration > 0 and _dur > 0:
+                    seg_frac = min(us / 1_000_000 / _dur, 1.0)
+                    abs_time = _encoded_keep + seg_frac * _dur
                     progress_callback(min(abs_time / total_duration * 0.9, 0.9))
 
             _run_ffmpeg(
                 [
-                    "ffmpeg", "-y", "-loglevel", "error",
-                    "-progress", "pipe:1",
-                    "-ss", f"{seek_before:.3f}",
-                    "-i", str(video_path),
-                    "-ss", f"{seek_after:.3f}",
-                    "-af", "apad",
-                    "-t", f"{dur + _AUDIO_PAD:.3f}",
-                    "-c:v", vcodec, *vcodec_opts,
-                    "-c:a", "aac", "-b:a", _AUDIO_BITRATE,
+                    "ffmpeg",
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-progress",
+                    "pipe:1",
+                    "-ss",
+                    f"{seek_before:.3f}",
+                    "-i",
+                    str(video_path),
+                    "-ss",
+                    f"{seek_after:.3f}",
+                    "-af",
+                    "apad",
+                    "-t",
+                    f"{dur + _AUDIO_PAD:.3f}",
+                    "-c:v",
+                    vcodec,
+                    *vcodec_opts,
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    _AUDIO_BITRATE,
                     str(seg_path),
                 ],
                 progress_callback=_seg_prog,
@@ -385,7 +443,9 @@ def _run_segment_concat(
                 progress_callback(min(encoded_keep / total_duration * 0.9, 0.9))
 
         if skipped:
-            logger.info(f"segment: resumed {skipped}/{n_segs} already encoded, encoded {n_segs - skipped}")
+            logger.info(
+                f"segment: resumed {skipped}/{n_segs} already encoded, encoded {n_segs - skipped}"
+            )
 
         # Build concat list
         list_path = seg_dir / "concat.txt"
@@ -400,13 +460,28 @@ def _run_segment_concat(
 
         _run_ffmpeg(
             [
-                "ffmpeg", "-y", "-loglevel", "error", "-progress", "pipe:1",
-                "-f", "concat", "-safe", "0", "-i", str(list_path),
-                "-c", "copy", "-fflags", "+genpts",
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-progress",
+                "pipe:1",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(list_path),
+                "-c",
+                "copy",
+                "-fflags",
+                "+genpts",
                 str(output_path),
             ],
-            progress_callback=_concat_prog, timeout=_FINAL_CONCAT_TIMEOUT,
-            label="segment concat", cancel_callback=cancel_callback,
+            progress_callback=_concat_prog,
+            timeout=_FINAL_CONCAT_TIMEOUT,
+            label="segment concat",
+            cancel_callback=cancel_callback,
         )
         logger.info(f"Successfully created output: {output_path}")
 
@@ -421,12 +496,12 @@ def _run_segment_concat(
 
 def _run_segment_with_fallback(
     video_path: Path,
-    keep_segments: List[Tuple[float, float]],
+    keep_segments: list[tuple[float, float]],
     output_path: Path,
     primary_codec: str,
-    primary_opts: List[str],
-    progress_callback: Optional[Callable[[float], None]] = None,
-    cancel_callback: Optional[Callable[[], bool]] = None,
+    primary_opts: list[str],
+    progress_callback: Callable[[float], None] | None = None,
+    cancel_callback: Callable[[], bool] | None = None,
 ):
     """Run segment concat with primary encoder; fall back to libx264 on failure.
 
@@ -439,28 +514,37 @@ def _run_segment_with_fallback(
 
     def _cleanup(failed_enc: str):
         if seg_dir.exists():
-            logger.info(
-                f"Removing partial segment dir from failed {failed_enc} encode: "
-                f"{seg_dir}"
-            )
+            logger.info(f"Removing partial segment dir from failed {failed_enc} encode: {seg_dir}")
             shutil.rmtree(seg_dir, ignore_errors=True)
 
-    def _try(enc: str, enc_opts: List[str]):
-        _run_segment_concat(video_path, keep_segments, output_path, enc, enc_opts,
-                            progress_callback, cancel_callback)
+    def _try(enc: str, enc_opts: list[str]):
+        _run_segment_concat(
+            video_path,
+            keep_segments,
+            output_path,
+            enc,
+            enc_opts,
+            progress_callback,
+            cancel_callback,
+        )
+
     _with_libx264_fallback(
-        primary_codec, primary_opts, _try, (ConcatError, OSError), _cleanup,
+        primary_codec,
+        primary_opts,
+        _try,
+        (ConcatError, OSError),
+        _cleanup,
     )
 
 
 def _run_batch_with_fallback(
     video_path: Path,
-    keep_segments: List[Tuple[float, float]],
+    keep_segments: list[tuple[float, float]],
     output_path: Path,
     primary_codec: str,
-    primary_opts: List[str],
-    progress_callback: Optional[Callable[[float], None]] = None,
-    cancel_callback: Optional[Callable[[], bool]] = None,
+    primary_opts: list[str],
+    progress_callback: Callable[[float], None] | None = None,
+    cancel_callback: Callable[[], bool] | None = None,
 ):
     """Run batch concat with primary encoder; fall back to libx264 on failure.
 
@@ -471,34 +555,43 @@ def _run_batch_with_fallback(
 
     def _cleanup(failed_enc: str):
         if batch_dir.exists():
-            logger.info(
-                f"Removing partial batch dir from failed {failed_enc} encode: "
-                f"{batch_dir}"
-            )
+            logger.info(f"Removing partial batch dir from failed {failed_enc} encode: {batch_dir}")
             shutil.rmtree(batch_dir, ignore_errors=True)
 
-    def _try(enc: str, enc_opts: List[str]):
-        _run_batch_concat(video_path, keep_segments, output_path, enc, enc_opts,
-                          progress_callback, cancel_callback)
+    def _try(enc: str, enc_opts: list[str]):
+        _run_batch_concat(
+            video_path,
+            keep_segments,
+            output_path,
+            enc,
+            enc_opts,
+            progress_callback,
+            cancel_callback,
+        )
+
     _with_libx264_fallback(
-        primary_codec, primary_opts, _try, (ConcatError, OSError), _cleanup,
+        primary_codec,
+        primary_opts,
+        _try,
+        (ConcatError, OSError),
+        _cleanup,
     )
 
 
 def _run_batch_concat(
     video_path: Path,
-    keep_segments: List[Tuple[float, float]],
+    keep_segments: list[tuple[float, float]],
     output_path: Path,
     vcodec: str,
-    vcodec_opts: List[str],
-    progress_callback: Optional[Callable[[float], None]] = None,
-    cancel_callback: Optional[Callable[[], bool]] = None,
+    vcodec_opts: list[str],
+    progress_callback: Callable[[float], None] | None = None,
+    cancel_callback: Callable[[], bool] | None = None,
 ):
     """Process chunks sequentially: each chunk → temp file, then concat.
 
     Previous approach built one giant filter graph with all chunks, causing
     ffmpeg to decode the entire video for every select/aselect filter in
-    parallel — O(chunks × filesize) RAM.  This version processes one chunk
+    parallel — O(chunks * filesize) RAM.  This version processes one chunk
     at a time so ffmpeg only holds ~1 chunk worth of decoded frames.
 
     Supports resume: already-encoded chunks are skipped on re-run.
@@ -506,8 +599,10 @@ def _run_batch_concat(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     total_duration = sum(e - s for s, e in keep_segments)
-    chunks = [keep_segments[i:i+_BATCH_CHUNK_SIZE]
-              for i in range(0, len(keep_segments), _BATCH_CHUNK_SIZE)]
+    chunks = [
+        keep_segments[i : i + _BATCH_CHUNK_SIZE]
+        for i in range(0, len(keep_segments), _BATCH_CHUNK_SIZE)
+    ]
     n_chunks = len(chunks)
     logger.info(
         f"batch: {len(keep_segments)} segments in {n_chunks} chunks, "
@@ -551,21 +646,37 @@ def _run_batch_concat(
                 script_path = f.name
 
             try:
-                def _chunk_prog(us: int):
-                    chunk_dur = sum(e - s for s, e in chunk)
+
+                def _chunk_prog(us: int, _chunk=chunk, _encoded_duration=encoded_duration):
+                    chunk_dur = sum(e - s for s, e in _chunk)
                     if progress_callback and total_duration > 0:
-                        base = encoded_duration / total_duration
+                        base = _encoded_duration / total_duration
                         span = chunk_dur / total_duration
                         progress_callback(min(base + us / 1_000_000 / total_duration, base + span))
 
                 _run_ffmpeg(
                     [
-                        "ffmpeg", "-y", "-loglevel", "error",
-                        "-progress", "pipe:1",
-                        "-i", str(video_path),
-                        "-filter_complex_script", script_path,
-                        "-map", "[outv]", "-c:v", vcodec, *vcodec_opts,
-                        "-map", "[outa]", "-c:a", "aac", "-b:a", _AUDIO_BITRATE,
+                        "ffmpeg",
+                        "-y",
+                        "-loglevel",
+                        "error",
+                        "-progress",
+                        "pipe:1",
+                        "-i",
+                        str(video_path),
+                        "-filter_complex_script",
+                        script_path,
+                        "-map",
+                        "[outv]",
+                        "-c:v",
+                        vcodec,
+                        *vcodec_opts,
+                        "-map",
+                        "[outa]",
+                        "-c:a",
+                        "aac",
+                        "-b:a",
+                        _AUDIO_BITRATE,
                         str(chunk_path),
                     ],
                     progress_callback=_chunk_prog,
@@ -577,10 +688,14 @@ def _run_batch_concat(
                 Path(script_path).unlink(missing_ok=True)
 
             encoded_duration += sum(e - s for s, e in chunk)
-            logger.info(f"batch chunk {ci+1}/{n_chunks} done ({chunk_path.stat().st_size // 1024 // 1024} MB)")
+            logger.info(
+                f"batch chunk {ci + 1}/{n_chunks} done ({chunk_path.stat().st_size // 1024 // 1024} MB)"
+            )
 
         if skipped:
-            logger.info(f"batch: resumed {skipped}/{n_chunks} already encoded, encoded {n_chunks - skipped}")
+            logger.info(
+                f"batch: resumed {skipped}/{n_chunks} already encoded, encoded {n_chunks - skipped}"
+            )
 
         # Concat all chunk files
         list_path = batch_dir / "concat.txt"
@@ -595,9 +710,22 @@ def _run_batch_concat(
 
         _run_ffmpeg(
             [
-                "ffmpeg", "-y", "-loglevel", "error", "-progress", "pipe:1",
-                "-f", "concat", "-safe", "0", "-i", str(list_path),
-                "-c", "copy", "-fflags", "+genpts",
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-progress",
+                "pipe:1",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(list_path),
+                "-c",
+                "copy",
+                "-fflags",
+                "+genpts",
                 str(output_path),
             ],
             progress_callback=_concat_prog,
@@ -618,10 +746,10 @@ def _run_batch_concat(
 
 def _with_libx264_fallback(
     primary_codec: str,
-    primary_opts: List[str],
-    try_fn: Callable[[str, List[str]], None],
-    exc_types: Tuple[type, ...],
-    on_fallback: Optional[Callable[[str], None]] = None,
+    primary_opts: list[str],
+    try_fn: Callable[[str, list[str]], None],
+    exc_types: tuple[type[BaseException], ...],
+    on_fallback: Callable[[str], None] | None = None,
 ):
     """Run try_fn(primary_codec, primary_opts); on failure, retry once with libx264.
 
@@ -646,8 +774,6 @@ def _with_libx264_fallback(
             if on_fallback is not None:
                 try:
                     on_fallback(enc)
-                except Exception as cleanup_err:  # noqa: BLE001
-                    logger.warning(
-                        f"Cleanup before libx264 retry failed: {cleanup_err}"
-                    )
+                except Exception as cleanup_err:
+                    logger.warning(f"Cleanup before libx264 retry failed: {cleanup_err}")
             enc, enc_opts = "libx264", ENCODER_OPTS["libx264"][:]

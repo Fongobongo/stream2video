@@ -4,8 +4,8 @@ import logging
 import shutil
 import signal
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable, Optional
 
 import typer
 import yaml
@@ -20,6 +20,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from stream2video.concat import ConcatError, cut_and_concat
 from stream2video.config import (
     CONFIG_DEFAULTS,
     CONFIG_RANGES,
@@ -27,19 +28,18 @@ from stream2video.config import (
     VALID_METHODS,
 )
 from stream2video.download import (
-    download,
     DownloadCancelledError,
     DownloadError,
+    download,
 )
+from stream2video.paths import ensure_project_dir, move_into_project
 from stream2video.silence import (
-    detect_silence,
-    save_silence_cache,
-    load_silence_cache,
     SilenceCancelledError,
     SilenceDetectionError,
+    detect_silence,
+    load_silence_cache,
+    save_silence_cache,
 )
-from stream2video.concat import cut_and_concat, ConcatError
-from stream2video.paths import ensure_project_dir, move_into_project
 
 # Setup logging
 _console_handler = RichHandler(rich_tracebacks=True)
@@ -70,6 +70,7 @@ def _make_sigint_cancel() -> tuple[threading.Event, Callable[[], bool]]:
 
     def _cb() -> bool:
         return event.is_set()
+
     return event, _cb
 
 
@@ -83,7 +84,7 @@ def _check_ffmpeg():
             raise typer.Exit(1)
 
 
-def load_config(config_file: Optional[Path]) -> dict:
+def load_config(config_file: Path | None) -> dict:
     """Load and validate configuration file."""
     config = CONFIG_DEFAULTS.copy()
 
@@ -104,11 +105,11 @@ def load_config(config_file: Optional[Path]) -> dict:
 
             except yaml.YAMLError as e:
                 console.print(f"[red]Error parsing config file:[/red] {e}")
-                raise typer.Exit(1)
+                raise typer.Exit(1) from None
 
             except Exception as e:
                 console.print(f"[red]Error loading config file:[/red] {e}")
-                raise typer.Exit(1)
+                raise typer.Exit(1) from None
 
     # Validate ranges
     for key, (min_val, max_val) in CONFIG_RANGES.items():
@@ -124,9 +125,9 @@ def load_config(config_file: Optional[Path]) -> dict:
 
                 config[key] = value
 
-            except (ValueError, TypeError) as e:
+            except (ValueError, TypeError):
                 console.print(f"[red]Invalid {key}:[/red] {config[key]} is not a number")
-                raise typer.Exit(1)
+                raise typer.Exit(1) from None
 
     logger.debug(f"Final config: {config}")
     return config
@@ -141,7 +142,7 @@ def main(
         "-o",
         help="Output directory for compressed video",
     ),
-    config_file: Optional[Path] = typer.Option(
+    config_file: Path | None = typer.Option(
         None,
         "--config",
         "-c",
@@ -174,9 +175,8 @@ def main(
         CONFIG_DEFAULTS["per_video_dir"],
         "--per-video-dir/--no-per-video-dir",
         help="Group all artifacts (source, WAV cache, JSON cache, output, log) "
-             "into a per-video subdirectory. Default follows config/per_video_dir.",
+        "into a per-video subdirectory. Default follows config/per_video_dir.",
     ),
-
     log_level: str = typer.Option(
         "INFO",
         "--log-level",
@@ -200,10 +200,7 @@ def main(
         )
         raise typer.Exit(1)
     if encoder not in VALID_ENCODERS:
-        console.print(
-            f"[red]Invalid encoder:[/red] {encoder!r} "
-            f"(use {', '.join(VALID_ENCODERS)})"
-        )
+        console.print(f"[red]Invalid encoder:[/red] {encoder!r} (use {', '.join(VALID_ENCODERS)})")
         raise typer.Exit(1)
 
     # Verify ffmpeg is available
@@ -214,7 +211,9 @@ def main(
     valid_levels = ("DEBUG", "INFO", "WARNING", "ERROR")
     level = log_level.upper()
     if level not in valid_levels:
-        console.print(f"[red]Invalid log level:[/red] {log_level!r} (use DEBUG, INFO, WARNING, or ERROR)")
+        console.print(
+            f"[red]Invalid log level:[/red] {log_level!r} (use DEBUG, INFO, WARNING, or ERROR)"
+        )
         raise typer.Exit(1)
     _console_handler.setLevel(level)
 
@@ -222,7 +221,7 @@ def main(
     output_dir.mkdir(parents=True, exist_ok=True)
     log_file = output_dir / "stream2video.log"
 
-    console.print(f"\n[bold cyan]stream2video[/bold cyan] - Compress by removing silence")
+    console.print("\n[bold cyan]stream2video[/bold cyan] - Compress by removing silence")
     console.print(f"Logs saved to: {log_file}\n")
 
     cancel_event, cancel_cb = _make_sigint_cancel()
@@ -254,24 +253,30 @@ def main(
             try:
                 logger.info(f"Processing: {input_video}")
                 download_result = download(
-                    input_video, output_dir,
+                    input_video,
+                    output_dir,
                     cancel_callback=cancel_cb,
                 )
                 video_path = download_result.path
                 if download_result.is_downloaded:
-                    progress.update(task1, total=1, completed=1,
-                                    description="[green]+[/green] Video downloaded")
+                    progress.update(
+                        task1, total=1, completed=1, description="[green]+[/green] Video downloaded"
+                    )
                 else:
-                    progress.update(task1, total=1, completed=1,
-                                    description="[green]+[/green] Local file (download skipped)")
+                    progress.update(
+                        task1,
+                        total=1,
+                        completed=1,
+                        description="[green]+[/green] Local file (download skipped)",
+                    )
 
             except DownloadCancelledError:
                 console.print("[yellow]Download cancelled.[/yellow]")
-                raise typer.Exit(130)
+                raise typer.Exit(130) from None
             except DownloadError as e:
                 console.print(f"[red]Download failed:[/red] {e}")
                 logger.exception("Download error")
-                raise typer.Exit(1)
+                raise typer.Exit(1) from None
 
             # Step 1.5: Apply per-video project directory (if enabled).
             # The downloaded file (if any) is moved into the project dir;
@@ -281,7 +286,9 @@ def main(
             per_video_dir = config.get("per_video_dir", CONFIG_DEFAULTS["per_video_dir"])
             if per_video_dir:
                 project_dir = ensure_project_dir(
-                    output_dir, video_path.stem, per_video_dir,
+                    output_dir,
+                    video_path.stem,
+                    per_video_dir,
                 )
                 if project_dir != output_dir:
                     if download_result.is_downloaded:
@@ -297,9 +304,11 @@ def main(
                             shutil.move(str(log_file), str(new_log))
                         fh = logging.FileHandler(new_log)
                         fh.setLevel(logging.DEBUG)
-                        fh.setFormatter(logging.Formatter(
-                            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-                        ))
+                        fh.setFormatter(
+                            logging.Formatter(
+                                "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+                            )
+                        )
                         logger.addHandler(fh)
                     output_dir = project_dir
                     console.print(f"Project directory: [cyan]{output_dir}[/cyan]")
@@ -313,6 +322,7 @@ def main(
                     silence_segments = load_silence_cache(video_path, output_dir, config)
 
                 if silence_segments is None:
+
                     def silence_progress(f: float):
                         progress.update(task2, completed=min(f * 100, 100))
 
@@ -327,15 +337,19 @@ def main(
                     )
                     save_silence_cache(video_path, silence_segments, output_dir, config)
 
-                progress.update(task2, completed=100, description=f"[green]+[/green] Found {len(silence_segments)} silence segments")
+                progress.update(
+                    task2,
+                    completed=100,
+                    description=f"[green]+[/green] Found {len(silence_segments)} silence segments",
+                )
 
             except SilenceCancelledError:
                 console.print("[yellow]Silence detection cancelled.[/yellow]")
-                raise typer.Exit(130)
+                raise typer.Exit(130) from None
             except SilenceDetectionError as e:
                 console.print(f"[red]Silence detection failed:[/red] {e}")
                 logger.exception("Silence detection error")
-                raise typer.Exit(1)
+                raise typer.Exit(1) from None
 
             # Step 3: Cut and concatenate (with progress bar)
             task3 = progress.add_task(
@@ -359,15 +373,17 @@ def main(
                     cancel_callback=cancel_cb,
                 )
 
-                progress.update(task3, completed=100, description="[green]+[/green] Video compressed")
+                progress.update(
+                    task3, completed=100, description="[green]+[/green] Video compressed"
+                )
 
             except ConcatError as e:
                 if cancel_event.is_set():
                     console.print("[yellow]Concatenation cancelled.[/yellow]")
-                    raise typer.Exit(130)
+                    raise typer.Exit(130) from None
                 console.print(f"[red]Concatenation failed:[/red] {e}")
                 logger.exception("Concatenation error")
-                raise typer.Exit(1)
+                raise typer.Exit(1) from None
 
         # Summary
         console.print("\n[bold green]+ Compression complete![/bold green]")
@@ -393,7 +409,7 @@ def main(
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {e}")
         logger.exception("Unexpected error")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     finally:
         if fh is not None:

@@ -1,24 +1,25 @@
 """Tests for download module."""
 
 import sys
-import pytest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import pytest
+
 from stream2video.download import (
-    download,
-    _validate_url,
-    _is_local_file,
-    _find_downloaded_file,
-    _classify_error,
-    URLValidationError,
-    VideoNotAvailableError,
     DiskSpaceError,
-    PermissionDeniedError,
     DownloadCancelledError,
     DownloadError,
     DownloadResult,
+    PermissionDeniedError,
+    URLValidationError,
+    VideoNotAvailableError,
+    _classify_error,
+    _find_downloaded_file,
+    _is_local_file,
+    _validate_url,
+    download,
 )
 
 
@@ -81,14 +82,13 @@ class TestDownloadFunction:
 
     def test_invalid_url_raises_error(self):
         """Test that invalid URLs raise URLValidationError."""
-        with TemporaryDirectory() as tmpdir:
-            with pytest.raises(URLValidationError):
-                download("not a valid url", Path(tmpdir))
+        with TemporaryDirectory() as tmpdir, pytest.raises(URLValidationError):
+            download("not a valid url", Path(tmpdir))
 
     def test_cancel_callback_aborts(self):
         """Cancel callback should kill the subprocess and raise DownloadCancelledError."""
-        import time
         import subprocess
+        import time
 
         _real_popen = subprocess.Popen
 
@@ -100,9 +100,12 @@ class TestDownloadFunction:
 
             def fake_popen(cmd, **kwargs):
                 proc = _real_popen(
-                    [sys.executable, "-c",
-                     "import time, sys; sys.stdout.write('starting\\n'); "
-                     "sys.stdout.flush(); time.sleep(30)"],
+                    [
+                        sys.executable,
+                        "-c",
+                        "import time, sys; sys.stdout.write('starting\\n'); "
+                        "sys.stdout.flush(); time.sleep(30)",
+                    ],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -111,9 +114,11 @@ class TestDownloadFunction:
                 time.sleep(0.3)
                 return proc
 
-            with patch("stream2video.download.subprocess.Popen", side_effect=fake_popen):
-                with pytest.raises(DownloadCancelledError, match="cancelled"):
-                    download("https://example.com/v", Path(tmpdir), cancel_callback=cancel_cb)
+            with (
+                patch("stream2video.download.subprocess.Popen", side_effect=fake_popen),
+                pytest.raises(DownloadCancelledError, match="cancelled"),
+            ):
+                download("https://example.com/v", Path(tmpdir), cancel_callback=cancel_cb)
 
     def test_cancelled_is_subclass_of_download_error(self):
         """DownloadCancelledError must remain a DownloadError for backwards-compat catches."""
@@ -164,19 +169,17 @@ class TestClassifyError:
             assert isinstance(_classify_error(marker), VideoNotAvailableError)
 
     def test_unavailable_does_not_match_unrelated(self):
-        assert not isinstance(_classify_error("ERROR: Permission not available"),
-                              VideoNotAvailableError)
+        assert not isinstance(
+            _classify_error("ERROR: Permission not available"), VideoNotAvailableError
+        )
 
     def test_disk_full(self):
-        assert isinstance(_classify_error("OSError: [Errno 28] No space left"),
-                          DiskSpaceError)
+        assert isinstance(_classify_error("OSError: [Errno 28] No space left"), DiskSpaceError)
 
     def test_permission_denied(self):
-        assert isinstance(_classify_error("Permission denied: /video.mp4"),
-                          PermissionDeniedError)
+        assert isinstance(_classify_error("Permission denied: /video.mp4"), PermissionDeniedError)
 
     def test_generic(self):
         e = _classify_error("Some unknown error")
         assert type(e).__name__ == "DownloadError"
         assert "Some unknown error" in str(e)
-

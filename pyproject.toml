@@ -21,6 +21,9 @@ dependencies = [
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "ruff>=0.5.0",
+    "mypy>=1.10.0",
+    "types-PyYAML>=6.0.0",
 ]
 gui = [
     "customtkinter>=5.2.0",
@@ -36,3 +39,55 @@ include = ["stream2video*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "B",     # flake8-bugbear
+    "C4",    # flake8-comprehensions
+    "UP",    # pyupgrade
+    "SIM",   # flake8-simplify
+    "RUF",   # ruff-specific
+]
+ignore = [
+    "E501",   # line length (handled by formatter / line-length)
+    "B008",   # function call in default argument (FastAPI/typer pattern)
+    "SIM105", # contextlib.suppress vs try/except pass (style)
+    "SIM108", # ternary vs if/else (style, sometimes less readable)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["B011"]  # asserts are fine in tests
+
+[tool.ruff.lint.isort]
+known-first-party = ["stream2video"]
+
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "stream2video"
+ignore_missing_imports = true
+follow_imports = "silent"
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_defs = false
+warn_return_any = false
+pretty = true
+show_error_codes = true
+exclude = [
+    "build/",
+    "dist/",
+    ".venv/",
+    "_portable/",
+    "stream2video.egg-info/",
+]

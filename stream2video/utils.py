@@ -4,9 +4,10 @@ import logging
 import subprocess
 import sys
 import threading
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import IO, Callable, Iterator, List, Optional
+from typing import IO
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,7 @@ CANCEL_POLL_INTERVAL = 0.5
 @contextmanager
 def cancel_monitor(
     process: subprocess.Popen,
-    cancel_callback: Optional[Callable[[], bool]] = None,
+    cancel_callback: Callable[[], bool] | None = None,
 ) -> Iterator[threading.Event]:
     """Start a daemon thread that kills ``process`` when ``cancel_callback`` returns True.
 
@@ -49,27 +50,39 @@ def cancel_monitor(
         cancelled.set()
 
 
-def get_video_duration(video_path: Path) -> Optional[float]:
+def get_video_duration(video_path: Path) -> float | None:
     """Get video duration in seconds via ffprobe."""
     cmd = [
-        "ffprobe", "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
         str(video_path),
     ]
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=30, check=True,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
             **no_window_kwargs(),
         )
         return float(result.stdout.strip())
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
-            ValueError, FileNotFoundError) as e:
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        ValueError,
+        FileNotFoundError,
+    ) as e:
         logger.warning(f"Could not determine video duration: {e}")
         return None
 
 
-def drain_stderr_lines(pipe: IO[bytes], sink: List[str]) -> Callable[[], None]:
+def drain_stderr_lines(pipe: IO[bytes], sink: list[str]) -> Callable[[], None]:
     """Spawn a daemon thread that reads bytes from `pipe` and appends decoded lines to `sink`.
 
     The thread terminates when the pipe is closed (typically when the subprocess
@@ -104,14 +117,15 @@ def drain_stderr_lines(pipe: IO[bytes], sink: List[str]) -> Callable[[], None]:
 
     def _wait_for_drain(timeout: float = 5.0) -> None:
         stop_event.wait(timeout=timeout)
+
     return _wait_for_drain
 
 
-_active_proc: Optional[subprocess.Popen] = None
+_active_proc: subprocess.Popen | None = None
 _active_proc_lock = threading.Lock()
 
 
-def get_active_process() -> Optional[subprocess.Popen]:
+def get_active_process() -> subprocess.Popen | None:
     """Return the currently running ffmpeg Popen, or None if no pipeline is active.
 
     Used by callers (e.g. GUI) that need to terminate a running ffmpeg.
@@ -120,7 +134,7 @@ def get_active_process() -> Optional[subprocess.Popen]:
         return _active_proc
 
 
-def set_active_process(proc: Optional[subprocess.Popen]) -> None:
+def set_active_process(proc: subprocess.Popen | None) -> None:
     """Register or clear the active ffmpeg Popen. Thread-safe."""
     with _active_proc_lock:
         global _active_proc

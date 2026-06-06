@@ -4,8 +4,8 @@ These are static methods on Stream2VideoGUI (or module-level helpers) that
 build the human-readable strings used in the status line, log, and popup
 on completion. They are pure functions and don't require a Tk root.
 """
-from stream2video.gui import Stream2VideoGUI
 
+from stream2video.gui import Stream2VideoGUI
 
 _fmt_size = staticmethod(Stream2VideoGUI._fmt_size).__func__
 _fmt_time = staticmethod(Stream2VideoGUI._fmt_time).__func__
@@ -26,11 +26,11 @@ class TestFmtSize:
 
     def test_gigabytes(self):
         # Realistic: 1.5GB Twitch VOD
-        assert _fmt_size(int(1.5 * 1024 ** 3)) == "1.5 GB"
+        assert _fmt_size(int(1.5 * 1024**3)) == "1.5 GB"
 
     def test_terabytes(self):
         # >= 1024 GB rolls over to TB
-        assert _fmt_size(2 * 1024 ** 4) == "2.0 TB"
+        assert _fmt_size(2 * 1024**4) == "2.0 TB"
 
 
 class TestFmtTime:
@@ -97,10 +97,9 @@ class TestFmtClockTime:
 
     def test_realistic_summaries(self):
         """The full 'X -> Y' summary lines as they appear in the GUI."""
-        src = 6 * 3600 + 4 * 60 + 12      # 06:04:12
-        dst = 34 * 60 + 11                 # 00:34:11
-        assert f"{_fmt_clock_time(src)} -> {_fmt_clock_time(dst)}" == \
-               "06:04:12 -> 00:34:11"
+        src = 6 * 3600 + 4 * 60 + 12  # 06:04:12
+        dst = 34 * 60 + 11  # 00:34:11
+        assert f"{_fmt_clock_time(src)} -> {_fmt_clock_time(dst)}" == "06:04:12 -> 00:34:11"
 
 
 class TestBuildCompletionSummary:
@@ -116,16 +115,17 @@ class TestBuildCompletionSummary:
 
     def _summary(self, **overrides):
         """Default-args helper for readability."""
-        defaults = dict(
-            src_size_bytes=20 * 1024 ** 3,        # 20.0 GB
-            src_duration=6 * 3600 + 4 * 60 + 12,  # 06:04:12
-            dst_size_bytes=int(1.1 * 1024 ** 3),  # 1.1 GB
-            dst_duration=34 * 60 + 11,            # 00:34:11
-            pipeline_seconds=23 * 60 + 5,         # 23m 5s
-            output_path="D:/vids/out.mp4",
-        )
+        defaults = {
+            "src_size_bytes": 20 * 1024**3,  # 20.0 GB
+            "src_duration": 6 * 3600 + 4 * 60 + 12,  # 06:04:12
+            "dst_size_bytes": int(1.1 * 1024**3),  # 1.1 GB
+            "dst_duration": 34 * 60 + 11,  # 00:34:11
+            "pipeline_seconds": 23 * 60 + 5,  # 23m 5s
+            "output_path": "D:/vids/out.mp4",
+        }
         defaults.update(overrides)
         from stream2video.gui import _build_completion_summary
+
         return _build_completion_summary(**defaults)
 
     def test_returns_dict_with_three_keys(self):
@@ -194,7 +194,10 @@ class TestBuildCompletionSummary:
         assert self._summary(pipeline_seconds=5)["status"] == "Complete! (5s)"
         assert self._summary(pipeline_seconds=90)["status"] == "Complete! (1m 30s)"
         assert self._summary(pipeline_seconds=23 * 60 + 5)["status"] == "Complete! (23m 5s)"
-        assert self._summary(pipeline_seconds=3600 + 30 * 60 + 12)["status"] == "Complete! (1h 30m 12s)"
+        assert (
+            self._summary(pipeline_seconds=3600 + 30 * 60 + 12)["status"]
+            == "Complete! (1h 30m 12s)"
+        )
 
     def test_zero_duration_renders_as_zero_clock(self):
         """00:00:00 is a valid value (corrupted 0-byte file) — must not
@@ -205,8 +208,8 @@ class TestBuildCompletionSummary:
     def test_size_uses_bytes_to_bytes_conversion(self):
         """1 GB = 1024^3 bytes exactly (no rounding issues)."""
         s = self._summary(
-            src_size_bytes=1024 ** 3,  # exactly 1.0 GB
-            dst_size_bytes=512 * 1024 ** 2,  # exactly 512.0 MB
+            src_size_bytes=1024**3,  # exactly 1.0 GB
+            dst_size_bytes=512 * 1024**2,  # exactly 512.0 MB
         )
         assert "1.0 GB -> 512.0 MB" in "\n".join(s["log_lines"])
 
@@ -227,24 +230,28 @@ class TestFmtTotalLabel:
 
     def test_basic(self):
         from stream2video.gui import Stream2VideoGUI
+
         assert Stream2VideoGUI._fmt_total_label(23 * 60 + 5) == "Total: 23m 5s"
 
     def test_zero(self):
         from stream2video.gui import Stream2VideoGUI
+
         assert Stream2VideoGUI._fmt_total_label(0) == "Total: 0s"
 
     def test_subsecond(self):
         from stream2video.gui import Stream2VideoGUI
+
         assert Stream2VideoGUI._fmt_total_label(0.4) == "Total: 0s"
 
     def test_long_pipeline(self):
         from stream2video.gui import Stream2VideoGUI
+
         # 1d 1h 1m 0s
-        assert Stream2VideoGUI._fmt_total_label(86400 + 3600 + 60) == \
-            "Total: 1d 1h 1m 0s"
+        assert Stream2VideoGUI._fmt_total_label(86400 + 3600 + 60) == "Total: 1d 1h 1m 0s"
 
     def test_seconds_only(self):
         from stream2video.gui import Stream2VideoGUI
+
         assert Stream2VideoGUI._fmt_total_label(42) == "Total: 42s"
 
 
@@ -254,7 +261,9 @@ class TestSetCheckbox:
 
     def test_true_calls_select(self):
         from unittest.mock import MagicMock
+
         from stream2video.gui import Stream2VideoGUI
+
         cb = MagicMock()
         Stream2VideoGUI._set_checkbox(cb, True)
         cb.select.assert_called_once_with()
@@ -262,7 +271,9 @@ class TestSetCheckbox:
 
     def test_false_calls_deselect(self):
         from unittest.mock import MagicMock
+
         from stream2video.gui import Stream2VideoGUI
+
         cb = MagicMock()
         Stream2VideoGUI._set_checkbox(cb, False)
         cb.deselect.assert_called_once_with()
@@ -272,22 +283,27 @@ class TestSetCheckbox:
         """Any truthy value should select. Defensive — callers may pass
         e.g. 1 or 'yes' (though the type hint says bool)."""
         from unittest.mock import MagicMock
+
         from stream2video.gui import Stream2VideoGUI
+
         cb = MagicMock()
         Stream2VideoGUI._set_checkbox(cb, 1)
         cb.select.assert_called_once_with()
 
     def test_falsy_non_bool_calls_deselect(self):
         from unittest.mock import MagicMock
+
         from stream2video.gui import Stream2VideoGUI
+
         cb = MagicMock()
         Stream2VideoGUI._set_checkbox(cb, 0)
         cb.deselect.assert_called_once_with()
 
     def test_none_calls_deselect(self):
         from unittest.mock import MagicMock
+
         from stream2video.gui import Stream2VideoGUI
+
         cb = MagicMock()
         Stream2VideoGUI._set_checkbox(cb, None)
         cb.deselect.assert_called_once_with()
-

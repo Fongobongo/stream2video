@@ -63,7 +63,7 @@ class TestApplyMargin:
         result = _apply_margin([seg], 0.5)
         assert len(result) == 1
         assert result[0].start == 2.5  # 2.0 + 0.5
-        assert result[0].end == 3.5    # 4.0 - 0.5
+        assert result[0].end == 3.5  # 4.0 - 0.5
 
     def test_negative_margin_expands(self):
         """Negative margin expands silence (removes more audio)."""
@@ -71,7 +71,7 @@ class TestApplyMargin:
         result = _apply_margin([seg], -0.5)
         assert len(result) == 1
         assert result[0].start == 1.5  # 2.0 - 0.5
-        assert result[0].end == 4.5    # 4.0 + 0.5
+        assert result[0].end == 4.5  # 4.0 + 0.5
 
     def test_margin_clamps_to_zero(self):
         """Shrinking must not produce negative start time."""
@@ -162,13 +162,15 @@ class TestSilenceCancellation:
             video_file = Path(tmpdir) / "video.mp4"
             video_file.write_text("dummy")
 
-            with patch("stream2video.silence._probe_duration", return_value=100.0), \
-                 patch("stream2video.silence.subprocess.Popen", side_effect=fake_popen):
-                with pytest.raises(SilenceCancelledError, match="cancelled"):
-                    detect_silence(
-                        video_file,
-                        cancel_callback=lambda: True,
-                    )
+            with (
+                patch("stream2video.silence._probe_duration", return_value=100.0),
+                patch("stream2video.silence.subprocess.Popen", side_effect=fake_popen),
+                pytest.raises(SilenceCancelledError, match="cancelled"),
+            ):
+                detect_silence(
+                    video_file,
+                    cancel_callback=lambda: True,
+                )
 
     def test_cancelled_is_subclass_of_silence_error(self):
         """SilenceCancelledError must remain a SilenceDetectionError for backwards-compat catches."""
@@ -327,7 +329,7 @@ class TestWavCacheFallback:
     control per-call, so we can simulate D-match-A and D-mismatch-A scenarios.
     """
 
-    def _fake_popen_factory(self, stderr_outputs: list, extract_wav_to: Path = None):
+    def _fake_popen_factory(self, stderr_outputs: list, extract_wav_to: Path | None = None):
         """Return a fake Popen whose .stderr.readline yields the i-th canned
         output then EOF, .stdout.readline yields 'progress=end' then EOF.
 
@@ -390,9 +392,13 @@ class TestWavCacheFallback:
             )
             factory = self._fake_popen_factory([stderr_D])
 
-            with patch("stream2video.silence._probe_duration", return_value=100.0), \
-                 patch("stream2video.silence.subprocess.Popen", side_effect=factory):
-                segs = detect_silence(video, output_dir=out, threshold=-20, min_silence=0.5, margin=0)
+            with (
+                patch("stream2video.silence._probe_duration", return_value=100.0),
+                patch("stream2video.silence.subprocess.Popen", side_effect=factory),
+            ):
+                segs = detect_silence(
+                    video, output_dir=out, threshold=-20, min_silence=0.5, margin=0
+                )
 
             assert len(segs) == 1
             assert segs[0].start == 1.0
@@ -429,9 +435,13 @@ class TestWavCacheFallback:
                 [stderr_extract, stderr_D, stderr_A_sample, stderr_A_full]
             )
 
-            with patch("stream2video.silence._probe_duration", return_value=100.0), \
-                 patch("stream2video.silence.subprocess.Popen", side_effect=factory):
-                segs = detect_silence(video, output_dir=out, threshold=-20, min_silence=0.5, margin=0)
+            with (
+                patch("stream2video.silence._probe_duration", return_value=100.0),
+                patch("stream2video.silence.subprocess.Popen", side_effect=factory),
+            ):
+                segs = detect_silence(
+                    video, output_dir=out, threshold=-20, min_silence=0.5, margin=0
+                )
 
             # Full A's result must be used (canonical, unshifted, all-time)
             assert len(segs) == 1
@@ -453,8 +463,10 @@ class TestWavCacheFallback:
             )
             factory = self._fake_popen_factory([stderr_A])
 
-            with patch("stream2video.silence._probe_duration", return_value=100.0), \
-                 patch("stream2video.silence.subprocess.Popen", side_effect=factory):
+            with (
+                patch("stream2video.silence._probe_duration", return_value=100.0),
+                patch("stream2video.silence.subprocess.Popen", side_effect=factory),
+            ):
                 segs = detect_silence(video, threshold=-20, min_silence=0.5, margin=0)
 
             assert len(segs) == 1
@@ -494,9 +506,13 @@ class TestWavCacheFallback:
                 extract_wav_to=wav,
             )
 
-            with patch("stream2video.silence._probe_duration", return_value=100.0), \
-                 patch("stream2video.silence.subprocess.Popen", side_effect=factory):
-                segs = detect_silence(video, output_dir=out, threshold=-20, min_silence=0.5, margin=0)
+            with (
+                patch("stream2video.silence._probe_duration", return_value=100.0),
+                patch("stream2video.silence.subprocess.Popen", side_effect=factory),
+            ):
+                segs = detect_silence(
+                    video, output_dir=out, threshold=-20, min_silence=0.5, margin=0
+                )
 
             # D's full result (3 segments) is used; 2 of those are within
             # the sample window and matched A-sample.
@@ -522,31 +538,54 @@ class TestEndToEndRealFfmpeg:
     @pytest.fixture
     def has_ffmpeg(self):
         import shutil
+
         return shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 
     def _make_test_video(self, out_path: Path) -> None:
         """Build a 6-second test video: 2s silence + 2s tone + 2s silence."""
         import shutil
+
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
             pytest.skip("ffmpeg not available")
         cmd = [
-            ffmpeg, "-y", "-v", "error",
-            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
-            "-f", "lavfi", "-i", (
-                "sine=frequency=1000:sample_rate=48000:duration=2"
-            ),
-            "-f", "lavfi", "-i", "color=c=black:s=320x240:r=10",
+            ffmpeg,
+            "-y",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=r=48000:cl=stereo",
+            "-f",
+            "lavfi",
+            "-i",
+            ("sine=frequency=1000:sample_rate=48000:duration=2"),
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=320x240:r=10",
             "-filter_complex",
             "[1:a]apad[w];[0:a][w]concat=n=2:v=0:a=1[a];[2:v]trim=duration=6[v]",
-            "-map", "[v]", "-map", "[a]",
-            "-t", "6",
-            "-c:v", "libx264", "-pix_fmt", "yuv420p",
-            "-c:a", "aac",
+            "-map",
+            "[v]",
+            "-map",
+            "[a]",
+            "-t",
+            "6",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
             str(out_path),
         ]
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=60,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if result.returncode != 0:
@@ -566,20 +605,24 @@ class TestEndToEndRealFfmpeg:
 
             # A path — no output_dir, direct detection on video
             segs_A = detect_silence(
-                video, threshold=-30, min_silence=0.5, margin=0,
+                video,
+                threshold=-30,
+                min_silence=0.5,
+                margin=0,
             )
 
             # D path — with output_dir, runs extract + D + A verification
             segs_D = detect_silence(
-                video, threshold=-30, min_silence=0.5, margin=0,
+                video,
+                threshold=-30,
+                min_silence=0.5,
+                margin=0,
                 output_dir=out,
             )
 
             # Same number of segments and matching timestamps (within tolerance)
-            assert len(segs_A) == len(segs_D), (
-                f"A={len(segs_A)} segments, D={len(segs_D)} segments"
-            )
-            for a, d in zip(segs_A, segs_D):
+            assert len(segs_A) == len(segs_D), f"A={len(segs_A)} segments, D={len(segs_D)} segments"
+            for a, d in zip(segs_A, segs_D, strict=True):
                 assert abs(a.start - d.start) < 0.1, f"start mismatch: {a.start} vs {d.start}"
                 assert abs(a.end - d.end) < 0.1, f"end mismatch: {a.end} vs {d.end}"
 
@@ -600,7 +643,10 @@ class TestEndToEndRealFfmpeg:
 
             # First call: creates WAV cache
             segs_first = detect_silence(
-                video, threshold=-30, min_silence=0.5, margin=0,
+                video,
+                threshold=-30,
+                min_silence=0.5,
+                margin=0,
                 output_dir=out,
             )
 
@@ -613,7 +659,10 @@ class TestEndToEndRealFfmpeg:
             # Second call with different min_silence — forces re-detect but
             # WAV should be reused (mtime is still >= video mtime)
             segs_second = detect_silence(
-                video, threshold=-30, min_silence=1.0, margin=0,
+                video,
+                threshold=-30,
+                min_silence=1.0,
+                margin=0,
                 output_dir=out,
             )
 
@@ -643,21 +692,41 @@ class TestEndToEndRealFfmpeg:
             # 5min video, all silence — produces ONE segment (0, 300)
             # that crosses the 60s sample-verify boundary.
             cmd = [
-                shutil_which("ffmpeg"), "-y", "-v", "error",
-                "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo:duration=300",
-                "-f", "lavfi", "-i", "color=c=black:s=320x240:r=10",
-                "-c:v", "libx264", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-t", "300",
+                shutil_which("ffmpeg"),
+                "-y",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=48000:cl=stereo:duration=300",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=320x240:r=10",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-t",
+                "300",
                 str(video),
             ]
             subprocess.run(
-                cmd, check=True, timeout=60,
+                cmd,
+                check=True,
+                timeout=60,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
 
             # 1st run: should pass sample-verify, keep WAV
             segs = detect_silence(
-                video, threshold=-30, min_silence=0.5, margin=0,
+                video,
+                threshold=-30,
+                min_silence=0.5,
+                margin=0,
                 output_dir=out,
             )
             wav = out / f"{video.stem}_audio.wav"
@@ -666,7 +735,10 @@ class TestEndToEndRealFfmpeg:
             # 2nd run with different threshold: should hit cache, no verify
             wav_mtime_before = wav.stat().st_mtime
             segs2 = detect_silence(
-                video, threshold=-40, min_silence=0.5, margin=0,
+                video,
+                threshold=-40,
+                min_silence=0.5,
+                margin=0,
                 output_dir=out,
             )
             assert wav.stat().st_mtime == wav_mtime_before, (
@@ -680,6 +752,7 @@ class TestEndToEndRealFfmpeg:
 
 def shutil_which(name: str) -> str:
     import shutil
+
     path = shutil.which(name)
     if not path:
         pytest.skip(f"{name} not available")
@@ -699,10 +772,10 @@ class _FakeStderr:
             return b""
         nl = self._payload.find(b"\n", self._pos)
         if nl < 0:
-            line = self._payload[self._pos:]
+            line = self._payload[self._pos :]
             self._pos = len(self._payload)
             return line
-        line = self._payload[self._pos:nl + 1]
+        line = self._payload[self._pos : nl + 1]
         self._pos = nl + 1
         return line
 
