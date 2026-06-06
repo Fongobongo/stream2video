@@ -528,67 +528,101 @@ class Stream2VideoGUI(ctk.CTk):
         )
         self.lbl_total.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 0))
 
-        # ── Right: Tabbed panel (Log + Waveform) ──
+        # ── Right: Log Panel + Waveform button ──
+        # The waveform preview is opened in its own Toplevel window on
+        # demand (see ``self._open_waveform_window``). Doing it as a tab
+        # in a CTkTabview caused multi-minute startup hangs on some
+        # Windows configurations because CTkTabview renders every tab
+        # off-screen at construction. A lazy Toplevel is created only
+        # when the user clicks "Preview waveform" — no startup cost.
         right_frame = ctk.CTkFrame(self)
-        right_frame.grid_rowconfigure(1, weight=1)
+        right_frame.grid_rowconfigure(2, weight=1)
         right_frame.grid_columnconfigure(0, weight=1)
         right_frame.grid(row=0, column=2, sticky="nsew", padx=(3, 4), pady=4)
 
-        self.right_tabs = ctk.CTkTabview(right_frame, height=100)
-        self.right_tabs.grid(row=0, column=0, sticky="nsew", padx=3, pady=(3, 0))
-        self.right_tabs.add("Log")
-        self.right_tabs.add("Waveform")
+        header = ctk.CTkFrame(right_frame, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=4, pady=(3, 0))
+        header.grid_columnconfigure(0, weight=1)
+        log_header = ctk.CTkLabel(
+            header, text="Log", anchor="w", font=ctk.CTkFont(size=12, weight="bold")
+        )
+        log_header.grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(
+            header,
+            text="Preview waveform",
+            width=130,
+            command=self._open_waveform_window,
+        ).grid(row=0, column=1, padx=(6, 0))
 
-        # Log tab — existing textbox.
-        log_tab = self.right_tabs.tab("Log")
-        log_tab.grid_rowconfigure(0, weight=1)
-        log_tab.grid_columnconfigure(0, weight=1)
-        self.txt_log = ctk.CTkTextbox(log_tab, wrap="word", state="disabled")
-        self.txt_log.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
+        self.txt_log = ctk.CTkTextbox(right_frame, wrap="word", state="disabled")
+        self.txt_log.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
 
-        # Waveform tab — image label, render button, status hint.
-        wave_tab = self.right_tabs.tab("Waveform")
-        wave_tab.grid_rowconfigure(1, weight=1)
-        wave_tab.grid_columnconfigure(0, weight=1)
-        self._build_waveform_tab(wave_tab)
+    def _open_waveform_window(self):
+        """Open (or focus) the waveform preview in a Toplevel window.
 
-    def _build_waveform_tab(self, parent):
-        """Build the Waveform tab UI: a render button, status line, and
-        an image label that displays the rendered waveform.
-
-        The image is held in ``self._waveform_ctk_image`` (a CTkImage) so
-        CustomTkinter keeps a strong reference (otherwise the image is
-        garbage-collected and the label shows nothing).
+        The window is created lazily on the first click and reused on
+        subsequent clicks (focused rather than re-created). All
+        rendering state lives on the Toplevel itself, so closing it is
+        cheap and the main window stays snappy.
         """
-        # Row 0: button + status. Row 1: image area.
-        controls = ctk.CTkFrame(parent, fg_color="transparent")
-        controls.grid(row=0, column=0, sticky="ew", padx=4, pady=(4, 2))
+        if getattr(self, "_wave_window", None) is not None and self._wave_window.winfo_exists():
+            self._wave_window.focus_force()
+            self._wave_window.lift()
+            return
+
+        win = ctk.CTkToplevel(self)
+        win.title("Waveform preview")
+        win.geometry("900x320")
+        win.minsize(640, 260)
+        # Center over the main window.
+        self.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - 900) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - 320) // 2
+        win.geometry(f"+{max(0, x)}+{max(0, y)}")
+        win.transient(self)
+        win.protocol("WM_DELETE_WINDOW", lambda: self._on_waveform_close())
+
+        # Controls row
+        controls = ctk.CTkFrame(win, fg_color="transparent")
+        controls.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
         controls.grid_columnconfigure(1, weight=1)
 
-        self.btn_render_wave = ctk.CTkButton(
-            controls,
-            text="Render preview",
-            width=130,
+        btn_render = ctk.CTkButton(
+            controls, text="Render preview", width=130,
             command=self._render_waveform_preview,
         )
-        self.btn_render_wave.grid(row=0, column=0, padx=(0, 6))
+        btn_render.grid(row=0, column=0, padx=(0, 6))
 
-        self.lbl_wave_status = ctk.CTkLabel(
-            controls,
-            text="No preview yet",
-            anchor="w",
+        lbl_status = ctk.CTkLabel(
+            controls, text="No preview yet", anchor="w",
             text_color=("gray40", "gray60"),
         )
-        self.lbl_wave_status.grid(row=0, column=1, sticky="ew")
+        lbl_status.grid(row=0, column=1, sticky="ew")
 
-        # Image area. Use a CTkLabel; swap the image after each render.
-        self._waveform_ctk_image: ctk.CTkImage | None = None
-        self.lbl_wave_image = ctk.CTkLabel(parent, text="", anchor="nw")
-        self.lbl_wave_image.grid(row=1, column=0, sticky="nsew", padx=4, pady=(2, 4))
+        # Image area
+        win.grid_rowconfigure(1, weight=1)
+        win.grid_columnconfigure(0, weight=1)
+        lbl_image = ctk.CTkLabel(win, text="", anchor="nw")
+        lbl_image.grid(row=1, column=0, sticky="nsew", padx=8, pady=(2, 8))
 
-        # Per-tab state.
+        # Stash references on self so the render callback can update them.
+        self._wave_window = win
+        self._wave_btn_render = btn_render
+        self._wave_lbl_status = lbl_status
+        self._wave_lbl_image = lbl_image
+        self._wave_ctk_image: ctk.CTkImage | None = None
         self._waveform_render_token = 0
         self._waveform_running = False
+
+    def _on_waveform_close(self):
+        """Hide the waveform Toplevel on close (X) so a re-open just refocuses."""
+        if getattr(self, "_wave_window", None) is not None:
+            self._wave_window.destroy()
+        self._wave_window = None
+        self._wave_btn_render = None
+        self._wave_lbl_status = None
+        self._wave_lbl_image = None
+        self._wave_ctk_image = None
 
     def _add_slider(
         self,
@@ -1321,7 +1355,16 @@ class Stream2VideoGUI(ctk.CTk):
         the (potentially long) first extract. Re-runs are debounced by
         ``_waveform_render_token`` — if the user clicks "Render" again
         before the previous run finishes, the older one is invalidated.
+        The waveform window is created on first click via
+        ``_open_waveform_window``; if the user closed it, this is a no-op
+        until they open it again.
         """
+        # Open the window if not yet open (the user may have clicked the
+        # render button directly from the main window header, before the
+        # popup was ever opened).
+        if getattr(self, "_wave_window", None) is None or not self._wave_window.winfo_exists():
+            self._open_waveform_window()
+
         if self._waveform_running:
             self._log("Waveform render already running")
             return
@@ -1360,8 +1403,10 @@ class Stream2VideoGUI(ctk.CTk):
         token = self._waveform_render_token + 1
         self._waveform_render_token = token
         self._waveform_running = True
-        self.btn_render_wave.configure(state="disabled", text="Rendering...")
-        self.lbl_wave_status.configure(text="Preparing audio...")
+        if self._wave_btn_render is not None:
+            self._wave_btn_render.configure(state="disabled", text="Rendering...")
+        if self._wave_lbl_status is not None:
+            self._wave_lbl_status.configure(text="Preparing audio...")
         self._log("Waveform preview: preparing audio...")
 
         def _run():
@@ -1369,7 +1414,10 @@ class Stream2VideoGUI(ctk.CTk):
                 # Phase 1: ensure WAV exists.
                 if not wav_path.is_file() or wav_path.stat().st_mtime < in_path.stat().st_mtime:
                     self.after(
-                        0, lambda: self.lbl_wave_status.configure(text="Extracting audio...")
+                        0,
+                        lambda: self._wave_lbl_status.configure(text="Extracting audio...")
+                        if self._wave_lbl_status is not None
+                        else None,
                     )
                     self._log(f"  Extracting {in_path.name} -> {wav_path.name}...")
                     from stream2video.silence import _extract_audio_wav
@@ -1379,7 +1427,12 @@ class Stream2VideoGUI(ctk.CTk):
                     return
 
                 # Phase 2: silence detection.
-                self.after(0, lambda: self.lbl_wave_status.configure(text="Detecting silence..."))
+                self.after(
+                    0,
+                    lambda: self._wave_lbl_status.configure(text="Detecting silence...")
+                    if self._wave_lbl_status is not None
+                    else None,
+                )
                 self._log(
                     f"  Detecting silence (threshold={config['threshold']}dB, "
                     f"min_silence={config['min_silence']}s, margin={config['margin']}s)..."
@@ -1393,9 +1446,11 @@ class Stream2VideoGUI(ctk.CTk):
                     margin=config["margin"],
                     progress_callback=lambda f: self.after(
                         0,
-                        lambda: self.lbl_wave_status.configure(
+                        lambda: self._wave_lbl_status.configure(
                             text=f"Detecting silence... {int(f * 100)}%"
-                        ),
+                        )
+                        if self._wave_lbl_status is not None
+                        else None,
                     ),
                 )
                 # Save to cache so a subsequent real pipeline run with
@@ -1405,7 +1460,12 @@ class Stream2VideoGUI(ctk.CTk):
                     return
 
                 # Phase 3: read peaks + render.
-                self.after(0, lambda: self.lbl_wave_status.configure(text="Rendering..."))
+                self.after(
+                    0,
+                    lambda: self._wave_lbl_status.configure(text="Rendering...")
+                    if self._wave_lbl_status is not None
+                    else None,
+                )
                 duration = wav_path.stat().st_size / (16000 * 2)  # 16kHz mono s16le
                 peaks = read_waveform_peaks(wav_path, target_buckets=800)
                 img = render_waveform_image(
@@ -1426,13 +1486,20 @@ class Stream2VideoGUI(ctk.CTk):
                 )
             except Exception as e:
                 logger.exception("Waveform render failed")
-                self.after(0, lambda err=e: self.lbl_wave_status.configure(text=f"Error: {err}"))
+                self.after(
+                    0,
+                    lambda err=e: self._wave_lbl_status.configure(text=f"Error: {err}")
+                    if self._wave_lbl_status is not None
+                    else None,
+                )
                 self._log(f"[ERROR] Waveform render failed: {e}")
             finally:
                 self._waveform_running = False
                 self.after(
                     0,
-                    lambda: self.btn_render_wave.configure(state="normal", text="Render preview"),
+                    lambda: self._wave_btn_render.configure(state="normal", text="Render preview")
+                    if self._wave_btn_render is not None
+                    else None,
                 )
 
         threading.Thread(target=_run, daemon=True).start()
@@ -1440,15 +1507,19 @@ class Stream2VideoGUI(ctk.CTk):
     def _apply_waveform_image(self, img: Image.Image, duration: float, n_segments: int):
         """Swap the displayed image and update the status label.
 
-        Keeps a strong reference on ``self._waveform_ctk_image`` —
+        Keeps a strong reference on ``self._wave_ctk_image`` —
         CustomTkinter's ``CTkLabel.configure(image=...)`` only borrows
         the image, so without the ref Python GC's the underlying Pillow
         object and the label goes blank.
+
+        No-op if the waveform window was closed mid-render.
         """
+        if self._wave_lbl_image is None or self._wave_lbl_status is None:
+            return
         ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
-        self._waveform_ctk_image = ctk_img
-        self.lbl_wave_image.configure(image=ctk_img, text="")
-        self.lbl_wave_status.configure(
+        self._wave_ctk_image = ctk_img
+        self._wave_lbl_image.configure(image=ctk_img, text="")
+        self._wave_lbl_status.configure(
             text=f"{n_segments} silences • {Stream2VideoGUI._fmt_clock_time(duration)}"
         )
 
