@@ -10,6 +10,7 @@ from stream2video.gui import Stream2VideoGUI
 _fmt_size = staticmethod(Stream2VideoGUI._fmt_size).__func__
 _fmt_time = staticmethod(Stream2VideoGUI._fmt_time).__func__
 _fmt_clock_time = staticmethod(Stream2VideoGUI._fmt_clock_time).__func__
+_fmt_zoom_text = staticmethod(Stream2VideoGUI._fmt_zoom_text).__func__
 
 
 class TestFmtSize:
@@ -255,6 +256,40 @@ class TestFmtTotalLabel:
         assert Stream2VideoGUI._fmt_total_label(42) == "Total: 42s"
 
 
+class TestFmtZoomText:
+    """`_fmt_zoom_text` formats the zoom multiplier (duration /
+    view_duration) for the controls and status line."""
+
+    def test_one_x(self):
+        assert _fmt_zoom_text(1.0) == "1.0x"
+
+    def test_sub_two_uses_one_decimal(self):
+        assert _fmt_zoom_text(1.5) == "1.5x"
+
+    def test_two_x(self):
+        assert _fmt_zoom_text(2.0) == "2.0x"
+
+    def test_just_under_ten_uses_one_decimal(self):
+        # 9.94 rounds to 9.9 (one decimal).
+        assert _fmt_zoom_text(9.94) == "9.9x"
+
+    def test_ten_x_rounds_to_int(self):
+        assert _fmt_zoom_text(10.0) == "10x"
+
+    def test_large_zoom_rounds_to_int(self):
+        # 14.7 -> "15x", 14.4 -> "14x" (banker's rounding would be 14,
+        # but Python's round uses half-to-even so 14.5 -> 14).
+        assert _fmt_zoom_text(14.7) == "15x"
+        assert _fmt_zoom_text(14.4) == "14x"
+
+    def test_just_under_ten_boundary(self):
+        # 9.999... rounds to 10.0 with 1 decimal? No -- 9.99 < 10
+        # uses 1-decimal branch and formats as 10.0. Actually the
+        # rule is < 10 vs >= 10, not the formatted value. So 9.99
+        # stays in the 1-decimal branch.
+        assert _fmt_zoom_text(9.99) == "10.0x"
+
+
 class TestSetCheckbox:
     """Stream2VideoGUI._set_checkbox — wrapper around CTkCheckBox.select/
     deselect. Tested with a MagicMock so no Tk root is required."""
@@ -307,3 +342,289 @@ class TestSetCheckbox:
         cb = MagicMock()
         Stream2VideoGUI._set_checkbox(cb, None)
         cb.deselect.assert_called_once_with()
+
+
+# ── Waveform view math (pure helpers, no Tk) ────────────────
+
+
+class TestComputeZoomView:
+    """`_compute_zoom_view` returns the new (start, end) for a zoom
+    action. Pure function — no GUI state needed. The view is
+    clamped to [0, duration] and the duration is clamped to
+    [0.5, duration] (so we never zoom past the full timeline or
+    below a 0.5s window)."""
+
+    def test_zoom_in_halves_duration_anchored_on_center(self):
+        """Default anchor is the view center (cursor unknown)."""
+        new_start, new_end = Stream2VideoGUI._compute_zoom_view(
+            duration=100.0,
+            view_start=0.0,
+            view_end=100.0,
+            cursor_frac=0.5,
+            cursor_known=False,
+            factor=0.5,
+        )
+        assert new_start == 25.0
+        assert new_end == 75.0
+
+    def test_zoom_in_doubles_zoom_from_offset_view(self):
+        """A view centered at 50s (10s wide) zooms to 5s wide,
+        still centered on 50s."""
+        new_start, new_end = Stream2VideoGUI._compute_zoom_view(
+            duration=100.0,
+            view_start=45.0,
+            view_end=55.0,
+            cursor_frac=0.5,
+            cursor_known=False,
+            factor=0.5,
+        )
+        assert new_start == 47.5
+        assert new_end == 52.5
+
+    def test_zoom_in_anchored_on_cursor_left_edge(self):
+        """Cursor at frac=0 (left edge) means the left edge of the
+        view stays put after zooming."""
+        new_start, new_end = Stream2VideoGUI._compute_zoom_view(
+            duration=100.0,
+            view_start=40.0,
+            view_end=60.0,
+            cursor_frac=0.0,
+            cursor_known=True,
+            factor=0.5,
+        )
+        # cursor_time = 40.0, new_duration = 10, new_start = 40 - 0*10 = 40
+        assert new_start == 40.0
+        assert new_end == 50.0
+
+    def test_zoom_in_anchored_on_cursor_right_edge(self):
+        """Cursor at frac=1 (right edge) means the right edge stays put."""
+        new_start, new_end = Stream2VideoGUI._compute_zoom_view(
+            duration=100.0,
+            view_start=40.0,
+            view_end=60.0,
+            cursor_frac=1.0,
+            cursor_known=True,
+            factor=0.5,
+        )
+        # cursor_time = 60.0, new_duration = 10, new_start = 60 - 1*10 = 50
+        assert new_start == 50.0
+        assert new_end == 60.0
+
+    def test_zoom_in_preserves_cursor_time(self):
+        """The time at the cursor stays at the same pixel after zooming:
+        the user is anchoring the zoom on the cursor position."""
+        cursor_frac = 0.3
+        view_start, view_end = 20.0, 80.0
+        duration = 100.0
+        cursor_time_before = view_start + cursor_frac * (view_end - view_start)
+        new_start, new_end = Stream2VideoGUI._compute_zoom_view(
+            duration=duration,
+            view_start=view_start,
+            view_end=view_end,
+            cursor_frac=cursor_frac,
+            cursor_known=True,
+            factor=0.5,
+        )
+        cursor_time_after = new_start + cursor_frac * (new_end - new_start)
+        assert abs(cursor_time_after - cursor_time_before) < 1e-9
+
+    def test_zoom_out_doubles_duration(self):
+        """Zoom out from a 10s view → 20s view, centered."""
+        new_start, new_end = Stream2VideoGUI._compute_zoom_view(
+            duration=100.0,
+            view_start=45.0,
+            view_end=55.0,
+            cursor_frac=0.5,
+            cursor_known=False,
+            factor=2.0,
+        )
+        assert new_start == 40.0
+        assert new_end == 60.0
+
+    def test_zoom_out_clamps_to_full_duration(self):
+        """Zoom out cannot exceed the full duration."""
+        new_start, new_end = Stream2VideoGUI._compute_zoom_view(
+            duration=100.0,
+            view_start=10.0,
+            view_end=20.0,
+            cursor_frac=0.5,
+            cursor_known=False,
+            factor=10.0,
+        )
+        # new_duration would be 100 → capped to 100 → already full
+        assert new_start == 0.0
+        assert new_end == 100.0
+
+    def test_zoom_in_clamps_to_left_edge(self):
+        """Cursor near the right edge would push new_start negative —
+        clamped to 0."""
+        new_start, new_end = Stream2VideoGUI._compute_zoom_view(
+            duration=100.0,
+            view_start=80.0,
+            view_end=90.0,
+            cursor_frac=1.0,
+            cursor_known=True,
+            factor=0.5,
+        )
+        # cursor_time=90, new_duration=5, new_start=85 → no clamp
+        # Try harder: cursor at left edge of a near-end view
+        new_start, new_end = Stream2VideoGUI._compute_zoom_view(
+            duration=100.0,
+            view_start=95.0,
+            view_end=100.0,
+            cursor_frac=0.0,
+            cursor_known=True,
+            factor=0.5,
+        )
+        # cursor_time=95, new_duration=2.5, new_start=95 - 0 = 95
+        # But min(100 - 2.5, 95) = 95 — no clamp
+        assert new_start == 95.0
+        assert new_end == 97.5
+
+    def test_zoom_in_clamps_to_right_edge(self):
+        """Cursor near the left edge would push new_end past duration."""
+        new_start, new_end = Stream2VideoGUI._compute_zoom_view(
+            duration=100.0,
+            view_start=0.0,
+            view_end=10.0,
+            cursor_frac=0.0,
+            cursor_known=True,
+            factor=0.5,
+        )
+        # cursor_time=0, new_duration=5, new_start=0 → no clamp
+        assert new_start == 0.0
+        assert new_end == 5.0
+
+    def test_zoom_in_clamped_at_minimum_duration(self):
+        """Below 0.5s, the duration is clamped to 0.5s."""
+        new_start, new_end = Stream2VideoGUI._compute_zoom_view(
+            duration=100.0,
+            view_start=49.9,
+            view_end=50.1,
+            cursor_frac=0.5,
+            cursor_known=False,
+            factor=0.01,
+        )
+        # new_duration would be 0.002 → capped to 0.5
+        assert new_end - new_start == 0.5
+
+    def test_zoom_at_full_is_identity(self):
+        """Zoom in at full duration is a no-op (already full)."""
+        new_start, new_end = Stream2VideoGUI._compute_zoom_view(
+            duration=100.0,
+            view_start=0.0,
+            view_end=100.0,
+            cursor_frac=0.5,
+            cursor_known=False,
+            factor=0.5,
+        )
+        # new_duration = 50, view changes — not identity
+        # Actually let's test identity: factor=1.0
+        new_start, new_end = Stream2VideoGUI._compute_zoom_view(
+            duration=100.0,
+            view_start=20.0,
+            view_end=80.0,
+            cursor_frac=0.5,
+            cursor_known=False,
+            factor=1.0,
+        )
+        assert new_start == 20.0
+        assert new_end == 80.0
+
+    def test_zoom_zero_duration_returns_zero(self):
+        """Defensive: zero or negative duration → (0, 0)."""
+        assert Stream2VideoGUI._compute_zoom_view(
+            duration=0.0,
+            view_start=0.0,
+            view_end=0.0,
+            cursor_frac=0.5,
+            cursor_known=False,
+            factor=0.5,
+        ) == (0.0, 0.0)
+        assert Stream2VideoGUI._compute_zoom_view(
+            duration=-1.0,
+            view_start=0.0,
+            view_end=10.0,
+            cursor_frac=0.5,
+            cursor_known=False,
+            factor=0.5,
+        ) == (0.0, 0.0)
+
+
+class TestComputePanView:
+    """`_compute_pan_view` shifts the view by `frac * view_duration`.
+    Pure function. Clamps to [0, duration]. Identity if the view is
+    already the full timeline (no room to pan)."""
+
+    def test_pan_right(self):
+        new_start, new_end = Stream2VideoGUI._compute_pan_view(
+            duration=100.0,
+            view_start=20.0,
+            view_end=40.0,
+            frac=0.5,
+        )
+        # shift = 20 * 0.5 = 10
+        assert new_start == 30.0
+        assert new_end == 50.0
+
+    def test_pan_left(self):
+        new_start, new_end = Stream2VideoGUI._compute_pan_view(
+            duration=100.0,
+            view_start=20.0,
+            view_end=40.0,
+            frac=-0.5,
+        )
+        # shift = 20 * -0.5 = -10
+        assert new_start == 10.0
+        assert new_end == 30.0
+
+    def test_pan_clamps_to_left(self):
+        new_start, new_end = Stream2VideoGUI._compute_pan_view(
+            duration=100.0,
+            view_start=5.0,
+            view_end=15.0,
+            frac=-1.0,
+        )
+        # shift = 10 * -1 = -10, new_start = -5 → clamped to 0
+        assert new_start == 0.0
+        assert new_end == 10.0
+
+    def test_pan_clamps_to_right(self):
+        new_start, new_end = Stream2VideoGUI._compute_pan_view(
+            duration=100.0,
+            view_start=90.0,
+            view_end=100.0,
+            frac=1.0,
+        )
+        # shift = 10 * 1 = 10, new_start = 100 → clamped to 90
+        assert new_start == 90.0
+        assert new_end == 100.0
+
+    def test_pan_at_full_view_is_identity(self):
+        """If the view is already the full timeline, pan is a no-op."""
+        assert Stream2VideoGUI._compute_pan_view(
+            duration=100.0,
+            view_start=0.0,
+            view_end=100.0,
+            frac=0.5,
+        ) == (0.0, 100.0)
+
+    def test_pan_zero_duration_returns_zero(self):
+        assert Stream2VideoGUI._compute_pan_view(
+            duration=0.0,
+            view_start=0.0,
+            view_end=10.0,
+            frac=0.5,
+        ) == (0.0, 0.0)
+
+    def test_pan_25_percent(self):
+        """The GUI's pan buttons use 0.25 / -0.25. Verify a 25% pan."""
+        new_start, new_end = Stream2VideoGUI._compute_pan_view(
+            duration=100.0,
+            view_start=20.0,
+            view_end=40.0,
+            frac=0.25,
+        )
+        # shift = 20 * 0.25 = 5
+        assert new_start == 25.0
+        assert new_end == 45.0

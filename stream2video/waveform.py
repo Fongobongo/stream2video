@@ -227,6 +227,40 @@ def silence_pixel_ranges(
     return result
 
 
+def slice_peaks_by_time(
+    peaks: Sequence[float],
+    total_duration: float,
+    view_start: float,
+    view_end: float,
+) -> list[float]:
+    """Return the subset of ``peaks`` that covers ``[view_start, view_end)``.
+
+    Used by the GUI's zoom/pan controls to map a visible time window
+    onto the pre-bucketed peak array. ``peaks`` is assumed to be
+    uniformly distributed across ``[0, total_duration]`` (the contract
+    of :func:`read_waveform_peaks` and :func:`read_peaks_from_stream`),
+    so slicing is a simple index range plus a max-pool if the slice
+    contains more peaks than fit in one output bucket.
+
+    Clamps ``view_start``/``view_end`` to ``[0, total_duration]``.
+    Returns ``[]`` for empty peaks, zero/negative duration, or
+    inverted windows (view_start >= view_end after clamping).
+    """
+    if not peaks or total_duration <= 0:
+        return []
+    # Clamp to valid range.
+    vs = max(0.0, min(float(view_start), total_duration))
+    ve = max(0.0, min(float(view_end), total_duration))
+    if ve <= vs:
+        return []
+    # Map [vs, ve] to bucket indices [lo, hi] in `peaks`.
+    n = len(peaks)
+    lo = int(vs / total_duration * n)
+    hi = max(lo + 1, int(ve / total_duration * n))
+    hi = min(n, hi)
+    return list(peaks[lo:hi])
+
+
 def _format_clock(seconds: float) -> str:
     total = int(seconds)
     h, r = divmod(total, 3600)

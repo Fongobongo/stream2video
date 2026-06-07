@@ -15,7 +15,6 @@ from tkinter import filedialog, messagebox
 from typing import ClassVar
 
 import customtkinter as ctk
-from PIL import Image
 
 from stream2video.concat import (
     CancelledError,
@@ -54,6 +53,7 @@ from stream2video.utils import get_active_process, get_video_duration
 from stream2video.waveform import (
     read_peaks_from_stream,
     render_waveform_image,
+    slice_peaks_by_time,
 )
 
 logger = logging.getLogger("stream2video.gui")
@@ -221,6 +221,19 @@ class Stream2VideoGUI(ctk.CTk):
         # drain thread and reads from the popup's poller thread.
         self._live_segments: dict[Path, list[SilenceSegment]] = {}
         self._live_segments_lock = threading.Lock()
+        # Waveform view state — populated by the renderer when peaks
+        # arrive, modified by the zoom/pan controls. Cleared when the
+        # popup closes (see `_on_waveform_close`).
+        self._waveform_peaks: list[float] = []
+        self._waveform_duration: float = 0.0
+        self._waveform_margin: float = 0.0
+        self._waveform_video_name: str = ""
+        self._waveform_view_start: float = 0.0
+        self._waveform_view_end: float = 0.0
+        self._waveform_cursor_frac: float = 0.5
+        self._waveform_cursor_known: bool = False
+        self._waveform_slider: ctk.CTkSlider | None = None
+        self._waveform_zoom_label: ctk.CTkLabel | None = None
         self.config = effective_defaults()
         self.log_queue: queue.Queue = queue.Queue()
         self._output_path: Path | None = None
@@ -576,6 +589,11 @@ class Stream2VideoGUI(ctk.CTk):
     def _open_waveform_window(self):
         """Open the waveform preview in a Toplevel window; auto-renders on open.
 
+        Layout (top to bottom):
+          0: Status line (silence count, duration, current view)
+          1: Zoom/pan controls (zoom buttons -/1x/+, pan buttons </>, position slider)
+          2: Image area (weight=1, expands to fill remaining space)
+
         If the popup already exists, focus it instead of creating a new one.
         On close (X), refs are nulled so a re-open re-creates the widgets.
         The render runs automatically on open — no manual render button.
@@ -587,35 +605,85 @@ class Stream2VideoGUI(ctk.CTk):
 
         win = ctk.CTkToplevel(self)
         win.title("Waveform preview")
-        win.geometry("900x320")
-        win.minsize(640, 260)
+        win.geometry("900x380")
+        win.minsize(640, 300)
         self.update_idletasks()
         x = self.winfo_rootx() + (self.winfo_width() - 900) // 2
-        y = self.winfo_rooty() + (self.winfo_height() - 320) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - 380) // 2
         win.geometry(f"+{max(0, x)}+{max(0, y)}")
         win.transient(self)
         win.protocol("WM_DELETE_WINDOW", lambda: self._on_waveform_close())
 
-        # Status row only (no render button — render fires automatically).
-        controls = ctk.CTkFrame(win, fg_color="transparent")
-        controls.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
-        controls.grid_columnconfigure(0, weight=1)
+        # Status row (no render button — render fires automatically).
+        status_row = ctk.CTkFrame(win, fg_color="transparent")
+        status_row.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 2))
+        status_row.grid_columnconfigure(0, weight=1)
         self.lbl_wave_status = ctk.CTkLabel(
-            controls,
+            status_row,
             text="Opening...",
             anchor="w",
             text_color=("gray40", "gray60"),
         )
         self.lbl_wave_status.grid(row=0, column=0, sticky="ew")
 
-        # Image area
-        win.grid_rowconfigure(1, weight=1)
+        # Zoom + pan controls row.
+        controls = ctk.CTkFrame(win, fg_color="transparent")
+        controls.grid(row=1, column=0, sticky="ew", padx=8, pady=(0, 2))
+        controls.grid_columnconfigure(0, weight=0)  # zoom cluster -- fixed
+        controls.grid_columnconfigure(1, weight=1)  # pan cluster -- expands
+
+        # Zoom cluster: [-] [1x] [+]
+        zoom_cluster = ctk.CTkFrame(controls, fg_color="transparent")
+        zoom_cluster.grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ctk.CTkButton(
+            zoom_cluster, text="-", width=28, height=24, command=self._waveform_zoom_out
+        ).pack(side="left", padx=1)
+        ctk.CTkButton(
+            zoom_cluster, text="1x", width=36, height=24, command=self._waveform_zoom_reset
+        ).pack(side="left", padx=1)
+        ctk.CTkButton(
+            zoom_cluster, text="+", width=28, height=24, command=self._waveform_zoom_in
+        ).pack(side="left", padx=1)
+        self._waveform_zoom_label = ctk.CTkLabel(
+            zoom_cluster, text="1x", width=42, anchor="w", text_color=("gray40", "gray60")
+        )
+        self._waveform_zoom_label.pack(side="left", padx=(6, 0))
+
+        # Pan cluster: [<] [-----o-----] [>]
+        pan_cluster = ctk.CTkFrame(controls, fg_color="transparent")
+        pan_cluster.grid(row=0, column=1, sticky="ew")
+        ctk.CTkButton(
+            pan_cluster, text="<", width=28, height=24, command=self._waveform_pan_left
+        ).pack(side="left", padx=1)
+        self._waveform_slider = ctk.CTkSlider(
+            pan_cluster, from_=0, to=1, height=16, command=self._on_waveform_slider
+        )
+        self._waveform_slider.pack(side="left", fill="x", expand=True, padx=4)
+        self._waveform_slider.set(0)
+        ctk.CTkButton(
+            pan_cluster, text=">", width=28, height=24, command=self._waveform_pan_right
+        ).pack(side="left", padx=1)
+
+        # Image area (row 2, weight=1).
+        win.grid_rowconfigure(2, weight=1)
         win.grid_columnconfigure(0, weight=1)
         self.lbl_wave_image = ctk.CTkLabel(win, text="", anchor="nw")
-        self.lbl_wave_image.grid(row=1, column=0, sticky="nsew", padx=8, pady=(2, 8))
+        self.lbl_wave_image.grid(row=2, column=0, sticky="nsew", padx=8, pady=(2, 8))
+        # Cursor tracking for cursor-anchored zoom: x position in the
+        # image maps to a time in the current view. We bind to the
+        # image label so we only see motion over the waveform.
+        self.lbl_wave_image.bind("<Motion>", self._on_waveform_motion)
+        self.lbl_wave_image.bind("<Leave>", self._on_waveform_leave)
 
         # Stash refs so the render callback can update them.
         self._wave_window = win
+
+        # Reset view state. The render path will populate peaks/duration
+        # in Phase 1 and call _apply_view (which uses these defaults).
+        self._waveform_view_start = 0.0
+        self._waveform_view_end = 0.0  # set in _apply_view to match duration
+        self._waveform_cursor_frac = 0.5  # 0.0-1.0 across the image, default to center
+        self._waveform_cursor_known = False  # becomes True on first <Motion>
 
         # Auto-render. The render method no-ops gracefully if the input
         # is missing (logs an error and exits without crashing the GUI).
@@ -629,6 +697,179 @@ class Stream2VideoGUI(ctk.CTk):
         self.lbl_wave_status = None
         self.lbl_wave_image = None
         self._waveform_ctk_image = None
+        self._waveform_slider = None
+        self._waveform_zoom_label = None
+
+    # ── Waveform cursor + zoom/pan handlers ────────────────────
+
+    def _on_waveform_motion(self, event):
+        """Track the cursor's horizontal position over the image.
+
+        Used for cursor-anchored zoom: when the user clicks +/-,
+        the time under the cursor stays at the same pixel. Stores
+        the cursor as a fraction [0.0, 1.0] of the image width so
+        the math is independent of the image's actual width.
+        """
+        if self.lbl_wave_image is None:
+            return
+        try:
+            width = self.lbl_wave_image.winfo_width()
+        except Exception:
+            return
+        if width <= 0:
+            return
+        frac = max(0.0, min(1.0, event.x / width))
+        self._waveform_cursor_frac = frac
+        self._waveform_cursor_known = True
+
+    def _on_waveform_leave(self, _event):
+        """Forget the cursor position when it leaves the image so
+        subsequent zoom falls back to the view center."""
+        self._waveform_cursor_known = False
+
+    def _waveform_zoom_in(self):
+        self._waveform_zoom_by(0.5)
+
+    def _waveform_zoom_out(self):
+        self._waveform_zoom_by(2.0)
+
+    def _waveform_zoom_reset(self):
+        """Reset to the full timeline (no zoom)."""
+        duration = self._waveform_duration
+        if duration <= 0:
+            return
+        if self._waveform_view_start == 0.0 and self._waveform_view_end == duration:
+            return
+        self._waveform_view_start = 0.0
+        self._waveform_view_end = duration
+        self._apply_view()
+
+    def _waveform_zoom_by(self, factor: float):
+        """Zoom by a multiplicative factor (< 1 = in, > 1 = out)
+        anchored on the cursor's last known position (or view center
+        if the cursor hasn't been over the image yet). Clamps the new
+        view to [0, duration]."""
+        new_start, new_end = self._compute_zoom_view(
+            self._waveform_duration,
+            self._waveform_view_start,
+            self._waveform_view_end,
+            self._waveform_cursor_frac,
+            self._waveform_cursor_known,
+            factor,
+        )
+        if (new_start, new_end) == (self._waveform_view_start, self._waveform_view_end):
+            return
+        self._waveform_view_start = new_start
+        self._waveform_view_end = new_end
+        self._apply_view()
+
+    def _waveform_pan(self, frac: float):
+        """Pan the view by `frac` of the current view duration
+        (positive = right, negative = left). Clamps to [0, duration]."""
+        new_start, new_end = self._compute_pan_view(
+            self._waveform_duration,
+            self._waveform_view_start,
+            self._waveform_view_end,
+            frac,
+        )
+        if new_start == self._waveform_view_start:
+            return
+        self._waveform_view_start = new_start
+        self._waveform_view_end = new_end
+        self._apply_view()
+
+    @staticmethod
+    def _compute_zoom_view(
+        duration: float,
+        view_start: float,
+        view_end: float,
+        cursor_frac: float,
+        cursor_known: bool,
+        factor: float,
+    ) -> tuple[float, float]:
+        """Pure view math: zoom by ``factor`` (< 1 in, > 1 out) anchored
+        on the cursor or view center. Returns ``(new_start, new_end)``
+        clamped to ``[0, duration]`` with ``new_duration`` in
+        ``[0.5, duration]``. Identity (no change) if the requested
+        factor would not change the duration.
+        """
+        if duration <= 0:
+            return (0.0, 0.0)
+        view_duration = view_end - view_start
+        new_duration = view_duration * factor
+        new_duration = max(0.5, min(duration, new_duration))
+        if new_duration == view_duration:
+            return (view_start, view_end)
+        if cursor_known:
+            anchor = view_start + cursor_frac * view_duration
+        else:
+            anchor = (view_start + view_end) / 2.0
+        new_start = anchor - cursor_frac * new_duration
+        new_start = max(0.0, min(duration - new_duration, new_start))
+        return (new_start, new_start + new_duration)
+
+    @staticmethod
+    def _compute_pan_view(
+        duration: float,
+        view_start: float,
+        view_end: float,
+        frac: float,
+    ) -> tuple[float, float]:
+        """Pure view math: shift view by ``frac * view_duration``
+        (positive = right, negative = left). Returns ``(new_start,
+        new_end)`` clamped to ``[0, duration]``. Identity if the
+        current view is the full timeline (no room to pan)."""
+        if duration <= 0:
+            return (0.0, 0.0)
+        view_duration = view_end - view_start
+        if view_duration >= duration:
+            return (view_start, view_end)
+        shift = view_duration * frac
+        new_start = view_start + shift
+        new_start = max(0.0, min(duration - view_duration, new_start))
+        return (new_start, new_start + view_duration)
+
+    def _waveform_pan_left(self):
+        self._waveform_pan(-0.25)
+
+    def _waveform_pan_right(self):
+        self._waveform_pan(0.25)
+
+    def _on_waveform_slider(self, value: float):
+        """Slider drag: jump to the given left-edge time.
+
+        The slider's range is [0, duration], but we clamp the value
+        to [0, duration - view_duration] so the view never extends
+        past the end. `command` fires on every value change while
+        dragging — the render is debounced by the render token
+        mechanism (the user will see a quick re-render on the
+        final settle; intermediate frames may stutter on slow
+        machines, which is acceptable for a preview).
+        """
+        duration = self._waveform_duration
+        view_duration = self._waveform_view_end - self._waveform_view_start
+        if duration <= 0 or view_duration >= duration:
+            return
+        new_start = max(0.0, min(duration - view_duration, float(value)))
+        if new_start == self._waveform_view_start:
+            return
+        self._waveform_view_start = new_start
+        self._waveform_view_end = new_start + view_duration
+        self._apply_view()
+
+    def _update_waveform_controls(self):
+        """Refresh the zoom label, slider position/range, and status
+        text to reflect the current view state."""
+        duration = self._waveform_duration
+        view_duration = self._waveform_view_end - self._waveform_view_start
+        if duration <= 0 or view_duration <= 0:
+            return
+        zoom_level = duration / view_duration if view_duration > 0 else 1.0
+        if self._waveform_zoom_label is not None:
+            self._waveform_zoom_label.configure(text=self._fmt_zoom_text(zoom_level))
+        if self._waveform_slider is not None:
+            self._waveform_slider.configure(to=max(duration, 1e-6))
+            self._waveform_slider.set(self._waveform_view_start)
 
     def _add_slider(
         self,
@@ -969,6 +1210,21 @@ class Stream2VideoGUI(ctk.CTk):
                 "margin": self.config["margin"],
             }
 
+            # Resume cache: lets a cancelled / crashed run pick up from
+            # a throttled checkpoint (every 30s or 100 new segments)
+            # instead of restarting from t=0. The canonical final cache
+            # still wins on success — see `load_silence_cache` check above.
+            resume_cache_path = output_dir / f"{video_path.stem}_silence_cache.json.resume"
+            # If force: drop any leftover resume from a previous cancelled
+            # run so we start fresh. The final cache is also bypassed
+            # (cache = None above) so this matches the user intent.
+            if force and resume_cache_path.exists():
+                try:
+                    resume_cache_path.unlink()
+                    self._log("Cleared stale resume cache (force re-detect)")
+                except OSError as e:
+                    self._log(f"[WARN] Could not clear resume cache: {e}")
+
             cache = None if force else load_silence_cache(video_path, output_dir, config)
             if cache is not None:
                 silence_segments = cache
@@ -1002,8 +1258,17 @@ class Stream2VideoGUI(ctk.CTk):
                     progress_callback=silence_prog,
                     cancel_callback=lambda: self._cancel_event.is_set(),
                     on_segment=on_segment,
+                    resume_cache_path=resume_cache_path,
                 )
                 save_silence_cache(video_path, silence_segments, output_dir, config)
+                # Final cache is the source of truth — the resume
+                # checkpoint is no longer needed. Unlink so a future
+                # "force re-detect" can't accidentally pick it up, and
+                # so the project dir stays clean.
+                try:
+                    resume_cache_path.unlink(missing_ok=True)
+                except OSError as e:
+                    self._log(f"[WARN] Could not clean up resume cache: {e}")
                 # Final cache is written — refresh the live store with the
                 # canonical (margin-applied) list so the popup renders the
                 # same data whether it reads the file or the in-memory map.
@@ -1378,14 +1643,20 @@ class Stream2VideoGUI(ctk.CTk):
         ``_waveform_render_token`` — if the user clicks "Render" again
         before the previous run finishes, the older one is invalidated.
 
-        Phase 1 streams the audio peaks directly from ffmpeg and shows
-        the bare waveform. Phase 2 reads silence segments from the
-        in-memory live store (the pipeline worker's ``on_segment``
-        callback keeps it up to date while detect is running) or, if
-        no live state is available, from the final silence cache on
-        disk. When the pipeline is still running, a 1-second poller
-        keeps the overlay in sync with new segments as they are
-        detected; it stops when ``self.running`` flips to False.
+        Phase 1 streams the audio peaks directly from ffmpeg, stores
+        them in self._waveform_peaks/duration, and shows the bare
+        waveform for the current view (initially the full timeline).
+        Phase 2 reads silence segments from the in-memory live store
+        (the pipeline worker's ``on_segment`` callback keeps it up to
+        date while detect is running) or, if no live state is
+        available, from the final silence cache on disk. When the
+        pipeline is still running, a 1-second poller keeps the overlay
+        in sync with new segments as they are detected; it stops when
+        ``self.running`` flips to False.
+
+        The current view (view_start/view_end) lives in self and is
+        re-rendered by the shared ``_apply_view`` helper that all
+        paths (initial, poller, zoom/pan buttons, slider) call.
         """
         if self._waveform_running:
             self._log("Waveform render already running")
@@ -1427,8 +1698,9 @@ class Stream2VideoGUI(ctk.CTk):
         def _run():
             try:
                 # Phase 1: read peaks directly from ffmpeg pipe (no WAV).
-                # Show the waveform immediately (no overlay yet) so the user
-                # gets visual feedback before silence detection finishes.
+                # Store them and the duration in self so subsequent
+                # renders (overlay, zoom/pan, live poller) can use
+                # the same data without re-reading.
                 self.after(0, lambda: self._safe_status_set("Streaming audio..."))
                 peaks, duration = read_peaks_from_stream(in_path, target_buckets=800)
                 if token != self._waveform_render_token:
@@ -1441,18 +1713,28 @@ class Stream2VideoGUI(ctk.CTk):
                     self._log("  Waveform preview: no audio in source")
                     return
 
-                self.after(0, lambda: self._safe_status_set("Rendering peaks..."))
-                img_no_overlay = render_waveform_image(
-                    peaks,
-                    width=800,
-                    height=200,
-                    total_duration=duration,
-                    silence_segments=[],
-                    title=f"{in_path.name}  •  detecting silence...",
+                # Commit the audio to state. The view is reset to the
+                # full timeline — any prior zoom/pan from an earlier
+                # render is discarded (the user opened a new preview).
+                self._waveform_peaks = peaks
+                self._waveform_duration = duration
+                self._waveform_video_name = in_path.name
+                self._waveform_view_start = 0.0
+                self._waveform_view_end = duration
+                self._waveform_cursor_frac = 0.5
+                self._waveform_cursor_known = False
+
+                # Phase 1.5: render the bare waveform (no overlay yet)
+                # so the user gets visual feedback before silence
+                # detection finishes. The status line will show
+                # "detecting silence..." so the user knows we're working.
+                self.after(
+                    0,
+                    lambda: self._safe_status_set("Rendering peaks... (detecting silence)"),
                 )
+                self.after(0, lambda: self._apply_view([]))
                 if token != self._waveform_render_token:
                     return
-                self.after(0, lambda: self._apply_waveform_image(img_no_overlay, duration, 0))
 
                 # Phase 2: pull silence segments. Prefer the in-memory
                 # live store (the pipeline's on_segment callback keeps it
@@ -1460,6 +1742,7 @@ class Stream2VideoGUI(ctk.CTk):
                 # Fall back to the final cache on disk if the live store
                 # is empty (e.g. popup opened after the pipeline finished).
                 margin = float(config["margin"])
+                self._waveform_margin = margin
                 live_segs = self._take_live_snapshot(in_path)
                 cached_segs = load_silence_cache(in_path, out_dir, config)
                 raw_segments = live_segs if live_segs is not None else cached_segs
@@ -1498,9 +1781,9 @@ class Stream2VideoGUI(ctk.CTk):
                 if token != self._waveform_render_token:
                     return
 
-                # Phase 3: render the overlay.
+                # Phase 3: render the overlay for the current view.
                 self.after(0, lambda: self._safe_status_set("Rendering overlay..."))
-                self._render_overlay_and_apply(peaks, duration, segments, in_path.name, token)
+                self.after(0, lambda: self._apply_view(segments))
                 if token != self._waveform_render_token:
                     return
                 self._log(
@@ -1514,12 +1797,13 @@ class Stream2VideoGUI(ctk.CTk):
                 # finishes (self.running flips to False) or the popup
                 # is closed / re-rendered.
                 if self.running:
-                    poll_state = {"last_count": len(segments)}
+                    poll_state = {
+                        "last_count": len(segments),
+                        "last_view": (self._waveform_view_start, self._waveform_view_end),
+                    }
                     self.after(
                         1000,
-                        lambda: self._poll_live_segments(
-                            in_path, peaks, duration, margin, token, poll_state
-                        ),
+                        lambda: self._poll_live_segments(in_path, margin, token, poll_state),
                     )
             except Exception as e:
                 logger.exception("Waveform render failed")
@@ -1538,45 +1822,92 @@ class Stream2VideoGUI(ctk.CTk):
             segs = self._live_segments.get(video_path)
         return list(segs) if segs is not None else None
 
-    def _render_overlay_and_apply(
-        self,
-        peaks: list[float],
-        duration: float,
-        segments: list,
-        name: str,
-        token: int,
-    ) -> None:
-        """Render the overlay image and post it to the main thread.
+    def _apply_view(self, segments: list[SilenceSegment] | None = None):
+        """Render the waveform for the current view (view_start → view_end)
+        and apply it to the image label. No-op if the popup is closed or
+        the audio hasn't been loaded yet.
 
-        Used by both the initial render and the live poller. Honours the
-        render token — if the user closed/reopened the popup between the
-        schedule and the dispatch, the call becomes a no-op.
+        Used by every render path:
+          - Initial render (Phase 1.5 bare, Phase 3 with overlay)
+          - Live poller (re-render with new segments)
+          - Zoom / pan buttons and slider (re-render with new view)
+
+        Segments are clipped to the visible window before being passed
+        to the renderer — out-of-view silences aren't drawn.
         """
-        if token != self._waveform_render_token:
+        if self.lbl_wave_image is None or self.lbl_wave_status is None:
             return
+        if not self._waveform_peaks or self._waveform_duration <= 0:
+            return
+
+        # Honor the latest render token — if a new render started
+        # between the schedule and the dispatch, drop this one.
+        token = self._waveform_render_token
+
+        view_start = self._waveform_view_start
+        view_end = self._waveform_view_end
+        view_duration = view_end - view_start
+        if view_duration <= 0 or view_duration > self._waveform_duration + 1e-6:
+            # Defensive clamp.
+            view_start = 0.0
+            view_end = self._waveform_duration
+            view_duration = view_end - view_start
+            self._waveform_view_start = view_start
+            self._waveform_view_end = view_end
+
+        # Slice peaks to the visible window — gives higher resolution
+        # when zoomed in (more peaks per pixel).
+        view_peaks = slice_peaks_by_time(
+            self._waveform_peaks, self._waveform_duration, view_start, view_end
+        )
+
+        # Clip segments to the view for the overlay. The renderer also
+        # clamps out-of-range segments, but doing it here gives an
+        # accurate count for the status line and avoids the renderer
+        # silently dropping nothing if duration is exactly the boundary.
+        if segments is None:
+            view_segments: list[SilenceSegment] = []
+        else:
+            view_segments = [s for s in segments if s.end > view_start and s.start < view_end]
+
+        zoom_level = self._waveform_duration / view_duration
+        zoom_text = self._fmt_zoom_text(zoom_level)
+        title = (
+            f"{self._waveform_video_name}  |  {len(view_segments)} silences"
+            f"  |  {Stream2VideoGUI._fmt_clock_time(view_start)}"
+            f"-{Stream2VideoGUI._fmt_clock_time(view_end)}  |  {zoom_text}"
+        )
+
         img = render_waveform_image(
-            peaks,
+            view_peaks,
             width=800,
             height=200,
-            total_duration=duration,
-            silence_segments=segments,
-            title=f"{name}  •  {len(segments)} silences",
+            total_duration=view_duration,
+            silence_segments=view_segments,
+            title=title,
         )
+
         if token != self._waveform_render_token:
             return
-        self.after(0, lambda: self._apply_waveform_image(img, duration, len(segments)))
+        ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
+        self._waveform_ctk_image = ctk_img
+        self.lbl_wave_image.configure(image=ctk_img, text="")
+
+        # Status line: short form (the title above has the full info).
+        self.lbl_wave_status.configure(text=title)
+
+        # Refresh the zoom label / slider to match the new view.
+        self._update_waveform_controls()
 
     def _poll_live_segments(
         self,
         in_path: Path,
-        peaks: list[float],
-        duration: float,
         margin: float,
         token: int,
         state: dict,
     ) -> None:
         """Re-read the in-memory live store every second and re-render
-        the overlay if the segment count changed.
+        the overlay if the segment count or visible window changed.
 
         Stops itself when the pipeline finishes (``self.running`` flips
         to False), the render token is invalidated (new render or popup
@@ -1586,6 +1917,8 @@ class Stream2VideoGUI(ctk.CTk):
             return
         if self._wave_window is None or not self._wave_window.winfo_exists():
             return
+
+        current_view = (self._waveform_view_start, self._waveform_view_end)
         if not self.running:
             # Pipeline finished — the in-memory store now has the
             # canonical (margin'd) list, so do one final render to
@@ -1593,47 +1926,31 @@ class Stream2VideoGUI(ctk.CTk):
             raw = self._take_live_snapshot(in_path)
             if raw is not None:
                 segments = _apply_margin(raw, margin)
-                if len(segments) != state["last_count"]:
-                    self._render_overlay_and_apply(peaks, duration, segments, in_path.name, token)
+                if len(segments) != state["last_count"] or current_view != state["last_view"]:
+                    self._apply_view(segments)
                     state["last_count"] = len(segments)
+                    state["last_view"] = current_view
                     self._log(f"  Pipeline finished — waveform locked at {len(segments)} silences")
             return
 
         raw = self._take_live_snapshot(in_path)
         if raw is not None:
             segments = _apply_margin(raw, margin)
-            if len(segments) != state["last_count"]:
-                self._render_overlay_and_apply(peaks, duration, segments, in_path.name, token)
+            if len(segments) != state["last_count"] or current_view != state["last_view"]:
+                self._apply_view(segments)
                 state["last_count"] = len(segments)
+                state["last_view"] = current_view
                 self._log(f"  Waveform updated: {len(segments)} silences so far")
 
         self.after(
             1000,
-            lambda: self._poll_live_segments(in_path, peaks, duration, margin, token, state),
+            lambda: self._poll_live_segments(in_path, margin, token, state),
         )
 
     def _safe_status_set(self, text: str) -> None:
         """Update the waveform status label; no-op if the popup is closed."""
         if self.lbl_wave_status is not None:
             self.lbl_wave_status.configure(text=text)
-
-    def _apply_waveform_image(self, img: Image.Image, duration: float, n_segments: int):
-        """Swap the displayed image and update the status label.
-
-        Keeps a strong reference on ``self._waveform_ctk_image`` —
-        CustomTkinter's ``CTkLabel.configure(image=...)`` only borrows
-        the image, so without the ref Python GC's the underlying Pillow
-        object and the label goes blank. No-op if the popup was closed
-        mid-render.
-        """
-        if self.lbl_wave_image is None or self.lbl_wave_status is None:
-            return
-        ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
-        self._waveform_ctk_image = ctk_img
-        self.lbl_wave_image.configure(image=ctk_img, text="")
-        self.lbl_wave_status.configure(
-            text=f"{n_segments} silences • {Stream2VideoGUI._fmt_clock_time(duration)}"
-        )
 
     # ── Utilities ────────────────────────────────────────────────
 
@@ -1674,6 +1991,15 @@ class Stream2VideoGUI(ctk.CTk):
         if d:
             return f"{d}:{h:02d}:{m:02d}:{s:02d}"
         return f"{h:02d}:{m:02d}:{s:02d}"
+
+    @staticmethod
+    def _fmt_zoom_text(zoom_level: float) -> str:
+        """Format a zoom multiplier (duration / view_duration) for
+        the controls and status line. Under 10x uses 1 decimal
+        ('1.5x'), at 10x or above rounds to int ('15x')."""
+        if zoom_level < 10:
+            return f"{zoom_level:.1f}x"
+        return f"{round(zoom_level)}x"
 
     # ── Settings Persistence ─────────────────────────────────────
 

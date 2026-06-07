@@ -13,6 +13,7 @@ from stream2video.waveform import (
     read_waveform_peaks,
     render_waveform_image,
     silence_pixel_ranges,
+    slice_peaks_by_time,
 )
 
 # ── read_waveform_peaks ────────────────────────────────────────
@@ -295,3 +296,70 @@ def test_read_peaks_from_stream_bucket_count(tmp_path: Path):
     peaks, _ = read_peaks_from_stream(wav, target_buckets=100)
     assert len(peaks) <= 100
     assert len(peaks) > 0
+
+
+# ── slice_peaks_by_time ────────────────────────────────────────
+
+
+class TestSlicePeaksByTime:
+    """The GUI's zoom/pan controls slice the pre-bucketed peak array
+    by a visible time window. Verifies the index math, clamping, and
+    empty-edge cases."""
+
+    def test_full_view_returns_all_peaks(self):
+        peaks = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+        assert slice_peaks_by_time(peaks, 10.0, 0.0, 10.0) == peaks
+
+    def test_first_half(self):
+        peaks = list(range(10))
+        out = slice_peaks_by_time(peaks, 10.0, 0.0, 5.0)
+        # Half of the buckets are in the first half of the timeline.
+        assert out == peaks[:5]
+
+    def test_last_half(self):
+        peaks = list(range(10))
+        out = slice_peaks_by_time(peaks, 10.0, 5.0, 10.0)
+        assert out == peaks[5:]
+
+    def test_zoom_middle_quarter(self):
+        """Zooming to the middle quarter of a 10s / 10-peak array
+        returns the middle 2-3 buckets."""
+        peaks = list(range(10))
+        out = slice_peaks_by_time(peaks, 10.0, 2.5, 7.5)
+        # Indices 2.5/10*10=2, 7.5/10*10=7 → peaks[2:7]
+        assert out == [2, 3, 4, 5, 6]
+
+    def test_clamps_overshoot_left(self):
+        peaks = [0.1, 0.2, 0.3, 0.4, 0.5]
+        out = slice_peaks_by_time(peaks, 5.0, -2.0, 3.0)
+        # Clamped to 0 → peaks[0:3] = [0.1, 0.2, 0.3]
+        assert out == [0.1, 0.2, 0.3]
+
+    def test_clamps_overshoot_right(self):
+        peaks = [0.1, 0.2, 0.3, 0.4, 0.5]
+        out = slice_peaks_by_time(peaks, 5.0, 3.0, 10.0)
+        # Clamped to 5 → peaks[3:5] = [0.4, 0.5]
+        assert out == [0.4, 0.5]
+
+    def test_empty_peaks(self):
+        assert slice_peaks_by_time([], 10.0, 0.0, 5.0) == []
+
+    def test_zero_duration(self):
+        assert slice_peaks_by_time([0.1, 0.2], 0.0, 0.0, 5.0) == []
+
+    def test_inverted_window(self):
+        peaks = [0.1, 0.2, 0.3]
+        # view_start > view_end → inverted, returns []
+        assert slice_peaks_by_time(peaks, 10.0, 5.0, 3.0) == []
+
+    def test_window_at_boundary(self):
+        """view_start == view_end → inverted (degenerate), returns []."""
+        peaks = [0.1, 0.2, 0.3]
+        assert slice_peaks_by_time(peaks, 10.0, 5.0, 5.0) == []
+
+    def test_preserves_uniform_density(self):
+        """For a 100-peak array, the slice should have ~window_fraction*100 entries."""
+        peaks = [float(i) for i in range(100)]
+        out = slice_peaks_by_time(peaks, 10.0, 2.0, 4.0)
+        # 20% of 100 = 20, ±1 for rounding.
+        assert 18 <= len(out) <= 22
