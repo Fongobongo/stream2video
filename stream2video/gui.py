@@ -1375,6 +1375,18 @@ class Stream2VideoGUI(ctk.CTk):
             "margin": float(self.config["margin"]),
         }
 
+        # Resolve the same output dir the pipeline uses — the silence
+        # cache lives there. If the pipeline already ran with the same
+        # threshold/min_silence/margin, we can skip Phase 2 (silencedetect)
+        # entirely and read the segments from JSON. Cache is keyed on
+        # (video, output_dir, config) by load_silence_cache, so a config
+        # change invalidates it and forces a re-detect.
+        out_raw = self.entry_output.get().strip() or "./compressed_videos"
+        out_dir = Path(out_raw).expanduser().resolve()
+        if bool(self.chk_per_video_dir.get()):
+            out_dir = out_dir / in_path.stem
+        cached_segments = load_silence_cache(in_path, out_dir, config)
+
         token = self._waveform_render_token + 1
         self._waveform_render_token = token
         self._waveform_running = True
@@ -1419,56 +1431,70 @@ class Stream2VideoGUI(ctk.CTk):
                 # Phase 2: silence detection directly on the source, with
                 # progressive overlay updates as each segment is parsed.
                 self.after(0, lambda: self._safe_status_set("Detecting silence..."))
-                self._log(
-                    f"  Detecting silence (threshold={config['threshold']}dB, "
-                    f"min_silence={config['min_silence']}s, margin={config['margin']}s)..."
-                )
+                if cached_segments is not None:
+                    # Cache hit — pipeline already ran with this config.
+                    # Skip the ffmpeg silencedetect pass entirely.
+                    self._log(
+                        f"  Loaded {len(cached_segments)} silences from cache "
+                        f"(threshold={config['threshold']}dB, "
+                        f"min_silence={config['min_silence']}s, margin={config['margin']}s)"
+                    )
+                    segments = cached_segments
+                else:
+                    self._log(
+                        f"  Detecting silence (threshold={config['threshold']}dB, "
+                        f"min_silence={config['min_silence']}s, margin={config['margin']}s)..."
+                    )
 
-                def _on_segment(segments_so_far):
-                    # Throttle: skip this callback if the previous update
-                    # was less than 1 second ago. The final Phase 3 render
-                    # below always runs unthrottled, so the user sees the
-                    # canonical image once detection completes.
-                    now = time.monotonic()
-                    if now - self._waveform_last_update_ts < 1.0:
-                        return
-                    self._waveform_last_update_ts = now
+                    def _on_segment(segments_so_far):
+                        # Throttle: skip this callback if the previous update
+                        # was less than 1 second ago. The final Phase 3 render
+                        # below always runs unthrottled, so the user sees the
+                        # canonical image once detection completes.
+                        now = time.monotonic()
+                        if now - self._waveform_last_update_ts < 1.0:
+                            return
+                        self._waveform_last_update_ts = now
 
-                    # Re-render on the main thread so the overlay grows
-                    # in real time as ffmpeg emits silence_end lines.
-                    def _update():
-                        if token != self._waveform_render_token:
-                            return
-                        if self.lbl_wave_image is None or self.lbl_wave_status is None:
-                            return
-                        img = render_waveform_image(
-                            peaks,
-                            width=800,
-                            height=200,
-                            total_duration=duration,
-                            silence_segments=segments_so_far,
-                            title=(
-                                f"{in_path.name}  •  {len(segments_so_far)} silences"
-                            ),
-                        )
-                        self._apply_waveform_image(img, duration, len(segments_so_far))
-                        # Override the "N silences • HH:MM:SS" final-text set by
-                        # _apply_waveform_image with the live "still detecting"
-                        # message so the user sees progress, not a final count.
-                        self.lbl_wave_status.configure(
-                            text=(
-                                f"Detecting silence... {len(segments_so_far)} so far"
+                        # Re-render on the main thread so the overlay grows
+                        # in real time as ffmpeg emits silence_end lines.
+                        def _update():
+                            if token != self._waveform_render_token:
+                                return
+                            if (
+                                self.lbl_wave_image is None
+                                or self.lbl_wave_status is None
+                            ):
+                                return
+                            img = render_waveform_image(
+                                peaks,
+                                width=800,
+                                height=200,
+                                total_duration=duration,
+                                silence_segments=segments_so_far,
+                                title=(
+                                    f"{in_path.name}  •  {len(segments_so_far)} silences"
+                                ),
                             )
-                        )
+                            self._apply_waveform_image(img, duration, len(segments_so_far))
+                            # Override the "N silences • HH:MM:SS" final-text
+                            # set by _apply_waveform_image with the live
+                            # "still detecting" message so the user sees
+                            # progress, not a final count.
+                            self.lbl_wave_status.configure(
+                                text=(
+                                    f"Detecting silence... {len(segments_so_far)} so far"
+                                )
+                            )
 
-                    self.after(0, _update)
+                        self.after(0, _update)
 
-                segments = detect_silence_stream(
-                    in_path,
-                    threshold=config["threshold"],
-                    min_silence=config["min_silence"],
-                    on_segment=_on_segment,
-                )
+                    segments = detect_silence_stream(
+                        in_path,
+                        threshold=config["threshold"],
+                        min_silence=config["min_silence"],
+                        on_segment=_on_segment,
+                    )
                 if token != self._waveform_render_token:
                     return
 
