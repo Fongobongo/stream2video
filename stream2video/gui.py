@@ -1335,6 +1335,8 @@ class Stream2VideoGUI(ctk.CTk):
         def _run():
             try:
                 # Phase 1: read peaks directly from ffmpeg pipe (no WAV).
+                # Show the waveform immediately (no overlay yet) so the user
+                # gets visual feedback before silence detection finishes.
                 self.after(0, lambda: self.lbl_wave_status.configure(text="Streaming audio..."))
                 peaks, duration = read_peaks_from_stream(in_path, target_buckets=800)
                 if token != self._waveform_render_token:
@@ -1348,6 +1350,21 @@ class Stream2VideoGUI(ctk.CTk):
                     )
                     self._log("  Waveform preview: no audio in source")
                     return
+
+                self.after(0, lambda: self.lbl_wave_status.configure(text="Rendering peaks..."))
+                img_no_overlay = render_waveform_image(
+                    peaks,
+                    width=800,
+                    height=200,
+                    total_duration=duration,
+                    silence_segments=[],
+                    title=f"{in_path.name}  •  detecting silence...",
+                )
+                if token != self._waveform_render_token:
+                    return
+                self.after(
+                    0, lambda: self._apply_waveform_image(img_no_overlay, duration, 0)
+                )
 
                 # Phase 2: silence detection directly on the source.
                 self.after(0, lambda: self.lbl_wave_status.configure(text="Detecting silence..."))
@@ -1363,9 +1380,9 @@ class Stream2VideoGUI(ctk.CTk):
                 if token != self._waveform_render_token:
                     return
 
-                # Phase 3: render the image.
-                self.after(0, lambda: self.lbl_wave_status.configure(text="Rendering..."))
-                img = render_waveform_image(
+                # Phase 3: re-render with silence overlay.
+                self.after(0, lambda: self.lbl_wave_status.configure(text="Rendering overlay..."))
+                img_with_overlay = render_waveform_image(
                     peaks,
                     width=800,
                     height=200,
@@ -1376,7 +1393,9 @@ class Stream2VideoGUI(ctk.CTk):
                 if token != self._waveform_render_token:
                     return
 
-                self.after(0, lambda: self._apply_waveform_image(img, duration, len(segments)))
+                self.after(
+                    0, lambda: self._apply_waveform_image(img_with_overlay, duration, len(segments))
+                )
                 self._log(
                     f"  Waveform ready: {len(segments)} silence segments, "
                     f"{Stream2VideoGUI._fmt_time(duration)} duration"
