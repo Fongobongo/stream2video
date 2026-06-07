@@ -1304,9 +1304,6 @@ class Stream2VideoGUI(ctk.CTk):
         if self._waveform_running:
             self._log("Waveform render already running")
             return
-        if self.running:
-            self._log("Cannot preview waveform while pipeline is running")
-            return
 
         # Need an input file (must be a local file — previewing a fresh
         # download would be a separate flow). Local file → reuse it.
