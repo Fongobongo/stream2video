@@ -22,9 +22,9 @@ from stream2video.silence import (
     _load_silence_cache_from_path,
     _sample_segments_match,
     _save_resume_cache,
-    _segments_match,
     detect_silence,
     detect_silence_stream,
+    segments_match,
 )
 
 
@@ -183,47 +183,47 @@ class TestSilenceCancellation:
 
 
 class TestSegmentsMatch:
-    """_segments_match is the verification gate for the D→A fallback."""
+    """segments_match is the verification gate for the D→A fallback."""
 
     def test_identical_segments_match(self):
         seg = [SilenceSegment(1.0, 2.0), SilenceSegment(5.0, 6.0)]
-        assert _segments_match(seg, seg[:]) is True
+        assert segments_match(seg, seg[:]) is True
 
     def test_reordered_segments_match(self):
         a = [SilenceSegment(1.0, 2.0), SilenceSegment(5.0, 6.0)]
         b = [SilenceSegment(5.0, 6.0), SilenceSegment(1.0, 2.0)]
-        assert _segments_match(a, b) is True
+        assert segments_match(a, b) is True
 
     def test_within_tolerance_matches(self):
         """Sub-100ms timestamp drift is tolerated (resampling precision)."""
         a = [SilenceSegment(1.000, 2.000), SilenceSegment(5.000, 6.000)]
         b = [SilenceSegment(1.030, 2.020), SilenceSegment(5.010, 6.040)]
-        assert _segments_match(a, b, tolerance=0.05) is True
+        assert segments_match(a, b, tolerance=0.05) is True
 
     def test_outside_tolerance_mismatches(self):
         a = [SilenceSegment(1.000, 2.000), SilenceSegment(5.000, 6.000)]
         b = [SilenceSegment(1.500, 2.500), SilenceSegment(5.500, 6.500)]
-        assert _segments_match(a, b, tolerance=0.05) is False
+        assert segments_match(a, b, tolerance=0.05) is False
 
     def test_different_count_mismatches(self):
         a = [SilenceSegment(1.0, 2.0), SilenceSegment(5.0, 6.0)]
         b = [SilenceSegment(1.0, 2.0)]
-        assert _segments_match(a, b) is False
+        assert segments_match(a, b) is False
 
     def test_extra_segment_mismatches(self):
         a = [SilenceSegment(1.0, 2.0)]
         b = [SilenceSegment(1.0, 2.0), SilenceSegment(5.0, 6.0)]
-        assert _segments_match(a, b) is False
+        assert segments_match(a, b) is False
 
     def test_empty_lists_match(self):
-        assert _segments_match([], []) is True
+        assert segments_match([], []) is True
 
     def test_broken_pts_shift_mismatches(self):
         """A 2-second itsoffset (the documented failure mode of -copyts-free
         extraction) must register as a mismatch so the fallback path is taken."""
         a = [SilenceSegment(10.0, 12.0), SilenceSegment(20.0, 22.0)]
         b = [SilenceSegment(8.0, 10.0), SilenceSegment(18.0, 20.0)]  # shifted by -2.0
-        assert _segments_match(a, b, tolerance=0.05) is False
+        assert segments_match(a, b, tolerance=0.05) is False
 
 
 class TestSampleSegmentsMatch:

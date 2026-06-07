@@ -6,7 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from stream2video.silence import SilenceSegment
+pytest.importorskip("PIL", reason="waveform rendering requires Pillow ([gui] extra)")
+
+from stream2video.silence import SilenceSegment  # noqa: E402  (after importorskip)
 from stream2video.waveform import (
     DB_AXIS_WIDTH,
     _format_clock,

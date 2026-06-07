@@ -4,11 +4,13 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from stream2video.paths import (
+    RECENT_NAME_MAX,
     add_recent_project,
     ensure_project_dir,
     move_into_project,
     project_dir,
     prune_recent_projects,
+    truncate_recent_name,
 )
 
 
@@ -194,37 +196,29 @@ class TestPruneRecentProjects:
 
 
 class TestTruncateRecentName:
-    """_truncate — display-name truncation for Recent Projects rows."""
+    """truncate_recent_name — display-name truncation for Recent Projects rows."""
 
     def test_short_text_unchanged(self):
-        from stream2video.gui import _RECENT_NAME_MAX, _truncate
-
-        for text in ("", "a", "video", "x" * _RECENT_NAME_MAX):
-            assert _truncate(text, _RECENT_NAME_MAX) == text
+        for text in ("", "a", "video", "x" * RECENT_NAME_MAX):
+            assert truncate_recent_name(text, RECENT_NAME_MAX) == text
 
     def test_long_text_truncated_with_ellipsis(self):
-        from stream2video.gui import _RECENT_NAME_MAX, _truncate
-
-        text = "x" * (_RECENT_NAME_MAX + 10)
-        result = _truncate(text, _RECENT_NAME_MAX)
-        assert len(result) == _RECENT_NAME_MAX
+        text = "x" * (RECENT_NAME_MAX + 10)
+        result = truncate_recent_name(text, RECENT_NAME_MAX)
+        assert len(result) == RECENT_NAME_MAX
         assert result.endswith("\u2026")  # unicode horizontal ellipsis
-        assert result == "x" * (_RECENT_NAME_MAX - 1) + "\u2026"
+        assert result == "x" * (RECENT_NAME_MAX - 1) + "\u2026"
 
     def test_realistic_long_filename(self):
         """The user's actual filename pattern is <id>_compressed_<n>_<m>."""
-        from stream2video.gui import _truncate
-
         long_name = "v2786949142_compressed_4_30_extra_long_suffix.mp4"
-        truncated = _truncate(long_name, 24)
+        truncated = truncate_recent_name(long_name, 24)
         assert len(truncated) == 24
         # The ellipsis replaces the file extension — that's fine since
         # the tooltip shows the full path; the column doesn't grow.
         assert truncated.endswith("\u2026")
 
     def test_custom_max_len(self):
-        from stream2video.gui import _truncate
-
-        assert _truncate("abcdef", 3) == "ab\u2026"
-        assert _truncate("abc", 3) == "abc"
-        assert _truncate("", 3) == ""
+        assert truncate_recent_name("abcdef", 3) == "ab\u2026"
+        assert truncate_recent_name("abc", 3) == "abc"
+        assert truncate_recent_name("", 3) == ""

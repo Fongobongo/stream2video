@@ -74,6 +74,23 @@ def _make_sigint_cancel() -> tuple[threading.Event, Callable[[], bool]]:
     return event, _cb
 
 
+def _make_file_handler(path: Path) -> logging.FileHandler:
+    """Create the CLI's per-run file handler with the canonical format.
+
+    DEBUG-level so the file always gets the full trace; the user-facing
+    console level is controlled separately by ``_console_handler.setLevel``.
+    Format: ``%(asctime)s - %(name)s - %(levelname)s - %(message)s`` —
+    matches what stream2video.log has always written so existing log-
+    parsing scripts keep working across upgrades.
+    """
+    fh = logging.FileHandler(path)
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(
+        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    )
+    return fh
+
+
 def _check_ffmpeg():
     """Warn if ffmpeg or ffprobe is missing."""
     for tool in ("ffmpeg", "ffprobe"):
@@ -228,9 +245,7 @@ def main(
 
     fh = None
     try:
-        fh = logging.FileHandler(log_file)
-        fh.setLevel(logging.DEBUG)
-        fh.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+        fh = _make_file_handler(log_file)
         logger.addHandler(fh)
 
         # Load configuration
@@ -302,13 +317,7 @@ def main(
                             new_log.unlink()
                         if log_file.exists():
                             shutil.move(str(log_file), str(new_log))
-                        fh = logging.FileHandler(new_log)
-                        fh.setLevel(logging.DEBUG)
-                        fh.setFormatter(
-                            logging.Formatter(
-                                "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-                            )
-                        )
+                        fh = _make_file_handler(new_log)
                         logger.addHandler(fh)
                     output_dir = project_dir
                     console.print(f"Project directory: [cyan]{output_dir}[/cyan]")

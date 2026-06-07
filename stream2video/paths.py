@@ -24,6 +24,28 @@ the per-video subdir.
 
 from pathlib import Path
 
+# Max length of the displayed name in a Recent Projects row. Long
+# filenames (e.g. "<id>_compressed_4_30_<more>") are truncated with
+# an ellipsis so the column doesn't grow to fit the longest name.
+# The full name is still available on hover via the tooltip.
+# Kept as a module constant (not in gui.py) so tests can pin the
+# behaviour without importing the GUI stack (which transitively
+# pulls in Pillow via waveform.py).
+RECENT_NAME_MAX = 24
+
+
+def truncate_recent_name(text: str, max_len: int = RECENT_NAME_MAX) -> str:
+    """Truncate ``text`` to ``max_len`` chars, appending an ellipsis if cut.
+
+    If ``text`` is shorter than or equal to ``max_len``, it is returned
+    unchanged. Otherwise the first ``max_len - 1`` characters are kept
+    and "…" is appended (so the result is exactly ``max_len`` chars).
+    Used by the GUI's Recent Projects row label.
+    """
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1] + "\u2026"
+
 
 def project_dir(output_dir: Path, video_stem: str, per_video_dir: bool) -> Path:
     """Compute the per-project directory path. Does not create it.
@@ -100,12 +122,21 @@ def add_recent_project(
 def prune_recent_projects(recent: list[str]) -> list[str]:
     """Return a new list with entries whose directory no longer exists removed.
 
-    Also drops non-string entries defensively. The input list is not modified.
+    Also drops non-string entries defensively. ``Path.is_dir()`` can raise
+    ``OSError`` on Windows (e.g. path longer than MAX_PATH without the
+    ``\\\\?\\`` prefix, permission errors) — those entries are dropped
+    rather than letting the whole prune abort and break the GUI's
+    Recent Projects panel.
+
+    The input list is not modified.
     """
     out: list[str] = []
     for p in recent:
         if not isinstance(p, str):
             continue
-        if Path(p).is_dir():
-            out.append(p)
+        try:
+            if Path(p).is_dir():
+                out.append(p)
+        except OSError:
+            continue
     return out

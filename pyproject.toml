@@ -18,12 +18,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Dev = linting + typing + tests. Includes the [gui] extra so the full
+# test suite (gui/waveform tests + import-smoke test_import_gui) runs
+# out of the box on `pip install -e .[dev]`.
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "ruff>=0.5.0",
     "mypy>=1.10.0",
     "types-PyYAML>=6.0.0",
+    "stream2video[gui]",
 ]
 gui = [
     "customtkinter>=5.2.0",

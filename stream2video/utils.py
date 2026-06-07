@@ -26,8 +26,10 @@ def cancel_monitor(
     ``cancel_callback()`` directly. The event is also set automatically on
     context exit so the monitor thread terminates cleanly.
 
-    No thread is started when ``cancel_callback`` is None — the yielded
-    event simply stays unset forever.
+    A thread is always started; when ``cancel_callback`` is None the
+    monitor body returns immediately and the thread exits as soon as the
+    context manager fires ``cancelled.set()`` on exit. The yielded event
+    simply stays unset forever in that case.
     """
     cancelled = threading.Event()
 

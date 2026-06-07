@@ -31,11 +31,9 @@ from stream2video.utils import (
     CANCEL_POLL_INTERVAL,
     cancel_monitor,
     drain_stderr_lines,
+    get_video_duration as _probe_duration,
     no_window_kwargs,
     set_active_process,
-)
-from stream2video.utils import (
-    get_video_duration as _probe_duration,
 )
 
 logger = logging.getLogger(__name__)
@@ -237,12 +235,18 @@ def detect_silence(
                 cancel_callback,
                 "WAV",
             )
+            # Sample-verify must NOT use the user-facing progress_callback:
+            # it runs for a fixed _SAMPLE_VERIFY_DURATION window and would
+            # fill the progress bar to 100% over 60s while the real D
+            # detection (which has no progress callback) just finished.
+            # The bar would either freeze at 100% (verify pass) or jump back
+            # to 0% on the A-fallback (verify fail). Keep verify invisible.
             segments_A_sample = _run_silencedetect(
                 video_path,
                 threshold,
                 min_silence,
                 duration,
-                progress_callback,
+                None,
                 cancel_callback,
                 "video (sample)",
                 duration_limit=_SAMPLE_VERIFY_DURATION,
@@ -702,6 +706,8 @@ def _extract_audio_wav(
             if cancelled.is_set():
                 raise SilenceCancelledError("audio extraction cancelled")
             process.wait(timeout=_SILENCE_TIMEOUT)
+            if cancelled.is_set():
+                raise SilenceCancelledError("audio extraction cancelled")
             wait_for_drain()
             drain_done = True
 
@@ -743,7 +749,7 @@ def _parse_ffmpeg_output(stderr: str) -> list[SilenceSegment]:
     return [SilenceSegment(start, end) for start, end in zip(starts, ends, strict=False)]
 
 
-def _segments_match(
+def segments_match(
     seg_a: list[SilenceSegment],
     seg_b: list[SilenceSegment],
     tolerance: float = _SEGMENT_MATCH_TOLERANCE,

@@ -36,10 +36,12 @@ from stream2video.config import (
 )
 from stream2video.download import DownloadCancelledError, DownloadError, download
 from stream2video.paths import (
+    RECENT_NAME_MAX,
     add_recent_project,
     ensure_project_dir,
     move_into_project,
     prune_recent_projects,
+    truncate_recent_name,
 )
 from stream2video.silence import (
     SilenceCancelledError,
@@ -59,25 +61,6 @@ from stream2video.waveform import (
 )
 
 logger = logging.getLogger("stream2video.gui")
-
-
-# Max length of the displayed name in a Recent Projects row. Long
-# filenames (e.g. "<id>_compressed_4_30_<more>") are truncated with
-# an ellipsis so the column doesn't grow to fit the longest name.
-# The full name is still available on hover via the tooltip.
-_RECENT_NAME_MAX = 24
-
-
-def _truncate(text: str, max_len: int) -> str:
-    """Truncate ``text`` to ``max_len`` chars, appending an ellipsis if cut.
-
-    If ``text`` is shorter than or equal to ``max_len``, it is returned
-    unchanged. Otherwise the first ``max_len - 1`` characters are kept
-    and "…" is appended (so the result is exactly ``max_len`` chars).
-    """
-    if len(text) <= max_len:
-        return text
-    return text[: max_len - 1] + "…"
 
 
 class _Tooltip:
@@ -296,9 +279,11 @@ class Stream2VideoGUI(ctk.CTk):
         # Fit window to screen if resolution is small
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
-        win_w = max(1, min(1080, sw - 40))
-        win_h = max(1, min(680, sh - 60))
-        self.minsize(max(1, min(1000, sw - 40)), max(1, min(620, sh - 60)))
+        win_w, win_h = self._fit_to_screen(sw, sh)
+        self.minsize(
+            max(1, min(1000, sw - 40)),
+            max(1, min(620, sh - 60)),
+        )
 
         geom = self.config.get("window_geometry")
         if geom:
@@ -1838,7 +1823,7 @@ class Stream2VideoGUI(ctk.CTk):
             display = Path(path_str).name or path_str
             lbl = ctk.CTkLabel(
                 row,
-                text=_truncate(display, _RECENT_NAME_MAX),
+                text=truncate_recent_name(display, RECENT_NAME_MAX),
                 anchor="w",
                 cursor="hand2",
             )
@@ -2520,7 +2505,8 @@ class Stream2VideoGUI(ctk.CTk):
         self._set_checkbox(self.chk_per_video_dir, self.config["per_video_dir"])
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
-        self.geometry(f"{min(1080, sw - 40)}x{min(680, sh - 60)}")
+        win_w, win_h = self._fit_to_screen(sw, sh)
+        self.geometry(f"{win_w}x{win_h}")
         for key in ("threshold", "min_silence", "margin"):
             slider = getattr(self, f"_slider_{key}", None)
             if slider:
@@ -2548,6 +2534,20 @@ class Stream2VideoGUI(ctk.CTk):
             checkbox.select()
         else:
             checkbox.deselect()
+
+    @staticmethod
+    def _fit_to_screen(sw: int, sh: int) -> tuple[int, int]:
+        """Return the default window size (w, h) clamped to the screen.
+
+        Targets 1080x680 on a typical desktop; shrinks to (sw-40) x (sh-60)
+        on smaller displays. The ``max(1, ...)`` floor guards against
+        negative/zero values from absurdly small screens (e.g., a remote
+        session at 200x150) where ``sw - 40`` could otherwise go negative.
+        """
+        return (
+            max(1, min(1080, sw - 40)),
+            max(1, min(680, sh - 60)),
+        )
 
     def _save_user_defaults(self):
         """Snapshot the current tunable GUI values to user_defaults.json.

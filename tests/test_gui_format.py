@@ -5,7 +5,16 @@ build the human-readable strings used in the status line, log, and popup
 on completion. They are pure functions and don't require a Tk root.
 """
 
-from stream2video.gui import Stream2VideoGUI
+import pytest
+
+# gui.py imports waveform.py → Pillow. Skip the whole module when Pillow
+# (or the rest of the [gui] extra) isn't installed in the test env.
+pytest.importorskip("PIL", reason="GUI helpers require Pillow ([gui] extra)")
+pytest.importorskip(
+    "customtkinter", reason="Stream2VideoGUI lives in gui.py ([gui] extra)"
+)
+
+from stream2video.gui import Stream2VideoGUI  # noqa: E402  (after importorskip)
 
 _fmt_size = staticmethod(Stream2VideoGUI._fmt_size).__func__
 _fmt_time = staticmethod(Stream2VideoGUI._fmt_time).__func__
