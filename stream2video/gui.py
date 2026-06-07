@@ -569,6 +569,7 @@ class Stream2VideoGUI(ctk.CTk):
         self._waveform_ctk_image: ctk.CTkImage | None = None
         self._waveform_render_token = 0
         self._waveform_running = False
+        self._waveform_last_update_ts: float = 0.0
 
     def _add_slider(
         self,
@@ -1328,6 +1329,9 @@ class Stream2VideoGUI(ctk.CTk):
         token = self._waveform_render_token + 1
         self._waveform_render_token = token
         self._waveform_running = True
+        # Reset the progressive-overlay throttle clock so the first
+        # segment after a fresh render is allowed through immediately.
+        self._waveform_last_update_ts = 0.0
         self.btn_render_wave.configure(state="disabled", text="Rendering...")
         self.lbl_wave_status.configure(text="Streaming audio...")
         self._log("Waveform preview: streaming audio from source video...")
@@ -1375,6 +1379,15 @@ class Stream2VideoGUI(ctk.CTk):
                 )
 
                 def _on_segment(segments_so_far):
+                    # Throttle: skip this callback if the previous update
+                    # was less than 1 second ago. The final Phase 3 render
+                    # below always runs unthrottled, so the user sees the
+                    # canonical image once detection completes.
+                    now = time.monotonic()
+                    if now - self._waveform_last_update_ts < 1.0:
+                        return
+                    self._waveform_last_update_ts = now
+
                     # Re-render on the main thread so the overlay grows
                     # in real time as ffmpeg emits silence_end lines.
                     def _update():
