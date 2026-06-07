@@ -82,12 +82,23 @@ def get_video_duration(video_path: Path) -> float | None:
         return None
 
 
-def drain_stderr_lines(pipe: IO[bytes], sink: list[str]) -> Callable[[], None]:
+def drain_stderr_lines(
+    pipe: IO[bytes],
+    sink: list[str],
+    on_line: Callable[[str], None] | None = None,
+) -> Callable[[], None]:
     """Spawn a daemon thread that reads bytes from `pipe` and appends decoded lines to `sink`.
 
     The thread terminates when the pipe is closed (typically when the subprocess
     exits and the OS reaps its fds); it cannot be stopped from outside the
     thread — the only way to end it is to close the pipe.
+
+    If `on_line` is given, it is invoked with each decoded line *after* the
+    line is appended to `sink`. The callback runs on the drain thread, so
+    callers that need to touch a UI must wrap the work in their framework's
+    main-thread dispatch (e.g. `self.after(0, ...)` in Tkinter). Exceptions
+    raised by the callback are logged and swallowed — they do not stop the
+    drain thread.
 
     Returns a `wait_for_drain` callable that blocks (up to `timeout` seconds) for
     the thread to finish. Call it in a `finally` block to ensure `sink` is fully
@@ -106,7 +117,13 @@ def drain_stderr_lines(pipe: IO[bytes], sink: list[str]) -> Callable[[], None]:
     def _run():
         try:
             for raw in iter(pipe.readline, b""):
-                sink.append(raw.decode("utf-8", errors="replace"))
+                line = raw.decode("utf-8", errors="replace")
+                sink.append(line)
+                if on_line is not None:
+                    try:
+                        on_line(line)
+                    except Exception:
+                        logger.exception("drain_stderr_lines on_line callback raised")
         except (OSError, ValueError):
             pass
         finally:

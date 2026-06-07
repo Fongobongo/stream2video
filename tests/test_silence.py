@@ -884,3 +884,231 @@ def test_detect_silence_stream_progressive_callback(tmp_path):
     assert seen[0] >= 1
     # Sizes are non-decreasing.
     assert seen == sorted(seen)
+
+
+# ── detect_silence(live_cache_path=...) — progressive cache writes ─
+
+
+class TestLiveCache:
+    """`detect_silence(..., live_cache_path=...)` writes a partial cache file
+    as segments are detected so the GUI waveform popup can render a
+    near-real-time overlay.
+
+    The ffmpeg subprocess is mocked: we feed canned `silence_start` /
+    `silence_end` lines and verify the partial file appears with growing
+    segment counts, and that the final state matches the return value.
+    """
+
+    def _fake_popen_factory(self, stderr_payload: str):
+        """Single-call Popen factory — A-path (no output_dir) makes one
+        ffmpeg call, so we only need to mock one."""
+
+        def fake_popen(cmd, **kwargs):
+            class _FakeProcess:
+                def __init__(self):
+                    self.stderr = _FakeStderr(stderr_payload.encode("utf-8"))
+                    self.stdout = _FakeStdout()
+                    self.returncode = 0
+
+                def poll(self):
+                    return self.returncode
+
+                def wait(self, timeout=None):
+                    return self.returncode
+
+                def kill(self):
+                    self.returncode = -9
+
+            return _FakeProcess()
+
+        return fake_popen
+
+    def test_live_cache_written_progressively(self):
+        """When `live_cache_path` is set, the file appears as segments are
+        detected, and its final content matches the segments list."""
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "video.mp4"
+            video.write_text("dummy")
+            live = Path(tmp) / "live.partial.json"
+
+            # Three silences in chronological order, each with positive
+            # margin (margin=0.5 shrinks them; margin=0 keeps them as-is).
+            stderr_payload = (
+                "[silencedetect @ 0x0] silence_start: 1.000\n"
+                "[silencedetect @ 0x0] silence_end: 2.000\n"
+                "[silencedetect @ 0x0] silence_start: 10.000\n"
+                "[silencedetect @ 0x0] silence_end: 12.000\n"
+                "[silencedetect @ 0x0] silence_start: 20.000\n"
+                "[silencedetect @ 0x0] silence_end: 25.000\n"
+            )
+            factory = self._fake_popen_factory(stderr_payload)
+
+            with (
+                patch("stream2video.silence._probe_duration", return_value=100.0),
+                patch("stream2video.silence.subprocess.Popen", side_effect=factory),
+            ):
+                segs = detect_silence(
+                    video,
+                    threshold=-20,
+                    min_silence=0.5,
+                    margin=0,
+                    live_cache_path=live,
+                )
+
+            # Final return value matches the canonical detection.
+            assert len(segs) == 3
+            assert [s.start for s in segs] == [1.0, 10.0, 20.0]
+            assert [s.end for s in segs] == [2.0, 12.0, 25.0]
+
+            # Partial file exists, is valid JSON, and contains the same segments.
+            assert live.exists()
+            import json
+
+            with open(live) as f:
+                data = json.load(f)
+            assert data["source"] == "video.mp4"
+            assert data["config"]["threshold"] == -20
+            assert data["config"]["min_silence"] == 0.5
+            assert data["config"]["margin"] == 0
+            assert len(data["segments"]) == 3
+            assert data["segments"][0] == {"start": 1.0, "end": 2.0}
+            assert data["segments"][2] == {"start": 20.0, "end": 25.0}
+
+    def test_live_cache_not_written_when_path_is_none(self):
+        """Backward compat: when `live_cache_path` is None, no partial
+        file is created and detection still works as before."""
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "video.mp4"
+            video.write_text("dummy")
+            # Look for any stray .partial file in the tmp dir.
+            tmp_path = Path(tmp)
+
+            stderr_payload = (
+                "[silencedetect @ 0x0] silence_start: 5.000\n"
+                "[silencedetect @ 0x0] silence_end: 6.000\n"
+            )
+            factory = self._fake_popen_factory(stderr_payload)
+
+            with (
+                patch("stream2video.silence._probe_duration", return_value=100.0),
+                patch("stream2video.silence.subprocess.Popen", side_effect=factory),
+            ):
+                segs = detect_silence(video, threshold=-20, min_silence=0.5, margin=0)
+
+            assert len(segs) == 1
+            assert segs[0].start == 5.0
+            # No .partial files anywhere in tmp.
+            partials = list(tmp_path.glob("*.partial*"))
+            assert partials == []
+
+    def test_live_cache_applies_margin_to_growing_list(self):
+        """The partial file uses the same `margin` as the final result —
+        positive margin shrinks silences, the shrink is visible in the
+        partial file as soon as the segment is detected."""
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "video.mp4"
+            video.write_text("dummy")
+            live = Path(tmp) / "live.partial.json"
+
+            stderr_payload = (
+                "[silencedetect @ 0x0] silence_start: 1.000\n"
+                "[silencedetect @ 0x0] silence_end: 4.000\n"
+            )
+            factory = self._fake_popen_factory(stderr_payload)
+
+            with (
+                patch("stream2video.silence._probe_duration", return_value=100.0),
+                patch("stream2video.silence.subprocess.Popen", side_effect=factory),
+            ):
+                segs = detect_silence(
+                    video,
+                    threshold=-20,
+                    min_silence=0.5,
+                    margin=0.5,  # shrink silences by 0.5s on each side
+                    live_cache_path=live,
+                )
+
+            # Returned segments are also margin'd (consistent with
+            # detect_silence's contract: it returns the margin'd list).
+            assert len(segs) == 1
+            assert segs[0].start == 1.5
+            assert segs[0].end == 3.5
+
+            # The partial file shows the same margin'd segment.
+            import json
+
+            with open(live) as f:
+                data = json.load(f)
+            assert data["segments"] == [{"start": 1.5, "end": 3.5}]
+
+
+def test_get_silence_cache_partial_path_uses_video_stem():
+    """`get_silence_cache_partial_path` is the canonical path for the
+    partial cache the GUI polls. The `.partial` suffix keeps it
+    separate from the final cache file."""
+    from stream2video.silence import get_silence_cache_partial_path
+
+    video = Path("/some/dir/myvideo.mp4")
+    out = Path("/output")
+    assert get_silence_cache_partial_path(video, out) == Path(
+        "/output/myvideo_silence_cache.json.partial"
+    )
+
+
+def test_load_silence_cache_from_path_reads_partial(tmp_path):
+    """`load_silence_cache_from_path` is the loader the GUI's poller uses
+    on the partial cache file. It must accept a caller-supplied path
+    and apply the same freshness / config checks as the final loader."""
+    from stream2video.silence import (
+        get_silence_cache_partial_path,
+        load_silence_cache_from_path,
+        save_silence_cache,
+    )
+
+    video = tmp_path / "video.mp4"
+    video.write_text("dummy")
+    out = tmp_path
+    config = {"threshold": -20, "min_silence": 0.5, "margin": 0}
+
+    # Write the partial file directly.
+    partial = get_silence_cache_partial_path(video, out)
+    save_silence_cache(video, [SilenceSegment(2.0, 3.0)], out, config)
+    # Move final to partial to simulate the live writer's output.
+    final = out / f"{video.stem}_silence_cache.json"
+    partial.write_bytes(final.read_bytes())
+
+    # The partial loader must read it back, identical to the final loader.
+    segs = load_silence_cache_from_path(partial, video, config)
+    assert segs is not None
+    assert len(segs) == 1
+    assert segs[0].start == 2.0
+    assert segs[0].end == 3.0
+
+
+def test_load_silence_cache_from_path_rejects_mismatched_config(tmp_path):
+    """A partial file written with different threshold/min_silence/margin
+    must be rejected so the GUI doesn't render stale highlights from a
+    previous run."""
+    from stream2video.silence import (
+        load_silence_cache_from_path,
+        save_silence_cache,
+    )
+
+    video = tmp_path / "video.mp4"
+    video.write_text("dummy")
+    out = tmp_path
+    cached_config = {"threshold": -20, "min_silence": 0.5, "margin": 0}
+
+    partial = out / "live.partial.json"
+    save_silence_cache(video, [SilenceSegment(2.0, 3.0)], out, cached_config)
+    final = out / f"{video.stem}_silence_cache.json"
+    partial.write_bytes(final.read_bytes())
+
+    # Same config → loads fine.
+    segs = load_silence_cache_from_path(partial, video, cached_config)
+    assert segs is not None and len(segs) == 1
+
+    # Different threshold → rejected.
+    new_config = {"threshold": -30, "min_silence": 0.5, "margin": 0}
+    segs = load_silence_cache_from_path(partial, video, new_config)
+    assert segs is None

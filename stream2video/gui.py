@@ -45,7 +45,9 @@ from stream2video.silence import (
     SilenceCancelledError,
     SilenceDetectionError,
     detect_silence,
+    get_silence_cache_partial_path,
     load_silence_cache,
+    load_silence_cache_from_path,
     save_silence_cache,
 )
 from stream2video.utils import get_active_process, get_video_duration
@@ -591,7 +593,9 @@ class Stream2VideoGUI(ctk.CTk):
         controls.grid(row=0, column=0, sticky="ew", padx=8, pady=(8, 4))
         controls.grid_columnconfigure(0, weight=1)
         self.lbl_wave_status = ctk.CTkLabel(
-            controls, text="Opening...", anchor="w",
+            controls,
+            text="Opening...",
+            anchor="w",
             text_color=("gray40", "gray60"),
         )
         self.lbl_wave_status.grid(row=0, column=0, sticky="ew")
@@ -961,6 +965,19 @@ class Stream2VideoGUI(ctk.CTk):
             if cache is not None:
                 silence_segments = cache
             else:
+                # Live cache path — the waveform popup polls this file to
+                # render a near-real-time overlay while detect is running.
+                # Deleted on cancel/error (see the outer try/finally below
+                # and the cancel/except branches above). On success the
+                # partial file is left in place until the user clicks
+                # "Render" on the next pipeline run — the popup's
+                # load_silence_cache call prefers the final file and only
+                # falls back to the partial when the final is missing.
+                live_cache_path = get_silence_cache_partial_path(video_path, output_dir)
+                try:
+                    live_cache_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
                 silence_start = time.monotonic()
 
                 def silence_prog(f: float):
@@ -973,14 +990,29 @@ class Stream2VideoGUI(ctk.CTk):
                     )
                     self._ui_overall(elapsed, remaining, more_phases=True)
 
-                silence_segments = detect_silence(
-                    video_path,
-                    **config,
-                    output_dir=output_dir,
-                    progress_callback=silence_prog,
-                    cancel_callback=lambda: self._cancel_event.is_set(),
-                )
+                try:
+                    silence_segments = detect_silence(
+                        video_path,
+                        **config,
+                        output_dir=output_dir,
+                        progress_callback=silence_prog,
+                        cancel_callback=lambda: self._cancel_event.is_set(),
+                        live_cache_path=live_cache_path,
+                    )
+                except BaseException:
+                    # On any failure (cancel, error) drop the partial file
+                    # so a future run starts from a clean slate.
+                    try:
+                        live_cache_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    raise
                 save_silence_cache(video_path, silence_segments, output_dir, config)
+                # Final cache is written — partial is now redundant.
+                try:
+                    live_cache_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
                 self._log(f"Detected {len(silence_segments)} silence segments")
 
             if self._cancel_event.is_set():
@@ -1349,6 +1381,14 @@ class Stream2VideoGUI(ctk.CTk):
         the (potentially long) first decode. Re-runs are debounced by
         ``_waveform_render_token`` — if the user clicks "Render" again
         before the previous run finishes, the older one is invalidated.
+
+        Phase 1 streams the audio peaks directly from ffmpeg and shows
+        the bare waveform. Phase 2 loads the silence cache (or, if the
+        pipeline is currently running, the partial cache that detect
+        is writing). When only the partial is available, a 1-second
+        poller keeps the overlay in sync with new segments as they are
+        detected, and stops itself when the final cache appears or
+        the partial file is deleted (e.g. on cancel).
         """
         if self._waveform_running:
             self._log("Waveform render already running")
@@ -1383,7 +1423,6 @@ class Stream2VideoGUI(ctk.CTk):
         out_dir = Path(out_raw).expanduser().resolve()
         if bool(self.chk_per_video_dir.get()):
             out_dir = out_dir / in_path.stem
-        cached_segments = load_silence_cache(in_path, out_dir, config)
 
         token = self._waveform_render_token + 1
         self._waveform_render_token = token
@@ -1419,22 +1458,26 @@ class Stream2VideoGUI(ctk.CTk):
                 )
                 if token != self._waveform_render_token:
                     return
-                self.after(
-                    0, lambda: self._apply_waveform_image(img_no_overlay, duration, 0)
-                )
+                self.after(0, lambda: self._apply_waveform_image(img_no_overlay, duration, 0))
 
                 # Phase 2: load silence segments from the pipeline's JSON
                 # cache. The waveform never runs its own detect — preview
-                # is a pure read over the pipeline's results. If the cache
-                # is missing (pipeline hasn't run, or config changed),
-                # show a "run pipeline first" message and exit.
-                if cached_segments is None:
+                # is a pure read over the pipeline's results. Prefer the
+                # final cache; if it's missing, try the partial cache the
+                # pipeline writes during detect (so the user can open
+                # the popup mid-run and watch the overlay grow).
+                final_segs = load_silence_cache(in_path, out_dir, config)
+                partial_path = get_silence_cache_partial_path(in_path, out_dir)
+                partial_segs = (
+                    None
+                    if final_segs is not None
+                    else load_silence_cache_from_path(partial_path, in_path, config)
+                )
+                if final_segs is None and partial_segs is None:
                     cache_path = out_dir / f"{in_path.stem}_silence_cache.json"
                     self.after(
                         0,
-                        lambda: self._safe_status_set(
-                            "No silence cache — run the pipeline first"
-                        ),
+                        lambda: self._safe_status_set("No silence cache — run the pipeline first"),
                     )
                     self._log(
                         f"  Waveform preview: no cache at {cache_path} "
@@ -1443,12 +1486,19 @@ class Stream2VideoGUI(ctk.CTk):
                         f"margin={config['margin']}s — skipping detect"
                     )
                     return
-                self._log(
-                    f"  Loaded {len(cached_segments)} silences from cache "
-                    f"(threshold={config['threshold']}dB, "
-                    f"min_silence={config['min_silence']}s, margin={config['margin']}s)"
-                )
-                segments = cached_segments
+                if final_segs is not None:
+                    self._log(
+                        f"  Loaded {len(final_segs)} silences from final cache "
+                        f"(threshold={config['threshold']}dB, "
+                        f"min_silence={config['min_silence']}s, margin={config['margin']}s)"
+                    )
+                else:
+                    self._log(
+                        f"  Loaded {len(partial_segs or [])} silences from partial cache "
+                        f"— polling for updates (threshold={config['threshold']}dB, "
+                        f"min_silence={config['min_silence']}s, margin={config['margin']}s)"
+                    )
+                segments = final_segs if final_segs is not None else partial_segs
                 if token != self._waveform_render_token:
                     return
 
@@ -1457,24 +1507,28 @@ class Stream2VideoGUI(ctk.CTk):
                 # duplicate of the final list — render once more to lock
                 # the canonical image and final status text).
                 self.after(0, lambda: self._safe_status_set("Rendering overlay..."))
-                img_with_overlay = render_waveform_image(
-                    peaks,
-                    width=800,
-                    height=200,
-                    total_duration=duration,
-                    silence_segments=segments,
-                    title=f"{in_path.name}  •  {len(segments)} silences",
-                )
+                self._render_overlay_and_apply(peaks, duration, segments or [], in_path.name, token)
                 if token != self._waveform_render_token:
                     return
-
-                self.after(
-                    0, lambda: self._apply_waveform_image(img_with_overlay, duration, len(segments))
-                )
                 self._log(
-                    f"  Waveform ready: {len(segments)} silence segments, "
+                    f"  Waveform ready: {len(segments or [])} silence segments, "
                     f"{Stream2VideoGUI._fmt_time(duration)} duration"
                 )
+
+                # Phase 4: if we loaded from the partial cache, start a
+                # poller that re-renders the overlay as new segments are
+                # detected. The poller stops itself when the final cache
+                # appears, when the partial is deleted (cancel/error), or
+                # when the render token is invalidated (new render / popup
+                # closed).
+                if final_segs is None:
+                    poll_state = {"last_count": len(segments or [])}
+                    self.after(
+                        1000,
+                        lambda: self._poll_waveform_cache(
+                            in_path, out_dir, config, peaks, duration, token, poll_state
+                        ),
+                    )
             except Exception as e:
                 logger.exception("Waveform render failed")
                 self.after(0, lambda err=e: self._safe_status_set(f"Error: {err}"))
@@ -1483,6 +1537,85 @@ class Stream2VideoGUI(ctk.CTk):
                 self._waveform_running = False
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def _render_overlay_and_apply(
+        self,
+        peaks: list[float],
+        duration: float,
+        segments: list,
+        name: str,
+        token: int,
+    ) -> None:
+        """Render the overlay image and post it to the main thread.
+
+        Used by both the initial render and the live poller. Honours the
+        render token — if the user closed/reopened the popup between the
+        schedule and the dispatch, the call becomes a no-op.
+        """
+        if token != self._waveform_render_token:
+            return
+        img = render_waveform_image(
+            peaks,
+            width=800,
+            height=200,
+            total_duration=duration,
+            silence_segments=segments,
+            title=f"{name}  •  {len(segments)} silences",
+        )
+        if token != self._waveform_render_token:
+            return
+        self.after(0, lambda: self._apply_waveform_image(img, duration, len(segments)))
+
+    def _poll_waveform_cache(
+        self,
+        in_path: Path,
+        out_dir: Path,
+        config: dict,
+        peaks: list[float],
+        duration: float,
+        token: int,
+        state: dict,
+    ) -> None:
+        """Re-check the silence cache every second and re-render on change.
+
+        Only scheduled when the initial render loaded the partial cache
+        (i.e. the pipeline was mid-detect). Stops itself when:
+          - the final cache appears (use it, stop polling)
+          - the partial cache is deleted (pipeline cancelled or completed)
+          - the render token is invalidated (new render or popup closed)
+          - the popup window has been destroyed
+        """
+        if token != self._waveform_render_token:
+            return
+        if self._wave_window is None or not self._wave_window.winfo_exists():
+            return
+
+        final_segs = load_silence_cache(in_path, out_dir, config)
+        if final_segs is not None:
+            self._render_overlay_and_apply(peaks, duration, final_segs, in_path.name, token)
+            self._log(
+                f"  Final silence cache appeared — waveform locked at "
+                f"{len(final_segs)} silences, stopping poll"
+            )
+            return
+
+        partial_path = get_silence_cache_partial_path(in_path, out_dir)
+        partial_segs = load_silence_cache_from_path(partial_path, in_path, config)
+        if partial_segs is None:
+            self._log("  Partial silence cache gone (pipeline done or cancelled) — stopping poll")
+            return
+
+        if len(partial_segs) != state["last_count"]:
+            self._render_overlay_and_apply(peaks, duration, partial_segs, in_path.name, token)
+            state["last_count"] = len(partial_segs)
+            self._log(f"  Waveform updated: {len(partial_segs)} silences so far")
+
+        self.after(
+            1000,
+            lambda: self._poll_waveform_cache(
+                in_path, out_dir, config, peaks, duration, token, state
+            ),
+        )
 
     def _safe_status_set(self, text: str) -> None:
         """Update the waveform status label; no-op if the popup is closed."""

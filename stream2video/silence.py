@@ -86,6 +86,7 @@ def detect_silence(
     output_dir: Path | None = None,
     progress_callback: Callable[[float], None] | None = None,
     cancel_callback: Callable[[], bool] | None = None,
+    live_cache_path: Path | None = None,
 ) -> list[SilenceSegment]:
     """
     Detect silence segments using ffmpeg silencedetect filter.
@@ -111,6 +112,15 @@ def detect_silence(
                     directly on the video (A path, no WAV caching).
         progress_callback: Optional callback with progress fraction [0, 1]
         cancel_callback: Optional callable returning True to abort; checked while ffmpeg runs.
+        live_cache_path: If provided, the canonical detection writes a "partial"
+                    silence cache JSON at this path as segments are detected, so
+                    a UI can poll the file and render a near-real-time preview
+                    while the pipeline is still running. The file uses the same
+                    format as `save_silence_cache` and is overwritten on every
+                    new segment. The caller is responsible for deleting the
+                    file on cancel/error (it's NOT removed on success — the
+                    final canonical cache is written elsewhere by the caller
+                    via `save_silence_cache`).
 
     Returns:
         List of SilenceSegment objects
@@ -129,6 +139,25 @@ def detect_silence(
 
     duration = _probe_duration(video_path)
 
+    config = {
+        "threshold": threshold,
+        "min_silence": min_silence,
+        "margin": margin,
+    }
+
+    def _make_live_writer() -> Callable[[list[SilenceSegment]], None] | None:
+        if live_cache_path is None:
+            return None
+
+        def _write(seg_list: list[SilenceSegment]) -> None:
+            try:
+                margin_applied = _apply_margin(seg_list, margin)
+                _save_silence_cache_to_path(live_cache_path, video_path, margin_applied, config)
+            except Exception as e:
+                logger.warning(f"Live cache write failed: {e}")
+
+        return _write
+
     if output_dir is not None:
         wav_path = _get_wav_cache_path(video_path, output_dir)
         if _is_wav_cache_valid(wav_path, video_path):
@@ -141,6 +170,7 @@ def detect_silence(
                 progress_callback,
                 cancel_callback,
                 "WAV cache",
+                on_segment=_make_live_writer(),
             )
         else:
             _extract_audio_wav(video_path, wav_path, cancel_callback)
@@ -173,6 +203,12 @@ def detect_silence(
                     f"— using D result, keeping WAV cache"
                 )
                 segments = segments_D
+                # Sample-verify used a batch D-pass for comparison; if a live
+                # cache is requested, write the final result now so the GUI
+                # doesn't have to wait for a (skipped) progressive re-run.
+                writer = _make_live_writer()
+                if writer is not None:
+                    writer(segments)
             else:
                 logger.warning(
                     f"Sample-verify failed (D-sample: {len(segments_D_sample)}, "
@@ -190,6 +226,7 @@ def detect_silence(
                     progress_callback,
                     cancel_callback,
                     "video",
+                    on_segment=_make_live_writer(),
                 )
     else:
         segments = _run_silencedetect(
@@ -200,6 +237,7 @@ def detect_silence(
             progress_callback,
             cancel_callback,
             "video",
+            on_segment=_make_live_writer(),
         )
 
     segments = _apply_margin(segments, margin)
@@ -298,9 +336,7 @@ def detect_silence_stream(
 
         proc.wait(timeout=_SILENCE_TIMEOUT)
         if proc.returncode != 0:
-            raise SilenceDetectionError(
-                f"ffmpeg silencedetect failed (rc={proc.returncode})"
-            )
+            raise SilenceDetectionError(f"ffmpeg silencedetect failed (rc={proc.returncode})")
         return segments
     except subprocess.TimeoutExpired as e:
         proc.kill()
@@ -319,6 +355,7 @@ def _run_silencedetect(
     cancel_callback: Callable[[], bool] | None,
     label: str,
     duration_limit: float | None = None,
+    on_segment: Callable[[list[SilenceSegment]], None] | None = None,
 ) -> list[SilenceSegment]:
     """Run ffmpeg silencedetect on `input_path` and return parsed segments.
 
@@ -329,6 +366,15 @@ def _run_silencedetect(
     input (added as `-t` flag). Used for sample-verification, where running
     silencedetect on the full video would be wasteful. Progress is reported
     relative to `duration_limit` in that case, not the full `duration`.
+
+    `on_segment`: optional callback invoked with a *copy* of the running
+    list of detected segments every time a `silence_end` line arrives on
+    ffmpeg's stderr. The callback runs on the stderr drain thread, so
+    callers that touch a UI must wrap the work in a main-thread dispatch.
+    Used by `detect_silence(live_cache_path=...)` to write a partial cache
+    file the GUI can poll while the pipeline is still running. When
+    `on_segment` is None, the function uses the batch path (parse stderr
+    only after the process exits) — the original behaviour.
     """
     noise = 10 ** (threshold / 20)
 
@@ -371,7 +417,31 @@ def _run_silencedetect(
     stdout_pipe = process.stdout
     assert stderr_pipe is not None and stdout_pipe is not None
     stderr_lines: list[str] = []
-    wait_for_drain = drain_stderr_lines(stderr_pipe, stderr_lines)
+
+    # State for progressive parsing. Only used when on_segment is set; the
+    # batch path ignores these and re-parses the accumulated stderr at the
+    # end. We mutate `progressive_segments` only from the drain thread (the
+    # only place `_on_line` runs), so no lock is needed.
+    progressive_segments: list[SilenceSegment] = []
+    pending_start: list[float | None] = [None]  # mutable container so the
+    # closure can assign without `nonlocal`.
+
+    def _on_line(line: str) -> None:
+        m_s = _SILENCE_START_RE.search(line)
+        if m_s:
+            pending_start[0] = _to_float(m_s.group(1))
+            return
+        m_e = _SILENCE_END_RE.search(line)
+        if m_e and pending_start[0] is not None:
+            progressive_segments.append(SilenceSegment(pending_start[0], _to_float(m_e.group(1))))
+            pending_start[0] = None
+            if on_segment is not None:
+                on_segment(list(progressive_segments))
+
+    if on_segment is not None:
+        wait_for_drain = drain_stderr_lines(stderr_pipe, stderr_lines, on_line=_on_line)
+    else:
+        wait_for_drain = drain_stderr_lines(stderr_pipe, stderr_lines)
     drain_done = False
 
     try:
@@ -400,6 +470,13 @@ def _run_silencedetect(
                 error_msg = stderr_text or "Unknown error"
                 raise SilenceDetectionError(f"ffmpeg silencedetect failed: {error_msg}")
 
+            if on_segment is not None:
+                if pending_start[0] is not None:
+                    logger.warning(
+                        "Unmatched silence_start (no silence_end); dropped — "
+                        "ffmpeg output may be truncated"
+                    )
+                return list(progressive_segments)
             return _parse_ffmpeg_output("".join(stderr_lines))
 
     except subprocess.TimeoutExpired as e:
@@ -616,13 +693,32 @@ def _get_cache_path(video_path: Path, output_dir: Path) -> Path:
     return output_dir / f"{video_path.stem}_silence_cache.json"
 
 
-def save_silence_cache(
+def get_silence_cache_partial_path(video_path: Path, output_dir: Path) -> Path:
+    """Path for the partial silence cache written during detection.
+
+    The final canonical cache lives at `{stem}_silence_cache.json`; the
+    partial version (used by the GUI waveform preview to render
+    near-real-time overlays while the pipeline is still running) is
+    suffixed with `.partial` so the two files never collide.
+    """
+    return output_dir / f"{video_path.stem}_silence_cache.json.partial"
+
+
+def _save_silence_cache_to_path(
+    cache_path: Path,
     video_path: Path,
     segments: list[SilenceSegment],
-    output_dir: Path,
     config: dict,
-):
-    cache_path = _get_cache_path(video_path, output_dir)
+) -> None:
+    """Atomically write the silence cache to `cache_path`.
+
+    Shared by `save_silence_cache` (final, after detection) and the
+    live cache writer inside `detect_silence` (partial, during
+    detection). The temp file is created in the same directory as
+    `cache_path` so `os.replace` is atomic on the same filesystem.
+    Parent directories are created if needed.
+    """
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "source": video_path.name,
         "config": {
@@ -632,7 +728,9 @@ def save_silence_cache(
         },
         "segments": [{"start": s.start, "end": s.end} for s in segments],
     }
-    fd, tmp_path = tempfile.mkstemp(dir=output_dir, prefix=f".{cache_path.name}.", suffix=".tmp")
+    fd, tmp_path = tempfile.mkstemp(
+        dir=cache_path.parent, prefix=f".{cache_path.name}.", suffix=".tmp"
+    )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
@@ -645,6 +743,43 @@ def save_silence_cache(
         except OSError:
             pass
         raise
+
+
+def load_silence_cache_from_path(
+    cache_path: Path,
+    video_path: Path,
+    config: dict,
+) -> list[SilenceSegment] | None:
+    """Load the silence cache at `cache_path` if it exists, is fresh, and
+    matches `config`. Returns None on any miss (missing, stale, mismatched,
+    or malformed).
+
+    Used by both `load_silence_cache` (final cache) and the GUI's
+    live-preview poller (partial cache).
+    """
+    if not cache_path.exists():
+        return None
+    if cache_path.stat().st_mtime < video_path.stat().st_mtime:
+        return None
+    try:
+        with open(cache_path) as f:
+            data = json.load(f)
+        for key in ("threshold", "min_silence", "margin"):
+            if data.get("config", {}).get(key) != config.get(key):
+                return None
+        return [SilenceSegment(s["start"], s["end"]) for s in data["segments"]]
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+
+
+def save_silence_cache(
+    video_path: Path,
+    segments: list[SilenceSegment],
+    output_dir: Path,
+    config: dict,
+):
+    cache_path = _get_cache_path(video_path, output_dir)
+    _save_silence_cache_to_path(cache_path, video_path, segments, config)
     logger.info(f"Silence cache saved to {cache_path}")
 
 
@@ -660,15 +795,10 @@ def load_silence_cache(
         logger.info("Silence cache outdated (source file newer)")
         return None
     try:
-        with open(cache_path) as f:
-            data = json.load(f)
-        for key in ("threshold", "min_silence", "margin"):
-            if data.get("config", {}).get(key) != config.get(key):
-                logger.info(f"Silence cache ignored: config mismatch ({key})")
-                return None
-        segments = [SilenceSegment(s["start"], s["end"]) for s in data["segments"]]
-        logger.info(f"Loaded {len(segments)} silence segments from cache")
-        return segments
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
-        logger.warning(f"Invalid silence cache: {e}")
+        result = load_silence_cache_from_path(cache_path, video_path, config)
+    except OSError as e:
+        logger.warning(f"Could not read silence cache: {e}")
         return None
+    if result is not None:
+        logger.info(f"Loaded {len(result)} silence segments from cache")
+    return result

@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- **Live waveform preview during pipeline run** — the GUI's waveform popup now polls a partial silence-cache file (`{stem}_silence_cache.json.partial`) that `detect_silence` writes progressively as `silence_end` lines arrive from ffmpeg. Open the Waveform popup mid-detect and the silence overlay grows in near real-time; the popup automatically switches to the final cache and stops polling when detection completes. The partial file is deleted on cancel/error and on successful completion (the canonical final cache at `{stem}_silence_cache.json` is what persists).
+
 ### Changed
 - **Pinned Python 3.13 as project default** — added `.python-version` and bumped `ruff` / `mypy` `target-version` to `py313`. The previous venv was built on Python 3.10 and on some Windows + Defender configurations caused multi-minute GUI startup (cold scan of `.pyd` files in the venv). Python 3.13.1 is required going forward.
 - **Waveform preview is now pipe-only (no file I/O)** — replaced the WAV extract + cache save path with a single-ffmpeg pipe approach. Peaks are read from `ffmpeg ... -f s16le -ac 1 -ar 16000 pipe:1`, and silence detection runs directly on the source video via `silencedetect` filter to stderr. No `{stem}_audio.wav` is written, no `silence.json` cache is updated by the preview. The next real pipeline run still does the cached extract on its own schedule.
