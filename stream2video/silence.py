@@ -214,6 +214,8 @@ def detect_silence_stream(
     input_path: Path,
     threshold: float,
     min_silence: float,
+    *,
+    on_segment: Callable[[list[SilenceSegment]], None] | None = None,
 ) -> list[SilenceSegment]:
     """Run ffmpeg silencedetect on ``input_path`` directly — no WAV file.
 
@@ -222,22 +224,90 @@ def detect_silence_stream(
     Results are not persisted to the silence cache; subsequent pipeline
     runs will redo detection on their own schedule.
 
-    Returns an empty list on no-audio sources or detection errors that
-    leave no parseable silencedetect lines (the underlying
-    :func:`_run_silencedetect` raises on hard ffmpeg failure, which
-    callers can catch). Progress reporting is disabled because the
-    total duration is not known ahead of time.
+    If ``on_segment`` is provided, it is called with the running list
+    of detected segments every time a new ``silence_end`` line arrives
+    on ffmpeg's stderr. The callback runs in the same thread that
+    called this function (typically a background thread); callers that
+    need to touch a UI must wrap the call with their framework's
+    main-thread dispatch (e.g. ``self.after(0, ...)`` in Tkinter).
+
+    Returns the final list of segments. Hard ffmpeg failures raise
+    :class:`SilenceDetectionError`; the callback is not invoked on
+    sources that have no parseable silencedetect output.
     """
-    return _run_silencedetect(
-        input_path,
-        threshold=threshold,
-        min_silence=min_silence,
-        duration=None,
-        progress_callback=None,
-        cancel_callback=None,
-        label="video (preview)",
-        duration_limit=None,
-    )
+    if on_segment is None:
+        # Fast path: reuse the existing batch parser (production code).
+        return _run_silencedetect(
+            input_path,
+            threshold=threshold,
+            min_silence=min_silence,
+            duration=None,
+            progress_callback=None,
+            cancel_callback=None,
+            label="video (preview)",
+            duration_limit=None,
+        )
+
+    # Progressive path: parse stderr line-by-line and fire the callback.
+    noise = 10 ** (threshold / 20)
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostats",
+        "-i",
+        str(input_path),
+        "-af",
+        f"silencedetect=noise={noise}:duration={min_silence}",
+        "-f",
+        "null",
+        "-",
+    ]
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            bufsize=-1,
+            **no_window_kwargs(),
+        )
+    except FileNotFoundError as e:
+        raise SilenceDetectionError("ffmpeg not found in PATH") from e
+
+    set_active_process(proc)
+    assert proc.stderr is not None
+    pipe = proc.stderr
+
+    segments: list[SilenceSegment] = []
+    pending_start: float | None = None
+    start_re = re.compile(r"silence_start:\s*(-?\d+\.?\d*)")
+    end_re = re.compile(r"silence_end:\s*(-?\d+\.?\d*)")
+
+    try:
+        for raw in iter(pipe.readline, b""):
+            line = raw.decode("utf-8", errors="replace")
+            m_s = start_re.search(line)
+            if m_s:
+                pending_start = float(m_s.group(1))
+                continue
+            m_e = end_re.search(line)
+            if m_e and pending_start is not None:
+                segments.append(SilenceSegment(pending_start, float(m_e.group(1))))
+                pending_start = None
+                on_segment(list(segments))
+
+        proc.wait(timeout=_SILENCE_TIMEOUT)
+        if proc.returncode != 0:
+            raise SilenceDetectionError(
+                f"ffmpeg silencedetect failed (rc={proc.returncode})"
+            )
+        return segments
+    except subprocess.TimeoutExpired as e:
+        proc.kill()
+        raise SilenceDetectionError(f"ffmpeg timeout after {e.timeout}s") from e
+    finally:
+        set_active_process(None)
+        pipe.close()
 
 
 def _run_silencedetect(

@@ -1366,21 +1366,58 @@ class Stream2VideoGUI(ctk.CTk):
                     0, lambda: self._apply_waveform_image(img_no_overlay, duration, 0)
                 )
 
-                # Phase 2: silence detection directly on the source.
+                # Phase 2: silence detection directly on the source, with
+                # progressive overlay updates as each segment is parsed.
                 self.after(0, lambda: self.lbl_wave_status.configure(text="Detecting silence..."))
                 self._log(
                     f"  Detecting silence (threshold={config['threshold']}dB, "
                     f"min_silence={config['min_silence']}s, margin={config['margin']}s)..."
                 )
+
+                def _on_segment(segments_so_far):
+                    # Re-render on the main thread so the overlay grows
+                    # in real time as ffmpeg emits silence_end lines.
+                    def _update():
+                        if token != self._waveform_render_token:
+                            return
+                        if self._wave_lbl_image is None or self._wave_lbl_status is None:
+                            return
+                        img = render_waveform_image(
+                            peaks,
+                            width=800,
+                            height=200,
+                            total_duration=duration,
+                            silence_segments=segments_so_far,
+                            title=(
+                                f"{in_path.name}  •  {len(segments_so_far)} silences"
+                            ),
+                        )
+                        ctk_img = ctk.CTkImage(
+                            light_image=img, dark_image=img, size=img.size
+                        )
+                        self._waveform_ctk_image = ctk_img
+                        self.lbl_wave_image.configure(image=ctk_img, text="")
+                        self.lbl_wave_status.configure(
+                            text=(
+                                f"Detecting silence... {len(segments_so_far)} so far"
+                            )
+                        )
+
+                    self.after(0, _update)
+
                 segments = detect_silence_stream(
                     in_path,
                     threshold=config["threshold"],
                     min_silence=config["min_silence"],
+                    on_segment=_on_segment,
                 )
                 if token != self._waveform_render_token:
                     return
 
-                # Phase 3: re-render with silence overlay.
+                # Phase 3: final overlay (in case ffmpeg batched all
+                # segments to the end and the last on_segment was a
+                # duplicate of the final list — render once more to lock
+                # the canonical image and final status text).
                 self.after(0, lambda: self.lbl_wave_status.configure(text="Rendering overlay..."))
                 img_with_overlay = render_waveform_image(
                     peaks,

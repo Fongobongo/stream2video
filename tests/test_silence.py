@@ -847,3 +847,40 @@ def test_detect_silence_stream_sine_wav_no_segments(tmp_path):
 
     segments = detect_silence_stream(wav, threshold=-30.0, min_silence=0.5)
     assert segments == []
+
+
+def test_detect_silence_stream_progressive_callback(tmp_path):
+    """on_segment fires with a running list of segments as silence_end lines arrive."""
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not available")
+    import wave
+
+    wav = tmp_path / "two_silences.wav"
+    # 0.5s loud tone, 1s silence, 0.5s loud tone, 1s silence (16kHz mono s16le).
+    sr = 16000
+    n_tone = int(0.5 * sr)
+    n_silence = int(1.0 * sr)
+    with wave.open(str(wav), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(sr)
+        # 0x7fff = max amplitude (0 dB) — well above the -30 dB threshold.
+        w.writeframes(b"\xff\x7f" * n_tone + b"\x00\x00" * n_silence)
+        w.writeframes(b"\xff\x7f" * n_tone + b"\x00\x00" * n_silence)
+
+    seen: list[list] = []
+    segments = detect_silence_stream(
+        wav,
+        threshold=-30.0,
+        min_silence=0.3,
+        on_segment=lambda s: seen.append(len(s)),
+    )
+    # Final list has 2 silences.
+    assert len(segments) == 2
+    # Callback was invoked at least twice with growing list sizes.
+    assert seen, "on_segment was never called"
+    assert seen[-1] == 2
+    # The first callback must have been a prefix of the final list.
+    assert seen[0] >= 1
+    # Sizes are non-decreasing.
+    assert seen == sorted(seen)
