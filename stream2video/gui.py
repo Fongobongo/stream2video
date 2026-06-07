@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import os
 import queue
 import shlex
@@ -11,7 +12,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from tkinter import StringVar, filedialog, messagebox
 from typing import ClassVar
 
 import customtkinter as ctk
@@ -51,6 +52,7 @@ from stream2video.silence import (
 )
 from stream2video.utils import get_active_process, get_video_duration
 from stream2video.waveform import (
+    DB_AXIS_WIDTH,
     read_peaks_from_stream,
     render_waveform_image,
     slice_peaks_by_time,
@@ -228,12 +230,59 @@ class Stream2VideoGUI(ctk.CTk):
         self._waveform_duration: float = 0.0
         self._waveform_margin: float = 0.0
         self._waveform_video_name: str = ""
+        self._waveform_video_path: Path | None = None
         self._waveform_view_start: float = 0.0
         self._waveform_view_end: float = 0.0
         self._waveform_cursor_frac: float = 0.5
         self._waveform_cursor_known: bool = False
         self._waveform_slider: ctk.CTkSlider | None = None
         self._waveform_zoom_label: ctk.CTkLabel | None = None
+        self._waveform_tooltip: ctk.CTkLabel | None = None
+        # ``after_idle`` handle for the next tooltip update. The tooltip
+        # is debounced via ``after_idle`` so a fast motion across the
+        # waveform doesn't leave a trail of "ghost" tooltips at the
+        # previous cursor positions — place() can't always keep up at
+        # motion-event rate, so we hide the tooltip during motion and
+        # reshow it at the *latest* position once the event queue
+        # drains. See ``_on_waveform_motion``.
+        self._waveform_tooltip_after_id: str | None = None
+        # Cached motion event used by the debounced tooltip update. We
+        # keep the most recent event and discard older ones; the
+        # callback always uses the latest event when it fires.
+        self._waveform_last_motion_event = None  # type: ignore[assignment]
+        self._waveform_image_width: int = 0  # full rendered image width in px
+        # Last set of margin-applied segments used to render the overlay.
+        # Fallback for zoom/pan/slider re-renders when the live store
+        # lookup misses (e.g., the pipeline keys _live_segments by a
+        # resolved/moved path that differs from the user-input path).
+        self._waveform_last_segments: list[SilenceSegment] = []
+        # Left-click drag state for panning. ``_waveform_dragging``
+        # gates ``_on_waveform_drag_motion`` so a single click without
+        # movement is a no-op. ``_waveform_drag_press_x`` is the pixel x
+        # (in the image's coordinate system) where the press landed;
+        # ``_waveform_drag_view_start``/``_end`` are the view bounds at
+        # press time (so the drag math is anchored, not incremental).
+        self._waveform_dragging: bool = False
+        self._waveform_drag_press_x: int = 0
+        self._waveform_drag_view_start: float = 0.0
+        self._waveform_drag_view_end: float = 0.0
+        # Last popup window size we rendered for. Used to short-circuit
+        # redundant <Configure> re-renders when the size didn't change.
+        # ``None`` means "no render issued yet" — the first configure
+        # after open should always go through.
+        self._waveform_last_render_w: int | None = None
+        self._waveform_last_render_h: int | None = None
+        # ``after_idle`` handle for the resize-triggered re-render. Set
+        # to the id returned by ``after_idle`` so we can cancel a
+        # pending render when a new <Configure> fires during drag.
+        self._waveform_resize_after_id: str | None = None
+        # ``after`` handle for the debounced threshold-slider re-render.
+        # The CTkSlider fires its ``command`` on every step of a drag, so
+        # we coalesce the re-renders with a 100 ms timer: a new step
+        # cancels the previous pending render. Without this the user
+        # dragging the threshold slider would re-render the PIL image
+        # at ~60 Hz, which is wasteful and can fall behind the cursor.
+        self._waveform_threshold_after_id: str | None = None
         self.config = effective_defaults()
         self.log_queue: queue.Queue = queue.Queue()
         self._output_path: Path | None = None
@@ -356,10 +405,19 @@ class Stream2VideoGUI(ctk.CTk):
         ).pack(fill="x", padx=5, pady=(1, 1))
         row = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
         row.pack(fill="x", padx=5, pady=(0, 5))
-        self.entry_input = ctk.CTkEntry(row, placeholder_text="video.mp4 or https://...")
+        self.input_var = StringVar()
+        self.entry_input = ctk.CTkEntry(
+            row,
+            textvariable=self.input_var,
+            placeholder_text="video.mp4 or https://...",
+        )
         self.entry_input.pack(side="left", fill="x", expand=True)
         if self.config.get("input_path"):
-            self.entry_input.insert(0, self.config["input_path"])
+            self.input_var.set(self.config["input_path"])
+        # Refresh the Waveform button whenever the input path changes
+        # (typing, paste, Browse, programmatic). Only enabled when the
+        # field points at a viewable local file.
+        self.input_var.trace_add("write", lambda *_: self._update_waveform_button_state())
         ctk.CTkButton(row, text="Browse", width=70, command=self._browse_input).pack(
             side="right", padx=(5, 0)
         )
@@ -576,12 +634,16 @@ class Stream2VideoGUI(ctk.CTk):
             header, text="Log", anchor="w", font=ctk.CTkFont(size=12, weight="bold")
         )
         log_header.grid(row=0, column=0, sticky="w")
-        ctk.CTkButton(
+        self.btn_waveform = ctk.CTkButton(
             header,
             text="Waveform",
             width=130,
             command=self._open_waveform_window,
-        ).grid(row=0, column=1, padx=(6, 0))
+        )
+        self.btn_waveform.grid(row=0, column=1, padx=(6, 0))
+        # Sync the disabled state with whatever's in the input field
+        # (which may have been pre-filled from saved config).
+        self._update_waveform_button_state()
 
         self.txt_log = ctk.CTkTextbox(right_frame, wrap="word", state="disabled")
         self.txt_log.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
@@ -598,6 +660,12 @@ class Stream2VideoGUI(ctk.CTk):
         On close (X), refs are nulled so a re-open re-creates the widgets.
         The render runs automatically on open — no manual render button.
         """
+        # Defensive guard: the Waveform button is normally disabled when no
+        # viewable file is selected, but log if a click somehow gets through
+        # (e.g. via keyboard accelerator / programmatic invoke).
+        if not self._can_preview_waveform():
+            self._log("Set a local input file before opening the waveform preview")
+            return
         if getattr(self, "_wave_window", None) is not None and self._wave_window.winfo_exists():
             self._wave_window.focus_force()
             self._wave_window.lift()
@@ -613,6 +681,11 @@ class Stream2VideoGUI(ctk.CTk):
         win.geometry(f"+{max(0, x)}+{max(0, y)}")
         win.transient(self)
         win.protocol("WM_DELETE_WINDOW", lambda: self._on_waveform_close())
+        # Re-render the waveform when the popup is resized so the image
+        # always fills the available area. Bound on the toplevel (not
+        # the image label) so we get the window's actual size; the
+        # handler debounces via ``after_idle``.
+        win.bind("<Configure>", self._on_waveform_window_configure, add="+")
 
         # Status row (no render button — render fires automatically).
         status_row = ctk.CTkFrame(win, fg_color="transparent")
@@ -669,11 +742,38 @@ class Stream2VideoGUI(ctk.CTk):
         win.grid_columnconfigure(0, weight=1)
         self.lbl_wave_image = ctk.CTkLabel(win, text="", anchor="nw")
         self.lbl_wave_image.grid(row=2, column=0, sticky="nsew", padx=8, pady=(2, 8))
+        # Floating tooltip showing time + dB at the cursor over the plot.
+        # Created up-front, parked with place_forget() until motion.
+        self._waveform_tooltip = ctk.CTkLabel(
+            win,
+            text="",
+            fg_color=("gray10", "gray10"),
+            text_color=("white", "white"),
+            corner_radius=4,
+            padx=6,
+            pady=2,
+        )
+        # Required for the label to actually render with a size we can
+        # position via place(); otherwise place() uses request size
+        # which is 0 before the first text update.
+        self._waveform_tooltip.update_idletasks()
         # Cursor tracking for cursor-anchored zoom: x position in the
         # image maps to a time in the current view. We bind to the
         # image label so we only see motion over the waveform.
         self.lbl_wave_image.bind("<Motion>", self._on_waveform_motion)
         self.lbl_wave_image.bind("<Leave>", self._on_waveform_leave)
+        # Left-click drag pans the view (like Audacity / most editors).
+        # Bound only to the image label so the slider/buttons keep
+        # their own behaviour.
+        self.lbl_wave_image.bind("<ButtonPress-1>", self._on_waveform_drag_start)
+        self.lbl_wave_image.bind("<B1-Motion>", self._on_waveform_drag_motion)
+        self.lbl_wave_image.bind("<ButtonRelease-1>", self._on_waveform_drag_end)
+        # Mouse wheel: zoom in/out, anchored on the cursor's last known
+        # position. Bound only to the image label so it doesn't steal
+        # wheel events from the slider/buttons above it.
+        self.lbl_wave_image.bind("<MouseWheel>", self._on_waveform_wheel)
+        self.lbl_wave_image.bind("<Button-4>", self._on_waveform_wheel)
+        self.lbl_wave_image.bind("<Button-5>", self._on_waveform_wheel)
 
         # Stash refs so the render callback can update them.
         self._wave_window = win
@@ -699,6 +799,117 @@ class Stream2VideoGUI(ctk.CTk):
         self._waveform_ctk_image = None
         self._waveform_slider = None
         self._waveform_zoom_label = None
+        self._waveform_tooltip = None
+        self._waveform_image_width = 0
+        self._waveform_last_render_w = None
+        self._waveform_last_render_h = None
+        self._waveform_resize_after_id = None
+        self._waveform_threshold_after_id = None
+        # Cancel any pending tooltip update so the destroyed widgets
+        # don't get touched after the popup is gone.
+        if getattr(self, "_waveform_tooltip_after_id", None) is not None:
+            try:
+                self.after_cancel(self._waveform_tooltip_after_id)
+            except Exception:
+                pass
+            self._waveform_tooltip_after_id = None
+        self._waveform_last_motion_event = None
+
+    def _on_waveform_window_configure(self, event):
+        """Re-render the waveform when the popup is resized.
+
+        Tk fires <Configure> for every pixel of drag-resize, so the
+        callback cancels any pending render and reschedules a single
+        one via ``after_idle``. ``after_idle`` coalesces by design:
+        during a continuous drag the system never goes idle, so the
+        re-render fires only once on release. The size-debounce in
+        this handler skips bursts where the size didn't change (e.g.
+        a child widget being re-laid out at the same window size).
+        """
+        if self._wave_window is None or not self._wave_window.winfo_exists():
+            return
+        if event.widget is not self._wave_window:
+            return
+        new_w, new_h = event.width, event.height
+        if (
+            new_w == self._waveform_last_render_w
+            and new_h == self._waveform_last_render_h
+        ):
+            return
+        if self._waveform_resize_after_id is not None:
+            try:
+                self._wave_window.after_cancel(self._waveform_resize_after_id)
+            except Exception:
+                pass
+        self._waveform_resize_after_id = self._wave_window.after_idle(
+            self._apply_view
+        )
+
+    def _compute_waveform_render_size(self) -> tuple[int, int]:
+        """Image size to use for the next render, derived from the
+        current popup window size.
+
+        The popup is laid out in three rows: status (~30 px), zoom/pan
+        controls (~30 px), and the image row (expanding). A small
+        vertical reservation is taken off the window height to leave
+        room for the two fixed rows plus the image row's own pady;
+        horizontal padx is subtracted from the width. A 800x200
+        fallback is used when the window has not been laid out yet
+        (e.g., first render immediately after the popup is created).
+        """
+        fallback = (800, 200)
+        if self._wave_window is None or not self._wave_window.winfo_exists():
+            return fallback
+        win_w = self._wave_window.winfo_width()
+        win_h = self._wave_window.winfo_height()
+        if win_w < 100 or win_h < 100:
+            return fallback
+        # Status row + controls row + inter-row spacing + image pady
+        # (2 top + 8 bottom) ≈ 80 px; padx is 8 on each side.
+        reserved_h = 80
+        reserved_w = 16
+        w = max(200, win_w - reserved_w)
+        h = max(80, win_h - reserved_h)
+        return (w, h)
+
+    def _schedule_waveform_threshold_re_render(self) -> None:
+        """Schedule a debounced re-render of the waveform popup so the
+        threshold line tracks the slider's current value.
+
+        CTkSlider's ``command`` fires on every step of a drag, and
+        PIL rendering at ~60 Hz is wasteful — and worse, it can fall
+        behind the cursor and leave the previous threshold value
+        visible until a fresh render catches up. We coalesce with a
+        100 ms timer: a new step cancels the previous pending render
+        and schedules a new one. The render runs at most a few times
+        per second while the user is actively dragging.
+        """
+        if self._wave_window is None or not self._wave_window.winfo_exists():
+            return
+        if getattr(self, "_waveform_threshold_after_id", None) is not None:
+            try:
+                self.after_cancel(self._waveform_threshold_after_id)
+            except Exception:
+                pass
+        self._waveform_threshold_after_id = self.after(
+            100, self._waveform_threshold_changed
+        )
+
+    def _waveform_threshold_changed(self) -> None:
+        """Bump the render token and re-apply the view so the
+        threshold line in the waveform image reflects the latest
+        slider value. No-op when the popup is closed or the audio
+        hasn't loaded yet.
+        """
+        self._waveform_threshold_after_id = None
+        if self._wave_window is None or not self._wave_window.winfo_exists():
+            return
+        if not self._waveform_peaks or self._waveform_duration <= 0:
+            return
+        # Cancel any in-flight render so its result doesn't overwrite
+        # the freshly-computed image.
+        self._waveform_render_token += 1
+        self._apply_view()
 
     # ── Waveform cursor + zoom/pan handlers ────────────────────
 
@@ -721,11 +932,190 @@ class Stream2VideoGUI(ctk.CTk):
         frac = max(0.0, min(1.0, event.x / width))
         self._waveform_cursor_frac = frac
         self._waveform_cursor_known = True
+        # Debounce the tooltip update via after_idle. Calling
+        # place() on every motion event can leave a trail of
+        # "ghost" tooltips at previous cursor positions when the
+        # user moves the mouse fast — tkinter's place() can't
+        # always keep up at motion-event rate. We instead hide
+        # the tooltip immediately and reshow it at the *latest*
+        # position once the event queue drains. Storing the event
+        # (not just the coords) keeps the original semantics for
+        # any caller that might inspect the timestamp.
+        self._waveform_last_motion_event = event
+        if self._waveform_tooltip_after_id is not None:
+            try:
+                self.after_cancel(self._waveform_tooltip_after_id)
+            except Exception:
+                pass
+            self._waveform_tooltip_after_id = None
+        self._hide_waveform_tooltip()
+        self._waveform_tooltip_after_id = self.after_idle(
+            self._show_waveform_tooltip_on_idle
+        )
 
     def _on_waveform_leave(self, _event):
         """Forget the cursor position when it leaves the image so
         subsequent zoom falls back to the view center."""
         self._waveform_cursor_known = False
+        # Cancel any pending tooltip update so a stale ``event`` from
+        # before the leave doesn't get a tooltip painted after the
+        # cursor has already left the image.
+        if self._waveform_tooltip_after_id is not None:
+            try:
+                self.after_cancel(self._waveform_tooltip_after_id)
+            except Exception:
+                pass
+            self._waveform_tooltip_after_id = None
+        self._waveform_last_motion_event = None
+        self._hide_waveform_tooltip()
+
+    def _show_waveform_tooltip_on_idle(self) -> None:
+        """Fired from ``after_idle``: repaint the tooltip at the
+        *latest* cached motion event. By the time this runs, the
+        event queue has drained and ``place()`` will land in the
+        right spot. If the popup closed or the cursor left the
+        image in the meantime, the cached event is stale and we
+        do nothing."""
+        self._waveform_tooltip_after_id = None
+        event = self._waveform_last_motion_event
+        if event is None:
+            return
+        if self.lbl_wave_image is None:
+            return
+        self._update_waveform_tooltip(event)
+
+    def _update_waveform_tooltip(self, event):
+        """Show a tooltip with time + dB at the cursor's plot position.
+
+        No-op when the cursor is over the left dB-axis strip, when the
+        popup has been destroyed, or when peaks/duration aren't loaded.
+        """
+        if (
+            self._waveform_tooltip is None
+            or self._wave_window is None
+            or not self._waveform_peaks
+            or self._waveform_duration <= 0
+            or self._waveform_image_width <= 0
+        ):
+            return
+        plot_w = self._waveform_image_width - DB_AXIS_WIDTH
+        plot_x = event.x - DB_AXIS_WIDTH
+        if plot_x < 0 or plot_x >= plot_w:
+            self._hide_waveform_tooltip()
+            return
+        view_duration = self._waveform_view_end - self._waveform_view_start
+        if view_duration <= 0:
+            self._hide_waveform_tooltip()
+            return
+        # Cursor time within the visible window.
+        t = self._waveform_view_start + (plot_x / plot_w) * view_duration
+        # Look up the peak at that time. Peaks are uniformly distributed
+        # over [0, _waveform_duration]; the index maps directly.
+        n_peaks = len(self._waveform_peaks)
+        idx = int(t / self._waveform_duration * n_peaks)
+        idx = max(0, min(n_peaks - 1, idx))
+        peak = self._waveform_peaks[idx]
+        if peak <= 0:
+            db_text = "-∞ dB"
+        else:
+            db = 20 * math.log10(max(peak, 1e-4))
+            db_text = f"{db:+.1f} dB"
+        time_text = Stream2VideoGUI._fmt_clock_time(t)
+        self._waveform_tooltip.configure(text=f"{time_text}  |  {db_text}")
+        # Position the tooltip near the cursor, in popup-relative coords.
+        # event.x_root/.y_root are screen coords; winfo_rootx() gives
+        # the popup's screen origin.
+        try:
+            root_x = self._wave_window.winfo_rootx()
+            root_y = self._wave_window.winfo_rooty()
+        except Exception:
+            return
+        self._waveform_tooltip.place(
+            x=event.x_root - root_x + 12,
+            y=event.y_root - root_y + 12,
+        )
+
+    def _hide_waveform_tooltip(self) -> None:
+        """Park the tooltip (no-op if it was never placed)."""
+        if self._waveform_tooltip is None:
+            return
+        try:
+            self._waveform_tooltip.place_forget()
+        except Exception:
+            pass
+
+    def _on_waveform_wheel(self, event):
+        """Mouse wheel over the waveform: zoom by default, pan with Ctrl.
+
+        On Windows/macOS Tk fires ``<MouseWheel>`` with ``event.delta``
+        positive for scroll up (zoom in / pan right) and negative for
+        scroll down (zoom out / pan left). On Linux Tk fires
+        ``<Button-4>`` (up) and ``<Button-5>`` (down) instead. Per-notch
+        zoom factor (0.8 / 1.25) is gentler than the +/- buttons
+        (0.5 / 2.0); per-notch pan is 0.25 of the view, matching the
+        < / > buttons."""
+        ctrl = bool(event.state & 0x4)  # ControlMask bit
+        if event.num == 4:
+            self._waveform_pan(0.25) if ctrl else self._waveform_zoom_by(0.8)
+        elif event.num == 5:
+            self._waveform_pan(-0.25) if ctrl else self._waveform_zoom_by(1.25)
+        elif event.delta > 0:
+            self._waveform_pan(0.25) if ctrl else self._waveform_zoom_by(0.8)
+        elif event.delta < 0:
+            self._waveform_pan(-0.25) if ctrl else self._waveform_zoom_by(1.25)
+
+    def _on_waveform_drag_start(self, event):
+        """Begin a left-click drag: record the press position and the
+        current view bounds so the motion handler can compute the
+        new view anchored on the press (not incrementally)."""
+        if self.lbl_wave_image is None or self._waveform_image_width <= 0:
+            return
+        if self._waveform_duration <= 0:
+            return
+        self._waveform_dragging = True
+        self._waveform_drag_press_x = event.x
+        self._waveform_drag_view_start = self._waveform_view_start
+        self._waveform_drag_view_end = self._waveform_view_end
+
+    def _on_waveform_drag_motion(self, event):
+        """Pan the view as the user drags. Dragging the cursor right
+        shifts the visible window *earlier* in time (the content moves
+        right under the cursor — like grabbing the waveform)."""
+        if not self._waveform_dragging:
+            return
+        if self._waveform_image_width <= 0 or self._waveform_duration <= 0:
+            return
+        plot_w = self._waveform_image_width - DB_AXIS_WIDTH
+        if plot_w <= 0:
+            return
+        view_duration = self._waveform_drag_view_end - self._waveform_drag_view_start
+        if view_duration <= 0:
+            return
+        # delta_x in image-pixel units; the press was at
+        # ``_waveform_drag_press_x``, the current cursor is at
+        # ``event.x``. Dividing by ``plot_w`` converts to a fraction
+        # of the visible window, then multiplied by view_duration
+        # gives the time offset to apply (negated so the content
+        # follows the cursor).
+        delta_x = event.x - self._waveform_drag_press_x
+        new_start = self._waveform_drag_view_start - (delta_x / plot_w) * view_duration
+        new_end = new_start + view_duration
+        if new_start < 0:
+            new_start = 0.0
+            new_end = view_duration
+        if new_end > self._waveform_duration:
+            new_end = self._waveform_duration
+            new_start = max(0.0, new_end - view_duration)
+        if (new_start, new_end) == (self._waveform_view_start, self._waveform_view_end):
+            return
+        self._waveform_view_start = new_start
+        self._waveform_view_end = new_end
+        self._apply_view()
+
+    def _on_waveform_drag_end(self, _event):
+        """Release the drag. A click without movement is a no-op
+        (the state was set in start but never acted on in motion)."""
+        self._waveform_dragging = False
 
     def _waveform_zoom_in(self):
         self._waveform_zoom_by(0.5)
@@ -919,6 +1309,13 @@ class Stream2VideoGUI(ctk.CTk):
             ev.delete(0, "end")
             ev.insert(0, f"{float(v):.1f}")
             self.config[k] = round(float(v), 1)
+            # The threshold drives a line in the waveform preview; re-render
+            # via a debounced timer so a slider drag does not pile up
+            # render calls. Other sliders (min_silence, margin) only
+            # affect future pipeline runs, so they don't trigger a
+            # re-render here.
+            if k == "threshold":
+                self._schedule_waveform_threshold_re_render()
 
         def on_entry_confirm(event=None, sv=slider, mn=min_v, mx=max_v, k=key):
             try:
@@ -929,6 +1326,8 @@ class Stream2VideoGUI(ctk.CTk):
                 self.config[k] = val
                 entry_val.delete(0, "end")
                 entry_val.insert(0, f"{val:.1f}")
+                if k == "threshold":
+                    self._schedule_waveform_threshold_re_render()
             except ValueError:
                 entry_val.delete(0, "end")
                 entry_val.insert(0, f"{sv.get():.1f}")
@@ -954,6 +1353,33 @@ class Stream2VideoGUI(ctk.CTk):
                     pass
 
     # ── Dialogs & Events ─────────────────────────────────────────
+
+    def _can_preview_waveform(self) -> bool:
+        """True iff the input field points at a readable local file.
+
+        Mirrors the guards in ``_render_waveform_preview`` so the button
+        reflects the actual preconditions (no file, URL, or non-existent
+        path = no preview).
+        """
+        raw = self.input_var.get().strip()
+        if not raw:
+            return False
+        # URLs aren't previewable (they need a download first).
+        if "://" in raw:
+            return False
+        try:
+            return Path(raw).is_file()
+        except OSError:
+            return False
+
+    def _update_waveform_button_state(self) -> None:
+        """Enable / disable the Waveform button based on the current
+        input. Called from the input StringVar's trace so it stays in
+        sync with typing, paste, Browse, and programmatic changes."""
+        btn = getattr(self, "btn_waveform", None)
+        if btn is None:
+            return  # button not built yet
+        btn.configure(state=("normal" if self._can_preview_waveform() else "disabled"))
 
     def _browse_input(self):
         path = filedialog.askopenfilename(
@@ -1692,8 +2118,8 @@ class Stream2VideoGUI(ctk.CTk):
         token = self._waveform_render_token + 1
         self._waveform_render_token = token
         self._waveform_running = True
-        self._safe_status_set("Streaming audio...")
-        self._log("Waveform preview: streaming audio from source video...")
+        self._safe_status_set("Loading...")
+        self._log("Waveform preview: loading audio from source video...")
 
         def _run():
             try:
@@ -1701,7 +2127,7 @@ class Stream2VideoGUI(ctk.CTk):
                 # Store them and the duration in self so subsequent
                 # renders (overlay, zoom/pan, live poller) can use
                 # the same data without re-reading.
-                self.after(0, lambda: self._safe_status_set("Streaming audio..."))
+                self.after(0, lambda: self._safe_status_set("Loading..."))
                 peaks, duration = read_peaks_from_stream(in_path, target_buckets=800)
                 if token != self._waveform_render_token:
                     return
@@ -1719,6 +2145,7 @@ class Stream2VideoGUI(ctk.CTk):
                 self._waveform_peaks = peaks
                 self._waveform_duration = duration
                 self._waveform_video_name = in_path.name
+                self._waveform_video_path = in_path
                 self._waveform_view_start = 0.0
                 self._waveform_view_end = duration
                 self._waveform_cursor_frac = 0.5
@@ -1865,10 +2292,35 @@ class Stream2VideoGUI(ctk.CTk):
         # clamps out-of-range segments, but doing it here gives an
         # accurate count for the status line and avoids the renderer
         # silently dropping nothing if duration is exactly the boundary.
+        #
+        # ``segments is None`` means "the caller didn't supply them"
+        # (zoom/pan/slider re-render path) — pull from the live store
+        # instead, matching what the initial render and the live
+        # poller pass in. If we have no path yet (initial render
+        # before any peaks) or the live store is empty, fall back to
+        # an empty list (no overlay). An explicit ``[]`` is honored
+        # (Phase 1.5 bare-waveform render before detect finishes).
+        if (
+            segments is None
+            and self._waveform_video_path is not None
+        ):
+            raw = self._take_live_snapshot(self._waveform_video_path)
+            if raw is not None:
+                segments = _apply_margin(raw, self._waveform_margin)
+            elif self._waveform_last_segments:
+                # Live store miss (e.g., the pipeline keyed it under a
+                # resolved path that differs from the user-input path).
+                # Fall back to the last segments we successfully rendered
+                # so the overlay survives zoom/pan/slider re-renders.
+                segments = list(self._waveform_last_segments)
         if segments is None:
-            view_segments: list[SilenceSegment] = []
-        else:
-            view_segments = [s for s in segments if s.end > view_start and s.start < view_end]
+            segments = []
+        self._waveform_last_segments = segments
+        view_segments = [s for s in segments if s.end > view_start and s.start < view_end]
+
+        # Size the rendered image to the popup's image row, with a small
+        # fallback for the very first render (window not yet laid out).
+        render_w, render_h = self._compute_waveform_render_size()
 
         zoom_level = self._waveform_duration / view_duration
         zoom_text = self._fmt_zoom_text(zoom_level)
@@ -1880,11 +2332,13 @@ class Stream2VideoGUI(ctk.CTk):
 
         img = render_waveform_image(
             view_peaks,
-            width=800,
-            height=200,
+            width=render_w,
+            height=render_h,
             total_duration=view_duration,
             silence_segments=view_segments,
             title=title,
+            view_start=view_start,
+            threshold_db=float(self.config["threshold"]),
         )
 
         if token != self._waveform_render_token:
@@ -1892,6 +2346,9 @@ class Stream2VideoGUI(ctk.CTk):
         ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
         self._waveform_ctk_image = ctk_img
         self.lbl_wave_image.configure(image=ctk_img, text="")
+        self._waveform_image_width = img.size[0]
+        self._waveform_last_render_w = img.size[0]
+        self._waveform_last_render_h = img.size[1]
 
         # Status line: short form (the title above has the full info).
         self.lbl_wave_status.configure(text=title)
@@ -1936,11 +2393,14 @@ class Stream2VideoGUI(ctk.CTk):
         raw = self._take_live_snapshot(in_path)
         if raw is not None:
             segments = _apply_margin(raw, margin)
-            if len(segments) != state["last_count"] or current_view != state["last_view"]:
+            count_changed = len(segments) != state["last_count"]
+            view_changed = current_view != state["last_view"]
+            if count_changed or view_changed:
                 self._apply_view(segments)
                 state["last_count"] = len(segments)
                 state["last_view"] = current_view
-                self._log(f"  Waveform updated: {len(segments)} silences so far")
+                if count_changed:
+                    self._log(f"  Waveform updated: {len(segments)} silences so far")
 
         self.after(
             1000,
