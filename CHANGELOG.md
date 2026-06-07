@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- **Resume on cancel / crash for silence detection** — `detect_silence(resume_cache_path=...)` checkpoints the in-progress segment list to `{stem}_silence_cache.json.resume` every 30 seconds OR every 100 new segments (whichever fires first). On a subsequent run, if the file is fresh (mtime >= source mtime) and config-matching, ffmpeg is invoked with `-ss <last_segment_end>` to fast-seek past the already-detected work, and the returned list concatenates the pre-seeded initial segments with the new ones. The resume file is unlinked at the start of every detection (so retries inside the same call don't re-load it), kept on cancel/error (next run picks it up), and unlinked by the GUI on success (the final cache is the source of truth). Resume is not used for the bounded 60s sample-verify pass, nor for the just-extracted-WAV D path (the WAV was re-extracted, so old state is no longer in sync).
 - **Live waveform preview during pipeline run** — the GUI's waveform popup now reads from an in-memory `dict[Path, list[SilenceSegment]]` that the pipeline worker updates through `detect_silence(on_segment=...)` as `silence_end` lines arrive from ffmpeg. Open the Waveform popup mid-detect and the silence overlay grows in near real-time; the popup polls the in-memory store once per second and stops automatically when the pipeline finishes (`self.running` flips to False). No partial cache file is written — the canonical final cache at `{stem}_silence_cache.json` is still produced for cross-process / persistence.
 
 ### Changed

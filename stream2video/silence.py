@@ -23,6 +23,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -68,6 +69,18 @@ _SILENCE_POLL_INTERVAL = CANCEL_POLL_INTERVAL
 _SILENCE_TIMEOUT = 36000
 _SEGMENT_MATCH_TOLERANCE = 0.05
 _SAMPLE_VERIFY_DURATION = 60.0
+# Resume cache throttling. We save at most every 30 seconds OR every
+# 100 new segments, whichever fires first. This keeps the per-segment
+# overhead negligible while still letting a cancelled run pick up from
+# a useful checkpoint.
+_RESUME_THROTTLE_S = 30.0
+_RESUME_THROTTLE_N = 100
+
+
+def _noop_on_segment(_segments: list[SilenceSegment]) -> None:
+    """Default no-op callback used when `initial_segments` is set but
+    the caller didn't supply `on_segment` — see `_run_silencedetect`."""
+
 
 _NUM = r"\d+(?:[.,]\d+)?"
 _SILENCE_START_RE = re.compile(rf"silence_start:\s*({_NUM})")
@@ -87,6 +100,7 @@ def detect_silence(
     progress_callback: Callable[[float], None] | None = None,
     cancel_callback: Callable[[], bool] | None = None,
     on_segment: Callable[[list[SilenceSegment]], None] | None = None,
+    resume_cache_path: Path | None = None,
 ) -> list[SilenceSegment]:
     """
     Detect silence segments using ffmpeg silencedetect filter.
@@ -119,8 +133,23 @@ def detect_silence(
                     that need to touch a UI must wrap the work in their
                     framework's main-thread dispatch (e.g. ``self.after(0, ...)``
                     in Tkinter). Used by the GUI to keep a near-real-time
-                    preview in sync with the running detection. Not invoked
-                    for sample-verify passes (which are batch and discarded).
+                    preview in sync with the running detection. On resume,
+                    the callback is also fired once at the start with the
+                    pre-seeded initial list so the GUI's overlay is correct
+                    from the moment the pipeline begins. Not invoked for
+                    sample-verify passes (which are batch and discarded).
+        resume_cache_path: Path to a resume cache file. If set and the file
+                    is fresh (mtime >= source mtime) and config-matching,
+                    detection picks up from the last throttled checkpoint
+                    written by a previous cancelled/crashed run. The file
+                    is unlinked at the start of detection so a retry
+                    within the same call doesn't re-load it. Use
+                    `_get_resume_cache_path(video_path, output_dir)` to
+                    compute the conventional path. Throttled checkpoints
+                    are written when `resume_cache_path` is set; a new
+                    run that uses resume will overwrite the file as it
+                    progresses, so leave it in place for cancellation /
+                    crash recovery and let the GUI unlink it on success.
 
     Returns:
         List of SilenceSegment objects (margin applied)
@@ -137,6 +166,41 @@ def detect_silence(
     if not -3 <= margin <= 5:
         raise ValueError(f"Margin must be in range [-3, 5], got {margin}")
 
+    current_config = {
+        "threshold": threshold,
+        "min_silence": min_silence,
+        "margin": margin,
+    }
+
+    # Resume cache: load and validate, then unlink so a retry inside
+    # this call doesn't re-load it. The file is ephemeral — if the
+    # detection is cancelled, the next run reads whatever was last
+    # throttled-saved. On success, the final cache is the source of
+    # truth and the resume file is the GUI's responsibility to clean
+    # up.
+    initial_segments: list[SilenceSegment] = []
+    resume_from: float | None = None
+    if resume_cache_path is not None:
+        loaded = _load_silence_cache_from_path(resume_cache_path, video_path, current_config)
+        if loaded is not None:
+            initial_segments = loaded
+            resume_from = initial_segments[-1].end if initial_segments else None
+            if resume_from is not None:
+                logger.info(
+                    f"Resuming from resume cache: {len(initial_segments)} segments, "
+                    f"seek to t={resume_from:.2f}s"
+                )
+            else:
+                logger.info("Resume cache has 0 segments — starting from t=0 with checkpointing on")
+        else:
+            logger.info("No valid resume cache — starting fresh")
+        # Unlink unconditionally — if it was stale/missing, this is a
+        # no-op; if it was valid, we don't want a retry to re-load it.
+        try:
+            resume_cache_path.unlink()
+        except OSError as e:
+            logger.debug(f"Resume cache unlink failed (will be retried next run): {e}")
+
     duration = _probe_duration(video_path)
 
     if output_dir is not None:
@@ -152,9 +216,18 @@ def detect_silence(
                 cancel_callback,
                 "WAV cache",
                 on_segment=on_segment,
+                initial_segments=initial_segments,
+                resume_from=resume_from,
+                resume_save_path=resume_cache_path,
+                resume_save_config=current_config,
             )
         else:
             _extract_audio_wav(video_path, wav_path, cancel_callback)
+            # The WAV was just (re-)extracted — no prior work to resume
+            # from, even if `initial_segments` was set above (it came
+            # from an old run whose state is no longer in sync with the
+            # new WAV). Drop the resume context for the canonical
+            # detection so we don't skip work we don't actually have.
             segments_D = _run_silencedetect(
                 wav_path,
                 threshold,
@@ -202,6 +275,10 @@ def detect_silence(
                     cancel_callback,
                     "video",
                     on_segment=on_segment,
+                    initial_segments=initial_segments,
+                    resume_from=resume_from,
+                    resume_save_path=resume_cache_path,
+                    resume_save_config=current_config,
                 )
     else:
         segments = _run_silencedetect(
@@ -213,6 +290,10 @@ def detect_silence(
             cancel_callback,
             "video",
             on_segment=on_segment,
+            initial_segments=initial_segments,
+            resume_from=resume_from,
+            resume_save_path=resume_cache_path,
+            resume_save_config=current_config,
         )
 
     segments = _apply_margin(segments, margin)
@@ -331,6 +412,10 @@ def _run_silencedetect(
     label: str,
     duration_limit: float | None = None,
     on_segment: Callable[[list[SilenceSegment]], None] | None = None,
+    initial_segments: list[SilenceSegment] | None = None,
+    resume_from: float | None = None,
+    resume_save_path: Path | None = None,
+    resume_save_config: dict | None = None,
 ) -> list[SilenceSegment]:
     """Run ffmpeg silencedetect on `input_path` and return parsed segments.
 
@@ -346,36 +431,78 @@ def _run_silencedetect(
     list of detected segments every time a `silence_end` line arrives on
     ffmpeg's stderr. The callback runs on the stderr drain thread, so
     callers that touch a UI must wrap the work in a main-thread dispatch.
-    Used by `detect_silence(live_cache_path=...)` to write a partial cache
-    file the GUI can poll while the pipeline is still running. When
-    `on_segment` is None, the function uses the batch path (parse stderr
-    only after the process exits) — the original behaviour.
+    When set, the function uses the progressive path (parse stderr
+    line-by-line) — otherwise it uses the batch path (parse stderr only
+    after the process exits). On resume (`initial_segments` set), the
+    snapshot passed to the callback includes the pre-seeded initial
+    segments so the GUI always sees the full picture from the first call.
+
+    `initial_segments`: pre-seeded raw (pre-margin) segments from a
+    previous run's resume cache. The new ffmpeg call starts at
+    `resume_from` and produces *additional* segments; the returned list
+    concatenates initial + new (all raw, margin applied once by the
+    caller). Ignored unless `on_segment` is also set — the batch path
+    has no place to surface the pre-seeded segments.
+
+    `resume_from`: absolute input-time position to seek ffmpeg to before
+    decoding (added as `-ss` before `-i`). The silencedetect filter
+    keeps producing absolute timestamps, so new segments are directly
+    concatenable with `initial_segments` without any time offset.
+
+    `resume_save_path` + `resume_save_config`: throttled checkpoint of
+    `progressive_segments` to `resume_save_path` so a subsequent run
+    can pick up from a useful point if this one is cancelled or
+    crashes. Triggered every `_RESUME_THROTTLE_S` seconds OR every
+    `_RESUME_THROTTLE_N` new segments, whichever fires first. No save
+    happens if no new segments have been detected.
     """
+    # If `initial_segments` is set, the progressive path is required —
+    # the batch parser can't see the pre-seeded list and would return
+    # only the new segments, losing the initial ones. Auto-enable
+    # progressive mode with a no-op callback so the throttled save
+    # still works for callers that don't need live updates.
+    if initial_segments and on_segment is None:
+        on_segment = _noop_on_segment
+
     noise = 10 ** (threshold / 20)
 
-    cmd = [
-        "ffmpeg",
-        "-progress",
-        "pipe:1",
-        "-i",
-        str(input_path),
-        "-af",
-        f"silencedetect=noise={noise}:duration={min_silence}",
-        "-f",
-        "null",
-        "-",
-    ]
+    # Build the ffmpeg command in dependency order: global options →
+    # input → filter → output. `extend` keeps the list monotonic so
+    # inserting `-ss` or `-t` does not require magic indices.
+    cmd = ["ffmpeg", "-progress", "pipe:1"]
+    if resume_from is not None and resume_from > 0:
+        # `-ss` before `-i` = fast seek (keyframe-aligned). Accurate
+        # seek (output PTS aligned) is not needed here — silencedetect
+        # outputs timestamps from the source PTS, which is preserved.
+        cmd.extend(["-ss", f"{resume_from:.3f}"])
+    cmd.extend(
+        [
+            "-i",
+            str(input_path),
+            "-af",
+            f"silencedetect=noise={noise}:duration={min_silence}",
+        ]
+    )
     if duration_limit is not None:
-        # Insert "-t <duration>" right before "-f null" so it's interpreted
-        # as a global output option, not a value for "-f".
-        cmd[7:7] = ["-t", str(duration_limit)]
+        cmd.extend(["-t", str(duration_limit)])
+    cmd.extend(["-f", "null", "-"])
 
-    progress_divisor = duration_limit if duration_limit is not None else duration
+    # Progress is reported relative to the portion of the input ffmpeg
+    # will actually decode — i.e. after any seek, the elapsed time
+    # reported by ffmpeg starts from the seek point, so the divisor
+    # must exclude the seeked-out head.
+    base_divisor = duration_limit if duration_limit is not None else duration
+    progress_divisor: float | None
+    if base_divisor is not None and resume_from is not None:
+        progress_divisor = max(0.0, base_divisor - resume_from)
+    else:
+        progress_divisor = base_divisor
 
     try:
         logger.info(
             f"Running ffmpeg silencedetect on {label}: "
             f"threshold={threshold}dB ({noise}), min_silence={min_silence}s"
+            + (f", resume_from={resume_from:.2f}s" if resume_from else "")
         )
         process = subprocess.Popen(
             cmd,
@@ -397,9 +524,30 @@ def _run_silencedetect(
     # batch path ignores these and re-parses the accumulated stderr at the
     # end. We mutate `progressive_segments` only from the drain thread (the
     # only place `_on_line` runs), so no lock is needed.
-    progressive_segments: list[SilenceSegment] = []
+    # On resume, `progressive_segments` starts with the pre-seeded initial
+    # segments so the callback sees the full picture from the first
+    # silence_end line and the throttled save covers everything detected
+    # so far (initial + new), not just the new ones.
+    progressive_segments: list[SilenceSegment] = list(initial_segments) if initial_segments else []
+
+    # Pre-seed the callback with the initial segments so the GUI's live
+    # overlay is correct from the moment the pipeline starts. This is
+    # the one exception to the "callback fires on the drain thread"
+    # rule — the GUI's callback is thread-safe (lock-protected dict
+    # update), and firing here closes the gap between the worker
+    # pre-seeding to [] and the first silence_end line arriving.
+    if progressive_segments and on_segment is not None:
+        on_segment(list(progressive_segments))
+
     pending_start: list[float | None] = [None]  # mutable container so the
     # closure can assign without `nonlocal`.
+
+    # Throttled resume save state. Mutable lists let the closure update
+    # them without `nonlocal` declarations.
+    last_save_time: list[float] = [0.0]
+    last_save_count: list[int] = [0]
+    if resume_save_path is not None:
+        last_save_time[0] = time.monotonic()
 
     def _on_line(line: str) -> None:
         m_s = _SILENCE_START_RE.search(line)
@@ -412,6 +560,34 @@ def _run_silencedetect(
             pending_start[0] = None
             if on_segment is not None:
                 on_segment(list(progressive_segments))
+            _maybe_save_resume()
+
+    def _maybe_save_resume() -> None:
+        """Checkpoint the current segment list to disk if the throttle
+        window has elapsed. Counts and timestamps tracked via mutable
+        lists so the closure can update them without `nonlocal`.
+        """
+        if resume_save_path is None or resume_save_config is None:
+            return
+        new_count = len(progressive_segments) - len(initial_segments or [])
+        if new_count <= 0:
+            return
+        now = time.monotonic()
+        if (
+            now - last_save_time[0] < _RESUME_THROTTLE_S
+            and new_count - last_save_count[0] < _RESUME_THROTTLE_N
+        ):
+            return
+        try:
+            _save_resume_cache(
+                resume_save_path, input_path, progressive_segments, resume_save_config
+            )
+            last_save_time[0] = now
+            last_save_count[0] = new_count
+        except OSError as e:
+            # Resume saves are best-effort — a failed checkpoint just
+            # means the next run starts from a slightly earlier point.
+            logger.warning(f"Resume cache save failed: {e}")
 
     if on_segment is not None:
         wait_for_drain = drain_stderr_lines(stderr_pipe, stderr_lines, on_line=_on_line)
@@ -724,11 +900,46 @@ def load_silence_cache(
     output_dir: Path,
     config: dict,
 ) -> list[SilenceSegment] | None:
+    """Load the final silence cache for `video_path` if fresh and config-matching.
+
+    Convenience wrapper around `_load_silence_cache_from_path` that
+    constructs the canonical final cache path. Returns margin-applied
+    segments (margin is part of the cache key, so any hit was built
+    with this exact margin).
+    """
     cache_path = _get_cache_path(video_path, output_dir)
+    segments = _load_silence_cache_from_path(cache_path, video_path, config)
+    if segments is not None:
+        logger.info(f"Loaded {len(segments)} silence segments from cache")
+    return segments
+
+
+def _load_silence_cache_from_path(
+    cache_path: Path,
+    video_path: Path,
+    config: dict,
+) -> list[SilenceSegment] | None:
+    """Load and validate a silence cache file at `cache_path`.
+
+    Returns the raw (pre-margin) segments on success, ``None`` on any
+    failure: file missing, source newer than cache, malformed JSON,
+    config mismatch, or malformed segments. Used by both the final
+    cache (via `load_silence_cache`) and the resume cache (via
+    `detect_silence(resume_cache_path=...)`).
+
+    Returns raw segments (no margin applied) because both the final
+    and resume caches already store margin-applied results — but for
+    resume we want pre-margin so the new ffmpeg run can concatenate
+    raw + new without double-applying margin. `load_silence_cache`'s
+    callers happen to want margin'd, so they call `_apply_margin`
+    themselves; the resume path leaves it as-is. The data on disk
+    is identical in both cases — it's the consumer that decides
+    whether to apply margin.
+    """
     if not cache_path.exists():
         return None
     if cache_path.stat().st_mtime < video_path.stat().st_mtime:
-        logger.info("Silence cache outdated (source file newer)")
+        logger.info(f"Silence cache outdated (source file newer): {cache_path.name}")
         return None
     try:
         with open(cache_path) as f:
@@ -741,9 +952,62 @@ def load_silence_cache(
             logger.info(f"Silence cache ignored: config mismatch ({key})")
             return None
     try:
-        segments = [SilenceSegment(s["start"], s["end"]) for s in data["segments"]]
+        return [SilenceSegment(s["start"], s["end"]) for s in data["segments"]]
     except (KeyError, TypeError, ValueError) as e:
         logger.warning(f"Invalid silence cache: {e}")
         return None
-    logger.info(f"Loaded {len(segments)} silence segments from cache")
-    return segments
+
+
+def _get_resume_cache_path(video_path: Path, output_dir: Path) -> Path:
+    """Path of the resume cache for `video_path` next to the final cache.
+
+    Format: ``{stem}_silence_cache.json.resume``. The `.resume` suffix
+    keeps it visually separate from the canonical final cache and
+    makes it easy to find for cleanup.
+    """
+    return output_dir / f"{video_path.stem}_silence_cache.json.resume"
+
+
+def _save_resume_cache(
+    cache_path: Path,
+    video_path: Path,
+    segments: list[SilenceSegment],
+    config: dict,
+) -> None:
+    """Atomically write a resume cache (throttled, ephemeral, no fsync).
+
+    Used by `detect_silence` to checkpoint in-progress detection so a
+    crash or cancel can pick up from the last throttled save instead
+    of restarting from zero. The segments are stored raw (pre-margin) —
+    margin is applied once at the very end of the pipeline, so storing
+    it here keeps the resume transparent regardless of how much
+    progress was captured.
+
+    No fsync and no indent: the file is ephemeral (next run reads it
+    once and unlinks it), and we save on a hot path. Atomicity via
+    temp + replace is enough — a power loss drops the latest checkpoint
+    at worst.
+    """
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "source": video_path.name,
+        "config": {
+            "threshold": config.get("threshold"),
+            "min_silence": config.get("min_silence"),
+            "margin": config.get("margin"),
+        },
+        "segments": [{"start": s.start, "end": s.end} for s in segments],
+    }
+    fd, tmp_path = tempfile.mkstemp(
+        dir=cache_path.parent, prefix=f".{cache_path.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        os.replace(tmp_path, cache_path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise

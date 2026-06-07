@@ -16,9 +16,12 @@ from stream2video.silence import (
     SilenceDetectionError,
     SilenceSegment,
     _apply_margin,
+    _get_resume_cache_path,
     _get_wav_cache_path,
     _is_wav_cache_valid,
+    _load_silence_cache_from_path,
     _sample_segments_match,
+    _save_resume_cache,
     _segments_match,
     detect_silence,
     detect_silence_stream,
@@ -1045,3 +1048,415 @@ class TestDetectSilenceOnSegment:
             assert len(last_snapshot) == 1
             assert last_snapshot[0].start == 1.0
             assert last_snapshot[0].end == 4.0
+
+
+class TestResumeCacheHelpers:
+    """Round-trip + validation tests for the resume cache file format.
+
+    The resume cache stores raw (pre-margin) segments checkpointed
+    during a cancelled run, so a subsequent run can pick up from the
+    last throttled save. These tests cover the load/save helpers
+    directly — no ffmpeg / no Popen mocking needed.
+    """
+
+    def _config(self) -> dict:
+        return {"threshold": -20, "min_silence": 0.5, "margin": 0.0}
+
+    def test_round_trip(self):
+        """save → load returns the same raw segments."""
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "video.mp4"
+            video.write_text("dummy")
+            cache = _get_resume_cache_path(video, Path(tmp))
+
+            segs = [SilenceSegment(1.0, 2.5), SilenceSegment(10.0, 12.0)]
+            _save_resume_cache(cache, video, segs, self._config())
+
+            loaded = _load_silence_cache_from_path(cache, video, self._config())
+            assert loaded is not None
+            assert [(s.start, s.end) for s in loaded] == [(1.0, 2.5), (10.0, 12.0)]
+
+    def test_load_returns_none_for_missing_file(self):
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "video.mp4"
+            video.write_text("dummy")
+            cache = Path(tmp) / "missing.json.resume"
+            assert _load_silence_cache_from_path(cache, video, self._config()) is None
+
+    def test_load_returns_none_for_stale_file(self):
+        """Source video newer than cache → invalid (outdated)."""
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "video.mp4"
+            video.write_text("dummy")
+            cache = _get_resume_cache_path(video, Path(tmp))
+            _save_resume_cache(cache, video, [SilenceSegment(1.0, 2.0)], self._config())
+            # Bump the video mtime past the cache mtime.
+            os.utime(video, (time.time() + 100, time.time() + 100))
+            assert _load_silence_cache_from_path(cache, video, self._config()) is None
+
+    def test_load_returns_none_for_malformed_json(self):
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "video.mp4"
+            video.write_text("dummy")
+            cache = _get_resume_cache_path(video, Path(tmp))
+            cache.write_text("{not valid json")
+            assert _load_silence_cache_from_path(cache, video, self._config()) is None
+
+    def test_load_returns_none_for_config_mismatch(self):
+        """Cache with a different config must be rejected (stale settings)."""
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "video.mp4"
+            video.write_text("dummy")
+            cache = _get_resume_cache_path(video, Path(tmp))
+            _save_resume_cache(cache, video, [SilenceSegment(1.0, 2.0)], self._config())
+            # Different threshold on the read side.
+            wrong = {"threshold": -30, "min_silence": 0.5, "margin": 0.0}
+            assert _load_silence_cache_from_path(cache, video, wrong) is None
+
+    def test_load_returns_none_for_malformed_segments(self):
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "video.mp4"
+            video.write_text("dummy")
+            cache = _get_resume_cache_path(video, Path(tmp))
+            cache.write_text(
+                '{"config": {"threshold": -20, "min_silence": 0.5, "margin": 0}, "segments": [{"start": 1.0}]}'
+            )  # missing 'end'
+            assert _load_silence_cache_from_path(cache, video, self._config()) is None
+
+    def test_save_atomic_replaces_existing(self):
+        """Saving again overwrites the file (next run's checkpoint replaces
+        the previous run's)."""
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "video.mp4"
+            video.write_text("dummy")
+            cache = _get_resume_cache_path(video, Path(tmp))
+
+            _save_resume_cache(cache, video, [SilenceSegment(1.0, 2.0)], self._config())
+            _save_resume_cache(cache, video, [SilenceSegment(5.0, 6.0)], self._config())
+            loaded = _load_silence_cache_from_path(cache, video, self._config())
+            assert loaded is not None
+            assert len(loaded) == 1
+            assert (loaded[0].start, loaded[0].end) == (5.0, 6.0)
+
+
+class TestResumeEndToEnd:
+    """`detect_silence(resume_cache_path=...)` — ffmpeg is called with
+    `-ss <last_segment_end>` and the returned list is initial + new.
+
+    Uses the A path (no `output_dir`) for the simplest mock surface:
+    one Popen call per invocation.
+    """
+
+    def _fake_popen_factory(self, stderr_payload: str, *, capture_cmd: bool = False):
+        """Single-call Popen factory. Records the cmd for inspection if
+        `capture_cmd` is set (returned via `record["cmd"]`)."""
+
+        record: dict = {}
+
+        def fake_popen(cmd, **kwargs):
+            if capture_cmd:
+                record["cmd"] = list(cmd)
+
+            class _FakeProcess:
+                def __init__(self):
+                    self.stderr = _FakeStderr(stderr_payload.encode("utf-8"))
+                    self.stdout = _FakeStdout()
+                    self.returncode = 0
+                    self._killed = False
+
+                def poll(self):
+                    return self.returncode
+
+                def wait(self, timeout=None):
+                    return self.returncode
+
+                def kill(self):
+                    self._killed = True
+                    self.returncode = -9
+
+            return _FakeProcess()
+
+        return fake_popen, record
+
+    def _write_resume_cache(self, video: Path, cache: Path, segments: list[SilenceSegment]) -> None:
+        """Write a resume cache file and ensure its mtime is newer than
+        the video's, so the load validation accepts it as fresh."""
+        video.write_text("dummy")
+        _save_resume_cache(
+            cache, video, segments, {"threshold": -20, "min_silence": 0.5, "margin": 0.0}
+        )
+        os.utime(video, (1000, 1000))
+        os.utime(cache, (2000, 2000))
+
+    def test_resume_seeks_ffmpeg_and_concatenates(self):
+        """Valid resume cache → ffmpeg is called with `-ss <last_seg_end>`
+        and the returned list is initial + new (raw, pre-margin)."""
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "video.mp4"
+            cache = _get_resume_cache_path(video, Path(tmp))
+            initial = [SilenceSegment(1.0, 2.0), SilenceSegment(10.0, 12.0)]
+            self._write_resume_cache(video, cache, initial)
+
+            # New ffmpeg run produces a segment AFTER the resume_from point.
+            new_payload = (
+                "[silencedetect @ 0x0] silence_start: 20.000\n"
+                "[silencedetect @ 0x0] silence_end: 25.000\n"
+            )
+            factory, record = self._fake_popen_factory(new_payload, capture_cmd=True)
+
+            with (
+                patch("stream2video.silence._probe_duration", return_value=100.0),
+                patch("stream2video.silence.subprocess.Popen", side_effect=factory),
+            ):
+                segs = detect_silence(
+                    video,
+                    threshold=-20,
+                    min_silence=0.5,
+                    margin=0,
+                    resume_cache_path=cache,
+                )
+
+            # ffmpeg was invoked with -ss pointing to the end of the last
+            # initial segment (12.0).
+            cmd = record["cmd"]
+            assert "-ss" in cmd
+            assert cmd[cmd.index("-ss") + 1] == "12.000"
+
+            # Returned list = initial (2) + new (1), raw, pre-margin.
+            assert [(s.start, s.end) for s in segs] == [
+                (1.0, 2.0),
+                (10.0, 12.0),
+                (20.0, 25.0),
+            ]
+            # Resume file was unlinked at the start of detection.
+            assert not cache.exists()
+
+    def test_resume_callback_fires_with_initial_then_grows(self):
+        """On resume, the on_segment callback must see the initial list
+        (pre-seed) plus the growing list of new segments. The GUI relies
+        on this to render the correct overlay from the moment detection
+        begins."""
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "video.mp4"
+            cache = _get_resume_cache_path(video, Path(tmp))
+            initial = [SilenceSegment(1.0, 2.0), SilenceSegment(10.0, 12.0)]
+            self._write_resume_cache(video, cache, initial)
+
+            new_payload = (
+                "[silencedetect @ 0x0] silence_start: 20.000\n"
+                "[silencedetect @ 0x0] silence_end: 25.000\n"
+            )
+            factory, _record = self._fake_popen_factory(new_payload)
+
+            seen: list[list[tuple[float, float]]] = []
+
+            def on_segment(seg_list: list[SilenceSegment]) -> None:
+                seen.append([(s.start, s.end) for s in seg_list])
+
+            with (
+                patch("stream2video.silence._probe_duration", return_value=100.0),
+                patch("stream2video.silence.subprocess.Popen", side_effect=factory),
+            ):
+                detect_silence(
+                    video,
+                    threshold=-20,
+                    min_silence=0.5,
+                    margin=0,
+                    on_segment=on_segment,
+                    resume_cache_path=cache,
+                )
+
+            # First callback fires with the pre-seeded initial list (so
+            # the GUI's live store is correct from the start). The next
+            # callback fires with initial + the new segment.
+            assert seen[0] == [(1.0, 2.0), (10.0, 12.0)]
+            assert seen[-1] == [(1.0, 2.0), (10.0, 12.0), (20.0, 25.0)]
+
+    def test_resume_ignores_stale_file(self):
+        """Cache mtime < video mtime → ignored, full fresh run from t=0."""
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "video.mp4"
+            cache = _get_resume_cache_path(video, Path(tmp))
+            video.write_text("dummy")
+            _save_resume_cache(
+                cache,
+                video,
+                [SilenceSegment(1.0, 2.0)],
+                {"threshold": -20, "min_silence": 0.5, "margin": 0.0},
+            )
+            # Make the cache OLDER than the video.
+            os.utime(cache, (500, 500))
+            os.utime(video, (2000, 2000))
+
+            new_payload = (
+                "[silencedetect @ 0x0] silence_start: 1.000\n"
+                "[silencedetect @ 0x0] silence_end: 2.000\n"
+            )
+            factory, record = self._fake_popen_factory(new_payload, capture_cmd=True)
+
+            with (
+                patch("stream2video.silence._probe_duration", return_value=100.0),
+                patch("stream2video.silence.subprocess.Popen", side_effect=factory),
+            ):
+                segs = detect_silence(
+                    video,
+                    threshold=-20,
+                    min_silence=0.5,
+                    margin=0,
+                    resume_cache_path=cache,
+                )
+
+            # No -ss — fresh run from t=0.
+            assert "-ss" not in record["cmd"]
+            # Only the new segment; no initial was loaded.
+            assert len(segs) == 1
+            assert (segs[0].start, segs[0].end) == (1.0, 2.0)
+
+    def test_resume_ignores_config_mismatch(self):
+        """Cache with different config must be rejected (the previous
+        run used different parameters)."""
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "video.mp4"
+            cache = _get_resume_cache_path(video, Path(tmp))
+            video.write_text("dummy")
+            # Cache stored with threshold=-30.
+            _save_resume_cache(
+                cache,
+                video,
+                [SilenceSegment(1.0, 2.0)],
+                {"threshold": -30, "min_silence": 0.5, "margin": 0.0},
+            )
+            os.utime(video, (1000, 1000))
+            os.utime(cache, (2000, 2000))
+
+            new_payload = (
+                "[silencedetect @ 0x0] silence_start: 1.000\n"
+                "[silencedetect @ 0x0] silence_end: 2.000\n"
+            )
+            factory, record = self._fake_popen_factory(new_payload, capture_cmd=True)
+
+            with (
+                patch("stream2video.silence._probe_duration", return_value=100.0),
+                # Current call uses threshold=-20 — different from cache.
+                patch("stream2video.silence.subprocess.Popen", side_effect=factory),
+            ):
+                segs = detect_silence(
+                    video,
+                    threshold=-20,
+                    min_silence=0.5,
+                    margin=0,
+                    resume_cache_path=cache,
+                )
+
+            # No -ss — config mismatch means fresh run.
+            assert "-ss" not in record["cmd"]
+            assert len(segs) == 1
+            assert (segs[0].start, segs[0].end) == (1.0, 2.0)
+
+    def test_resume_with_empty_initial_runs_from_zero(self):
+        """Resume file with zero segments (e.g. cancel before the first
+        silence_end) — must not add `-ss 0.0` to the cmd. ffmpeg's
+        `-ss 0` is harmless but the cmd stays clean. No initial
+        callback pre-seed; only the new segments are reported."""
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "video.mp4"
+            cache = _get_resume_cache_path(video, Path(tmp))
+            video.write_text("dummy")
+            _save_resume_cache(
+                cache,
+                video,
+                [],  # no segments yet
+                {"threshold": -20, "min_silence": 0.5, "margin": 0.0},
+            )
+            os.utime(video, (1000, 1000))
+            os.utime(cache, (2000, 2000))
+
+            new_payload = (
+                "[silencedetect @ 0x0] silence_start: 5.000\n"
+                "[silencedetect @ 0x0] silence_end: 6.000\n"
+            )
+            factory, record = self._fake_popen_factory(new_payload, capture_cmd=True)
+
+            with (
+                patch("stream2video.silence._probe_duration", return_value=100.0),
+                patch("stream2video.silence.subprocess.Popen", side_effect=factory),
+            ):
+                segs = detect_silence(
+                    video,
+                    threshold=-20,
+                    min_silence=0.5,
+                    margin=0,
+                    resume_cache_path=cache,
+                )
+
+            # No -ss: resume_from is None when initial is empty.
+            assert "-ss" not in record["cmd"]
+            assert len(segs) == 1
+            assert (segs[0].start, segs[0].end) == (5.0, 6.0)
+
+    def test_resume_with_missing_file_runs_from_zero(self):
+        """resume_cache_path passed but file doesn't exist — full fresh
+        run, no error, no -ss."""
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "video.mp4"
+            video.write_text("dummy")
+            cache = Path(tmp) / "nope.json.resume"  # never created
+
+            new_payload = (
+                "[silencedetect @ 0x0] silence_start: 1.000\n"
+                "[silencedetect @ 0x0] silence_end: 2.000\n"
+            )
+            factory, record = self._fake_popen_factory(new_payload, capture_cmd=True)
+
+            with (
+                patch("stream2video.silence._probe_duration", return_value=100.0),
+                patch("stream2video.silence.subprocess.Popen", side_effect=factory),
+            ):
+                segs = detect_silence(
+                    video,
+                    threshold=-20,
+                    min_silence=0.5,
+                    margin=0,
+                    resume_cache_path=cache,
+                )
+
+            assert "-ss" not in record["cmd"]
+            assert len(segs) == 1
+
+    def test_resume_unlinks_file_on_start(self):
+        """Even with no valid cache, the resume file is removed at the
+        start of detection — keeps the project dir clean and prevents
+        a retry inside the same call from re-loading it."""
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "video.mp4"
+            cache = _get_resume_cache_path(video, Path(tmp))
+            video.write_text("dummy")
+            # Stale mtimes: validation will fail, but the file is still
+            # unlinked at the end.
+            _save_resume_cache(
+                cache,
+                video,
+                [SilenceSegment(1.0, 2.0)],
+                {"threshold": -20, "min_silence": 0.5, "margin": 0.0},
+            )
+            os.utime(cache, (500, 500))
+            os.utime(video, (2000, 2000))
+
+            factory, _ = self._fake_popen_factory(
+                "[silencedetect @ 0x0] silence_start: 1.000\n"
+                "[silencedetect @ 0x0] silence_end: 2.000\n"
+            )
+
+            with (
+                patch("stream2video.silence._probe_duration", return_value=100.0),
+                patch("stream2video.silence.subprocess.Popen", side_effect=factory),
+            ):
+                detect_silence(
+                    video,
+                    threshold=-20,
+                    min_silence=0.5,
+                    margin=0,
+                    resume_cache_path=cache,
+                )
+
+            assert not cache.exists()
