@@ -45,7 +45,6 @@ from stream2video.silence import (
     SilenceCancelledError,
     SilenceDetectionError,
     detect_silence,
-    detect_silence_stream,
     load_silence_cache,
     save_silence_cache,
 )
@@ -212,7 +211,6 @@ class Stream2VideoGUI(ctk.CTk):
         self._waveform_ctk_image: ctk.CTkImage | None = None
         self._waveform_render_token = 0
         self._waveform_running = False
-        self._waveform_last_update_ts: float = 0.0
         self.config = effective_defaults()
         self.log_queue: queue.Queue = queue.Queue()
         self._output_path: Path | None = None
@@ -1390,9 +1388,6 @@ class Stream2VideoGUI(ctk.CTk):
         token = self._waveform_render_token + 1
         self._waveform_render_token = token
         self._waveform_running = True
-        # Reset the progressive-overlay throttle clock so the first
-        # segment after a fresh render is allowed through immediately.
-        self._waveform_last_update_ts = 0.0
         self._safe_status_set("Streaming audio...")
         self._log("Waveform preview: streaming audio from source video...")
 
@@ -1428,73 +1423,32 @@ class Stream2VideoGUI(ctk.CTk):
                     0, lambda: self._apply_waveform_image(img_no_overlay, duration, 0)
                 )
 
-                # Phase 2: silence detection directly on the source, with
-                # progressive overlay updates as each segment is parsed.
-                self.after(0, lambda: self._safe_status_set("Detecting silence..."))
-                if cached_segments is not None:
-                    # Cache hit — pipeline already ran with this config.
-                    # Skip the ffmpeg silencedetect pass entirely.
+                # Phase 2: load silence segments from the pipeline's JSON
+                # cache. The waveform never runs its own detect — preview
+                # is a pure read over the pipeline's results. If the cache
+                # is missing (pipeline hasn't run, or config changed),
+                # show a "run pipeline first" message and exit.
+                if cached_segments is None:
+                    cache_path = out_dir / f"{in_path.stem}_silence_cache.json"
+                    self.after(
+                        0,
+                        lambda: self._safe_status_set(
+                            "No silence cache — run the pipeline first"
+                        ),
+                    )
                     self._log(
-                        f"  Loaded {len(cached_segments)} silences from cache "
-                        f"(threshold={config['threshold']}dB, "
-                        f"min_silence={config['min_silence']}s, margin={config['margin']}s)"
+                        f"  Waveform preview: no cache at {cache_path} "
+                        f"for threshold={config['threshold']}dB, "
+                        f"min_silence={config['min_silence']}s, "
+                        f"margin={config['margin']}s — skipping detect"
                     )
-                    segments = cached_segments
-                else:
-                    self._log(
-                        f"  Detecting silence (threshold={config['threshold']}dB, "
-                        f"min_silence={config['min_silence']}s, margin={config['margin']}s)..."
-                    )
-
-                    def _on_segment(segments_so_far):
-                        # Throttle: skip this callback if the previous update
-                        # was less than 1 second ago. The final Phase 3 render
-                        # below always runs unthrottled, so the user sees the
-                        # canonical image once detection completes.
-                        now = time.monotonic()
-                        if now - self._waveform_last_update_ts < 1.0:
-                            return
-                        self._waveform_last_update_ts = now
-
-                        # Re-render on the main thread so the overlay grows
-                        # in real time as ffmpeg emits silence_end lines.
-                        def _update():
-                            if token != self._waveform_render_token:
-                                return
-                            if (
-                                self.lbl_wave_image is None
-                                or self.lbl_wave_status is None
-                            ):
-                                return
-                            img = render_waveform_image(
-                                peaks,
-                                width=800,
-                                height=200,
-                                total_duration=duration,
-                                silence_segments=segments_so_far,
-                                title=(
-                                    f"{in_path.name}  •  {len(segments_so_far)} silences"
-                                ),
-                            )
-                            self._apply_waveform_image(img, duration, len(segments_so_far))
-                            # Override the "N silences • HH:MM:SS" final-text
-                            # set by _apply_waveform_image with the live
-                            # "still detecting" message so the user sees
-                            # progress, not a final count.
-                            self.lbl_wave_status.configure(
-                                text=(
-                                    f"Detecting silence... {len(segments_so_far)} so far"
-                                )
-                            )
-
-                        self.after(0, _update)
-
-                    segments = detect_silence_stream(
-                        in_path,
-                        threshold=config["threshold"],
-                        min_silence=config["min_silence"],
-                        on_segment=_on_segment,
-                    )
+                    return
+                self._log(
+                    f"  Loaded {len(cached_segments)} silences from cache "
+                    f"(threshold={config['threshold']}dB, "
+                    f"min_silence={config['min_silence']}s, margin={config['margin']}s)"
+                )
+                segments = cached_segments
                 if token != self._waveform_render_token:
                     return
 
