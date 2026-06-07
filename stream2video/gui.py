@@ -1380,8 +1380,6 @@ class Stream2VideoGUI(ctk.CTk):
                     def _update():
                         if token != self._waveform_render_token:
                             return
-                        if self._wave_lbl_image is None or self._wave_lbl_status is None:
-                            return
                         img = render_waveform_image(
                             peaks,
                             width=800,
@@ -1392,11 +1390,10 @@ class Stream2VideoGUI(ctk.CTk):
                                 f"{in_path.name}  •  {len(segments_so_far)} silences"
                             ),
                         )
-                        ctk_img = ctk.CTkImage(
-                            light_image=img, dark_image=img, size=img.size
-                        )
-                        self._waveform_ctk_image = ctk_img
-                        self.lbl_wave_image.configure(image=ctk_img, text="")
+                        self._apply_waveform_image(img, duration, len(segments_so_far))
+                        # Override the "N silences • HH:MM:SS" final-text set by
+                        # _apply_waveform_image with the live "still detecting"
+                        # message so the user sees progress, not a final count.
                         self.lbl_wave_status.configure(
                             text=(
                                 f"Detecting silence... {len(segments_so_far)} so far"
