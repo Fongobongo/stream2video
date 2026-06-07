@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+- **Pinned Python 3.13 as project default** — added `.python-version` and bumped `ruff` / `mypy` `target-version` to `py313`. The previous venv was built on Python 3.10 and on some Windows + Defender configurations caused multi-minute GUI startup (cold scan of `.pyd` files in the venv). Python 3.13.1 is required going forward.
+- **Waveform preview is now pipe-only (no file I/O)** — replaced the WAV extract + cache save path with a single-ffmpeg pipe approach. Peaks are read from `ffmpeg ... -f s16le -ac 1 -ar 16000 pipe:1`, and silence detection runs directly on the source video via `silencedetect` filter to stderr. No `{stem}_audio.wav` is written, no `silence.json` cache is updated by the preview. The next real pipeline run still does the cached extract on its own schedule.
+
+### Fixed
+- **GUI launcher `run_gui.cmd` didn't install Pillow** — the import check at line 47 only verified `stream2video` and `customtkinter`. The GUI then silently crashed on `from PIL import Image` because `pythonw.exe` has no console to show the traceback. Added `PIL` to the check so a clean portable venv installs the full `[gui]` extra set.
+
 ### Added
 - **Waveform preview tab (GUI)** — a new "Waveform" tab in the right panel renders the audio waveform of the selected input file with detected silence regions overlaid as semi-transparent red bars and a time axis. Lets users tune `threshold` / `min_silence` / `margin` visually instead of running a full encode. The "Render preview" button extracts the WAV (if not cached) and runs silence detection on it with the current slider values; results are saved to the silence cache so the next real pipeline run is instant. Pillow is a new optional `[gui]` extra.
 - **CI workflow** — GitHub Actions runs `ruff check`, `ruff format --check`, `mypy`, and `pytest` on push/PR to `main`. Uses `uv` for fast, reproducible installs (committed `uv.lock`).

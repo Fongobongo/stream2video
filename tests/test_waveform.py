@@ -9,6 +9,7 @@ import pytest
 from stream2video.silence import SilenceSegment
 from stream2video.waveform import (
     _format_clock,
+    read_peaks_from_stream,
     read_waveform_peaks,
     render_waveform_image,
     silence_pixel_ranges,
@@ -254,3 +255,43 @@ def test_format_clock_minutes_seconds():
 
 def test_format_clock_hours_minutes_seconds():
     assert _format_clock(3725) == "1:02:05"
+
+
+# ── read_peaks_from_stream (ffmpeg pipe, no file) ─────────────
+
+
+def test_read_peaks_from_stream_missing_file(tmp_path: Path):
+    """Missing input -> ([], 0.0)."""
+    assert read_peaks_from_stream(tmp_path / "missing.mp4", 100) == ([], 0.0)
+
+
+def test_read_peaks_from_stream_silent_wav(tmp_path: Path):
+    """All-zero WAV via ffmpeg pipe returns ~target_buckets peaks of 0 and ~1s duration."""
+    wav = tmp_path / "silent.wav"
+    _write_sine_wav(wav, duration_s=1.0, amp=0)
+    peaks, duration = read_peaks_from_stream(wav, target_buckets=50)
+    assert len(peaks) > 0
+    assert len(peaks) <= 50
+    assert all(p == 0.0 for p in peaks)
+    assert 0.9 <= duration <= 1.1
+
+
+def test_read_peaks_from_stream_sine_wav(tmp_path: Path):
+    """Sine wave via ffmpeg pipe gives non-zero peaks and correct duration."""
+    wav = tmp_path / "sine.wav"
+    _write_sine_wav(wav, duration_s=2.0, sr=16000, amp=20000)
+    peaks, duration = read_peaks_from_stream(wav, target_buckets=200)
+    assert len(peaks) > 0
+    assert len(peaks) <= 200
+    # Sine with amp=20000 -> normalised peak ~= 20000/32768 ~ 0.61.
+    assert max(peaks) > 0.5
+    assert 1.9 <= duration <= 2.1
+
+
+def test_read_peaks_from_stream_bucket_count(tmp_path: Path):
+    """target_buckets is a soft upper bound; result is <= target_buckets."""
+    wav = tmp_path / "x.wav"
+    _write_sine_wav(wav, duration_s=0.5, amp=10000)
+    peaks, _ = read_peaks_from_stream(wav, target_buckets=100)
+    assert len(peaks) <= 100
+    assert len(peaks) > 0

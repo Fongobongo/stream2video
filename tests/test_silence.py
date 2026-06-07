@@ -1,6 +1,7 @@
 """Tests for silence detection module."""
 
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -20,6 +21,7 @@ from stream2video.silence import (
     _sample_segments_match,
     _segments_match,
     detect_silence,
+    detect_silence_stream,
 )
 
 
@@ -798,3 +800,50 @@ class _FakeStdout:
 
     def close(self):
         self._closed = True
+
+
+# ── detect_silence_stream (ffmpeg pipe, no WAV) ───────────────
+
+
+def test_detect_silence_stream_silent_wav(tmp_path):
+    """All-zero WAV is one continuous silence (single segment from 0 to end)."""
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not available")
+    import wave
+
+    wav = tmp_path / "silent.wav"
+    n = 16000 * 2  # 2 seconds at 16kHz
+    with wave.open(str(wav), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(b"\x00\x00" * n)
+
+    segments = detect_silence_stream(wav, threshold=-30.0, min_silence=0.5)
+    assert len(segments) >= 1
+    assert segments[0].start < 0.1
+    assert segments[0].end > 1.5
+
+
+def test_detect_silence_stream_sine_wav_no_segments(tmp_path):
+    """Loud sine wave — no silence detected."""
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not available")
+    import math
+    import struct
+    import wave
+
+    wav = tmp_path / "sine.wav"
+    n = 16000  # 1 second at 16kHz
+    with wave.open(str(wav), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        frames = bytearray()
+        for i in range(n):
+            s = int(20000 * math.sin(2 * math.pi * 440 * i / 16000))
+            frames += struct.pack("<h", max(-32768, min(32767, s)))
+        w.writeframes(bytes(frames))
+
+    segments = detect_silence_stream(wav, threshold=-30.0, min_silence=0.5)
+    assert segments == []

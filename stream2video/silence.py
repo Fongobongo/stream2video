@@ -210,6 +210,36 @@ def detect_silence(
     return segments
 
 
+def detect_silence_stream(
+    input_path: Path,
+    threshold: float,
+    min_silence: float,
+) -> list[SilenceSegment]:
+    """Run ffmpeg silencedetect on ``input_path`` directly — no WAV file.
+
+    Use this for preview-only flows (e.g. the GUI waveform tab) that
+    don't need the cached audio extract the real pipeline relies on.
+    Results are not persisted to the silence cache; subsequent pipeline
+    runs will redo detection on their own schedule.
+
+    Returns an empty list on no-audio sources or detection errors that
+    leave no parseable silencedetect lines (the underlying
+    :func:`_run_silencedetect` raises on hard ffmpeg failure, which
+    callers can catch). Progress reporting is disabled because the
+    total duration is not known ahead of time.
+    """
+    return _run_silencedetect(
+        input_path,
+        threshold=threshold,
+        min_silence=min_silence,
+        duration=None,
+        progress_callback=None,
+        cancel_callback=None,
+        label="video (preview)",
+        duration_limit=None,
+    )
+
+
 def _run_silencedetect(
     input_path: Path,
     threshold: float,

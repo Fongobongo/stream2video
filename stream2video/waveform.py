@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 import struct
+import subprocess
 import wave
 from collections.abc import Sequence
 from pathlib import Path
@@ -22,6 +23,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 from stream2video.silence import SilenceSegment
+from stream2video.utils import no_window_kwargs
 
 # Canvas sizing constants. Exposed as module-level so tests can pin them.
 _DEFAULT_WIDTH = 800
@@ -98,6 +100,99 @@ def read_waveform_peaks(wav_path: Path, target_buckets: int) -> list[float]:
         # shorter than ``target_buckets`` samples — that's fine, callers
         # treat the result as proportional to duration.
         return peaks
+
+
+def read_peaks_from_stream(
+    input_path: Path,
+    target_buckets: int,
+) -> tuple[list[float], float]:
+    """Stream audio from ``input_path`` via ffmpeg and return (peaks, duration).
+
+    Single ffmpeg invocation: decodes the input and resamples to
+    s16le / mono / 16 kHz on stdout. No file is written. Duration is
+    derived from the total sample count (bytes / 2 / 16000).
+
+    Returns ``([], 0.0)`` on error or empty audio. Peaks are normalised
+    to ``[0.0, 1.0]`` (max-abs divided by 32768), matching
+    :func:`read_waveform_peaks`. Memory peaks at the raw audio byte
+    count — for a 2 h stream at 16 kHz mono that's ~230 MB.
+
+    The function intentionally ignores stderr (silenced via
+    ``-loglevel error`` to ``DEVNULL``) so silencedetect noise from
+    :func:`stream2video.silence.detect_silence_stream` running in
+    parallel is irrelevant. For preview-only use, this is faster and
+    simpler than threading stderr parsing.
+    """
+    if target_buckets <= 0 or not Path(input_path).is_file():
+        return [], 0.0
+
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostats",
+        "-loglevel",
+        "error",
+        "-i",
+        str(input_path),
+        "-vn",
+        "-sn",
+        "-dn",
+        "-f",
+        "s16le",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "pipe:1",
+    ]
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=-1,
+            **no_window_kwargs(),
+        )
+    except FileNotFoundError:
+        return [], 0.0
+
+    assert proc.stdout is not None
+    raw = proc.stdout.read()
+    proc.wait()
+    if proc.returncode != 0 or not raw:
+        return [], 0.0
+
+    total_samples = len(raw) // 2
+    if total_samples == 0:
+        return [], 0.0
+
+    duration = total_samples / 16000.0
+    bucket_size = max(1, math.ceil(total_samples / target_buckets))
+
+    # Iterate the bytearray in chunks to avoid allocating a full sample
+    # list (the unpacked list of 2h-16kHz-mono would be ~460 MB).
+    peaks: list[float] = []
+    bucket_acc = 0
+    bucket_count = 0
+    offset = 0
+    chunk_samples = 8192
+    while offset < total_samples:
+        n = min(chunk_samples, total_samples - offset)
+        chunk = struct.unpack_from(f"<{n}h", raw, offset * 2)
+        for s in chunk:
+            bucket_acc = max(bucket_acc, abs(s))
+            bucket_count += 1
+            if bucket_count >= bucket_size:
+                peaks.append(bucket_acc / 32768.0)
+                bucket_acc = 0
+                bucket_count = 0
+        offset += n
+
+    if bucket_count > 0:
+        peaks.append(bucket_acc / 32768.0)
+
+    return peaks, duration
 
 
 def silence_pixel_ranges(

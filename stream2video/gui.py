@@ -45,12 +45,13 @@ from stream2video.silence import (
     SilenceCancelledError,
     SilenceDetectionError,
     detect_silence,
+    detect_silence_stream,
     load_silence_cache,
     save_silence_cache,
 )
 from stream2video.utils import get_active_process, get_video_duration
 from stream2video.waveform import (
-    read_waveform_peaks,
+    read_peaks_from_stream,
     render_waveform_image,
 )
 
@@ -1293,11 +1294,11 @@ class Stream2VideoGUI(ctk.CTk):
     # ── Waveform tab ────────────────────────────────────────────
 
     def _render_waveform_preview(self):
-        """Extract audio (if needed), run silence detection with the
-        current slider values, and render the waveform with overlay.
+        """Stream audio + silence from the source video via ffmpeg pipes
+        and render the waveform with overlay. No file is written.
 
         Runs on a background thread so the GUI stays responsive during
-        the (potentially long) first extract. Re-runs are debounced by
+        the (potentially long) first decode. Re-runs are debounced by
         ``_waveform_render_token`` — if the user clicks "Render" again
         before the previous run finishes, the older one is invalidated.
         """
@@ -1324,66 +1325,46 @@ class Stream2VideoGUI(ctk.CTk):
             "margin": float(self.config["margin"]),
         }
 
-        # Output dir: where the cached WAV will live. Same resolution as
-        # the pipeline (resolve + per-video dir if enabled).
-        out_raw = self.entry_output.get().strip() or "./compressed_videos"
-        out_dir = Path(out_raw).expanduser().resolve()
-        if bool(self.chk_per_video_dir.get()):
-            out_dir = out_dir / in_path.stem
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-        wav_path = out_dir / f"{in_path.stem}_audio.wav"
         token = self._waveform_render_token + 1
         self._waveform_render_token = token
         self._waveform_running = True
         self.btn_render_wave.configure(state="disabled", text="Rendering...")
-        self.lbl_wave_status.configure(text="Preparing audio...")
-        self._log("Waveform preview: preparing audio...")
+        self.lbl_wave_status.configure(text="Streaming audio...")
+        self._log("Waveform preview: streaming audio from source video...")
 
         def _run():
             try:
-                # Phase 1: ensure WAV exists.
-                if not wav_path.is_file() or wav_path.stat().st_mtime < in_path.stat().st_mtime:
-                    self.after(
-                        0, lambda: self.lbl_wave_status.configure(text="Extracting audio...")
-                    )
-                    self._log(f"  Extracting {in_path.name} -> {wav_path.name}...")
-                    from stream2video.silence import _extract_audio_wav
-
-                    _extract_audio_wav(in_path, wav_path)
+                # Phase 1: read peaks directly from ffmpeg pipe (no WAV).
+                self.after(0, lambda: self.lbl_wave_status.configure(text="Streaming audio..."))
+                peaks, duration = read_peaks_from_stream(in_path, target_buckets=800)
                 if token != self._waveform_render_token:
                     return
+                if not peaks or duration <= 0:
+                    self.after(
+                        0,
+                        lambda: self.lbl_wave_status.configure(
+                            text="No audio stream found"
+                        ),
+                    )
+                    self._log("  Waveform preview: no audio in source")
+                    return
 
-                # Phase 2: silence detection.
+                # Phase 2: silence detection directly on the source.
                 self.after(0, lambda: self.lbl_wave_status.configure(text="Detecting silence..."))
                 self._log(
                     f"  Detecting silence (threshold={config['threshold']}dB, "
                     f"min_silence={config['min_silence']}s, margin={config['margin']}s)..."
                 )
-                from stream2video.silence import detect_silence, save_silence_cache
-
-                segments = detect_silence(
-                    wav_path,
+                segments = detect_silence_stream(
+                    in_path,
                     threshold=config["threshold"],
                     min_silence=config["min_silence"],
-                    margin=config["margin"],
-                    progress_callback=lambda f: self.after(
-                        0,
-                        lambda: self.lbl_wave_status.configure(
-                            text=f"Detecting silence... {int(f * 100)}%"
-                        ),
-                    ),
                 )
-                # Save to cache so a subsequent real pipeline run with
-                # these same params is instant.
-                save_silence_cache(wav_path, segments, out_dir, config)
                 if token != self._waveform_render_token:
                     return
 
-                # Phase 3: read peaks + render.
+                # Phase 3: render the image.
                 self.after(0, lambda: self.lbl_wave_status.configure(text="Rendering..."))
-                duration = wav_path.stat().st_size / (16000 * 2)  # 16kHz mono s16le
-                peaks = read_waveform_peaks(wav_path, target_buckets=800)
                 img = render_waveform_image(
                     peaks,
                     width=800,
