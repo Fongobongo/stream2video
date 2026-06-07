@@ -886,17 +886,18 @@ def test_detect_silence_stream_progressive_callback(tmp_path):
     assert seen == sorted(seen)
 
 
-# ── detect_silence(live_cache_path=...) — progressive cache writes ─
+# ── detect_silence(on_segment=...) — progressive callback ─
 
 
-class TestLiveCache:
-    """`detect_silence(..., live_cache_path=...)` writes a partial cache file
-    as segments are detected so the GUI waveform popup can render a
-    near-real-time overlay.
+class TestDetectSilenceOnSegment:
+    """`detect_silence(..., on_segment=...)` invokes the callback with a
+    growing list of raw (pre-margin) segments as `silence_end` lines
+    arrive on ffmpeg's stderr. The callback runs on the stderr drain
+    thread; the GUI is responsible for any main-thread dispatch.
 
-    The ffmpeg subprocess is mocked: we feed canned `silence_start` /
-    `silence_end` lines and verify the partial file appears with growing
-    segment counts, and that the final state matches the return value.
+    No file is written — the in-process GUI stores the snapshot in
+    memory and the popup polls it. The final cache (if any) is still
+    written by the caller via `save_silence_cache`.
     """
 
     def _fake_popen_factory(self, stderr_payload: str):
@@ -923,16 +924,14 @@ class TestLiveCache:
 
         return fake_popen
 
-    def test_live_cache_written_progressively(self):
-        """When `live_cache_path` is set, the file appears as segments are
-        detected, and its final content matches the segments list."""
+    def test_on_segment_fires_with_growing_snapshot(self):
+        """The callback must be invoked with a snapshot list whose length
+        grows monotonically as new segments are detected. The final
+        snapshot must match the returned list of segments."""
         with TemporaryDirectory() as tmp:
             video = Path(tmp) / "video.mp4"
             video.write_text("dummy")
-            live = Path(tmp) / "live.partial.json"
 
-            # Three silences in chronological order, each with positive
-            # margin (margin=0.5 shrinks them; margin=0 keeps them as-is).
             stderr_payload = (
                 "[silencedetect @ 0x0] silence_start: 1.000\n"
                 "[silencedetect @ 0x0] silence_end: 2.000\n"
@@ -943,6 +942,16 @@ class TestLiveCache:
             )
             factory = self._fake_popen_factory(stderr_payload)
 
+            seen_sizes: list[int] = []
+            last_snapshot: list[SilenceSegment] = []
+
+            def on_segment(seg_list: list[SilenceSegment]) -> None:
+                seen_sizes.append(len(seg_list))
+                # Stash the latest snapshot — the GUI's polling code does
+                # effectively the same to read the most recent state.
+                last_snapshot.clear()
+                last_snapshot.extend(seg_list)
+
             with (
                 patch("stream2video.silence._probe_duration", return_value=100.0),
                 patch("stream2video.silence.subprocess.Popen", side_effect=factory),
@@ -952,42 +961,37 @@ class TestLiveCache:
                     threshold=-20,
                     min_silence=0.5,
                     margin=0,
-                    live_cache_path=live,
+                    on_segment=on_segment,
                 )
 
-            # Final return value matches the canonical detection.
-            assert len(segs) == 3
-            assert [s.start for s in segs] == [1.0, 10.0, 20.0]
-            assert [s.end for s in segs] == [2.0, 12.0, 25.0]
+            # Callback fired exactly once per new segment.
+            assert seen_sizes == [1, 2, 3]
+            # Final snapshot matches the returned list (raw, pre-margin).
+            assert [(s.start, s.end) for s in last_snapshot] == [(s.start, s.end) for s in segs]
+            # The returned list is also margin'd (margin=0 here, so no change).
+            assert [(s.start, s.end) for s in segs] == [
+                (1.0, 2.0),
+                (10.0, 12.0),
+                (20.0, 25.0),
+            ]
 
-            # Partial file exists, is valid JSON, and contains the same segments.
-            assert live.exists()
-            import json
-
-            with open(live) as f:
-                data = json.load(f)
-            assert data["source"] == "video.mp4"
-            assert data["config"]["threshold"] == -20
-            assert data["config"]["min_silence"] == 0.5
-            assert data["config"]["margin"] == 0
-            assert len(data["segments"]) == 3
-            assert data["segments"][0] == {"start": 1.0, "end": 2.0}
-            assert data["segments"][2] == {"start": 20.0, "end": 25.0}
-
-    def test_live_cache_not_written_when_path_is_none(self):
-        """Backward compat: when `live_cache_path` is None, no partial
-        file is created and detection still works as before."""
+    def test_on_segment_not_fired_when_none(self):
+        """Backward compat: when `on_segment` is None, detection still
+        works (batch path), and no callback is registered."""
         with TemporaryDirectory() as tmp:
             video = Path(tmp) / "video.mp4"
             video.write_text("dummy")
-            # Look for any stray .partial file in the tmp dir.
-            tmp_path = Path(tmp)
 
             stderr_payload = (
                 "[silencedetect @ 0x0] silence_start: 5.000\n"
                 "[silencedetect @ 0x0] silence_end: 6.000\n"
             )
             factory = self._fake_popen_factory(stderr_payload)
+
+            fired: list[bool] = []
+
+            def on_segment(seg_list: list[SilenceSegment]) -> None:
+                fired.append(True)
 
             with (
                 patch("stream2video.silence._probe_duration", return_value=100.0),
@@ -997,24 +1001,29 @@ class TestLiveCache:
 
             assert len(segs) == 1
             assert segs[0].start == 5.0
-            # No .partial files anywhere in tmp.
-            partials = list(tmp_path.glob("*.partial*"))
-            assert partials == []
+            # No callback fired because none was passed.
+            assert fired == []
 
-    def test_live_cache_applies_margin_to_growing_list(self):
-        """The partial file uses the same `margin` as the final result —
-        positive margin shrinks silences, the shrink is visible in the
-        partial file as soon as the segment is detected."""
+    def test_on_segment_receives_pre_margin_segments(self):
+        """The callback sees raw (pre-margin) segments — margin is applied
+        ONLY in the final return value, not in the snapshots the
+        callback observes. The GUI applies margin at render time
+        so the same logic works for both live and post-detect rendering."""
         with TemporaryDirectory() as tmp:
             video = Path(tmp) / "video.mp4"
             video.write_text("dummy")
-            live = Path(tmp) / "live.partial.json"
 
             stderr_payload = (
                 "[silencedetect @ 0x0] silence_start: 1.000\n"
                 "[silencedetect @ 0x0] silence_end: 4.000\n"
             )
             factory = self._fake_popen_factory(stderr_payload)
+
+            last_snapshot: list[SilenceSegment] = []
+
+            def on_segment(seg_list: list[SilenceSegment]) -> None:
+                last_snapshot.clear()
+                last_snapshot.extend(seg_list)
 
             with (
                 patch("stream2video.silence._probe_duration", return_value=100.0),
@@ -1024,91 +1033,15 @@ class TestLiveCache:
                     video,
                     threshold=-20,
                     min_silence=0.5,
-                    margin=0.5,  # shrink silences by 0.5s on each side
-                    live_cache_path=live,
+                    margin=0.5,  # shrink by 0.5s on each side
+                    on_segment=on_segment,
                 )
 
-            # Returned segments are also margin'd (consistent with
-            # detect_silence's contract: it returns the margin'd list).
+            # Return value is margin'd (1.5, 3.5).
             assert len(segs) == 1
             assert segs[0].start == 1.5
             assert segs[0].end == 3.5
-
-            # The partial file shows the same margin'd segment.
-            import json
-
-            with open(live) as f:
-                data = json.load(f)
-            assert data["segments"] == [{"start": 1.5, "end": 3.5}]
-
-
-def test_get_silence_cache_partial_path_uses_video_stem():
-    """`get_silence_cache_partial_path` is the canonical path for the
-    partial cache the GUI polls. The `.partial` suffix keeps it
-    separate from the final cache file."""
-    from stream2video.silence import get_silence_cache_partial_path
-
-    video = Path("/some/dir/myvideo.mp4")
-    out = Path("/output")
-    assert get_silence_cache_partial_path(video, out) == Path(
-        "/output/myvideo_silence_cache.json.partial"
-    )
-
-
-def test_load_silence_cache_from_path_reads_partial(tmp_path):
-    """`load_silence_cache_from_path` is the loader the GUI's poller uses
-    on the partial cache file. It must accept a caller-supplied path
-    and apply the same freshness / config checks as the final loader."""
-    from stream2video.silence import (
-        get_silence_cache_partial_path,
-        load_silence_cache_from_path,
-        save_silence_cache,
-    )
-
-    video = tmp_path / "video.mp4"
-    video.write_text("dummy")
-    out = tmp_path
-    config = {"threshold": -20, "min_silence": 0.5, "margin": 0}
-
-    # Write the partial file directly.
-    partial = get_silence_cache_partial_path(video, out)
-    save_silence_cache(video, [SilenceSegment(2.0, 3.0)], out, config)
-    # Move final to partial to simulate the live writer's output.
-    final = out / f"{video.stem}_silence_cache.json"
-    partial.write_bytes(final.read_bytes())
-
-    # The partial loader must read it back, identical to the final loader.
-    segs = load_silence_cache_from_path(partial, video, config)
-    assert segs is not None
-    assert len(segs) == 1
-    assert segs[0].start == 2.0
-    assert segs[0].end == 3.0
-
-
-def test_load_silence_cache_from_path_rejects_mismatched_config(tmp_path):
-    """A partial file written with different threshold/min_silence/margin
-    must be rejected so the GUI doesn't render stale highlights from a
-    previous run."""
-    from stream2video.silence import (
-        load_silence_cache_from_path,
-        save_silence_cache,
-    )
-
-    video = tmp_path / "video.mp4"
-    video.write_text("dummy")
-    out = tmp_path
-    cached_config = {"threshold": -20, "min_silence": 0.5, "margin": 0}
-
-    partial = out / "live.partial.json"
-    save_silence_cache(video, [SilenceSegment(2.0, 3.0)], out, cached_config)
-    final = out / f"{video.stem}_silence_cache.json"
-    partial.write_bytes(final.read_bytes())
-
-    # Same config → loads fine.
-    segs = load_silence_cache_from_path(partial, video, cached_config)
-    assert segs is not None and len(segs) == 1
-
-    # Different threshold → rejected.
-    new_config = {"threshold": -30, "min_silence": 0.5, "margin": 0}
-    segs = load_silence_cache_from_path(partial, video, new_config)
-    assert segs is None
+            # Callback saw the raw (1.0, 4.0) — margin is the caller's job.
+            assert len(last_snapshot) == 1
+            assert last_snapshot[0].start == 1.0
+            assert last_snapshot[0].end == 4.0

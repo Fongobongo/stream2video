@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Added
-- **Live waveform preview during pipeline run** — the GUI's waveform popup now polls a partial silence-cache file (`{stem}_silence_cache.json.partial`) that `detect_silence` writes progressively as `silence_end` lines arrive from ffmpeg. Open the Waveform popup mid-detect and the silence overlay grows in near real-time; the popup automatically switches to the final cache and stops polling when detection completes. The partial file is deleted on cancel/error and on successful completion (the canonical final cache at `{stem}_silence_cache.json` is what persists).
+- **Live waveform preview during pipeline run** — the GUI's waveform popup now reads from an in-memory `dict[Path, list[SilenceSegment]]` that the pipeline worker updates through `detect_silence(on_segment=...)` as `silence_end` lines arrive from ffmpeg. Open the Waveform popup mid-detect and the silence overlay grows in near real-time; the popup polls the in-memory store once per second and stops automatically when the pipeline finishes (`self.running` flips to False). No partial cache file is written — the canonical final cache at `{stem}_silence_cache.json` is still produced for cross-process / persistence.
 
 ### Changed
 - **Pinned Python 3.13 as project default** — added `.python-version` and bumped `ruff` / `mypy` `target-version` to `py313`. The previous venv was built on Python 3.10 and on some Windows + Defender configurations caused multi-minute GUI startup (cold scan of `.pyd` files in the venv). Python 3.13.1 is required going forward.
