@@ -49,10 +49,23 @@ USER_DEFAULT_KEYS: list[str] = [
 
 def user_defaults_path() -> Path:
     """Path to the per-user defaults file. Lives next to settings.json."""
-    portable = Path(__file__).parent.parent / "_portable"
-    if portable.exists():
-        return portable / "user_defaults.json"
-    return Path(__file__).parent.parent / "user_defaults.json"
+    return _base_dir() / "user_defaults.json"
+
+
+def settings_path() -> Path:
+    """Path to the GUI settings file (gui_settings.json or settings.json in _portable)."""
+    base = _base_dir()
+    if base.name == "_portable":
+        return base / "settings.json"
+    return base / "gui_settings.json"
+
+
+def _base_dir() -> Path:
+    """Base directory for config files: ``_portable/`` if it exists, else the project root."""
+    project_root = Path(__file__).parent.parent
+    if (project_root / "_portable").exists():
+        return project_root / "_portable"
+    return project_root
 
 
 def coerce_typed_value(key: str, value: Any) -> Any:

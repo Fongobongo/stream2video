@@ -54,7 +54,7 @@ def _quote_concat_path(p: str) -> str:
     raise ConcatError(f"Path contains both quote types, cannot be represented: {p}")
 
 
-VIDEO_BITRATE = "7000k"
+_VIDEO_BITRATE = "7000k"
 _AUDIO_BITRATE = "128k"
 _BATCH_CHUNK_SIZE = 40
 _BATCH_TIMEOUT = 28800
@@ -154,17 +154,17 @@ def generate_keep_segments(
 
 
 ENCODER_OPTS: dict[str, list[str]] = {
-    "h264_mf": ["-b:v", VIDEO_BITRATE, "-quality", "100"],
-    "h264_amf": ["-usage", "transcoding", "-quality", "speed", "-b:v", VIDEO_BITRATE],
+    "h264_mf": ["-b:v", _VIDEO_BITRATE, "-quality", "100"],
+    "h264_amf": ["-usage", "transcoding", "-quality", "speed", "-b:v", _VIDEO_BITRATE],
     "h264_nvenc": [
         "-preset",
         "p7",
         "-rc",
         "vbr",
         "-b:v",
-        VIDEO_BITRATE,
+        _VIDEO_BITRATE,
         "-maxrate",
-        VIDEO_BITRATE,
+        _VIDEO_BITRATE,
         "-cq",
         "18",
     ],

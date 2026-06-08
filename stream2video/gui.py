@@ -32,6 +32,7 @@ from stream2video.config import (
     coerce_typed_value,
     effective_defaults,
     save_user_defaults,
+    settings_path,
     user_defaults_path,
 )
 from stream2video.download import DownloadCancelledError, DownloadError, download
@@ -1040,13 +1041,25 @@ class Stream2VideoGUI(ctk.CTk):
         < / > buttons."""
         ctrl = bool(event.state & 0x4)  # ControlMask bit
         if event.num == 4:
-            self._waveform_pan(0.25) if ctrl else self._waveform_zoom_by(0.8)
+            if ctrl:
+                self._waveform_pan(0.25)
+            else:
+                self._waveform_zoom_by(0.8)
         elif event.num == 5:
-            self._waveform_pan(-0.25) if ctrl else self._waveform_zoom_by(1.25)
+            if ctrl:
+                self._waveform_pan(-0.25)
+            else:
+                self._waveform_zoom_by(1.25)
         elif event.delta > 0:
-            self._waveform_pan(0.25) if ctrl else self._waveform_zoom_by(0.8)
+            if ctrl:
+                self._waveform_pan(0.25)
+            else:
+                self._waveform_zoom_by(0.8)
         elif event.delta < 0:
-            self._waveform_pan(-0.25) if ctrl else self._waveform_zoom_by(1.25)
+            if ctrl:
+                self._waveform_pan(-0.25)
+            else:
+                self._waveform_zoom_by(1.25)
 
     def _on_waveform_drag_start(self, event):
         """Begin a left-click drag: record the press position and the
@@ -1412,11 +1425,11 @@ class Stream2VideoGUI(ctk.CTk):
         def _run():
             try:
                 ok = check_encoder(enc)
-                self._log(f"  {enc}: {'[OK]' if ok else 'NO'}")
+                self.after(0, lambda: self._log(f"  {enc}: {'[OK]' if ok else 'NO'}"))
             except FileNotFoundError:
-                self._log(f"  {enc}: ffmpeg not found in PATH")
+                self.after(0, lambda: self._log(f"  {enc}: ffmpeg not found in PATH"))
             except Exception as e:
-                self._log(f"  {enc}: ERROR ({e})")
+                self.after(0, lambda: self._log(f"  {enc}: ERROR ({e})"))
                 logger.exception("Encoder test crashed")
             finally:
                 self._test_running = False
@@ -1540,17 +1553,11 @@ class Stream2VideoGUI(ctk.CTk):
             self._log("Step 1/3: Downloading / resolving video...")
             self._ui_overall_elapsed_only()
 
-            def dl_prog(frac: float, text: str):
-                self._ui_progress(frac * 0.05)
-                self._ui_status(f"Step 1/3: Downloading... {text}")
-                self._ui_overall_elapsed_only()
-
             try:
                 download_result = download(
                     input_raw,
                     output_dir,
                     cancel_callback=lambda: self._cancel_event.is_set(),
-                    progress_callback=dl_prog,
                 )
                 video_path = download_result.path
             except DownloadCancelledError:
@@ -2390,10 +2397,7 @@ class Stream2VideoGUI(ctk.CTk):
     # ── Settings Persistence ─────────────────────────────────────
 
     def _settings_path(self) -> Path:
-        portable = Path(__file__).parent.parent / "_portable"
-        if portable.exists():
-            return portable / "settings.json"
-        return Path(__file__).parent.parent / "gui_settings.json"
+        return settings_path()
 
     def _save_settings(self):
         self.config["input_path"] = self.entry_input.get().strip()

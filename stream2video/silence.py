@@ -380,17 +380,15 @@ def detect_silence_stream(
 
     segments: list[SilenceSegment] = []
     pending_start: float | None = None
-    start_re = re.compile(rf"silence_start:\s*({_NUM})")
-    end_re = re.compile(rf"silence_end:\s*({_NUM})")
 
     try:
         for raw in iter(pipe.readline, b""):
             line = raw.decode("utf-8", errors="replace")
-            m_s = start_re.search(line)
+            m_s = _SILENCE_START_RE.search(line)
             if m_s:
                 pending_start = float(m_s.group(1))
                 continue
-            m_e = end_re.search(line)
+            m_e = _SILENCE_END_RE.search(line)
             if m_e and pending_start is not None:
                 segments.append(SilenceSegment(pending_start, float(m_e.group(1))))
                 pending_start = None
