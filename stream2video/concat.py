@@ -675,7 +675,7 @@ def _run_batch_concat(
         with open(list_path, "w", encoding="utf-8") as lf:
             for ci in range(n_chunks):
                 cp = batch_dir / f"chunk_{ci:04d}.mp4"
-                lf.write(f"file {_quote_concat_path(cp.as_posix())}\n")
+                lf.write(f"file {_quote_concat_path(cp.name)}\n")
 
         def _concat_prog(us: int):
             if progress_callback and total_duration > 0:

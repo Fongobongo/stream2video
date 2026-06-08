@@ -380,8 +380,8 @@ def detect_silence_stream(
 
     segments: list[SilenceSegment] = []
     pending_start: float | None = None
-    start_re = re.compile(r"silence_start:\s*(-?\d+\.?\d*)")
-    end_re = re.compile(r"silence_end:\s*(-?\d+\.?\d*)")
+    start_re = re.compile(rf"silence_start:\s*({_NUM})")
+    end_re = re.compile(rf"silence_end:\s*({_NUM})")
 
     try:
         for raw in iter(pipe.readline, b""):
@@ -585,8 +585,13 @@ def _run_silencedetect(
         ):
             return
         try:
-            _save_resume_cache(
-                resume_save_path, input_path, progressive_segments, resume_save_config
+            _save_cache(
+                resume_save_path,
+                input_path,
+                progressive_segments,
+                resume_save_config,
+                indent=None,
+                fsync=False,
             )
             last_save_time[0] = now
             last_save_count[0] = new_count
@@ -697,7 +702,6 @@ def _extract_audio_wav(
 
     set_active_process(process)
     stderr_pipe = process.stderr
-    stdout_pipe = process.stdout
     assert stderr_pipe is not None
     stderr_lines: list[str] = []
     wait_for_drain = drain_stderr_lines(stderr_pipe, stderr_lines)
@@ -726,8 +730,6 @@ def _extract_audio_wav(
         if not drain_done:
             wait_for_drain()
         set_active_process(None)
-        if stdout_pipe is not None:
-            stdout_pipe.close()
         stderr_pipe.close()
 
 
@@ -852,18 +854,25 @@ def _get_cache_path(video_path: Path, output_dir: Path) -> Path:
     return output_dir / f"{video_path.stem}_silence_cache.json"
 
 
-def _save_silence_cache_to_path(
+def _save_cache(
     cache_path: Path,
     video_path: Path,
     segments: list[SilenceSegment],
     config: dict,
+    *,
+    indent: int | None = 2,
+    fsync: bool = True,
 ) -> None:
-    """Atomically write the silence cache to `cache_path`.
+    """Atomically write a silence cache to `cache_path`.
 
-    Used by `save_silence_cache` (final, after detection). The temp
-    file is created in the same directory as `cache_path` so
+    The temp file is created in the same directory as `cache_path` so
     `os.replace` is atomic on the same filesystem. Parent directories
     are created if needed.
+
+    Args:
+        indent: JSON indent level (None for compact, default 2).
+        fsync: Whether to fsync after writing (True for final cache,
+               False for ephemeral resume checkpoints).
     """
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     data = {
@@ -880,9 +889,10 @@ def _save_silence_cache_to_path(
     )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
+            json.dump(data, f, indent=indent)
+            if fsync:
+                f.flush()
+                os.fsync(f.fileno())
         os.replace(tmp_path, cache_path)
     except Exception:
         try:
@@ -899,7 +909,7 @@ def save_silence_cache(
     config: dict,
 ):
     cache_path = _get_cache_path(video_path, output_dir)
-    _save_silence_cache_to_path(cache_path, video_path, segments, config)
+    _save_cache(cache_path, video_path, segments, config)
     logger.info(f"Silence cache saved to {cache_path}")
 
 
@@ -929,20 +939,11 @@ def _load_silence_cache_from_path(
 ) -> list[SilenceSegment] | None:
     """Load and validate a silence cache file at `cache_path`.
 
-    Returns the raw (pre-margin) segments on success, ``None`` on any
+    Returns the margin-applied segments on success, ``None`` on any
     failure: file missing, source newer than cache, malformed JSON,
-    config mismatch, or malformed segments. Used by both the final
-    cache (via `load_silence_cache`) and the resume cache (via
-    `detect_silence(resume_cache_path=...)`).
-
-    Returns raw segments (no margin applied) because both the final
-    and resume caches already store margin-applied results — but for
-    resume we want pre-margin so the new ffmpeg run can concatenate
-    raw + new without double-applying margin. `load_silence_cache`'s
-    callers happen to want margin'd, so they call `_apply_margin`
-    themselves; the resume path leaves it as-is. The data on disk
-    is identical in both cases — it's the consumer that decides
-    whether to apply margin.
+    config mismatch, or malformed segments. The final cache stores
+    margin-applied results; for resume, the caller uses the raw
+    progressive_segments directly (no cache load).
     """
     if not cache_path.exists():
         return None
@@ -974,48 +975,3 @@ def _get_resume_cache_path(video_path: Path, output_dir: Path) -> Path:
     makes it easy to find for cleanup.
     """
     return output_dir / f"{video_path.stem}_silence_cache.json.resume"
-
-
-def _save_resume_cache(
-    cache_path: Path,
-    video_path: Path,
-    segments: list[SilenceSegment],
-    config: dict,
-) -> None:
-    """Atomically write a resume cache (throttled, ephemeral, no fsync).
-
-    Used by `detect_silence` to checkpoint in-progress detection so a
-    crash or cancel can pick up from the last throttled save instead
-    of restarting from zero. The segments are stored raw (pre-margin) —
-    margin is applied once at the very end of the pipeline, so storing
-    it here keeps the resume transparent regardless of how much
-    progress was captured.
-
-    No fsync and no indent: the file is ephemeral (next run reads it
-    once and unlinks it), and we save on a hot path. Atomicity via
-    temp + replace is enough — a power loss drops the latest checkpoint
-    at worst.
-    """
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    data = {
-        "source": video_path.name,
-        "config": {
-            "threshold": config.get("threshold"),
-            "min_silence": config.get("min_silence"),
-            "margin": config.get("margin"),
-        },
-        "segments": [{"start": s.start, "end": s.end} for s in segments],
-    }
-    fd, tmp_path = tempfile.mkstemp(
-        dir=cache_path.parent, prefix=f".{cache_path.name}.", suffix=".tmp"
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-        os.replace(tmp_path, cache_path)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise

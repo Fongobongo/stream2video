@@ -21,7 +21,7 @@ from stream2video.silence import (
     _is_wav_cache_valid,
     _load_silence_cache_from_path,
     _sample_segments_match,
-    _save_resume_cache,
+    _save_cache,
     detect_silence,
     detect_silence_stream,
     segments_match,
@@ -1070,7 +1070,7 @@ class TestResumeCacheHelpers:
             cache = _get_resume_cache_path(video, Path(tmp))
 
             segs = [SilenceSegment(1.0, 2.5), SilenceSegment(10.0, 12.0)]
-            _save_resume_cache(cache, video, segs, self._config())
+            _save_cache(cache, video, segs, self._config(), indent=None, fsync=False)
 
             loaded = _load_silence_cache_from_path(cache, video, self._config())
             assert loaded is not None
@@ -1089,7 +1089,9 @@ class TestResumeCacheHelpers:
             video = Path(tmp) / "video.mp4"
             video.write_text("dummy")
             cache = _get_resume_cache_path(video, Path(tmp))
-            _save_resume_cache(cache, video, [SilenceSegment(1.0, 2.0)], self._config())
+            _save_cache(
+                cache, video, [SilenceSegment(1.0, 2.0)], self._config(), indent=None, fsync=False
+            )
             # Bump the video mtime past the cache mtime.
             os.utime(video, (time.time() + 100, time.time() + 100))
             assert _load_silence_cache_from_path(cache, video, self._config()) is None
@@ -1108,7 +1110,9 @@ class TestResumeCacheHelpers:
             video = Path(tmp) / "video.mp4"
             video.write_text("dummy")
             cache = _get_resume_cache_path(video, Path(tmp))
-            _save_resume_cache(cache, video, [SilenceSegment(1.0, 2.0)], self._config())
+            _save_cache(
+                cache, video, [SilenceSegment(1.0, 2.0)], self._config(), indent=None, fsync=False
+            )
             # Different threshold on the read side.
             wrong = {"threshold": -30, "min_silence": 0.5, "margin": 0.0}
             assert _load_silence_cache_from_path(cache, video, wrong) is None
@@ -1131,8 +1135,12 @@ class TestResumeCacheHelpers:
             video.write_text("dummy")
             cache = _get_resume_cache_path(video, Path(tmp))
 
-            _save_resume_cache(cache, video, [SilenceSegment(1.0, 2.0)], self._config())
-            _save_resume_cache(cache, video, [SilenceSegment(5.0, 6.0)], self._config())
+            _save_cache(
+                cache, video, [SilenceSegment(1.0, 2.0)], self._config(), indent=None, fsync=False
+            )
+            _save_cache(
+                cache, video, [SilenceSegment(5.0, 6.0)], self._config(), indent=None, fsync=False
+            )
             loaded = _load_silence_cache_from_path(cache, video, self._config())
             assert loaded is not None
             assert len(loaded) == 1
@@ -1182,8 +1190,13 @@ class TestResumeEndToEnd:
         """Write a resume cache file and ensure its mtime is newer than
         the video's, so the load validation accepts it as fresh."""
         video.write_text("dummy")
-        _save_resume_cache(
-            cache, video, segments, {"threshold": -20, "min_silence": 0.5, "margin": 0.0}
+        _save_cache(
+            cache,
+            video,
+            segments,
+            {"threshold": -20, "min_silence": 0.5, "margin": 0.0},
+            indent=None,
+            fsync=False,
         )
         os.utime(video, (1000, 1000))
         os.utime(cache, (2000, 2000))
@@ -1278,11 +1291,13 @@ class TestResumeEndToEnd:
             video = Path(tmp) / "video.mp4"
             cache = _get_resume_cache_path(video, Path(tmp))
             video.write_text("dummy")
-            _save_resume_cache(
+            _save_cache(
                 cache,
                 video,
                 [SilenceSegment(1.0, 2.0)],
                 {"threshold": -20, "min_silence": 0.5, "margin": 0.0},
+                indent=None,
+                fsync=False,
             )
             # Make the cache OLDER than the video.
             os.utime(cache, (500, 500))
@@ -1320,11 +1335,13 @@ class TestResumeEndToEnd:
             cache = _get_resume_cache_path(video, Path(tmp))
             video.write_text("dummy")
             # Cache stored with threshold=-30.
-            _save_resume_cache(
+            _save_cache(
                 cache,
                 video,
                 [SilenceSegment(1.0, 2.0)],
                 {"threshold": -30, "min_silence": 0.5, "margin": 0.0},
+                indent=None,
+                fsync=False,
             )
             os.utime(video, (1000, 1000))
             os.utime(cache, (2000, 2000))
@@ -1362,11 +1379,13 @@ class TestResumeEndToEnd:
             video = Path(tmp) / "video.mp4"
             cache = _get_resume_cache_path(video, Path(tmp))
             video.write_text("dummy")
-            _save_resume_cache(
+            _save_cache(
                 cache,
                 video,
                 [],  # no segments yet
                 {"threshold": -20, "min_silence": 0.5, "margin": 0.0},
+                indent=None,
+                fsync=False,
             )
             os.utime(video, (1000, 1000))
             os.utime(cache, (2000, 2000))
@@ -1433,11 +1452,13 @@ class TestResumeEndToEnd:
             video.write_text("dummy")
             # Stale mtimes: validation will fail, but the file is still
             # unlinked at the end.
-            _save_resume_cache(
+            _save_cache(
                 cache,
                 video,
                 [SilenceSegment(1.0, 2.0)],
                 {"threshold": -20, "min_silence": 0.5, "margin": 0.0},
+                indent=None,
+                fsync=False,
             )
             os.utime(cache, (500, 500))
             os.utime(video, (2000, 2000))

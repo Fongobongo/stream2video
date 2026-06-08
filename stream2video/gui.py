@@ -2163,13 +2163,14 @@ class Stream2VideoGUI(ctk.CTk):
                         f"margin={config['margin']}s — skipping detect"
                     )
                     return
-                # Apply margin here so the overlay always matches what
-                # cut_and_concat will see. The live store holds raw
-                # (pre-margin) segments during detect; the cache holds
-                # the canonical margin'd list. _apply_margin is a no-op
-                # for the cached case (already margin'd, but the second
-                # pass is idempotent for non-overlapping segments).
-                segments = _apply_margin(raw_segments, margin)
+                # Apply margin so the overlay matches cut_and_concat.
+                # The live store holds raw (pre-margin) segments during
+                # detect; the cache holds the canonical margin-applied
+                # list — only apply margin for the live (raw) source.
+                if live_segs is not None:
+                    segments = _apply_margin(raw_segments, margin)
+                else:
+                    segments = raw_segments
                 if live_segs is not None:
                     self._log(
                         f"  Loaded {len(live_segs)} silences from live store "

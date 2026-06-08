@@ -81,7 +81,6 @@ def _is_local_file(path_str: str) -> bool:
         return False
 
 
-_CANCEL_POLL_INTERVAL = CANCEL_POLL_INTERVAL
 _DOWNLOAD_TIMEOUT = 28800
 
 _VIDEO_EXTENSIONS = frozenset(
@@ -253,7 +252,7 @@ def download(
                 process.kill()
                 raise DownloadTimeoutError(f"Download timeout after {_DOWNLOAD_TIMEOUT}s")
             try:
-                process.wait(timeout=min(_CANCEL_POLL_INTERVAL, remaining))
+                process.wait(timeout=min(CANCEL_POLL_INTERVAL, remaining))
             except subprocess.TimeoutExpired:
                 pass
 
