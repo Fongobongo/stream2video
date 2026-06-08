@@ -16,7 +16,6 @@ from __future__ import annotations
 import math
 import struct
 import subprocess
-import wave
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -56,75 +55,6 @@ _DB_AXIS_STEP = 10  # tick every 10 dB
 # Minimum on-screen amplitude (peaks below this are pinned to the bottom
 # of the plot — they're effectively silence anyway).
 _DB_FLOOR = 1e-4  # = -80 dB
-
-
-def read_waveform_peaks(wav_path: Path, target_buckets: int) -> list[float]:
-    """Read a 16-bit PCM mono (or stereo) WAV and return ``target_buckets`` peak values.
-
-    Each returned value is the max-abs amplitude (in [-1, 1]) of one
-    bucket of samples. Empty WAVs return an empty list. The result is
-    suitable for symmetric waveform rendering (a positive and a negative
-    bar centered on the canvas midline).
-
-    Reads in fixed-size chunks to keep peak memory at one chunk's worth
-    of samples (~64 KB per chunk) regardless of input length. Stereo
-    inputs are mixed to mono by taking the max-abs across channels.
-    Returns ``[]`` for missing files or non-16-bit formats — the caller
-    can show an 'audio not available' state without exception handling.
-    """
-    if target_buckets <= 0 or not wav_path.is_file():
-        return []
-    with wave.open(str(wav_path), "rb") as w:
-        n_channels = w.getnchannels()
-        sampwidth = w.getsampwidth()
-        n_frames = w.getnframes()
-        if n_frames == 0 or n_channels == 0 or sampwidth != 2:
-            return []
-
-        # Bucket size: how many INPUT frames feed into one output peak.
-        # Use ceiling so the last bucket may be slightly larger (a tail
-        # of silence is fine — the last peak is just less averaged).
-        bucket_size = max(1, math.ceil(n_frames / target_buckets))
-
-        # Per channel, the audio WAV from the project is always mono
-        # (n_channels == 1). If someone hands us stereo, mix to mono
-        # by taking the max-abs across channels for each sample.
-        chunk_frames = max(bucket_size, 4096)
-
-        peaks: list[float] = []
-        remaining = n_frames
-        bucket_acc = 0
-        bucket_count = 0
-
-        while remaining > 0:
-            to_read = min(chunk_frames, remaining)
-            raw = w.readframes(to_read)
-            if not raw:
-                break
-            n_samples = len(raw) // sampwidth
-            # Build the format string per-chunk to match the actual count.
-            samples = struct.unpack(f"<{n_samples}h", raw)
-            for i in range(0, len(samples), n_channels):
-                if n_channels == 1:
-                    s = samples[i]
-                else:
-                    s = max(samples[i : i + n_channels], key=abs)
-                bucket_acc = max(bucket_acc, abs(s))
-                bucket_count += 1
-                if bucket_count >= bucket_size:
-                    peaks.append(bucket_acc / 32768.0)
-                    bucket_acc = 0
-                    bucket_count = 0
-            remaining -= to_read
-
-        # Tail bucket (partial) — flush whatever was accumulated.
-        if bucket_count > 0:
-            peaks.append(bucket_acc / 32768.0)
-
-        # If we somehow got fewer buckets than requested, the WAV is
-        # shorter than ``target_buckets`` samples — that's fine, callers
-        # treat the result as proportional to duration.
-        return peaks
 
 
 def read_peaks_from_stream(

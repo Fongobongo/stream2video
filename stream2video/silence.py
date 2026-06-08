@@ -300,7 +300,7 @@ def detect_silence(
             resume_save_config=current_config,
         )
 
-    segments = _apply_margin(segments, margin)
+    segments = apply_margin(segments, margin)
 
     if not segments:
         logger.info("No silence segments detected (video may have no audio track)")
@@ -774,7 +774,7 @@ def _sample_segments_match(
     )
 
 
-def _apply_margin(segments: list[SilenceSegment], margin: float) -> list[SilenceSegment]:
+def apply_margin(segments: list[SilenceSegment], margin: float) -> list[SilenceSegment]:
     """Apply margin and merge overlapping segments.
 
     Positive margin shrinks silence (keep more audio around phrases).
@@ -937,11 +937,4 @@ def _load_silence_cache_from_path(
         return None
 
 
-def _get_resume_cache_path(video_path: Path, output_dir: Path) -> Path:
-    """Path of the resume cache for `video_path` next to the final cache.
 
-    Format: ``{stem}_silence_cache.json.resume``. The `.resume` suffix
-    keeps it visually separate from the canonical final cache and
-    makes it easy to find for cleanup.
-    """
-    return output_dir / f"{video_path.stem}_silence_cache.json.resume"

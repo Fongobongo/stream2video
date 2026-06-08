@@ -1,5 +1,6 @@
 """Tests for stream2video.waveform — pure rendering helpers."""
 
+import math
 import struct
 import wave
 from pathlib import Path
@@ -13,19 +14,14 @@ from stream2video.silence import SilenceSegment
 from stream2video.waveform import (
     DB_AXIS_WIDTH,
     read_peaks_from_stream,
-    read_waveform_peaks,
     render_waveform_image,
     silence_pixel_ranges,
     slice_peaks_by_time,
 )
 
-# ── read_waveform_peaks ────────────────────────────────────────
-
 
 def _write_sine_wav(path: Path, duration_s: float = 1.0, sr: int = 16000, amp: int = 16000) -> None:
     """Write a 1-channel 16-bit PCM WAV containing a sine wave."""
-    import math
-
     n = int(duration_s * sr)
     with wave.open(str(path), "wb") as w:
         w.setnchannels(1)
@@ -36,95 +32,6 @@ def _write_sine_wav(path: Path, duration_s: float = 1.0, sr: int = 16000, amp: i
             sample = int(amp * math.sin(2 * math.pi * 440 * i / sr))
             frames += struct.pack("<h", max(-32768, min(32767, sample)))
         w.writeframes(bytes(frames))
-
-
-def test_read_peaks_empty_path(tmp_path: Path):
-    """Missing file -> empty list (the caller should treat as 'no data')."""
-    assert read_waveform_peaks(tmp_path / "missing.wav", 100) == []
-
-
-def test_read_peaks_handles_missing_file_without_raising(tmp_path: Path):
-    """The reader must not raise on a missing path — return [] so the GUI
-    can show an 'audio not available' state instead of a crash dialog."""
-    import pytest as _pytest
-
-    # If the function ever changes to raise, this test will catch it.
-    try:
-        result = read_waveform_peaks(tmp_path / "does_not_exist.wav", 50)
-    except FileNotFoundError:
-        _pytest.fail("read_waveform_peaks should not raise on missing path")
-    assert result == []
-
-
-def test_read_peaks_zero_buckets(tmp_path: Path):
-    p = tmp_path / "x.wav"
-    _write_sine_wav(p, duration_s=0.5)
-    assert read_waveform_peaks(p, 0) == []
-
-
-def test_read_peaks_short_wav_returns_proportional_count(tmp_path: Path):
-    p = tmp_path / "x.wav"
-    # 0.1s @ 16kHz = 1600 samples; ask for 100 buckets, expect ~100 peaks
-    # but cap at n_frames / bucket_size = 1, so up to 1600 peaks.
-    _write_sine_wav(p, duration_s=0.1)
-    peaks = read_waveform_peaks(p, 100)
-    assert 0 < len(peaks) <= 1600
-    assert all(0.0 <= v <= 1.0 for v in peaks)
-
-
-def test_read_peaks_dense_sine_nonzero(tmp_path: Path):
-    """A loud sine should produce non-trivial peak values everywhere."""
-    p = tmp_path / "x.wav"
-    _write_sine_wav(p, duration_s=0.5, amp=30000)
-    peaks = read_waveform_peaks(p, 50)
-    assert len(peaks) == 50
-    # Sine of full amp gives peaks around 30000/32768 ~ 0.91
-    assert max(peaks) > 0.5
-
-
-def test_read_peaks_silent_wav_returns_zeros(tmp_path: Path):
-    p = tmp_path / "x.wav"
-    # Zero-amplitude sine is silence.
-    _write_sine_wav(p, duration_s=0.5, amp=0)
-    peaks = read_waveform_peaks(p, 20)
-    assert peaks  # buckets present
-    assert all(v == 0.0 for v in peaks)
-
-
-def test_read_peaks_stereo_mixed_to_mono(tmp_path: Path):
-    """Stereo WAVs are mixed to mono via max-abs across channels.
-
-    A stereo file with one silent and one loud channel should still
-    produce non-zero peaks (we don't want to throw away the loud side).
-    """
-    p = tmp_path / "stereo.wav"
-    n_frames = 8000
-    with wave.open(str(p), "wb") as w:
-        w.setnchannels(2)
-        w.setsampwidth(2)
-        w.setframerate(16000)
-        # L = silence (0), R = loud 16k amplitude square wave.
-        frames = bytearray()
-        for i in range(n_frames):
-            left = 0
-            right = 16000 if (i // 100) % 2 == 0 else -16000
-            frames += struct.pack("<hh", left, right)
-        w.writeframes(bytes(frames))
-    peaks = read_waveform_peaks(p, 20)
-    assert len(peaks) == 20
-    # Max-abs is ~16000/32768 ~ 0.49
-    assert max(peaks) > 0.3
-
-
-def test_read_peaks_empty_wav_returns_empty(tmp_path: Path):
-    """Zero-frame WAVs are valid input — return an empty peak list."""
-    p = tmp_path / "empty.wav"
-    with wave.open(str(p), "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(16000)
-        w.writeframes(b"")
-    assert read_waveform_peaks(p, 10) == []
 
 
 # ── silence_pixel_ranges ──────────────────────────────────────

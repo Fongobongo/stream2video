@@ -15,13 +15,12 @@ from stream2video.silence import (
     SilenceCancelledError,
     SilenceDetectionError,
     SilenceSegment,
-    _apply_margin,
-    _get_resume_cache_path,
     _get_wav_cache_path,
     _is_wav_cache_valid,
     _load_silence_cache_from_path,
     _sample_segments_match,
     _save_cache,
+    apply_margin,
     detect_silence,
     detect_silence_stream,
 )
@@ -51,12 +50,12 @@ class TestApplyMargin:
     """Test margin application."""
 
     def test_empty_list(self):
-        result = _apply_margin([], 0.5)
+        result = apply_margin([], 0.5)
         assert result == []
 
     def test_single_segment_no_margin(self):
         seg = SilenceSegment(2.0, 4.0)
-        result = _apply_margin([seg], 0)
+        result = apply_margin([seg], 0)
         assert len(result) == 1
         assert result[0].start == 2.0
         assert result[0].end == 4.0
@@ -64,7 +63,7 @@ class TestApplyMargin:
     def test_positive_margin_shrinks(self):
         """Positive margin shrinks silence (keeps more audio)."""
         seg = SilenceSegment(2.0, 4.0)
-        result = _apply_margin([seg], 0.5)
+        result = apply_margin([seg], 0.5)
         assert len(result) == 1
         assert result[0].start == 2.5  # 2.0 + 0.5
         assert result[0].end == 3.5  # 4.0 - 0.5
@@ -72,7 +71,7 @@ class TestApplyMargin:
     def test_negative_margin_expands(self):
         """Negative margin expands silence (removes more audio)."""
         seg = SilenceSegment(2.0, 4.0)
-        result = _apply_margin([seg], -0.5)
+        result = apply_margin([seg], -0.5)
         assert len(result) == 1
         assert result[0].start == 1.5  # 2.0 - 0.5
         assert result[0].end == 4.5  # 4.0 + 0.5
@@ -80,7 +79,7 @@ class TestApplyMargin:
     def test_margin_clamps_to_zero(self):
         """Shrinking must not produce negative start time."""
         seg = SilenceSegment(0.3, 1.0)
-        result = _apply_margin([seg], 0.5)
+        result = apply_margin([seg], 0.5)
         # After shrink: start=0.8, end=0.5 → start>end → filtered out
         assert len(result) == 0
 
@@ -88,7 +87,7 @@ class TestApplyMargin:
         """Negative margin expands segments that then overlap and merge."""
         seg1 = SilenceSegment(1.0, 2.5)
         seg2 = SilenceSegment(2.0, 3.5)
-        result = _apply_margin([seg1, seg2], -0.3)
+        result = apply_margin([seg1, seg2], -0.3)
         # seg1: 0.7-2.8, seg2: 1.7-3.8 → overlap → merge to 0.7-3.8
         assert len(result) == 1
         assert result[0].start == 0.7
@@ -97,7 +96,7 @@ class TestApplyMargin:
     def test_non_overlapping_segments_preserved(self):
         seg1 = SilenceSegment(1.0, 2.0)
         seg2 = SilenceSegment(4.0, 5.0)
-        result = _apply_margin([seg1, seg2], 0.2)
+        result = apply_margin([seg1, seg2], 0.2)
         assert len(result) == 2
         assert result[0].start == 1.2
         assert result[0].end == 1.8
@@ -1022,7 +1021,7 @@ class TestResumeCacheHelpers:
         with TemporaryDirectory() as tmp:
             video = Path(tmp) / "video.mp4"
             video.write_text("dummy")
-            cache = _get_resume_cache_path(video, Path(tmp))
+            cache = Path(tmp) / f"{video.stem}_silence_cache.json.resume"
 
             segs = [SilenceSegment(1.0, 2.5), SilenceSegment(10.0, 12.0)]
             _save_cache(cache, video, segs, self._config(), indent=None, fsync=False)
@@ -1043,7 +1042,7 @@ class TestResumeCacheHelpers:
         with TemporaryDirectory() as tmp:
             video = Path(tmp) / "video.mp4"
             video.write_text("dummy")
-            cache = _get_resume_cache_path(video, Path(tmp))
+            cache = Path(tmp) / f"{video.stem}_silence_cache.json.resume"
             _save_cache(
                 cache, video, [SilenceSegment(1.0, 2.0)], self._config(), indent=None, fsync=False
             )
@@ -1055,7 +1054,7 @@ class TestResumeCacheHelpers:
         with TemporaryDirectory() as tmp:
             video = Path(tmp) / "video.mp4"
             video.write_text("dummy")
-            cache = _get_resume_cache_path(video, Path(tmp))
+            cache = Path(tmp) / f"{video.stem}_silence_cache.json.resume"
             cache.write_text("{not valid json")
             assert _load_silence_cache_from_path(cache, video, self._config()) is None
 
@@ -1064,7 +1063,7 @@ class TestResumeCacheHelpers:
         with TemporaryDirectory() as tmp:
             video = Path(tmp) / "video.mp4"
             video.write_text("dummy")
-            cache = _get_resume_cache_path(video, Path(tmp))
+            cache = Path(tmp) / f"{video.stem}_silence_cache.json.resume"
             _save_cache(
                 cache, video, [SilenceSegment(1.0, 2.0)], self._config(), indent=None, fsync=False
             )
@@ -1076,7 +1075,7 @@ class TestResumeCacheHelpers:
         with TemporaryDirectory() as tmp:
             video = Path(tmp) / "video.mp4"
             video.write_text("dummy")
-            cache = _get_resume_cache_path(video, Path(tmp))
+            cache = Path(tmp) / f"{video.stem}_silence_cache.json.resume"
             cache.write_text(
                 '{"config": {"threshold": -20, "min_silence": 0.5, "margin": 0}, "segments": [{"start": 1.0}]}'
             )  # missing 'end'
@@ -1088,7 +1087,7 @@ class TestResumeCacheHelpers:
         with TemporaryDirectory() as tmp:
             video = Path(tmp) / "video.mp4"
             video.write_text("dummy")
-            cache = _get_resume_cache_path(video, Path(tmp))
+            cache = Path(tmp) / f"{video.stem}_silence_cache.json.resume"
 
             _save_cache(
                 cache, video, [SilenceSegment(1.0, 2.0)], self._config(), indent=None, fsync=False
@@ -1161,7 +1160,7 @@ class TestResumeEndToEnd:
         and the returned list is initial + new (raw, pre-margin)."""
         with TemporaryDirectory() as tmp:
             video = Path(tmp) / "video.mp4"
-            cache = _get_resume_cache_path(video, Path(tmp))
+            cache = Path(tmp) / f"{video.stem}_silence_cache.json.resume"
             initial = [SilenceSegment(1.0, 2.0), SilenceSegment(10.0, 12.0)]
             self._write_resume_cache(video, cache, initial)
 
@@ -1206,7 +1205,7 @@ class TestResumeEndToEnd:
         begins."""
         with TemporaryDirectory() as tmp:
             video = Path(tmp) / "video.mp4"
-            cache = _get_resume_cache_path(video, Path(tmp))
+            cache = Path(tmp) / f"{video.stem}_silence_cache.json.resume"
             initial = [SilenceSegment(1.0, 2.0), SilenceSegment(10.0, 12.0)]
             self._write_resume_cache(video, cache, initial)
 
@@ -1244,7 +1243,7 @@ class TestResumeEndToEnd:
         """Cache mtime < video mtime → ignored, full fresh run from t=0."""
         with TemporaryDirectory() as tmp:
             video = Path(tmp) / "video.mp4"
-            cache = _get_resume_cache_path(video, Path(tmp))
+            cache = Path(tmp) / f"{video.stem}_silence_cache.json.resume"
             video.write_text("dummy")
             _save_cache(
                 cache,
@@ -1287,7 +1286,7 @@ class TestResumeEndToEnd:
         run used different parameters)."""
         with TemporaryDirectory() as tmp:
             video = Path(tmp) / "video.mp4"
-            cache = _get_resume_cache_path(video, Path(tmp))
+            cache = Path(tmp) / f"{video.stem}_silence_cache.json.resume"
             video.write_text("dummy")
             # Cache stored with threshold=-30.
             _save_cache(
@@ -1332,7 +1331,7 @@ class TestResumeEndToEnd:
         callback pre-seed; only the new segments are reported."""
         with TemporaryDirectory() as tmp:
             video = Path(tmp) / "video.mp4"
-            cache = _get_resume_cache_path(video, Path(tmp))
+            cache = Path(tmp) / f"{video.stem}_silence_cache.json.resume"
             video.write_text("dummy")
             _save_cache(
                 cache,
@@ -1403,7 +1402,7 @@ class TestResumeEndToEnd:
         a retry inside the same call from re-loading it."""
         with TemporaryDirectory() as tmp:
             video = Path(tmp) / "video.mp4"
-            cache = _get_resume_cache_path(video, Path(tmp))
+            cache = Path(tmp) / f"{video.stem}_silence_cache.json.resume"
             video.write_text("dummy")
             # Stale mtimes: validation will fail, but the file is still
             # unlinked at the end.

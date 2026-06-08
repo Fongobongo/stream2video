@@ -57,7 +57,6 @@ def _quote_concat_path(p: str) -> str:
 _VIDEO_BITRATE = "7000k"
 _AUDIO_BITRATE = "128k"
 _BATCH_CHUNK_SIZE = 40
-_BATCH_TIMEOUT = 28800
 ENCODER_CHECK_TIMEOUT = 10
 _FINAL_CONCAT_TIMEOUT = 86400
 _SEGMENT_ENCODE_TIMEOUT = 600
@@ -94,11 +93,6 @@ def cut_and_concat(
 
     vcodec, vcodec_opts = get_video_encoder(encoder)
     logger.info(f"Encoder: {vcodec} {vcodec_opts}")
-
-    if method not in ("segment", "batch"):
-        raise ConcatError(
-            f"Unknown method: {method!r} (use {' or '.join(repr(m) for m in VALID_METHODS)})"
-        )
 
     _run_with_fallback(
         video_path,

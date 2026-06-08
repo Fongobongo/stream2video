@@ -35,7 +35,15 @@ from stream2video.config import (
     settings_path,
     user_defaults_path,
 )
-from stream2video.download import DownloadCancelledError, DownloadError, download
+from stream2video.download import (
+    DiskSpaceError,
+    DownloadCancelledError,
+    DownloadError,
+    DownloadTimeoutError,
+    PermissionDeniedError,
+    VideoNotAvailableError,
+    download,
+)
 from stream2video.formatters import (
     fmt_clock_time,
     fmt_size,
@@ -54,7 +62,7 @@ from stream2video.silence import (
     SilenceCancelledError,
     SilenceDetectionError,
     SilenceSegment,
-    _apply_margin,
+    apply_margin,
     detect_silence,
     load_silence_cache,
     save_silence_cache,
@@ -1564,6 +1572,22 @@ class Stream2VideoGUI(ctk.CTk):
                 self._log("Download cancelled")
                 self._ui_status("Cancelled", force=True)
                 return
+            except VideoNotAvailableError as e:
+                self._log(f"[ERROR] Video unavailable: {e}")
+                self._ui_status("Failed: video unavailable", force=True)
+                return
+            except DownloadTimeoutError as e:
+                self._log(f"[ERROR] Download timed out: {e}")
+                self._ui_status("Failed: download timeout", force=True)
+                return
+            except DiskSpaceError as e:
+                self._log(f"[ERROR] Disk space error: {e}")
+                self._ui_status("Failed: insufficient disk space", force=True)
+                return
+            except PermissionDeniedError as e:
+                self._log(f"[ERROR] Permission denied: {e}")
+                self._ui_status("Failed: permission denied", force=True)
+                return
             except DownloadError as e:
                 self._log(f"[ERROR] Download failed: {e}")
                 self._ui_status(f"Failed: {e}", force=True)
@@ -2175,7 +2199,7 @@ class Stream2VideoGUI(ctk.CTk):
                 # detect; the cache holds the canonical margin-applied
                 # list — only apply margin for the live (raw) source.
                 if live_segs is not None:
-                    segments = _apply_margin(raw_segments, margin)
+                    segments = apply_margin(raw_segments, margin)
                 else:
                     segments = raw_segments
                 if live_segs is not None:
@@ -2288,7 +2312,7 @@ class Stream2VideoGUI(ctk.CTk):
         if segments is None and self._waveform_video_path is not None:
             raw = self._take_live_snapshot(self._waveform_video_path)
             if raw is not None:
-                segments = _apply_margin(raw, self._waveform_margin)
+                segments = apply_margin(raw, self._waveform_margin)
             elif self._waveform_last_segments:
                 # Live store miss (e.g., the pipeline keyed it under a
                 # resolved path that differs from the user-input path).
@@ -2364,7 +2388,7 @@ class Stream2VideoGUI(ctk.CTk):
             # pick it up and then stop polling.
             raw = self._take_live_snapshot(in_path)
             if raw is not None:
-                segments = _apply_margin(raw, margin)
+                segments = apply_margin(raw, margin)
                 if len(segments) != state["last_count"] or current_view != state["last_view"]:
                     self._apply_view(segments)
                     state["last_count"] = len(segments)
@@ -2374,7 +2398,7 @@ class Stream2VideoGUI(ctk.CTk):
 
         raw = self._take_live_snapshot(in_path)
         if raw is not None:
-            segments = _apply_margin(raw, margin)
+            segments = apply_margin(raw, margin)
             count_changed = len(segments) != state["last_count"]
             view_changed = current_view != state["last_view"]
             if count_changed or view_changed:

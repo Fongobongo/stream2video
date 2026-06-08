@@ -28,9 +28,13 @@ from stream2video.config import (
     VALID_METHODS,
 )
 from stream2video.download import (
+    DiskSpaceError,
     DownloadCancelledError,
     DownloadError,
+    DownloadTimeoutError,
+    PermissionDeniedError,
     URLValidationError,
+    VideoNotAvailableError,
     download,
 )
 from stream2video.paths import apply_per_video_dir
@@ -294,6 +298,22 @@ def main(
                 console.print(f"[red]Invalid input:[/red] {e}")
                 console.print("  Expected an http(s):// URL or an existing local file path.")
                 raise typer.Exit(2) from None
+            except VideoNotAvailableError as e:
+                console.print(f"[red]Video unavailable:[/red] {e}")
+                console.print("  The video may be private, deleted, or region-restricted.")
+                raise typer.Exit(1) from None
+            except DownloadTimeoutError as e:
+                console.print(f"[red]Download timed out:[/red] {e}")
+                console.print("  Try again later or check your connection.")
+                raise typer.Exit(1) from None
+            except DiskSpaceError as e:
+                console.print(f"[red]Disk space error:[/red] {e}")
+                console.print("  Free up disk space and try again.")
+                raise typer.Exit(1) from None
+            except PermissionDeniedError as e:
+                console.print(f"[red]Permission denied:[/red] {e}")
+                console.print("  Check file permissions and try again.")
+                raise typer.Exit(1) from None
             except DownloadError as e:
                 console.print(f"[red]Download failed:[/red] {e}")
                 logger.exception("Download error")
