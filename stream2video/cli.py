@@ -442,7 +442,11 @@ def main(
         raise typer.Exit(1) from e
 
     finally:
-        signal.signal(signal.SIGINT, prev_handler)
+        if prev_handler not in (signal.SIG_IGN, signal.SIG_DFL):
+            try:
+                signal.signal(signal.SIGINT, prev_handler)
+            except (OSError, ValueError):
+                pass
         if fh is not None:
             logger.removeHandler(fh)
             fh.close()

@@ -442,7 +442,7 @@ def _run_segment_concat(
 
         def _concat_prog(us: int):
             if progress_callback and total_duration > 0:
-                progress_callback(min(0.9 + (us / 1_000_000 / total_duration * 0.1), 1.0))
+                progress_callback(min(us / 1_000_000 / total_duration * 0.1, 0.1) + 0.9)
 
         _run_ffmpeg(
             [
@@ -668,7 +668,7 @@ def _run_batch_concat(
 
         def _concat_prog(us: int):
             if progress_callback and total_duration > 0:
-                progress_callback(min(0.9 + us / 1_000_000 / total_duration * 0.1, 1.0))
+                progress_callback(min(us / 1_000_000 / total_duration * 0.1, 0.1) + 0.9)
 
         _run_ffmpeg(
             [

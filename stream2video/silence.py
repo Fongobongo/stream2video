@@ -935,6 +935,3 @@ def _load_silence_cache_from_path(
     except (KeyError, TypeError, ValueError) as e:
         logger.warning(f"Invalid silence cache: {e}")
         return None
-
-
-

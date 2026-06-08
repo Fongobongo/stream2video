@@ -221,14 +221,16 @@ def download(
     try:
         deadline = time.monotonic() + _DOWNLOAD_TIMEOUT
         while True:
-            if cancel_callback and cancel_callback():
-                process.kill()
-                raise DownloadCancelledError("Download cancelled by user")
             if process.poll() is not None:
                 break
+            if cancel_callback and cancel_callback():
+                process.kill()
+                process.wait()
+                raise DownloadCancelledError("Download cancelled by user")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 process.kill()
+                process.wait()
                 raise DownloadTimeoutError(f"Download timeout after {_DOWNLOAD_TIMEOUT}s")
             try:
                 process.wait(timeout=min(CANCEL_POLL_INTERVAL, remaining))

@@ -55,6 +55,7 @@ _DB_AXIS_STEP = 10  # tick every 10 dB
 # Minimum on-screen amplitude (peaks below this are pinned to the bottom
 # of the plot — they're effectively silence anyway).
 _DB_FLOOR = 1e-4  # = -80 dB
+_WAVEFORM_TIMEOUT = 300  # seconds
 
 
 def read_peaks_from_stream(
@@ -113,9 +114,19 @@ def read_peaks_from_stream(
         return [], 0.0
 
     assert proc.stdout is not None
-    raw = proc.stdout.read()
+    try:
+        raw = proc.stdout.read()
+    except Exception:
+        proc.kill()
+        proc.wait()
+        return [], 0.0
     proc.stdout.close()
-    proc.wait()
+    try:
+        proc.wait(timeout=_WAVEFORM_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        return [], 0.0
     if proc.returncode != 0 or not raw:
         return [], 0.0
 
