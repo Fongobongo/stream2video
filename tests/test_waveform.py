@@ -8,10 +8,10 @@ import pytest
 
 pytest.importorskip("PIL", reason="waveform rendering requires Pillow ([gui] extra)")
 
+from stream2video.formatters import fmt_clock_time
 from stream2video.silence import SilenceSegment
 from stream2video.waveform import (
     DB_AXIS_WIDTH,
-    _format_clock,
     read_peaks_from_stream,
     read_waveform_peaks,
     render_waveform_image,
@@ -790,19 +790,19 @@ def test_render_below_threshold_overlay_draws_solid_edge():
         )
 
 
-# ── _format_clock (small helper, not exposed) ─────────────────
+# ── fmt_clock_time (shared helper, used by waveform time axis) ──
 
 
 def test_format_clock_seconds_only():
-    assert _format_clock(5) == "0:05"
+    assert fmt_clock_time(5) == "00:00:05"
 
 
 def test_format_clock_minutes_seconds():
-    assert _format_clock(125) == "2:05"
+    assert fmt_clock_time(125) == "00:02:05"
 
 
 def test_format_clock_hours_minutes_seconds():
-    assert _format_clock(3725) == "1:02:05"
+    assert fmt_clock_time(3725) == "01:02:05"
 
 
 # ── read_peaks_from_stream (ffmpeg pipe, no file) ─────────────

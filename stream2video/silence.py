@@ -28,7 +28,6 @@ from collections.abc import Callable
 from pathlib import Path
 
 from stream2video.utils import (
-    CANCEL_POLL_INTERVAL,
     cancel_monitor,
     drain_stderr_lines,
     no_window_kwargs,
@@ -65,7 +64,6 @@ class SilenceSegment:
         return f"SilenceSegment({self.start:.2f}s - {self.end:.2f}s, duration={self.duration:.2f}s)"
 
 
-_SILENCE_POLL_INTERVAL = CANCEL_POLL_INTERVAL
 _SILENCE_TIMEOUT = 36000
 _SEGMENT_MATCH_TOLERANCE = 0.05
 _SAMPLE_VERIFY_DURATION = 60.0
@@ -749,32 +747,6 @@ def _parse_ffmpeg_output(stderr: str) -> list[SilenceSegment]:
         )
 
     return [SilenceSegment(start, end) for start, end in zip(starts, ends, strict=False)]
-
-
-def segments_match(
-    seg_a: list[SilenceSegment],
-    seg_b: list[SilenceSegment],
-    tolerance: float = _SEGMENT_MATCH_TOLERANCE,
-) -> bool:
-    """True if two segment lists are equivalent within `tolerance` seconds.
-
-    Used to verify that the WAV-based detection (D) matches the video-based
-    detection (A). If they differ, the source likely has broken timestamps and
-    the caller should fall back to A's result and invalidate the WAV cache.
-    """
-    if len(seg_a) != len(seg_b):
-        return False
-
-    sorted_a = sorted([(s.start, s.end) for s in seg_a])
-    sorted_b = sorted([(s.start, s.end) for s in seg_b])
-
-    for (a_start, a_end), (b_start, b_end) in zip(sorted_a, sorted_b, strict=True):
-        if abs(a_start - b_start) > tolerance:
-            return False
-        if abs(a_end - b_end) > tolerance:
-            return False
-
-    return True
 
 
 def _sample_segments_match(

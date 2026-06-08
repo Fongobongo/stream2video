@@ -1429,7 +1429,7 @@ class Stream2VideoGUI(ctk.CTk):
             except FileNotFoundError:
                 self.after(0, lambda: self._log(f"  {enc}: ffmpeg not found in PATH"))
             except Exception as e:
-                self.after(0, lambda: self._log(f"  {enc}: ERROR ({e})"))
+                self.after(0, lambda e=e: self._log(f"  {enc}: ERROR ({e})"))
                 logger.exception("Encoder test crashed")
             finally:
                 self._test_running = False

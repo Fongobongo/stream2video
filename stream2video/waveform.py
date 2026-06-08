@@ -22,6 +22,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
+from stream2video.formatters import fmt_clock_time
 from stream2video.silence import SilenceSegment
 from stream2video.utils import no_window_kwargs
 
@@ -347,15 +348,6 @@ def slice_peaks_by_time(
     hi = max(lo + 1, int(ve / total_duration * n))
     hi = min(n, hi)
     return list(peaks[lo:hi])
-
-
-def _format_clock(seconds: float) -> str:
-    total = int(seconds)
-    h, r = divmod(total, 3600)
-    m, s = divmod(r, 60)
-    if h:
-        return f"{h}:{m:02d}:{s:02d}"
-    return f"{m}:{s:02d}"
 
 
 def render_waveform_image(
@@ -690,7 +682,7 @@ def _draw_time_axis(
         return
     for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
         x = x_left + int(frac * (plot_w - 1))
-        label = _format_clock(view_start + frac * total_duration)
+        label = fmt_clock_time(view_start + frac * total_duration)
         # Right-align end labels, left-align start, center the rest.
         if frac == 0.0:
             tx = x + 2
