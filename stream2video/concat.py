@@ -271,20 +271,15 @@ def _run_ffmpeg(
                         raise CancelledError(f"{label} cancelled")
                     if cancelled.is_set():
                         raise CancelledError(f"{label} cancelled")
-                    # Any non-empty line from ffmpeg means the process is
-                    # alive and producing output — bump the stall clock
-                    # regardless of which key (out_time_us, frame, speed,
-                    # etc.) the line carries. Resetting only on out_time_us
-                    # would false-positive if ffmpeg emits a "quiet" block
-                    # where out_time_us is absent for >_STALL_KILL seconds.
-                    last_progress_time = time.monotonic()
                     line = raw_line.decode("utf-8", errors="replace").strip()
-                    if line.startswith("out_time_us=") and progress_callback:
-                        try:
-                            us = int(line.split("=", 1)[1])
-                            progress_callback(us)
-                        except (ValueError, IndexError):
-                            pass
+                    if line.startswith("out_time_us="):
+                        last_progress_time = time.monotonic()
+                        if progress_callback:
+                            try:
+                                us = int(line.split("=", 1)[1])
+                                progress_callback(us)
+                            except (ValueError, IndexError):
+                                pass
                     elapsed_since_progress = time.monotonic() - last_progress_time
                     if elapsed_since_progress > _STALL_KILL:
                         process.kill()

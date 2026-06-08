@@ -33,7 +33,7 @@ from stream2video.download import (
     URLValidationError,
     download,
 )
-from stream2video.paths import ensure_project_dir, move_into_project
+from stream2video.paths import apply_per_video_dir
 from stream2video.silence import (
     SilenceCancelledError,
     SilenceDetectionError,
@@ -240,6 +240,7 @@ def main(
     console.print("\n[bold cyan]stream2video[/bold cyan] - Compress by removing silence")
     console.print(f"Logs saved to: {log_file}\n")
 
+    prev_handler = signal.getsignal(signal.SIGINT)
     cancel_event, cancel_cb = _make_sigint_cancel()
 
     fh = None
@@ -299,32 +300,24 @@ def main(
                 raise typer.Exit(1) from None
 
             # Step 1.5: Apply per-video project directory (if enabled).
-            # The downloaded file (if any) is moved into the project dir;
-            # the log file is also relocated so it ends up next to the
-            # artifacts. For local files the source is never moved — only
-            # the output_dir for downstream calls is reassigned.
-            per_video_dir = config.get("per_video_dir", CONFIG_DEFAULTS["per_video_dir"])
             if per_video_dir:
-                project_dir = ensure_project_dir(
-                    output_dir,
-                    video_path.stem,
-                    per_video_dir,
+                new_output, video_path = apply_per_video_dir(
+                    output_dir, video_path, download_result.is_downloaded
                 )
-                if project_dir != output_dir:
+                if new_output != output_dir:
                     if download_result.is_downloaded:
-                        video_path = move_into_project(video_path, project_dir)
                         logger.info(f"Moved source into project dir: {video_path}")
                     if fh is not None:
                         fh.close()
                         logger.removeHandler(fh)
-                        new_log = project_dir / "stream2video.log"
+                        new_log = new_output / "stream2video.log"
                         if new_log.exists():
                             new_log.unlink()
                         if log_file.exists():
                             shutil.move(str(log_file), str(new_log))
                         fh = _make_file_handler(new_log)
                         logger.addHandler(fh)
-                    output_dir = project_dir
+                    output_dir = new_output
                     console.print(f"Project directory: [cyan]{output_dir}[/cyan]")
 
             # Step 2: Detect silence (with cache support)
@@ -429,6 +422,7 @@ def main(
         raise typer.Exit(1) from e
 
     finally:
+        signal.signal(signal.SIGINT, prev_handler)
         if fh is not None:
             logger.removeHandler(fh)
             fh.close()

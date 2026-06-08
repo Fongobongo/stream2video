@@ -45,8 +45,7 @@ from stream2video.formatters import (
 from stream2video.paths import (
     RECENT_NAME_MAX,
     add_recent_project,
-    ensure_project_dir,
-    move_into_project,
+    apply_per_video_dir,
     prune_recent_projects,
     truncate_recent_name,
 )
@@ -1524,6 +1523,12 @@ class Stream2VideoGUI(ctk.CTk):
         force: bool,
         per_video_dir: bool = False,
     ):
+        # Copy config values we need so the worker thread doesn't race
+        # with the main thread's slider/save-settings writes.
+        cfg_threshold = float(self.config["threshold"])
+        cfg_min_silence = float(self.config["min_silence"])
+        cfg_margin = float(self.config["margin"])
+
         # Wall-clock anchor for the overall-time label.
         self._pipeline_start = time.monotonic()
         try:
@@ -1558,19 +1563,14 @@ class Stream2VideoGUI(ctk.CTk):
                 return
 
             # Step 1.5: Apply per-video project directory (if enabled).
-            # Downloaded source is moved; local file is untouched but the
-            # project dir is still used for WAV / JSON / compressed / log.
             if per_video_dir:
-                project_dir = ensure_project_dir(
-                    output_dir,
-                    video_path.stem,
-                    per_video_dir,
+                new_output, video_path = apply_per_video_dir(
+                    output_dir, video_path, download_result.is_downloaded
                 )
-                if project_dir != output_dir:
+                if new_output != output_dir:
                     if download_result.is_downloaded:
-                        video_path = move_into_project(video_path, project_dir)
                         self._log(f"Moved source into project dir: {video_path}")
-                    output_dir = project_dir
+                    output_dir = new_output
                     self._ui_update_output(output_dir)
                     self._log(f"Project directory: {output_dir}")
 
@@ -1608,15 +1608,15 @@ class Stream2VideoGUI(ctk.CTk):
             self._ui_status("Step 2/3: Detecting silence...", force=True)
             self._log(
                 f"Step 2/3: Detecting silence "
-                f"(threshold={self.config['threshold']}dB, "
-                f"min_silence={self.config['min_silence']}s, "
-                f"margin={self.config['margin']}s)..."
+                f"(threshold={cfg_threshold}dB, "
+                f"min_silence={cfg_min_silence}s, "
+                f"margin={cfg_margin}s)..."
             )
 
             config = {
-                "threshold": self.config["threshold"],
-                "min_silence": self.config["min_silence"],
-                "margin": self.config["margin"],
+                "threshold": cfg_threshold,
+                "min_silence": cfg_min_silence,
+                "margin": cfg_margin,
             }
 
             # Resume cache: lets a cancelled / crashed run pick up from
@@ -2406,8 +2406,12 @@ class Stream2VideoGUI(ctk.CTk):
         self.config["theme"] = self.combo_theme.get()
         self.config["window_geometry"] = self.geometry()
         try:
-            with open(self._settings_path(), "w") as f:
+            path = self._settings_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.config, f, indent=2)
+            os.replace(str(tmp), str(path))
         except Exception as e:
             self._log(f"[WARN] Could not save settings: {e}")
 

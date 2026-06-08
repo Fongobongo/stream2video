@@ -140,3 +140,22 @@ def prune_recent_projects(recent: list[str]) -> list[str]:
         except OSError:
             continue
     return out
+
+
+def apply_per_video_dir(
+    output_dir: Path,
+    video_path: Path,
+    is_downloaded: bool,
+) -> tuple[Path, Path]:
+    """Resolve the per-video project directory and move the source if needed.
+
+    Returns ``(output_dir, video_path)`` — the (possibly updated) output
+    directory and the (possibly moved) source path. The downloaded source is
+    moved into the project dir; local files are left untouched.
+    """
+    project_dir = ensure_project_dir(output_dir, video_path.stem, True)
+    if project_dir != output_dir:
+        if is_downloaded:
+            video_path = move_into_project(video_path, project_dir)
+        return project_dir, video_path
+    return output_dir, video_path

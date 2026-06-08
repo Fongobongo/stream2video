@@ -116,6 +116,6 @@ def save_user_defaults(values: dict[str, Any]) -> None:
 
 def effective_defaults() -> dict[str, Any]:
     """CONFIG_DEFAULTS overlaid with user_defaults.json overrides."""
-    out = CONFIG_DEFAULTS.copy()
+    out = {k: (list(v) if isinstance(v, list) else v) for k, v in CONFIG_DEFAULTS.items()}
     out.update(load_user_defaults())
     return out

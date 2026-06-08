@@ -183,6 +183,7 @@ def read_peaks_from_stream(
 
     assert proc.stdout is not None
     raw = proc.stdout.read()
+    proc.stdout.close()
     proc.wait()
     if proc.returncode != 0 or not raw:
         return [], 0.0
