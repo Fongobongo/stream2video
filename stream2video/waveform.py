@@ -631,7 +631,7 @@ def _draw_db_axis(
     max_half_h = max(1, plot_h // 2 - 1)
     tick_x_outer = DB_AXIS_WIDTH - 1  # rightmost pixel of the tick (at the boundary)
     tick_x_inner = DB_AXIS_WIDTH - 5  # 4-px tick length
-    label_x = DB_AXIS_WIDTH - 7       # right-aligned just left of the tick
+    label_x = DB_AXIS_WIDTH - 7  # right-aligned just left of the tick
     # Faint vertical guide at the boundary (separates axis from plot).
     draw.line(
         [(tick_x_outer, 0), (tick_x_outer, plot_h - 1)],

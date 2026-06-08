@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("PIL", reason="waveform rendering requires Pillow ([gui] extra)")
 
-from stream2video.silence import SilenceSegment  # noqa: E402  (after importorskip)
+from stream2video.silence import SilenceSegment
 from stream2video.waveform import (
     DB_AXIS_WIDTH,
     _format_clock,
@@ -177,9 +177,7 @@ def test_silence_pixels_view_start_shifts_x_to_match_view():
     """
     segs = [SilenceSegment(10, 15)]
     full = silence_pixel_ranges(segs, total_duration=100.0, plot_width=800)
-    panned = silence_pixel_ranges(
-        segs, total_duration=15.0, plot_width=800, view_start=5.0
-    )
+    panned = silence_pixel_ranges(segs, total_duration=15.0, plot_width=800, view_start=5.0)
     assert full[0] == (80, 120)
     # The panned view starts at 5 s, so 10 s is 5/15 of the way across.
     assert panned[0] == (266, 533)
@@ -257,9 +255,6 @@ def test_render_time_axis_uses_view_start_for_panned_labels():
     assert img_default.tobytes() != img_panned.tobytes()
 
 
-
-
-
 def test_render_rejects_non_positive_size():
     with pytest.raises(ValueError):
         render_waveform_image([], width=0, height=100)
@@ -297,9 +292,9 @@ def test_render_draws_db_axis_in_left_margin():
     # in the left margin. We don't need an exact count — just that the
     # axis was drawn (e.g., a few text-color pixels in [0, DB_AXIS_WIDTH)).
     bg = (30, 30, 30)
-    margin_pixels = [img.getpixel((x, plot_y))
-                     for x in range(DB_AXIS_WIDTH)
-                     for plot_y in (5, 20, 40, 60)]
+    margin_pixels = [
+        img.getpixel((x, plot_y)) for x in range(DB_AXIS_WIDTH) for plot_y in (5, 20, 40, 60)
+    ]
     assert any(px != bg for px in margin_pixels), (
         "expected dB axis content (ticks/labels) in the left margin"
     )
@@ -311,6 +306,7 @@ def test_render_bar_height_is_db_linear():
     (instead of ~3% as it would on a linear-amplitude scale)."""
     img_quiet = render_waveform_image([0.0316] * 200, width=200, height=200)
     img_loud = render_waveform_image([1.0] * 200, width=200, height=200)
+
     # 0.0316 amplitude ≈ -30 dB. Walk upward from midline on a single
     # plot column and find the topmost bar pixel; compare to the
     # loud-reference column.
@@ -322,6 +318,7 @@ def test_render_bar_height_is_db_linear():
                 if px != (30, 30, 30):  # bg
                     return y
         return -1
+
     y_quiet = _topmost_bar_y(img_quiet)
     y_loud = _topmost_bar_y(img_loud)
     assert y_loud <= 2, f"0 dB peak should reach the top of the plot, got y={y_loud}"
@@ -364,10 +361,7 @@ def test_render_db_axis_ticks_align_with_bar_tops():
     # And the bar's topmost pixel (first non-bg pixel above midline in
     # the plot region) should land on the same y, within 1 px.
     bar_top_y = next(
-        y
-        for x in range(DB_AXIS_WIDTH, 200)
-        for y in range(midline_y)
-        if img.getpixel((x, y)) != bg
+        y for x in range(DB_AXIS_WIDTH, 200) for y in range(midline_y) if img.getpixel((x, y)) != bg
     )
     assert abs(bar_top_y - expected_y) <= 1, (
         f"bar top y={bar_top_y} should align with -30 dB tick y={expected_y} (±1 px)"
@@ -433,8 +427,7 @@ def test_render_db_axis_lower_minus_60_mirror_is_skipped():
     # non-bg content near the midline in the tick area is the upper
     # -60 tick at y = midline_y itself.
     assert all(
-        img.getpixel((x, midline_y + 1)) == bg
-        for x in range(DB_AXIS_WIDTH - 5, DB_AXIS_WIDTH - 1)
+        img.getpixel((x, midline_y + 1)) == bg for x in range(DB_AXIS_WIDTH - 5, DB_AXIS_WIDTH - 1)
     ), f"unexpected tick content at y={midline_y + 1} in tick area"
 
 
@@ -444,9 +437,8 @@ def test_render_db_axis_step_is_10db():
     6 lower mirror ticks (0, -10, ..., -50) — the -60 mirror is
     intentionally skipped to avoid merging with the upper -60."""
     from stream2video.waveform import _DB_AXIS_STEP
-    assert _DB_AXIS_STEP == 10, (
-        f"dB step should be 10, got {_DB_AXIS_STEP}"
-    )
+
+    assert _DB_AXIS_STEP == 10, f"dB step should be 10, got {_DB_AXIS_STEP}"
     img = render_waveform_image([0.5] * 200, width=200, height=200)
     bg = (30, 30, 30)
     plot_h = 200 - 16
@@ -459,6 +451,7 @@ def test_render_db_axis_step_is_10db():
     ]
     upper_ticks = [y for y in tick_ys if y <= midline_y]
     lower_ticks = [y for y in tick_ys if y > midline_y]
+
     # Expected positions: 0, -10, -20, -30, -40, -50, -60 in the upper
     # half (7 ticks) and the mirror of 0..-50 in the lower half (6
     # ticks; -60 is collapsed to the midline so it lives in ``upper_ticks``).
@@ -467,15 +460,10 @@ def test_render_db_axis_step_is_10db():
     # ``midline_y - half_h``; bottom is ``midline_y + half_h``.
     def _half_h(db: float) -> float:
         return (db + 60) / 60 * max_half_h
-    expected_upper = sorted(
-        round(midline_y - _half_h(db)) for db in range(0, -61, -10)
-    )
-    expected_lower = sorted(
-        round(midline_y + _half_h(db)) for db in range(0, -51, -10)
-    )
-    assert upper_ticks == expected_upper, (
-        f"upper ticks {upper_ticks} != expected {expected_upper}"
-    )
+
+    expected_upper = sorted(round(midline_y - _half_h(db)) for db in range(0, -61, -10))
+    expected_lower = sorted(round(midline_y + _half_h(db)) for db in range(0, -51, -10))
+    assert upper_ticks == expected_upper, f"upper ticks {upper_ticks} != expected {expected_upper}"
     assert lower_ticks == expected_lower, (
         f"lower mirror ticks {lower_ticks} != expected {expected_lower}"
     )
@@ -608,9 +596,7 @@ def test_below_threshold_pixel_ranges_basic():
     peaks = [0.1 if i % 2 == 0 else 0.001 for i in range(10)]
     # plot_w == n_peaks: one column per peak.
     ranges = below_threshold_pixel_ranges(peaks, threshold_db=-30, plot_w=10)
-    assert ranges == [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10)], (
-        f"unexpected ranges: {ranges}"
-    )
+    assert ranges == [(1, 2), (3, 4), (5, 6), (7, 8), (9, 10)], f"unexpected ranges: {ranges}"
 
 
 def test_below_threshold_pixel_ranges_all_above():
@@ -667,9 +653,7 @@ def test_below_threshold_pixel_ranges_edge_cases():
     assert below_threshold_pixel_ranges([0.5] * 5, threshold_db=-30, plot_w=0) == []
     assert below_threshold_pixel_ranges([0.5] * 5, threshold_db=None, plot_w=10) == []
     # +60 dB threshold = amplitude 1000; no real peak gets there.
-    assert below_threshold_pixel_ranges(
-        [0.5] * 5, threshold_db=60, plot_w=5
-    ) == [(0, 5)]
+    assert below_threshold_pixel_ranges([0.5] * 5, threshold_db=60, plot_w=5) == [(0, 5)]
 
 
 def test_render_below_threshold_overlay_basic():
@@ -780,7 +764,7 @@ def test_render_below_threshold_overlay_draws_solid_edge():
     blend in. The edge should appear at y=0 and y=plot_h-1 of every
     below-threshold column, in ``below_threshold_edge`` color."""
     fill = (255, 0, 0, 100)  # not the edge color
-    edge = (0, 200, 0)        # bright green so it's easy to spot
+    edge = (0, 200, 0)  # bright green so it's easy to spot
     # 100 peaks, 100 plot columns, all below threshold.
     img = render_waveform_image(
         [0.001] * 100,

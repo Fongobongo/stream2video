@@ -30,6 +30,7 @@ from stream2video.config import (
 from stream2video.download import (
     DownloadCancelledError,
     DownloadError,
+    URLValidationError,
     download,
 )
 from stream2video.paths import ensure_project_dir, move_into_project
@@ -85,9 +86,7 @@ def _make_file_handler(path: Path) -> logging.FileHandler:
     """
     fh = logging.FileHandler(path)
     fh.setLevel(logging.DEBUG)
-    fh.setFormatter(
-        logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    )
+    fh.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
     return fh
 
 
@@ -288,6 +287,12 @@ def main(
             except DownloadCancelledError:
                 console.print("[yellow]Download cancelled.[/yellow]")
                 raise typer.Exit(130) from None
+            except URLValidationError as e:
+                # Caught before the generic DownloadError so the user gets
+                # a clear "this isn't a URL or local file" message.
+                console.print(f"[red]Invalid input:[/red] {e}")
+                console.print("  Expected an http(s):// URL or an existing local file path.")
+                raise typer.Exit(2) from None
             except DownloadError as e:
                 console.print(f"[red]Download failed:[/red] {e}")
                 logger.exception("Download error")
@@ -418,7 +423,10 @@ def main(
     except Exception as e:
         console.print(f"[red]Unexpected error:[/red] {e}")
         logger.exception("Unexpected error")
-        raise typer.Exit(1) from None
+        # Preserve the original exception so a developer running with
+        # `RICH_TRACEBACK=1` (or a debugger) sees the actual cause; the
+        # user-facing message above is the only thing they see by default.
+        raise typer.Exit(1) from e
 
     finally:
         if fh is not None:

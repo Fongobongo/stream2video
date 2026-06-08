@@ -35,7 +35,5 @@ class TestModuleImports:
         # Skip if the [gui] extra isn't installed rather than failing the
         # smoke test on a minimal CI env.
         pytest.importorskip("PIL", reason="gui.py requires Pillow ([gui] extra)")
-        pytest.importorskip(
-            "customtkinter", reason="gui.py requires customtkinter ([gui] extra)"
-        )
+        pytest.importorskip("customtkinter", reason="gui.py requires customtkinter ([gui] extra)")
         importlib.import_module("stream2video.gui")

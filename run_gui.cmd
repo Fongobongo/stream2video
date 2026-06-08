@@ -35,7 +35,14 @@ if defined FFMPEG_DIR (
 ) else (
     where ffmpeg >nul 2>&1 || call :install_ffmpeg
 )
-ffmpeg -version >nul 2>&1 && echo [+] ffmpeg found
+ffmpeg -version >nul 2>&1
+if %errorlevel% equ 0 (
+    echo [+] ffmpeg found
+) else (
+    echo [ERROR] ffmpeg not found in PATH after install attempt
+    pause
+    exit /b 1
+)
 
 :: Venv + deps
 if not exist "%PORT_DIR%\venv\" (
@@ -83,11 +90,13 @@ curl -sL -o "%TEMP%\ffmpeg.zip" https://github.com/BtbN/FFmpeg-Builds/releases/d
 if %errorlevel% equ 0 (
     powershell -Command "Expand-Archive -Path '%TEMP%\ffmpeg.zip' -DestinationPath '%PORT_DIR%\ffmpeg_tmp' -Force; if(Test-Path '%PORT_DIR%\ffmpeg_tmp\ffmpeg-master-latest-win64-gpl'){Move-Item '%PORT_DIR%\ffmpeg_tmp\ffmpeg-master-latest-win64-gpl\*' '%PORT_DIR%\ffmpeg' -Force; Remove-Item '%PORT_DIR%\ffmpeg_tmp' -Recurse -Force}"
     if exist "%PORT_DIR%\ffmpeg\bin\ffmpeg.exe" (
-        set "PATH=%PORT_DIR%\ffmpeg\bin;%PATH%"
+        set "PATH=%FFMPEG_DIR%;%PATH%"
     ) else (
         echo [WARN] ffmpeg extract failed. Install manually: winget install Gyan.FFmpeg
+        exit /b 1
     )
 ) else (
     echo [WARN] ffmpeg download failed. Install manually: winget install Gyan.FFmpeg
+    exit /b 1
 )
 exit /b 0

@@ -53,9 +53,9 @@ class TestCliPerVideoDir:
             pytest.skip("ffmpeg not available")
         return path
 
-    def _make_test_video(self, path: Path):
+    def _make_test_video(self, ffmpeg: str, path: Path):
         cmd = [
-            self.ffmpeg_path,
+            ffmpeg,
             "-y",
             "-v",
             "error",
@@ -85,10 +85,7 @@ class TestCliPerVideoDir:
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
 
-    ffmpeg_path = None
-
     def test_local_file_artifacts_land_in_project_dir(self, ffmpeg):
-        self.ffmpeg_path = ffmpeg
         from typer.testing import CliRunner
 
         from stream2video.cli import app
@@ -96,7 +93,7 @@ class TestCliPerVideoDir:
         with TemporaryDirectory() as tmp:
             tmp_p = Path(tmp)
             src = tmp_p / "myvideo.mp4"
-            self._make_test_video(src)
+            self._make_test_video(ffmpeg, src)
             out = tmp_p / "out"
             cfg = tmp_p / "config.yaml"
             cfg.write_text("per_video_dir: true\nthreshold: -30\nmin_silence: 0.3\n")

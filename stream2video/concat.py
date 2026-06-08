@@ -95,30 +95,21 @@ def cut_and_concat(
     vcodec, vcodec_opts = get_video_encoder(encoder)
     logger.info(f"Encoder: {vcodec} {vcodec_opts}")
 
-    if method == "segment":
-        _run_segment_with_fallback(
-            video_path,
-            keep_segments,
-            output_path,
-            vcodec,
-            vcodec_opts,
-            progress_callback,
-            cancel_callback,
-        )
-    elif method == "batch":
-        _run_batch_with_fallback(
-            video_path,
-            keep_segments,
-            output_path,
-            vcodec,
-            vcodec_opts,
-            progress_callback,
-            cancel_callback,
-        )
-    else:
+    if method not in ("segment", "batch"):
         raise ConcatError(
             f"Unknown method: {method!r} (use {' or '.join(repr(m) for m in VALID_METHODS)})"
         )
+
+    _run_with_fallback(
+        video_path,
+        keep_segments,
+        output_path,
+        vcodec,
+        vcodec_opts,
+        method,
+        progress_callback,
+        cancel_callback,
+    )
 
     return output_path
 
@@ -280,12 +271,18 @@ def _run_ffmpeg(
                         raise CancelledError(f"{label} cancelled")
                     if cancelled.is_set():
                         raise CancelledError(f"{label} cancelled")
+                    # Any non-empty line from ffmpeg means the process is
+                    # alive and producing output — bump the stall clock
+                    # regardless of which key (out_time_us, frame, speed,
+                    # etc.) the line carries. Resetting only on out_time_us
+                    # would false-positive if ffmpeg emits a "quiet" block
+                    # where out_time_us is absent for >_STALL_KILL seconds.
+                    last_progress_time = time.monotonic()
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if line.startswith("out_time_us=") and progress_callback:
                         try:
                             us = int(line.split("=", 1)[1])
                             progress_callback(us)
-                            last_progress_time = time.monotonic()
                         except (ValueError, IndexError):
                             pass
                     elapsed_since_progress = time.monotonic() - last_progress_time
@@ -494,72 +491,48 @@ def _run_segment_concat(
         raise
 
 
-def _run_segment_with_fallback(
+def _run_with_fallback(
     video_path: Path,
     keep_segments: list[tuple[float, float]],
     output_path: Path,
     primary_codec: str,
     primary_opts: list[str],
+    method: str,
     progress_callback: Callable[[float], None] | None = None,
     cancel_callback: Callable[[], bool] | None = None,
 ):
-    """Run segment concat with primary encoder; fall back to libx264 on failure.
+    """Run segment or batch concat with the primary encoder; fall back to libx264 on failure.
 
-    On encoder fallback the segment directory is wiped — the segments
-    written by the failing encoder may be corrupt (e.g. h264_mf produces
-    MP4s without a moov atom on some Windows builds) and the resume-skip
-    check in _run_segment_concat would otherwise reuse them.
+    On encoder fallback the per-method working directory (``_<stem>_segments``
+    or ``_<stem>_batch``) is wiped — the chunks written by the failing
+    encoder may be corrupt (e.g. h264_mf produces MP4s without a moov atom
+    on some Windows builds) and the resume-skip check in the inner method
+    would otherwise reuse them on the libx264 retry.
+
+    ``method`` is "segment" or "batch"; anything else raises ConcatError.
     """
-    seg_dir = output_path.parent / f"_{output_path.stem}_segments"
-
-    def _cleanup(failed_enc: str):
-        if seg_dir.exists():
-            logger.info(f"Removing partial segment dir from failed {failed_enc} encode: {seg_dir}")
-            shutil.rmtree(seg_dir, ignore_errors=True)
-
-    def _try(enc: str, enc_opts: list[str]):
-        _run_segment_concat(
-            video_path,
-            keep_segments,
-            output_path,
-            enc,
-            enc_opts,
-            progress_callback,
-            cancel_callback,
+    if method == "segment":
+        inner = _run_segment_concat
+        work_suffix = "_segments"
+    elif method == "batch":
+        inner = _run_batch_concat
+        work_suffix = "_batch"
+    else:
+        raise ConcatError(
+            f"Unknown method: {method!r} (use {' or '.join(repr(m) for m in VALID_METHODS)})"
         )
 
-    _with_libx264_fallback(
-        primary_codec,
-        primary_opts,
-        _try,
-        (ConcatError, OSError),
-        _cleanup,
-    )
-
-
-def _run_batch_with_fallback(
-    video_path: Path,
-    keep_segments: list[tuple[float, float]],
-    output_path: Path,
-    primary_codec: str,
-    primary_opts: list[str],
-    progress_callback: Callable[[float], None] | None = None,
-    cancel_callback: Callable[[], bool] | None = None,
-):
-    """Run batch concat with primary encoder; fall back to libx264 on failure.
-
-    Same cleanup-on-fallback logic as segment method — corrupt chunks from
-    the failing encoder must not be reused by the libx264 retry.
-    """
-    batch_dir = output_path.parent / f"_{output_path.stem}_batch"
+    work_dir = output_path.parent / f"_{output_path.stem}{work_suffix}"
 
     def _cleanup(failed_enc: str):
-        if batch_dir.exists():
-            logger.info(f"Removing partial batch dir from failed {failed_enc} encode: {batch_dir}")
-            shutil.rmtree(batch_dir, ignore_errors=True)
+        if work_dir.exists():
+            logger.info(
+                f"Removing partial {work_suffix[1:]} dir from failed {failed_enc} encode: {work_dir}"
+            )
+            shutil.rmtree(work_dir, ignore_errors=True)
 
     def _try(enc: str, enc_opts: list[str]):
-        _run_batch_concat(
+        inner(
             video_path,
             keep_segments,
             output_path,

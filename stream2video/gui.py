@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from tkinter import StringVar, filedialog, messagebox
+from tkinter import Event, StringVar, filedialog, messagebox
 from typing import ClassVar
 
 import customtkinter as ctk
@@ -35,6 +35,13 @@ from stream2video.config import (
     user_defaults_path,
 )
 from stream2video.download import DownloadCancelledError, DownloadError, download
+from stream2video.formatters import (
+    fmt_clock_time,
+    fmt_size,
+    fmt_time,
+    fmt_total_label,
+    fmt_zoom_text,
+)
 from stream2video.paths import (
     RECENT_NAME_MAX,
     add_recent_project,
@@ -150,11 +157,11 @@ def _build_completion_summary(
       - popup:     multi-line message for the 'Complete' messagebox.
                    Full breakdown with Source/Output labels.
     """
-    src_size_s = Stream2VideoGUI._fmt_size(src_size_bytes)
-    dst_size_s = Stream2VideoGUI._fmt_size(dst_size_bytes)
-    src_dur_s = Stream2VideoGUI._fmt_clock_time(src_duration)
-    dst_dur_s = Stream2VideoGUI._fmt_clock_time(dst_duration)
-    pipe_s = Stream2VideoGUI._fmt_time(pipeline_seconds)
+    src_size_s = fmt_size(src_size_bytes)
+    dst_size_s = fmt_size(dst_size_bytes)
+    src_dur_s = fmt_clock_time(src_duration)
+    dst_dur_s = fmt_clock_time(dst_duration)
+    pipe_s = fmt_time(pipeline_seconds)
 
     sep = "=" * 60
     log_lines = [
@@ -231,8 +238,10 @@ class Stream2VideoGUI(ctk.CTk):
         self._waveform_tooltip_after_id: str | None = None
         # Cached motion event used by the debounced tooltip update. We
         # keep the most recent event and discard older ones; the
-        # callback always uses the latest event when it fires.
-        self._waveform_last_motion_event = None  # type: ignore[assignment]
+        # callback always uses the latest event when it fires. Typed
+        # as a tk Event at the class level so mypy doesn't widen the
+        # first assignment (None) and flag the later Event assignment.
+        self._waveform_last_motion_event: Event | None = None
         self._waveform_image_width: int = 0  # full rendered image width in px
         # Last set of margin-applied segments used to render the overlay.
         # Fallback for zoom/pan/slider re-renders when the live store
@@ -816,19 +825,14 @@ class Stream2VideoGUI(ctk.CTk):
         if event.widget is not self._wave_window:
             return
         new_w, new_h = event.width, event.height
-        if (
-            new_w == self._waveform_last_render_w
-            and new_h == self._waveform_last_render_h
-        ):
+        if new_w == self._waveform_last_render_w and new_h == self._waveform_last_render_h:
             return
         if self._waveform_resize_after_id is not None:
             try:
                 self._wave_window.after_cancel(self._waveform_resize_after_id)
             except Exception:
                 pass
-        self._waveform_resize_after_id = self._wave_window.after_idle(
-            self._apply_view
-        )
+        self._waveform_resize_after_id = self._wave_window.after_idle(self._apply_view)
 
     def _compute_waveform_render_size(self) -> tuple[int, int]:
         """Image size to use for the next render, derived from the
@@ -876,9 +880,7 @@ class Stream2VideoGUI(ctk.CTk):
                 self.after_cancel(self._waveform_threshold_after_id)
             except Exception:
                 pass
-        self._waveform_threshold_after_id = self.after(
-            100, self._waveform_threshold_changed
-        )
+        self._waveform_threshold_after_id = self.after(100, self._waveform_threshold_changed)
 
     def _waveform_threshold_changed(self) -> None:
         """Bump the render token and re-apply the view so the
@@ -934,9 +936,7 @@ class Stream2VideoGUI(ctk.CTk):
                 pass
             self._waveform_tooltip_after_id = None
         self._hide_waveform_tooltip()
-        self._waveform_tooltip_after_id = self.after_idle(
-            self._show_waveform_tooltip_on_idle
-        )
+        self._waveform_tooltip_after_id = self.after_idle(self._show_waveform_tooltip_on_idle)
 
     def _on_waveform_leave(self, _event):
         """Forget the cursor position when it leaves the image so
@@ -1005,7 +1005,7 @@ class Stream2VideoGUI(ctk.CTk):
         else:
             db = 20 * math.log10(max(peak, 1e-4))
             db_text = f"{db:+.1f} dB"
-        time_text = Stream2VideoGUI._fmt_clock_time(t)
+        time_text = fmt_clock_time(t)
         self._waveform_tooltip.configure(text=f"{time_text}  |  {db_text}")
         # Position the tooltip near the cursor, in popup-relative coords.
         # event.x_root/.y_root are screen coords; winfo_rootx() gives
@@ -1241,7 +1241,7 @@ class Stream2VideoGUI(ctk.CTk):
             return
         zoom_level = duration / view_duration if view_duration > 0 else 1.0
         if self._waveform_zoom_label is not None:
-            self._waveform_zoom_label.configure(text=self._fmt_zoom_text(zoom_level))
+            self._waveform_zoom_label.configure(text=fmt_zoom_text(zoom_level))
         if self._waveform_slider is not None:
             self._waveform_slider.configure(to=max(duration, 1e-6))
             self._waveform_slider.set(self._waveform_view_start)
@@ -1432,7 +1432,7 @@ class Stream2VideoGUI(ctk.CTk):
             return
         self.lbl_file.configure(text=f"File: {path.name}")
         size = path.stat().st_size
-        self.lbl_size.configure(text=f"Size: {self._fmt_size(size)}")
+        self.lbl_size.configure(text=f"Size: {fmt_size(size)}")
         self.lbl_duration.configure(text="Duration: ...")
 
         def _get_dur():
@@ -1440,9 +1440,7 @@ class Stream2VideoGUI(ctk.CTk):
             if dur:
                 self.after(
                     0,
-                    lambda d=dur: self.lbl_duration.configure(
-                        text=f"Duration: {self._fmt_time(d)}"
-                    ),
+                    lambda d=dur: self.lbl_duration.configure(text=f"Duration: {fmt_time(d)}"),
                 )
 
         threading.Thread(target=_get_dur, daemon=True).start()
@@ -1593,7 +1591,7 @@ class Stream2VideoGUI(ctk.CTk):
                 self._log(f"Downloaded: {input_raw} -> {video_path}")
             else:
                 self._log(f"Download skipped (file already on disk): {video_path}")
-            self._log(f"Size: {self._fmt_size(src_size_bytes)}")
+            self._log(f"Size: {fmt_size(src_size_bytes)}")
 
             if method == "batch" and file_size_mb > 4096:
                 self._log(
@@ -1654,7 +1652,7 @@ class Stream2VideoGUI(ctk.CTk):
                     self._ui_progress(0.05 + f * 0.35)
                     self._ui_status(
                         f"Step 2/3: Silence... {f * 100:.0f}% "
-                        f"({self._fmt_time(elapsed)}/{self._fmt_time(remaining)})"
+                        f"({fmt_time(elapsed)}/{fmt_time(remaining)})"
                     )
                     self._ui_overall(elapsed, remaining, more_phases=True)
 
@@ -1695,7 +1693,7 @@ class Stream2VideoGUI(ctk.CTk):
             keep = generate_keep_segments(video_path, silence_segments)
             keep_dur = sum(e - s for s, e in keep)
             self._ui_info(
-                f"Silence: {len(silence_segments)} segments\nKeep: {len(keep)} segments ({self._fmt_time(keep_dur)})"
+                f"Silence: {len(silence_segments)} segments\nKeep: {len(keep)} segments ({fmt_time(keep_dur)})"
             )
 
             # Step 3: Cut & concat
@@ -1716,7 +1714,7 @@ class Stream2VideoGUI(ctk.CTk):
                 self._ui_progress(0.4 + f * 0.6)
                 self._ui_status(
                     f"Step 3/3: Cutting... {f * 100:.0f}% "
-                    f"({self._fmt_time(elapsed)}/{self._fmt_time(remaining)})"
+                    f"({fmt_time(elapsed)}/{fmt_time(remaining)})"
                 )
                 # Phase 3 is the last one — no "more phases" after it.
                 self._ui_overall(elapsed, remaining, more_phases=False)
@@ -1962,11 +1960,11 @@ class Stream2VideoGUI(ctk.CTk):
             tail = "?" if more_phases else "—"
         else:
             tail = (
-                f"~{self._fmt_time(phase_remaining)} + ?"
+                f"~{fmt_time(phase_remaining)} + ?"
                 if more_phases
-                else f"~{self._fmt_time(phase_remaining)}"
+                else f"~{fmt_time(phase_remaining)}"
             )
-        text = f"Elapsed: {self._fmt_time(total_elapsed)} | Remaining: {tail}"
+        text = f"Elapsed: {fmt_time(total_elapsed)} | Remaining: {tail}"
         self.after(0, lambda: self.lbl_overall.configure(text=text))
         self._ui_total(total_elapsed)
 
@@ -1980,7 +1978,7 @@ class Stream2VideoGUI(ctk.CTk):
         self.after(
             0,
             lambda: self.lbl_overall.configure(
-                text=f"Elapsed: {self._fmt_time(total_elapsed)} | Remaining: ?"
+                text=f"Elapsed: {fmt_time(total_elapsed)} | Remaining: ?"
             ),
         )
         self._ui_total(total_elapsed)
@@ -1989,14 +1987,8 @@ class Stream2VideoGUI(ctk.CTk):
         """Update the Total wall-clock label below the progress bar."""
         self.after(
             0,
-            lambda: self.lbl_total.configure(text=Stream2VideoGUI._fmt_total_label(total_elapsed)),
+            lambda: self.lbl_total.configure(text=fmt_total_label(total_elapsed)),
         )
-
-    @staticmethod
-    def _fmt_total_label(total_elapsed: float) -> str:
-        """Format the Total label — 'Total: X' where X is the wall-clock
-        pipeline duration. Pure helper, easy to unit-test."""
-        return f"Total: {Stream2VideoGUI._fmt_time(total_elapsed)}"
 
     _STATUS_MAX = 50
 
@@ -2200,7 +2192,7 @@ class Stream2VideoGUI(ctk.CTk):
                     return
                 self._log(
                     f"  Waveform ready: {len(segments)} silence segments, "
-                    f"{Stream2VideoGUI._fmt_time(duration)} duration"
+                    f"{fmt_time(duration)} duration"
                 )
 
                 # Phase 4: if the pipeline is still running, start a
@@ -2285,10 +2277,7 @@ class Stream2VideoGUI(ctk.CTk):
         # before any peaks) or the live store is empty, fall back to
         # an empty list (no overlay). An explicit ``[]`` is honored
         # (Phase 1.5 bare-waveform render before detect finishes).
-        if (
-            segments is None
-            and self._waveform_video_path is not None
-        ):
+        if segments is None and self._waveform_video_path is not None:
             raw = self._take_live_snapshot(self._waveform_video_path)
             if raw is not None:
                 segments = _apply_margin(raw, self._waveform_margin)
@@ -2308,11 +2297,11 @@ class Stream2VideoGUI(ctk.CTk):
         render_w, render_h = self._compute_waveform_render_size()
 
         zoom_level = self._waveform_duration / view_duration
-        zoom_text = self._fmt_zoom_text(zoom_level)
+        zoom_text = fmt_zoom_text(zoom_level)
         title = (
             f"{self._waveform_video_name}  |  {len(view_segments)} silences"
-            f"  |  {Stream2VideoGUI._fmt_clock_time(view_start)}"
-            f"-{Stream2VideoGUI._fmt_clock_time(view_end)}  |  {zoom_text}"
+            f"  |  {fmt_clock_time(view_start)}"
+            f"-{fmt_clock_time(view_end)}  |  {zoom_text}"
         )
 
         img = render_waveform_image(
@@ -2396,55 +2385,6 @@ class Stream2VideoGUI(ctk.CTk):
         """Update the waveform status label; no-op if the popup is closed."""
         if self.lbl_wave_status is not None:
             self.lbl_wave_status.configure(text=text)
-
-    # ── Utilities ────────────────────────────────────────────────
-
-    @staticmethod
-    def _fmt_size(bytez: int) -> str:
-        size = float(bytez)
-        for unit in ("B", "KB", "MB", "GB"):
-            if size < 1024:
-                return f"{size:.1f} {unit}"
-            size /= 1024
-        return f"{size:.1f} TB"
-
-    @staticmethod
-    def _fmt_time(secs: float) -> str:
-        total = int(secs)
-        d, r = divmod(total, 86400)
-        h, r = divmod(r, 3600)
-        m, s = divmod(r, 60)
-        if d:
-            return f"{d}d {h}h {m}m {s}s"
-        if h:
-            return f"{h}h {m}m {s}s"
-        if m:
-            return f"{m}m {s}s"
-        return f"{s}s"
-
-    @staticmethod
-    def _fmt_clock_time(secs: float | None) -> str:
-        """Format a duration as HH:MM:SS (or D:HH:MM:SS if >= 24h),
-        zero-padded. Used in the final summary so '06:04:12 -> 00:34:11'
-        is scannable. Returns '?' for None (e.g. ffprobe failed)."""
-        if secs is None or secs < 0:
-            return "?"
-        total = int(secs)
-        d, r = divmod(total, 86400)
-        h, r = divmod(r, 3600)
-        m, s = divmod(r, 60)
-        if d:
-            return f"{d}:{h:02d}:{m:02d}:{s:02d}"
-        return f"{h:02d}:{m:02d}:{s:02d}"
-
-    @staticmethod
-    def _fmt_zoom_text(zoom_level: float) -> str:
-        """Format a zoom multiplier (duration / view_duration) for
-        the controls and status line. Under 10x uses 1 decimal
-        ('1.5x'), at 10x or above rounds to int ('15x')."""
-        if zoom_level < 10:
-            return f"{zoom_level:.1f}x"
-        return f"{round(zoom_level)}x"
 
     # ── Settings Persistence ─────────────────────────────────────
 

@@ -31,9 +31,11 @@ from stream2video.utils import (
     CANCEL_POLL_INTERVAL,
     cancel_monitor,
     drain_stderr_lines,
-    get_video_duration as _probe_duration,
     no_window_kwargs,
     set_active_process,
+)
+from stream2video.utils import (
+    get_video_duration as _probe_duration,
 )
 
 logger = logging.getLogger(__name__)
