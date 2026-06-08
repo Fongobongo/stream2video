@@ -45,6 +45,10 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 
+# Type checking / lint caches
+.mypy_cache/
+.ruff_cache/
+
 # Virtual environments
 .venv
 venv/
