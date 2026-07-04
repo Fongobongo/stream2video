@@ -11,6 +11,7 @@ from stream2video.download import (
     DiskSpaceError,
     DownloadCancelledError,
     DownloadError,
+    DownloadProgress,
     DownloadResult,
     PermissionDeniedError,
     URLValidationError,
@@ -19,6 +20,7 @@ from stream2video.download import (
     _find_downloaded_file,
     _format_selector_for_quality,
     _is_local_file,
+    _parse_progress_line,
     _validate_url,
     download,
 )
@@ -221,3 +223,123 @@ class TestFormatSelector:
                 result = download(str(test_file), Path(tmpdir) / "out", quality=q)
                 assert result.path == test_file
                 assert not result.is_downloaded
+
+
+class TestProgressParsing:
+    """_parse_progress_line — yt-dlp --progress-template line parser."""
+
+    def test_returns_none_for_non_progress_lines(self):
+        # The final filepath line from --print must be left untouched.
+        assert _parse_progress_line("/tmp/abc123.mp4") is None
+        assert _parse_progress_line("") is None
+        # yt-dlp's own [download] progress (without our template) is also
+        # passed through as None — we only care about our prefix.
+        assert _parse_progress_line("[download]  50.0% of ~1.00GiB at  5.00MiB/s") is None
+
+    def test_parses_full_line(self):
+        line = "s2v_progress|524288000|1073741824|5242880|120"
+        prog = _parse_progress_line(line)
+        assert prog is not None
+        assert prog.downloaded_bytes == 524288000.0
+        assert prog.total_bytes == 1073741824.0
+        assert prog.speed == 5242880.0
+        assert prog.eta == 120.0
+
+    def test_returns_namedtuple_fields(self):
+        # DownloadProgress is a NamedTuple with the documented field order.
+        line = "s2v_progress|100|200|10|5"
+        prog = _parse_progress_line(line)
+        assert prog is not None
+        assert isinstance(prog, DownloadProgress)
+        assert prog._fields == ("downloaded_bytes", "total_bytes", "speed", "eta")
+
+    def test_handles_na_fields(self):
+        # yt-dlp emits ``NA`` for unknown fields (e.g. total_bytes_estimate
+        # when the stream's content-length isn't known, or speed before
+        # a steady estimate stabilises).
+        prog = _parse_progress_line("s2v_progress|1000|NA|NA|NA")
+        assert prog is not None
+        assert prog.downloaded_bytes == 1000.0
+        assert prog.total_bytes is None
+        assert prog.speed is None
+        assert prog.eta is None
+
+    def test_handles_empty_fields(self):
+        # An empty token also maps to None (defensive — yt-dlp uses NA but
+        # a malformed line shouldn't crash).
+        prog = _parse_progress_line("s2v_progress||NA|NA|NA")
+        assert prog is not None
+        assert prog.downloaded_bytes is None
+        assert prog.total_bytes is None
+
+    def test_non_numeric_field_becomes_none(self):
+        # Garbage values that can't be parsed to float → None so the
+        # caller can't crash on a bad template / future yt-dlp change.
+        # ``NaN`` is rejected explicitly: float("NaN") succeeds but
+        # breaks numeric comparisons downstream.
+        prog = _parse_progress_line("s2v_progress|NaN|NA|NA|NA")
+        assert prog is not None
+        assert prog.downloaded_bytes is None
+
+    def test_line_with_too_few_fields_returns_none(self):
+        # Defensive: a truncated line shouldn't be mis-parsed.
+        assert _parse_progress_line("s2v_progress|100|200") is None
+        assert _parse_progress_line("s2v_progress|") is None
+        assert _parse_progress_line("s2v_progress") is None
+
+    def test_progress_callback_is_invoked(self):
+        """The progress_callback is called from the stdout drain thread
+        for each progress-template line, with parsed DownloadProgress.
+
+        Bits after the progress lines are NOT forwarded to the callback
+        (notably the final filepath line from ``--print after_move:filepath``).
+        """
+        import subprocess
+
+        real_popen = subprocess.Popen
+
+        def fake_popen(cmd, **kwargs):
+            return real_popen(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "print('s2v_progress|500|1000|100|5')\n"
+                        "print('s2v_progress|1000|1000|0|0')\n"
+                        "print('/tmp/abc123.mp4')"
+                    ),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+
+        with TemporaryDirectory() as tmp:
+            received: list[DownloadProgress] = []
+
+            def cb(p: DownloadProgress) -> None:
+                received.append(p)
+
+            with patch("stream2video.download.subprocess.Popen", side_effect=fake_popen):
+                try:
+                    download(
+                        "https://example.com/v",
+                        Path(tmp),
+                        quality="best",
+                        progress_callback=cb,
+                    )
+                except DownloadError:
+                    pass  # the fake script's path doesn't exist on disk
+
+            assert len(received) >= 2
+            assert received[0].downloaded_bytes == 500.0
+            assert received[0].total_bytes == 1000.0
+            assert received[0].speed == 100.0
+            assert received[0].eta == 5.0
+            assert received[1].downloaded_bytes == 1000.0
+            # Sanity: there's no stray '/tmp/abc123.mp4' line delivered as
+            # a progress update (it isn't prefixed with s2v_progress|).
+            for p in received:
+                assert p.downloaded_bytes is not None
+                assert p.total_bytes is not None

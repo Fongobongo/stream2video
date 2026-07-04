@@ -33,12 +33,14 @@ from stream2video.download import (
     DiskSpaceError,
     DownloadCancelledError,
     DownloadError,
+    DownloadProgress,
     DownloadTimeoutError,
     PermissionDeniedError,
     URLValidationError,
     VideoNotAvailableError,
     download,
 )
+from stream2video.formatters import fmt_size, fmt_speed
 from stream2video.paths import apply_per_video_dir
 from stream2video.silence import (
     SilenceCancelledError,
@@ -296,6 +298,42 @@ def main(
             # Step 1: Download video (indeterminate: yt-dlp does not report progress)
             task1 = progress.add_task("[cyan]Downloading video...", total=None)
 
+            def _download_progress_cb(p: DownloadProgress) -> None:
+                """Update the Rich task with yt-dlp progress.
+
+                Called from the stdout drain thread — Rich's Progress.update
+                is thread-safe (it locks internally). Maps the downloaded /
+                total bytes to the task, and refreshes the description with
+                percent + speed + ETA. Falls back to the indeterminate bar
+                (no total) when yt-dlp reports NA for the total size.
+                """
+                if p.total_bytes:
+                    progress.update(
+                        task1,
+                        total=p.total_bytes,
+                        completed=p.downloaded_bytes or 0.0,
+                    )
+                elif p.downloaded_bytes:
+                    # Known downloaded, unknown total — show at least the
+                    # bytes that came in so the bar visibly advances.
+                    progress.update(task1, total=None, completed=0.0)
+                    progress.update(
+                        task1,
+                        description=f"[cyan]Downloading... {fmt_size(int(p.downloaded_bytes))} "
+                        f"at {fmt_speed(p.speed)}",
+                    )
+                    return
+                pct = (
+                    100.0 * (p.downloaded_bytes or 0.0) / p.total_bytes
+                    if p.total_bytes
+                    else 0.0
+                )
+                progress.update(
+                    task1,
+                    description=f"[cyan]Downloading... {pct:.1f}% "
+                    f"at {fmt_speed(p.speed)} ETA {int(p.eta or 0)}s",
+                )
+
             try:
                 logger.info(f"Processing: {input_video}")
                 download_result = download(
@@ -303,6 +341,7 @@ def main(
                     output_dir,
                     cancel_callback=cancel_cb,
                     quality=download_quality,
+                    progress_callback=_download_progress_cb,
                 )
                 video_path = download_result.path
                 if download_result.is_downloaded:

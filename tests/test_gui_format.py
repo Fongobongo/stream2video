@@ -8,6 +8,7 @@ so the test module is import-safe in a minimal env.
 from stream2video.formatters import (
     fmt_clock_time,
     fmt_size,
+    fmt_speed,
     fmt_time,
     fmt_total_label,
     fmt_zoom_text,
@@ -38,6 +39,30 @@ class TestFmtSize:
 
     def test_below_kb_uses_bytes(self):
         assert fmt_size(1023) == "1023.0 B"
+
+
+class TestFmtSpeed:
+    """fmt_speed — bytes/sec -> '<size>/s' for the download status line."""
+
+    def test_bytes_per_sec(self):
+        assert fmt_speed(500) == "500.0 B/s"
+
+    def test_kibibytes_per_sec(self):
+        assert fmt_speed(5 * 1024 * 1024) == "5.0 MB/s"
+
+    def test_none_returns_question_mark(self):
+        # yt-dlp emits NA for speed during the initial ramp-up.
+        assert fmt_speed(None) == "?"
+
+    def test_negative_returns_question_mark(self):
+        assert fmt_speed(-1) == "?"
+
+    def test_zero(self):
+        assert fmt_speed(0) == "0.0 B/s"
+
+    def test_gigabits_per_sec(self):
+        # Realistic upper bound for a fast cable / fibre download.
+        assert fmt_speed(100 * 1024 * 1024) == "100.0 MB/s"
 
 
 class TestFmtTime:

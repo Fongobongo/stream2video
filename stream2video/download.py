@@ -20,6 +20,21 @@ class DownloadResult(NamedTuple):
     is_downloaded: bool
 
 
+class DownloadProgress(NamedTuple):
+    """Progress update from yt-dlp.
+
+    Any field may be None when yt-dlp doesn't know it yet (e.g. total
+    bytes for a stream that doesn't report its size, or speed during the
+    initial ramp-up). Callers should treat None as "unknown" and fall
+    back to an indeterminate display.
+    """
+
+    downloaded_bytes: float | None
+    total_bytes: float | None
+    speed: float | None  # bytes per second
+    eta: float | None  # seconds remaining
+
+
 class DownloadError(Exception):
     """Base download error."""
 
@@ -108,6 +123,53 @@ def _format_selector_for_quality(quality: str) -> str:
             f"(use {' or '.join(repr(q) for q in _DOWNLOAD_FORMATS)})"
         ) from e
 
+
+# Prefix used for yt-dlp ``--progress-template`` lines so they can be
+# distinguished from the regular stdout (notably the final filepath line
+# produced by ``--print after_move:filepath``).Parsed by
+# ``_parse_progress_line``.
+_PROGRESS_PREFIX = "s2v_progress|"
+
+
+def _parse_progress_line(line: str) -> DownloadProgress | None:
+    """Parse a yt-dlp ``--progress-template`` line into a DownloadProgress.
+
+    The line format is:
+        s2v_progress|<downloaded_bytes>|<total_bytes>|<speed>|<eta>
+
+    yt-dlp writes ``NA`` for fields it doesn't know yet (e.g. total size
+    for a stream that doesn't report it). Returns ``None`` for lines
+    that aren't progress updates (including the final filepath line from
+    ``--print``).
+    """
+    if not line.startswith(_PROGRESS_PREFIX):
+        return None
+    parts = line[len(_PROGRESS_PREFIX) :].split("|")
+    if len(parts) < 4:
+        return None
+
+    def _f(v: str) -> float | None:
+        if v == "NA" or v == "":
+            return None
+        try:
+            f = float(v)
+        except (ValueError, TypeError):
+            return None
+        # Reject NaN / inf — float("NaN") / float("inf") parse fine but
+        # break numeric comparisons downstream (e.g. downloaded/total,
+        # ``min(1.0, x)``). Treat them as "unknown" so the caller falls
+        # back to the indeterminate display.
+        if f != f or f in (float("inf"), float("-inf")):
+            return None
+        return f
+
+    return DownloadProgress(
+        downloaded_bytes=_f(parts[0]),
+        total_bytes=_f(parts[1]),
+        speed=_f(parts[2]),
+        eta=_f(parts[3]),
+    )
+
 _VIDEO_EXTENSIONS = frozenset(
     {
         ".mp4",
@@ -165,6 +227,7 @@ def download(
     out_dir: Path,
     cancel_callback: Callable[[], bool] | None = None,
     quality: str = "best",
+    progress_callback: Callable[[DownloadProgress], None] | None = None,
 ) -> DownloadResult:
     """
     Download video from URL via yt-dlp CLI, or pass through a local file.
@@ -180,6 +243,12 @@ def download(
         quality: Download quality preset — one of
             ``best`` / ``1080p`` / ``720p`` / ``480p`` / ``360p``.
             Mapped to a yt-dlp format selector. Ignored for local files.
+        progress_callback: Optional callable receiving a ``DownloadProgress``
+            on each yt-dlp progress update (downloaded bytes, total bytes,
+            speed in bytes/sec, ETA in seconds). Any field may be ``None``
+            when yt-dlp doesn't know it yet. Called from the stdout drain
+            thread — callers must be thread-safe (the CLI's Rich task update
+            is; the GUI schedules onto the Tk main loop via ``after``).
 
     Returns:
         DownloadResult with `path` to the file and `is_downloaded` flag
@@ -210,6 +279,12 @@ def download(
         "yt_dlp",
         "--no-warnings",
         "--newline",
+        # Send one progress update per line to stdout, using a prefix we
+        # can recognise and parse (see _parse_progress_line). yt-dlp emits
+        # ``NA`` for fields it doesn't know yet (e.g. total_bytes_estimate
+        # for streams without a content-length).
+        "--progress-template",
+        f"{_PROGRESS_PREFIX}%(downloaded_bytes)s|%(total_bytes_estimate)s|%(speed)s|%(eta)s",
         "--output",
         str(out_dir / "%(id)s.%(ext)s"),
         "--format",
@@ -239,6 +314,17 @@ def download(
     def _drain_stdout():
         for line in process.stdout:
             text = line.rstrip()
+            prog = _parse_progress_line(text)
+            if prog is not None:
+                if progress_callback is not None:
+                    try:
+                        progress_callback(prog)
+                    except Exception:
+                        # A callback crash must not break the download —
+                        # progress is best-effort UI feedback, not a hard
+                        # signal. Log and continue.
+                        logger.debug("progress_callback raised", exc_info=True)
+                continue
             stdout_lines.append(text)
 
     def _drain_stderr():

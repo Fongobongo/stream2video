@@ -229,6 +229,7 @@ python -m stream2video.gui
 - **Download quality**: best / 1080p / 720p / 480p / 360p (Twitch/YouTube, ignored for local files)
 - **Test encoder** button
 - **Progress bar** + **log panel** with real-time output
+  - During download (Twitch/YouTube), the bar shows percent, downloaded/total size, speed, and ETA — parsed from yt-dlp's `--progress-template` output
 - **Theme**: dark/light/system
 - **Copy CLI command** — copies current params as CLI command to clipboard
 - **Persistent settings** — remembers last used values

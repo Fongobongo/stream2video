@@ -16,6 +16,18 @@ def fmt_size(bytez: int) -> str:
     return f"{size:.1f} TB"
 
 
+def fmt_speed(bytes_per_sec: float | None) -> str:
+    """Format a download/upload speed as ``"<size>/s"``.
+
+    Returns ``"?"`` for None (yt-dlp reports NA during the initial
+    ramp-up before a steady speed estimate stabilises). Reuses
+    ``fmt_size`` for the magnitude so the units stay consistent.
+    """
+    if bytes_per_sec is None or bytes_per_sec < 0:
+        return "?"
+    return f"{fmt_size(int(bytes_per_sec))}/s"
+
+
 def fmt_time(secs: float) -> str:
     total = int(secs)
     d, r = divmod(total, 86400)

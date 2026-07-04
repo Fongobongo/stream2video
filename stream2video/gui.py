@@ -41,6 +41,7 @@ from stream2video.download import (
     DiskSpaceError,
     DownloadCancelledError,
     DownloadError,
+    DownloadProgress,
     DownloadTimeoutError,
     PermissionDeniedError,
     VideoNotAvailableError,
@@ -49,6 +50,7 @@ from stream2video.download import (
 from stream2video.formatters import (
     fmt_clock_time,
     fmt_size,
+    fmt_speed,
     fmt_time,
     fmt_total_label,
     fmt_zoom_text,
@@ -1605,7 +1607,46 @@ class Stream2VideoGUI(ctk.CTk):
             self._ui_progress(0.0)
             self._ui_status("Step 1/3: Downloading / resolving video...", force=True)
             self._log("Step 1/3: Downloading / resolving video...")
-            self._ui_overall_elapsed_only()
+
+            # Setup the download-progress callback so Step 1 advances the
+            # overall progress bar (download covers 0.0..0.05) and shows
+            # percent + speed + ETA in the status and Elapsed/Remaining
+            # labels. Runs from yt-dlp's stdout drain thread — all UI
+            # writes are scheduled on the Tk main loop via ``after``.
+            download_start = time.monotonic()
+
+            def _download_cb(p: DownloadProgress) -> None:
+                elapsed = time.monotonic() - download_start
+
+                # 0.0..0.05 of the overall bar maps to download 0..100%.
+                # When yt-dlp doesn't know the total size, fall back to a
+                # visible but non-bounded indicator (advance by elapsed
+                # capped at 0.04 so the next phase still leaves headroom).
+                if p.total_bytes and p.total_bytes > 0:
+                    frac = min(1.0, (p.downloaded_bytes or 0.0) / p.total_bytes)
+                    self._ui_progress(0.05 * frac)
+                else:
+                    self._ui_progress(min(0.04, 0.005 * elapsed))
+
+                pct = (
+                    100.0 * (p.downloaded_bytes or 0.0) / p.total_bytes
+                    if p.total_bytes
+                    else 0.0
+                )
+                downloaded_s = fmt_size(int(p.downloaded_bytes)) if p.downloaded_bytes else "?"
+                total_s = fmt_size(int(p.total_bytes)) if p.total_bytes else "?"
+                speed_s = fmt_speed(p.speed)
+                eta_s = fmt_time(p.eta) if p.eta else "?"
+                self._ui_status(
+                    f"Step 1/3: Downloading {pct:.0f}% ({downloaded_s}/{total_s}) "
+                    f"at {speed_s} ETA {eta_s}",
+                    force=True,
+                )
+                # Reuse the Elapsed/Remaining line in bottom_frame:
+                # yt-dlp's ETA is for THIS phase — no other phases follow
+                # in the same callback, but the silence/cut phases do, so
+                # mark ``more_phases=True``.
+                self._ui_overall(elapsed, p.eta or 0.0, more_phases=True)
 
             try:
                 download_result = download(
@@ -1613,6 +1654,7 @@ class Stream2VideoGUI(ctk.CTk):
                     output_dir,
                     cancel_callback=lambda: self._cancel_event.is_set(),
                     quality=download_quality,
+                    progress_callback=_download_cb,
                 )
                 video_path = download_result.path
             except DownloadCancelledError:
