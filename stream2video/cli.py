@@ -24,8 +24,10 @@ from stream2video.concat import ConcatError, cut_and_concat
 from stream2video.config import (
     CONFIG_DEFAULTS,
     CONFIG_RANGES,
+    VALID_DOWNLOAD_QUALITIES,
     VALID_ENCODERS,
     VALID_METHODS,
+    VALID_QUALITIES,
 )
 from stream2video.download import (
     DiskSpaceError,
@@ -186,6 +188,19 @@ def main(
         "-e",
         help="Video encoder: 'h264_nvenc' (NVIDIA), 'h264_amf' (AMD), 'h264_mf' (Media Foundation, default), or 'libx264' (CPU fallback)",
     ),
+    video_quality: str = typer.Option(
+        "medium",
+        "--video-quality",
+        "-vq",
+        help="Encode quality preset: 'high' (10000k / CRF 18), 'medium' (7000k / CRF 23, default), or 'low' (3500k / CRF 28)",
+    ),
+    download_quality: str = typer.Option(
+        "best",
+        "--download-quality",
+        "-dq",
+        help="Download quality preset (Twitch/YouTube, ignored for local files): "
+        "'best' (default), '1080p', '720p', '480p', '360p'",
+    ),
     delete_after: bool = typer.Option(
         False,
         "--delete-after",
@@ -221,6 +236,18 @@ def main(
         raise typer.Exit(1)
     if encoder not in VALID_ENCODERS:
         console.print(f"[red]Invalid encoder:[/red] {encoder!r} (use {', '.join(VALID_ENCODERS)})")
+        raise typer.Exit(1)
+    if video_quality not in VALID_QUALITIES:
+        console.print(
+            f"[red]Invalid video quality:[/red] {video_quality!r} "
+            f"(use {', '.join(VALID_QUALITIES)})"
+        )
+        raise typer.Exit(1)
+    if download_quality not in VALID_DOWNLOAD_QUALITIES:
+        console.print(
+            f"[red]Invalid download quality:[/red] {download_quality!r} "
+            f"(use {', '.join(VALID_DOWNLOAD_QUALITIES)})"
+        )
         raise typer.Exit(1)
 
     # Verify ffmpeg is available
@@ -275,6 +302,7 @@ def main(
                     input_video,
                     output_dir,
                     cancel_callback=cancel_cb,
+                    quality=download_quality,
                 )
                 video_path = download_result.path
                 if download_result.is_downloaded:
@@ -397,6 +425,7 @@ def main(
                     progress_callback=update_progress,
                     method=method,
                     encoder=encoder,
+                    video_quality=video_quality,
                     cancel_callback=cancel_cb,
                 )
 

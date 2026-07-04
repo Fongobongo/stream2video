@@ -11,6 +11,8 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     "margin": 0.5,
     "method": "segment",
     "encoder": "h264_mf",
+    "video_quality": "medium",
+    "download_quality": "best",
     "force": False,
     "delete_after": False,
     "per_video_dir": True,
@@ -29,6 +31,10 @@ VALID_METHODS: list[str] = ["segment", "batch"]
 
 VALID_ENCODERS: list[str] = ["h264_nvenc", "h264_amf", "h264_mf", "libx264"]
 
+VALID_QUALITIES: list[str] = ["high", "medium", "low"]
+
+VALID_DOWNLOAD_QUALITIES: list[str] = ["best", "1080p", "720p", "480p", "360p"]
+
 VALID_THEMES: list[str] = ["dark", "light", "system"]
 
 # Keys that are user-tunable defaults (exclude per-session state like
@@ -40,6 +46,8 @@ USER_DEFAULT_KEYS: list[str] = [
     "margin",
     "method",
     "encoder",
+    "video_quality",
+    "download_quality",
     "force",
     "delete_after",
     "per_video_dir",

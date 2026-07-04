@@ -67,6 +67,8 @@ stream2video /path/to/video.mp4
 |------|---------|-------------|
 | `-o, --output` | `./compressed_videos` | Output directory |
 | `-e, --encoder` | `h264_mf` | `h264_nvenc`, `h264_amf`, `h264_mf`, `libx264` |
+| `-vq, --video-quality` | `medium` | Encode quality preset: `high` (10000k / CRF 18), `medium` (7000k / CRF 23), `low` (3500k / CRF 28) |
+| `-dq, --download-quality` | `best` | Download quality preset (Twitch/YouTube, ignored for local files): `best`, `1080p`, `720p`, `480p`, `360p` |
 | `-m, --method` | `segment` | `segment` (per-segment encode + concat demuxer) or `batch` (frame-exact select/aselect) |
 | `-f, --force` | — | Re-detect silence, ignore cache |
 | `-c, --config` | — | YAML config file |
@@ -79,6 +81,9 @@ stream2video /path/to/video.mp4
 ```bash
 # Choose encoder
 stream2video video.mp4 --encoder h264_nvenc
+
+# Download at 720p and encode at low quality (smaller output)
+stream2video https://www.youtube.com/watch?v=VIDEO_ID --download-quality 720p --video-quality low
 
 # Specify output directory
 stream2video video.mp4 -o ./output --method batch
@@ -102,6 +107,8 @@ margin: 0.15
 | `threshold` (dB) | -60 to -5 | -30.0 | Audio below this level = silence |
 | `min_silence` (s) | 0.1 to 60 | 2.0 | Minimum silence duration to cut |
 | `margin` (s) | -3 to 5 | 0.5 | How much to shrink silence zones. Positive = shrink silence (keep more audio around phrases). Negative = expand silence (cut more aggressively). `0` = no adjustment. |
+| `video_quality` | `high`/`medium`/`low` | `medium` | Encode quality preset. Bitrate for HW encoders (10000k/7000k/3500k); CRF for libx264 (18/23/28). Also settable via `--video-quality`. |
+| `download_quality` | `best`/`1080p`/`720p`/`480p`/`360p` | `best` | Max resolution to download from Twitch/YouTube (ignored for local files). Also settable via `--download-quality`. |
 | `per_video_dir` | bool | `true` | When true, all artifacts (downloaded source, WAV, JSON, log, compressed, temp dirs) are collected into `{output_dir}/{stem}/` instead of living in the base `output_dir`. Local source files are never moved/copied — they stay where you put them. |
 
 ## Project directory
@@ -135,7 +142,7 @@ Entries are pruned automatically when their directory no longer exists. The list
 
 The GUI's left info panel has two related buttons:
 
-- **Save current as defaults** — writes the current tunable settings (threshold, min_silence, margin, method, encoder, force, delete_after, per_video_dir, theme) to `_portable/user_defaults.json`. Per-session state (output_dir, recent_projects, input_path) is intentionally not saved.
+- **Save current as defaults** — writes the current tunable settings (threshold, min_silence, margin, method, encoder, video_quality, download_quality, force, delete_after, per_video_dir, theme) to `_portable/user_defaults.json`. Per-session state (output_dir, recent_projects, input_path) is intentionally not saved.
 - **Restore defaults** — restores those user defaults (or the factory `CONFIG_DEFAULTS` if no user defaults file exists).
 
 This lets you set your preferred workflow once (e.g. `per_video_dir=True`, `encoder=libx264`) and have it stick across restarts, projects, and "Restore defaults" clicks — without having to edit code.
@@ -218,6 +225,8 @@ python -m stream2video.gui
 - **Per-video project directory** checkbox — group all of a video's artifacts into `{output_dir}/{stem}/`
 - **Method**: segment (per-segment encode + concat demuxer) or batch (frame-exact select/aselect)
 - **Encoder**: h264_nvenc, h264_amf, h264_mf, libx264
+- **Video quality**: high / medium / low (bitrate for HW encoders, CRF for libx264)
+- **Download quality**: best / 1080p / 720p / 480p / 360p (Twitch/YouTube, ignored for local files)
 - **Test encoder** button
 - **Progress bar** + **log panel** with real-time output
 - **Theme**: dark/light/system

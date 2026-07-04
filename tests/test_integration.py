@@ -8,12 +8,15 @@ from unittest.mock import patch
 import pytest
 
 from stream2video.concat import (
+    ENCODER_OPTS,
     CancelledError,
     ConcatError,
     _run_ffmpeg,
     _with_libx264_fallback,
     cut_and_concat,
+    encoder_opts,
     generate_keep_segments,
+    get_video_encoder,
 )
 from stream2video.download import download
 from stream2video.silence import SilenceSegment
@@ -467,3 +470,105 @@ class TestEncoderFallbackCleanup:
         assert calls["cleanup"] == ["h264_mf"], (
             "on_fallback should only fire once (before the libx264 retry)"
         )
+
+
+class TestEncoderQualityPresets:
+    """encoder_opts(encoder, quality) — bitrate (HW) and CRF (libx264)
+    must track the quality preset. ``medium`` reproduces the previously
+    hard-coded defaults so existing output size/quality is unchanged."""
+
+    def test_medium_matches_legacy_encoder_opts(self):
+        # The legacy hard-coded values (7000k / CRF 23) must be exactly
+        # reproduced by encoder_opts(enc, "medium"). This is the
+        # backward-compat guarantee for users upgrading.
+        legacy = {
+            "h264_mf": ["-b:v", "7000k", "-quality", "100"],
+            "h264_amf": ["-usage", "transcoding", "-quality", "speed", "-b:v", "7000k"],
+            "h264_nvenc": [
+                "-preset", "p7", "-rc", "vbr", "-b:v", "7000k",
+                "-maxrate", "7000k", "-cq", "18",
+            ],
+            "libx264": ["-crf", "23", "-preset", "medium"],
+        }
+        for enc in ("h264_mf", "h264_amf", "h264_nvenc", "libx264"):
+            assert encoder_opts(enc, "medium") == legacy[enc], (
+                f"medium preset must reproduce legacy opts for {enc}"
+            )
+
+    def test_encoder_opts_registry_matches_default(self):
+        # The module-level ENCODER_OPTS dict is a back-compat registry
+        # mapping encoder -> default (medium) opts.
+        for enc in ("h264_mf", "h264_amf", "h264_nvenc", "libx264"):
+            assert ENCODER_OPTS[enc] == encoder_opts(enc, "medium")
+
+    def test_hw_bitrate_tracks_quality(self):
+        from stream2video.concat import _VIDEO_BITRATES
+
+        assert _VIDEO_BITRATES == {"high": "10000k", "medium": "7000k", "low": "3500k"}
+        for enc in ("h264_mf", "h264_amf", "h264_nvenc"):
+            for q, br in _VIDEO_BITRATES.items():
+                opts = encoder_opts(enc, q)
+                assert "-b:v" in opts
+                idx = opts.index("-b:v")
+                assert opts[idx + 1] == br, f"{enc} {q}: -b:v must be {br}"
+                if enc == "h264_nvenc":
+                    assert "-maxrate" in opts
+                    m_idx = opts.index("-maxrate")
+                    assert opts[m_idx + 1] == br, f"{enc} {q}: -maxrate must be {br}"
+
+    def test_libx264_crf_tracks_quality(self):
+        from stream2video.concat import _X264_CRF
+
+        assert _X264_CRF == {"high": "18", "medium": "23", "low": "28"}
+        for q, crf in _X264_CRF.items():
+            opts = encoder_opts("libx264", q)
+            idx = opts.index("-crf")
+            assert opts[idx + 1] == crf
+            # libx264 ignores bitrate, so -b:v must NOT be present
+            assert "-b:v" not in opts
+
+    def test_unknown_encoder_raises(self):
+        with pytest.raises(ConcatError, match="Unknown encoder"):
+            encoder_opts("vp9", "medium")
+
+    def test_unknown_quality_raises(self):
+        with pytest.raises(ConcatError, match="Unknown video quality"):
+            encoder_opts("libx264", "ultra")
+
+    def test_get_video_encoder_passes_quality(self):
+        # libx264 always passes the encoder check. Verify the quality
+        # preset flows through get_video_encoder into the returned opts.
+        for q in ("high", "medium", "low"):
+            enc, opts = get_video_encoder("libx264", q)
+            assert enc == "libx264"
+            assert opts == encoder_opts("libx264", q)
+
+    def test_get_video_encoder_fallback_carries_quality(self):
+        """When the primary encoder is unavailable, the libx264 fallback
+        must use the same video_quality preset (CRF) the user requested.
+        """
+        from stream2video.concat import _X264_CRF
+
+        calls: list[tuple[str, list[str]]] = []
+
+        def _try_fn(enc, opts):
+            calls.append((enc, opts))
+            if enc == "h264_nvenc":
+                raise ConcatError("nvenc unavailable")
+
+        with patch("stream2video.concat.check_encoder", return_value=False):
+            _with_libx264_fallback(
+                "h264_nvenc",
+                encoder_opts("h264_nvenc", "low"),
+                _try_fn,
+                (ConcatError, OSError),
+                None,
+                video_quality="low",
+            )
+
+        # Two attempts: first h264_nvenc (fails), then libx264 (succeeds).
+        assert [enc for enc, _ in calls] == ["h264_nvenc", "libx264"]
+        # The fallback libx264 call must use CRF 28 (low preset).
+        libx264_opts = calls[-1][1]
+        crf_idx = libx264_opts.index("-crf")
+        assert libx264_opts[crf_idx + 1] == _X264_CRF["low"]

@@ -26,8 +26,10 @@ from stream2video.concat import (
 )
 from stream2video.config import (
     CONFIG_DEFAULTS,
+    VALID_DOWNLOAD_QUALITIES,
     VALID_ENCODERS,
     VALID_METHODS,
+    VALID_QUALITIES,
     VALID_THEMES,
     coerce_typed_value,
     effective_defaults,
@@ -521,6 +523,35 @@ class Stream2VideoGUI(ctk.CTk):
         self.lbl_encoder_desc = ctk.CTkLabel(opt_frame, text="", font=("", 10, "italic"))
         self.lbl_encoder_desc.grid(
             row=2, column=0, columnspan=4, sticky="w", padx=(0, 5), pady=(1, 0)
+        )
+
+        # Video quality preset — bitrate (HW encoders) / CRF (libx264).
+        ctk.CTkLabel(opt_frame, text="Video quality:").grid(
+            row=3, column=0, sticky="w", padx=(0, 5)
+        )
+        self.combo_video_quality = ctk.CTkComboBox(
+            opt_frame, values=VALID_QUALITIES, state="readonly", width=120
+        )
+        self.combo_video_quality.set(self.config["video_quality"])
+        self.combo_video_quality.grid(row=3, column=1, sticky="w", padx=(0, 5))
+        _Tooltip(
+            self.combo_video_quality,
+            "Preset for the encode step.\nhigh — 10000k / CRF 18 (large files, best quality)\nmedium — 7000k / CRF 23 (default)\nlow — 3500k / CRF 28 (small files)",
+        )
+
+        # Download quality preset — Twitch/YouTube resolution cap. Ignored
+        # for local files (the source file is used as-is).
+        ctk.CTkLabel(opt_frame, text="Download quality:").grid(
+            row=4, column=0, sticky="w", padx=(0, 5)
+        )
+        self.combo_download_quality = ctk.CTkComboBox(
+            opt_frame, values=VALID_DOWNLOAD_QUALITIES, state="readonly", width=120
+        )
+        self.combo_download_quality.set(self.config["download_quality"])
+        self.combo_download_quality.grid(row=4, column=1, sticky="w", padx=(0, 5))
+        _Tooltip(
+            self.combo_download_quality,
+            "Max resolution to download from Twitch/YouTube.\nbest — highest available (default)\n1080p / 720p / 480p / 360p — cap height\nIgnored for local files.",
         )
 
         opt_frame.grid_columnconfigure(1, weight=0)
@@ -1495,6 +1526,8 @@ class Stream2VideoGUI(ctk.CTk):
         output_dir = output_dir.resolve()
         method = self.combo_method.get()
         encoder = self.combo_encoder.get()
+        video_quality = self.combo_video_quality.get()
+        download_quality = self.combo_download_quality.get()
         force = bool(self.chk_force.get())
         per_video_dir = bool(self.chk_per_video_dir.get())
 
@@ -1502,7 +1535,9 @@ class Stream2VideoGUI(ctk.CTk):
 
         self._log(
             f"Starting pipeline: input={input_raw}, output_dir={output_dir}, "
-            f"method={method}, encoder={encoder}, force={force}, "
+            f"method={method}, encoder={encoder}, "
+            f"video_quality={video_quality}, download_quality={download_quality}, "
+            f"force={force}, "
             f"threshold={self.config['threshold']}, "
             f"min_silence={self.config['min_silence']}, "
             f"margin={self.config['margin']}, "
@@ -1512,7 +1547,16 @@ class Stream2VideoGUI(ctk.CTk):
 
         threading.Thread(
             target=self._pipeline_worker,
-            args=(input_raw, output_dir, method, encoder, force, per_video_dir),
+            args=(
+                input_raw,
+                output_dir,
+                method,
+                encoder,
+                video_quality,
+                download_quality,
+                force,
+                per_video_dir,
+            ),
             daemon=True,
         ).start()
 
@@ -1541,6 +1585,8 @@ class Stream2VideoGUI(ctk.CTk):
         output_dir: Path,
         method: str,
         encoder: str,
+        video_quality: str,
+        download_quality: str,
         force: bool,
         per_video_dir: bool = False,
     ):
@@ -1566,6 +1612,7 @@ class Stream2VideoGUI(ctk.CTk):
                     input_raw,
                     output_dir,
                     cancel_callback=lambda: self._cancel_event.is_set(),
+                    quality=download_quality,
                 )
                 video_path = download_result.path
             except DownloadCancelledError:
@@ -1730,12 +1777,20 @@ class Stream2VideoGUI(ctk.CTk):
             # Step 3: Cut & concat
             self._ui_progress(0.4)
             self._ui_status("Step 3/3: Cutting and concatenating...", force=True)
-            self._log(f"Step 3/3: Cutting & concatenating (method={method}, encoder={encoder})...")
+            self._log(
+                f"Step 3/3: Cutting & concatenating "
+                f"(method={method}, encoder={encoder}, video_quality={video_quality})..."
+            )
 
             output_path = output_dir / f"{video_path.stem}_compressed.mp4"
             self._output_path = output_path
 
-            self.after(0, lambda: self.lbl_encoder.configure(text=f"Encoder: {encoder}"))
+            self.after(
+                0,
+                lambda: self.lbl_encoder.configure(
+                    text=f"Encoder: {encoder} ({video_quality})"
+                ),
+            )
 
             cut_start = time.monotonic()
 
@@ -1757,6 +1812,7 @@ class Stream2VideoGUI(ctk.CTk):
                 progress_callback=concat_prog,
                 method=method,
                 encoder=encoder,
+                video_quality=video_quality,
                 cancel_callback=lambda: self._cancel_event.is_set(),
             )
 
@@ -2428,6 +2484,8 @@ class Stream2VideoGUI(ctk.CTk):
         self.config["output_dir"] = self.entry_output.get().strip()
         self.config["method"] = self.combo_method.get()
         self.config["encoder"] = self.combo_encoder.get()
+        self.config["video_quality"] = self.combo_video_quality.get()
+        self.config["download_quality"] = self.combo_download_quality.get()
         self.config["force"] = bool(self.chk_force.get())
         self.config["delete_after"] = bool(self.chk_delete.get())
         self.config["per_video_dir"] = bool(self.chk_per_video_dir.get())
@@ -2473,6 +2531,8 @@ class Stream2VideoGUI(ctk.CTk):
         self.combo_method.set(self.config["method"])
         self.combo_encoder.set(self.config["encoder"])
         self._on_encoder_change(self.config["encoder"])
+        self.combo_video_quality.set(self.config["video_quality"])
+        self.combo_download_quality.set(self.config["download_quality"])
         self._set_checkbox(self.chk_force, self.config["force"])
         self._set_checkbox(self.chk_delete, self.config["delete_after"])
         self._set_checkbox(self.chk_per_video_dir, self.config["per_video_dir"])
@@ -2537,6 +2597,8 @@ class Stream2VideoGUI(ctk.CTk):
             "margin": float(self.config["margin"]),
             "method": self.combo_method.get(),
             "encoder": self.combo_encoder.get(),
+            "video_quality": self.combo_video_quality.get(),
+            "download_quality": self.combo_download_quality.get(),
             "force": bool(self.chk_force.get()),
             "delete_after": bool(self.chk_delete.get()),
             "per_video_dir": bool(self.chk_per_video_dir.get()),
@@ -2555,6 +2617,8 @@ class Stream2VideoGUI(ctk.CTk):
         out_raw = self.entry_output.get().strip() or "./compressed_videos"
         method = self.combo_method.get()
         encoder = self.combo_encoder.get()
+        video_quality = self.combo_video_quality.get()
+        download_quality = self.combo_download_quality.get()
         force = bool(self.chk_force.get())
         delete_after = bool(self.chk_delete.get())
 
@@ -2581,6 +2645,8 @@ class Stream2VideoGUI(ctk.CTk):
         if config_path is not None:
             parts.extend(["-c", shlex.quote(str(config_path))])
         parts.extend(["--method", method, "--encoder", encoder])
+        parts.extend(["--video-quality", video_quality])
+        parts.extend(["--download-quality", download_quality])
         if force:
             parts.append("-f")
         if delete_after:

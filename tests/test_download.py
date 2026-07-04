@@ -17,6 +17,7 @@ from stream2video.download import (
     VideoNotAvailableError,
     _classify_error,
     _find_downloaded_file,
+    _format_selector_for_quality,
     _is_local_file,
     _validate_url,
     download,
@@ -183,3 +184,40 @@ class TestClassifyError:
         e = _classify_error("Some unknown error")
         assert type(e).__name__ == "DownloadError"
         assert "Some unknown error" in str(e)
+
+
+class TestFormatSelector:
+    """Quality preset → yt-dlp format selector mapping."""
+
+    def test_best_is_pre_merged_with_mp4_preference(self):
+        # ``best`` keeps the original behaviour: a single pre-merged file
+        # with mp4 preferred.
+        assert _format_selector_for_quality("best") == "best[ext=mp4]/best"
+
+    def test_resolution_caps_use_height_filter(self):
+        # Resolution presets pick the best video stream up to the given
+        # height plus best audio, with a pre-merged fallback.
+        for height in ("1080p", "720p", "480p", "360p"):
+            sel = _format_selector_for_quality(height)
+            n = height.rstrip("p")
+            assert f"bestvideo[height<={n}]+bestaudio" in sel
+            assert f"best[height<={n}]" in sel
+            assert sel.endswith("/best"), "resolution selector must fall back to /best"
+
+    def test_unknown_quality_raises(self):
+        with pytest.raises(DownloadError, match="Unknown download quality"):
+            _format_selector_for_quality("4k")
+        with pytest.raises(DownloadError, match="Unknown download quality"):
+            _format_selector_for_quality("")
+
+    def test_quality_is_ignored_for_local_files(self):
+        """Local file passthrough must not invoke yt-dlp regardless of
+        the quality preset — the source is used as-is and quality only
+        applies to URL downloads (Twitch/YouTube)."""
+        with TemporaryDirectory() as tmpdir:
+            test_file = Path(tmpdir) / "input.mp4"
+            test_file.write_text("video data")
+            for q in ("best", "1080p", "720p", "480p", "360p"):
+                result = download(str(test_file), Path(tmpdir) / "out", quality=q)
+                assert result.path == test_file
+                assert not result.is_downloaded

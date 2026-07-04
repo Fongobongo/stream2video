@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from stream2video.config import VALID_ENCODERS, VALID_METHODS
+from stream2video.config import VALID_ENCODERS, VALID_METHODS, VALID_QUALITIES
 from stream2video.silence import SilenceSegment
 from stream2video.utils import (
     CANCEL_POLL_INTERVAL,
@@ -66,6 +66,20 @@ _STALL_KILL = 300
 _HYBRID_SEEK_OFFSET = 0.5
 _AUDIO_PAD = 0.1  # extra seconds to let AAC encoder flush its lookahead buffer
 
+# Bitrate (HW encoders) and CRF (libx264) per ``video_quality`` preset.
+# ``medium`` keeps the values previously hard-coded in ENCODER_OPTS so
+# existing output size/quality is unchanged on upgrade.
+_VIDEO_BITRATES: dict[str, str] = {
+    "high": "10000k",
+    "medium": _VIDEO_BITRATE,
+    "low": "3500k",
+}
+_X264_CRF: dict[str, str] = {
+    "high": "18",
+    "medium": "23",
+    "low": "28",
+}
+
 _encoder_check_cache: dict[str, bool] = {}
 _encoder_check_lock = threading.Lock()
 
@@ -77,6 +91,7 @@ def cut_and_concat(
     progress_callback: Callable[[float], None] | None = None,
     method: str = "batch",
     encoder: str = "libx264",
+    video_quality: str = "medium",
     cancel_callback: Callable[[], bool] | None = None,
 ) -> Path:
     if not video_path.exists():
@@ -91,8 +106,8 @@ def cut_and_concat(
         f"Keeping {len(keep_segments)} segments, removing {len(silence_segments)} silence segments"
     )
 
-    vcodec, vcodec_opts = get_video_encoder(encoder)
-    logger.info(f"Encoder: {vcodec} {vcodec_opts}")
+    vcodec, vcodec_opts = get_video_encoder(encoder, video_quality)
+    logger.info(f"Encoder: {vcodec} {vcodec_opts} (quality={video_quality})")
 
     _run_with_fallback(
         video_path,
@@ -103,6 +118,7 @@ def cut_and_concat(
         method,
         progress_callback,
         cancel_callback,
+        video_quality=video_quality,
     )
 
     return output_path
@@ -147,23 +163,49 @@ def generate_keep_segments(
     return keep_segments
 
 
-ENCODER_OPTS: dict[str, list[str]] = {
-    "h264_mf": ["-b:v", _VIDEO_BITRATE, "-quality", "100"],
-    "h264_amf": ["-usage", "transcoding", "-quality", "speed", "-b:v", _VIDEO_BITRATE],
-    "h264_nvenc": [
-        "-preset",
-        "p7",
-        "-rc",
-        "vbr",
-        "-b:v",
-        _VIDEO_BITRATE,
-        "-maxrate",
-        _VIDEO_BITRATE,
-        "-cq",
-        "18",
-    ],
-    "libx264": ["-crf", "23", "-preset", "medium"],
-}
+def encoder_opts(encoder: str, quality: str = "medium") -> list[str]:
+    """Return the ffmpeg encoder options for ``encoder`` at ``quality`` preset.
+
+    quality: ``high`` / ``medium`` / ``low``. Affects bitrate (HW encoders)
+    and CRF (libx264). ``medium`` reproduces the previously hard-coded
+    options exactly so existing output is unchanged.
+    """
+    if encoder not in VALID_ENCODERS:
+        raise ConcatError(
+            f"Unknown encoder {encoder!r} (known: {', '.join(VALID_ENCODERS)})"
+        )
+    if quality not in VALID_QUALITIES:
+        raise ConcatError(
+            f"Unknown video quality {quality!r} (use {' or '.join(repr(q) for q in VALID_QUALITIES)})"
+        )
+    bitrate = _VIDEO_BITRATES[quality]
+    if encoder == "h264_mf":
+        return ["-b:v", bitrate, "-quality", "100"]
+    if encoder == "h264_amf":
+        return ["-usage", "transcoding", "-quality", "speed", "-b:v", bitrate]
+    if encoder == "h264_nvenc":
+        return [
+            "-preset",
+            "p7",
+            "-rc",
+            "vbr",
+            "-b:v",
+            bitrate,
+            "-maxrate",
+            bitrate,
+            "-cq",
+            "18",
+        ]
+    # libx264 — CRF-driven, bitrate is ignored.
+    crf = _X264_CRF[quality]
+    return ["-crf", crf, "-preset", "medium"]
+
+
+# Back-compat registry: maps each supported encoder to its default (medium)
+# options. Used by tests as a sanity check that VALID_ENCODERS and the
+# encoder registry stay in sync; not for runtime use — callers should
+# use ``encoder_opts()`` so the ``video_quality`` preset is applied.
+ENCODER_OPTS: dict[str, list[str]] = {enc: encoder_opts(enc) for enc in VALID_ENCODERS}
 
 
 def check_encoder(name: str) -> bool:
@@ -206,13 +248,18 @@ def check_encoder(name: str) -> bool:
         return ok
 
 
-def get_video_encoder(preferred: str) -> tuple[str, list[str]]:
-    if preferred not in ENCODER_OPTS:
+def get_video_encoder(preferred: str, video_quality: str = "medium") -> tuple[str, list[str]]:
+    if preferred not in VALID_ENCODERS:
         raise ConcatError(f"Unknown encoder {preferred!r} (known: {', '.join(VALID_ENCODERS)})")
+    if video_quality not in VALID_QUALITIES:
+        raise ConcatError(
+            f"Unknown video quality {video_quality!r} "
+            f"(use {' or '.join(repr(q) for q in VALID_QUALITIES)})"
+        )
     if check_encoder(preferred):
-        return preferred, ENCODER_OPTS[preferred][:]
+        return preferred, encoder_opts(preferred, video_quality)
     logger.warning(f"{preferred} not available, falling back to libx264")
-    return "libx264", ENCODER_OPTS["libx264"][:]
+    return "libx264", encoder_opts("libx264", video_quality)
 
 
 def _run_ffmpeg(
@@ -489,6 +536,7 @@ def _run_with_fallback(
     method: str,
     progress_callback: Callable[[float], None] | None = None,
     cancel_callback: Callable[[], bool] | None = None,
+    video_quality: str = "medium",
 ):
     """Run segment or batch concat with the primary encoder; fall back to libx264 on failure.
 
@@ -499,6 +547,8 @@ def _run_with_fallback(
     would otherwise reuse them on the libx264 retry.
 
     ``method`` is "segment" or "batch"; anything else raises ConcatError.
+    ``video_quality`` is forwarded to the libx264 fallback so the retry
+    uses the same bitrate/CRF preset the user requested.
     """
     if method == "segment":
         inner = _run_segment_concat
@@ -537,6 +587,7 @@ def _run_with_fallback(
         _try,
         (ConcatError, OSError),
         _cleanup,
+        video_quality=video_quality,
     )
 
 
@@ -712,6 +763,7 @@ def _with_libx264_fallback(
     try_fn: Callable[[str, list[str]], None],
     exc_types: tuple[type[BaseException], ...],
     on_fallback: Callable[[str], None] | None = None,
+    video_quality: str = "medium",
 ):
     """Run try_fn(primary_codec, primary_opts); on failure, retry once with libx264.
 
@@ -721,6 +773,9 @@ def _with_libx264_fallback(
     on_fallback (optional): called with the failing encoder name BEFORE
     retrying with libx264. Use this to clean up partial / corrupt output
     (e.g. delete a segment directory of MP4s that have a missing moov atom).
+
+    ``video_quality`` is forwarded to the libx264 retry so its CRF matches
+    the user-requested preset.
     """
     enc, enc_opts = primary_codec, primary_opts
     while True:
@@ -738,4 +793,4 @@ def _with_libx264_fallback(
                     on_fallback(enc)
                 except Exception as cleanup_err:
                     logger.warning(f"Cleanup before libx264 retry failed: {cleanup_err}")
-            enc, enc_opts = "libx264", ENCODER_OPTS["libx264"][:]
+            enc, enc_opts = "libx264", encoder_opts("libx264", video_quality)

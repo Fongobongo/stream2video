@@ -83,6 +83,31 @@ def _is_local_file(path_str: str) -> bool:
 
 _DOWNLOAD_TIMEOUT = 28800
 
+# yt-dlp format selectors by quality preset. ``best`` keeps the original
+# behaviour (single pre-merged file with mp4 preference); the others pick
+# the best video stream up to the given height plus best audio, then fall
+# back to a pre-merged file. yt-dlp merges with ffmpeg when needed; the
+# resulting extension is whatever yt-dlp picks (mkv/mp4/...) — the
+# ``_find_downloaded_file`` glob handles whatever ends up on disk.
+_DOWNLOAD_FORMATS: dict[str, str] = {
+    "best": "best[ext=mp4]/best",
+    "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
+    "720p": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
+    "480p": "bestvideo[height<=480]+bestaudio/best[height<=480]/best",
+    "360p": "bestvideo[height<=360]+bestaudio/best[height<=360]/best",
+}
+
+
+def _format_selector_for_quality(quality: str) -> str:
+    """Return the yt-dlp format string for a quality preset."""
+    try:
+        return _DOWNLOAD_FORMATS[quality]
+    except KeyError as e:
+        raise DownloadError(
+            f"Unknown download quality: {quality!r} "
+            f"(use {' or '.join(repr(q) for q in _DOWNLOAD_FORMATS)})"
+        ) from e
+
 _VIDEO_EXTENSIONS = frozenset(
     {
         ".mp4",
@@ -139,6 +164,7 @@ def download(
     url: str,
     out_dir: Path,
     cancel_callback: Callable[[], bool] | None = None,
+    quality: str = "best",
 ) -> DownloadResult:
     """
     Download video from URL via yt-dlp CLI, or pass through a local file.
@@ -151,6 +177,9 @@ def download(
         url: Video URL or local file path
         out_dir: Output directory for downloaded video
         cancel_callback: Optional callable returning True to abort
+        quality: Download quality preset — one of
+            ``best`` / ``1080p`` / ``720p`` / ``480p`` / ``360p``.
+            Mapped to a yt-dlp format selector. Ignored for local files.
 
     Returns:
         DownloadResult with `path` to the file and `is_downloaded` flag
@@ -172,6 +201,9 @@ def download(
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    format_str = _format_selector_for_quality(quality)
+    logger.info(f"Download quality: {quality} ({format_str})")
+
     cmd = [
         sys.executable,
         "-m",
@@ -181,7 +213,7 @@ def download(
         "--output",
         str(out_dir / "%(id)s.%(ext)s"),
         "--format",
-        "best[ext=mp4]/best",
+        format_str,
         "--print",
         "after_move:filepath",
         url,
