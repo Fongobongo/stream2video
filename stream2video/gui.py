@@ -5,15 +5,17 @@ import logging
 import math
 import os
 import queue
+import re
 import shlex
 import shutil
 import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from tkinter import Event, StringVar, filedialog, messagebox
-from typing import ClassVar
+from tkinter import Event, StringVar, TclError, filedialog, messagebox
+from typing import Any, ClassVar
 
 import customtkinter as ctk
 
@@ -1402,8 +1404,11 @@ class Stream2VideoGUI(ctk.CTk):
         raw = self.input_var.get().strip()
         if not raw:
             return False
-        # URLs aren't previewable (they need a download first).
-        if "://" in raw:
+        # URLs aren't previewable (they need a download first). Use the
+        # same strict `^https?://` check as ``download._validate_url`` so
+        # a local filename containing '://' (rare but legal on some
+        # filesystems) isn't misclassified as a URL and silently disabled.
+        if re.match(r"^https?://", raw, re.IGNORECASE):
             return False
         try:
             return Path(raw).is_file()
@@ -1466,11 +1471,11 @@ class Stream2VideoGUI(ctk.CTk):
         def _run():
             try:
                 ok = check_encoder(enc)
-                self.after(0, lambda: self._log(f"  {enc}: {'[OK]' if ok else 'NO'}"))
+                self._tk_after(0, lambda: self._log(f"  {enc}: {'[OK]' if ok else 'NO'}"))
             except FileNotFoundError:
-                self.after(0, lambda: self._log(f"  {enc}: ffmpeg not found in PATH"))
+                self._tk_after(0, lambda: self._log(f"  {enc}: ffmpeg not found in PATH"))
             except Exception as e:
-                self.after(0, lambda e=e: self._log(f"  {enc}: ERROR ({e})"))
+                self._tk_after(0, lambda e=e: self._log(f"  {enc}: ERROR ({e})"))
                 logger.exception("Encoder test crashed")
             finally:
                 self._test_running = False
@@ -1578,8 +1583,8 @@ class Stream2VideoGUI(ctk.CTk):
             # Clear the time labels so a stale state is not shown on the
             # next pipeline's idle state.
             self._pipeline_start = None
-            self.after(0, lambda: self.lbl_overall.configure(text=""))
-            self.after(0, lambda: self.lbl_total.configure(text=""))
+            self._tk_after(0, lambda: self.lbl_overall.configure(text=""))
+            self._tk_after(0, lambda: self.lbl_total.configure(text=""))
 
     def _pipeline_worker(
         self,
@@ -1888,7 +1893,7 @@ class Stream2VideoGUI(ctk.CTk):
 
             # Clear the Elapsed/Remaining line — its job is done once
             # the status line carries the final pipeline time.
-            self.after(0, lambda: self.lbl_overall.configure(text=""))
+            self._tk_after(0, lambda: self.lbl_overall.configure(text=""))
             # Freeze the Total wall-clock label at its final value.
             self._ui_total(total_elapsed)
 
@@ -1902,7 +1907,7 @@ class Stream2VideoGUI(ctk.CTk):
             self._download_path = None
 
             # Show completion popup
-            self.after(0, lambda: messagebox.showinfo("Complete", summary["popup"]))
+            self._tk_after(0, lambda: messagebox.showinfo("Complete", summary["popup"]))
 
         except (CancelledError, SilenceCancelledError):
             self._log("Pipeline cancelled")
@@ -1920,7 +1925,7 @@ class Stream2VideoGUI(ctk.CTk):
         finally:
             self._output_path = None
             self._download_path = None
-            self.after(0, lambda: self._set_running(False))
+            self._tk_after(0, lambda: self._set_running(False))
 
     # ── Recent Projects ───────────────────────────────────────────
 
@@ -2069,8 +2074,24 @@ class Stream2VideoGUI(ctk.CTk):
 
     # ── UI Helpers ───────────────────────────────────────────────
 
+    def _tk_after(self, ms: int, func: Callable[..., Any]) -> None:
+        """Schedule ``func`` on the Tk main loop, swallowing ``TclError``
+        if the window has been destroyed. Worker threads call UI helpers
+        (``_ui_progress``, ``_ui_status``, ``_download_cb``'s helpers…)
+        while a pipeline is running; if the user closes the window mid-run
+        the queued callbacks would otherwise raise ``TclError`` against a
+        destroyed root and propagate up the worker thread, surfacing only
+        as an uncaught-exception log line. Treat "window gone" as a quiet
+        no-op so the cancel/cleanup path runs cleanly.
+        """
+        try:
+            self.after(ms, func)
+        except TclError:
+            # Root destroyed — drop the queued update.
+            pass
+
     def _ui_progress(self, value: float):
-        self.after(0, lambda: self.progress.set(max(0.0, min(1.0, value))))
+        self._tk_after(0, lambda: self.progress.set(max(0.0, min(1.0, value))))
 
     def _ui_overall(self, phase_elapsed: float, phase_remaining: float, more_phases: bool):
         """Update the live Elapsed/Remaining line in bottom_frame (the
@@ -2094,27 +2115,12 @@ class Stream2VideoGUI(ctk.CTk):
                 else f"~{fmt_time(phase_remaining)}"
             )
         text = f"Elapsed: {fmt_time(total_elapsed)} | Remaining: {tail}"
-        self.after(0, lambda: self.lbl_overall.configure(text=text))
-        self._ui_total(total_elapsed)
-
-    def _ui_overall_elapsed_only(self):
-        """Update the overall label with only elapsed time (no remaining
-        estimate available — used during phase 1 download when progress
-        is indeterminate)."""
-        if self._pipeline_start is None:
-            return
-        total_elapsed = time.monotonic() - self._pipeline_start
-        self.after(
-            0,
-            lambda: self.lbl_overall.configure(
-                text=f"Elapsed: {fmt_time(total_elapsed)} | Remaining: ?"
-            ),
-        )
+        self._tk_after(0, lambda: self.lbl_overall.configure(text=text))
         self._ui_total(total_elapsed)
 
     def _ui_total(self, total_elapsed: float):
         """Update the Total wall-clock label below the progress bar."""
-        self.after(
+        self._tk_after(
             0,
             lambda: self.lbl_total.configure(text=fmt_total_label(total_elapsed)),
         )
@@ -2128,16 +2134,16 @@ class Stream2VideoGUI(ctk.CTk):
         self._last_status_update = now
         if len(text) > self._STATUS_MAX:
             text = text[: self._STATUS_MAX - 1] + "…"
-        self.after(0, lambda: self.lbl_status.configure(text=text))
+        self._tk_after(0, lambda: self.lbl_status.configure(text=text))
 
     def _ui_info(self, text: str):
-        self.after(0, lambda t=text: self.lbl_silence.configure(text=t))
+        self._tk_after(0, lambda t=text: self.lbl_silence.configure(text=t))
 
     def _ui_update_file_info(self, path: Path):
-        self.after(0, lambda: self._update_file_info(path))
+        self._tk_after(0, lambda: self._update_file_info(path))
 
     def _ui_update_output(self, path: Path):
-        self.after(0, lambda p=path: self.lbl_output.configure(text=f"Output: {p}"))
+        self._tk_after(0, lambda p=path: self.lbl_output.configure(text=f"Output: {p}"))
 
     def _log(self, message: str):
         timestamp = time.strftime("%H:%M:%S")
@@ -2233,7 +2239,7 @@ class Stream2VideoGUI(ctk.CTk):
                 # Store them and the duration in self so subsequent
                 # renders (overlay, zoom/pan, live poller) can use
                 # the same data without re-reading.
-                self.after(0, lambda: self._safe_status_set("Loading..."))
+                self._tk_after(0, lambda: self._safe_status_set("Loading..."))
                 peaks, duration = read_peaks_from_stream(in_path, target_buckets=800)
                 if token != self._waveform_render_token:
                     return
@@ -2265,7 +2271,7 @@ class Stream2VideoGUI(ctk.CTk):
                     0,
                     lambda: self._safe_status_set("Rendering peaks... (detecting silence)"),
                 )
-                self.after(0, lambda: self._apply_view([]))
+                self._tk_after(0, lambda: self._apply_view([]))
                 if token != self._waveform_render_token:
                     return
 
@@ -2316,8 +2322,8 @@ class Stream2VideoGUI(ctk.CTk):
                     return
 
                 # Phase 3: render the overlay for the current view.
-                self.after(0, lambda: self._safe_status_set("Rendering overlay..."))
-                self.after(0, lambda: self._apply_view(segments))
+                self._tk_after(0, lambda: self._safe_status_set("Rendering overlay..."))
+                self._tk_after(0, lambda: self._apply_view(segments))
                 if token != self._waveform_render_token:
                     return
                 self._log(
@@ -2341,7 +2347,7 @@ class Stream2VideoGUI(ctk.CTk):
                     )
             except Exception as e:
                 logger.exception("Waveform render failed")
-                self.after(0, lambda err=e: self._safe_status_set(f"Error: {err}"))
+                self._tk_after(0, lambda err=e: self._safe_status_set(f"Error: {err}"))
                 self._log(f"[ERROR] Waveform render failed: {e}")
             finally:
                 self._waveform_running = False

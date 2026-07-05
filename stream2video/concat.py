@@ -452,10 +452,19 @@ def _run_segment_concat(
                     str(video_path),
                     "-ss",
                     f"{seek_after:.3f}",
+                    # Per-stream duration limits: video is cut EXACTLY at
+                    # `dur` so concatenating segments reconstructs the
+                    # original timeline without accumulating drift;
+                    # audio is allowed an extra `_AUDIO_PAD` (with apad)
+                    # so the AAC encoder can flush its lookahead buffer,
+                    # then trimmed back to `dur + pad` to avoid a runaway
+                    # pad. The previous single `-t dur+pad` over-encodes
+                    # BOTH streams by pad, which drifted by ~0.1s per
+                    # segment on long videos.
+                    "-vf",
+                    f"trim=duration={dur:.3f},setpts=N/FRAME_RATE/TB",
                     "-af",
-                    "apad",
-                    "-t",
-                    f"{dur + _AUDIO_PAD:.3f}",
+                    f"apad,atrim=duration={dur + _AUDIO_PAD:.3f},asetpts=N/SR/TB",
                     "-c:v",
                     vcodec,
                     *vcodec_opts,

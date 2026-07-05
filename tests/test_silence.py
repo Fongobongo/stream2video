@@ -1188,6 +1188,11 @@ class TestResumeEndToEnd:
             cmd = record["cmd"]
             assert "-ss" in cmd
             assert cmd[cmd.index("-ss") + 1] == "12.000"
+            # `-copyts` MUST be present so silencedetect reports absolute
+            # source timestamps after the seek — without it the new
+            # segments would be relative to the seek point and the
+            # initial + new merge would be silently corrupted.
+            assert "-copyts" in cmd
 
             # Returned list = initial (2) + new (1), raw, pre-margin.
             assert [(s.start, s.end) for s in segs] == [

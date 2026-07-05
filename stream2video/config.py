@@ -83,6 +83,12 @@ def coerce_typed_value(key: str, value: Any) -> Any:
     _load_settings() apply the same strict-but-forgiving filter. A corrupt
     file with ``{"threshold": "abc"}`` silently drops that key instead of
     crashing the GUI later.
+
+    For list-typed defaults (currently only ``recent_projects``), the
+    element type is also validated against the default list's first
+    element's type — a list containing non-str entries (e.g. ``[42, null,
+    Path('/x')]``) is dropped entirely so a later ``json.dump`` in the GUI
+    can't crash on a non-serialisable element. An empty list is accepted.
     """
     if key not in CONFIG_DEFAULTS:
         return None
@@ -96,7 +102,15 @@ def coerce_typed_value(key: str, value: Any) -> Any:
     if isinstance(default, str):
         return value if isinstance(value, str) else None
     if isinstance(default, list):
-        return value if isinstance(value, list) else None
+        if not isinstance(value, list):
+            return None
+        # Validate element types against the default list's element type
+        # (defaults are homogeneous lists, so we sample [0] when non-empty).
+        if default:
+            elem_type = type(default[0])
+            if not all(isinstance(e, elem_type) for e in value):
+                return None
+        return value
     return None
 
 

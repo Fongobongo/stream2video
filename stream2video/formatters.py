@@ -60,8 +60,21 @@ def fmt_clock_time(secs: float | None) -> str:
 def fmt_zoom_text(zoom_level: float) -> str:
     """Format a zoom multiplier (duration / view_duration) for
     the controls and status line. Under 10x uses 1 decimal
-    ('1.5x'), at 10x or above rounds to int ('15x')."""
-    if zoom_level < 10:
+    ('1.5x'), at 10x or above rounds to int ('15x').
+
+    The threshold is based on the ROUNDED value, not the raw one —
+    ``f"{9.99:.1f}"`` = "10.0" (banker's rounding), so a raw 9.95+
+    would render "10.0x" *below* the int branch while 10.0 renders
+    "10x" above it (a discontinuity at the boundary). Rounding first
+    and comparing the rounded value against 10 moves the switch
+    point to where the user actually sees it.
+    """
+    # Round to 1 decimal (the precision of the sub-10 branch) and
+    # compare against 10. 9.94 → 9.9 (sub-10, decimal branch).
+    # 9.96 → 10.0 (≥10, int branch). The boundary now matches what
+    # the rendered labels look like.
+    rounded_1dp = round(zoom_level, 1)
+    if rounded_1dp < 10:
         return f"{zoom_level:.1f}x"
     return f"{round(zoom_level)}x"
 

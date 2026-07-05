@@ -175,5 +175,15 @@ class TestFmtZoomText:
         assert fmt_zoom_text(14.4) == "14x"
 
     def test_just_below_10x_boundary_keeps_decimal(self):
-        """Edge: 9.99 must still print '9.9x', not jump to int formatting."""
-        assert fmt_zoom_text(9.99) == "10.0x"
+        """Edge: 9.94 must still print '9.9x', not jump to int formatting.
+
+        The threshold for the int branch is based on the 1-dp-rounded
+        value, so anything that rounds to <10.0 keeps the decimal
+        format. ``9.94`` rounds to ``9.9`` and prints '9.9x'."""
+        assert fmt_zoom_text(9.94) == "9.9x"
+
+    def test_just_above_10x_boundary_drops_decimal(self):
+        """Edge: 9.96 rounds to 10.0 at 1 dp, so it switches to int
+        formatting ('10x') — matching what '10.0x' would have shown
+        in the decimal branch, eliminating the discontinuity."""
+        assert fmt_zoom_text(9.96) == "10x"

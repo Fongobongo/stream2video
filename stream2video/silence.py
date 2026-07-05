@@ -193,9 +193,10 @@ def detect_silence(
         else:
             logger.info("No valid resume cache — starting fresh")
         # Unlink unconditionally — if it was stale/missing, this is a
-        # no-op; if it was valid, we don't want a retry to re-load it.
+        # no-op (missing_ok=True guards against FileNotFoundError); if
+        # it was valid, we don't want a retry to re-load it.
         try:
-            resume_cache_path.unlink()
+            resume_cache_path.unlink(missing_ok=True)
         except OSError as e:
             logger.debug(f"Resume cache unlink failed (will be retried next run): {e}")
 
@@ -447,9 +448,11 @@ def _run_silencedetect(
     has no place to surface the pre-seeded segments.
 
     `resume_from`: absolute input-time position to seek ffmpeg to before
-    decoding (added as `-ss` before `-i`). The silencedetect filter
-    keeps producing absolute timestamps, so new segments are directly
-    concatenable with `initial_segments` without any time offset.
+    decoding (added as `-ss` before `-i`). `-copyts` is also added so
+    ffmpeg preserves source PTS after the seek — without it the
+    silencedetect timestamps would restart at 0 relative to the seek
+    point and the new segments would NOT be directly concatenable with
+    `initial_segments`.
 
     `resume_save_path` + `resume_save_config`: throttled checkpoint of
     `progressive_segments` to `resume_save_path` so a subsequent run
@@ -471,11 +474,19 @@ def _run_silencedetect(
     # Build the ffmpeg command in dependency order: global options →
     # input → filter → output. `extend` keeps the list monotonic so
     # inserting `-ss` or `-t` does not require magic indices.
-    cmd = ["ffmpeg", "-progress", "pipe:1"]
+    # `-copyts` is required when seeking (resume path): without it,
+    # input `-ss` before `-i` resets the output PTS to zero, so
+    # silencedetect would report timestamps *relative to the seek
+    # point* instead of absolute source time — silently corrupting
+    # the `initial + new` merge on real videos. With `-copyts`, ffmpeg
+    # preserves the source PTS and the segments are directly
+    # concatenable. The option is harmless (no-op) when not seeking.
+    cmd = ["ffmpeg", "-copyts", "-progress", "pipe:1"]
     if resume_from is not None and resume_from > 0:
         # `-ss` before `-i` = fast seek (keyframe-aligned). Accurate
-        # seek (output PTS aligned) is not needed here — silencedetect
-        # outputs timestamps from the source PTS, which is preserved.
+        # seek (output PTS aligned) is not needed — silencedetect
+        # outputs timestamps from the source PTS, which `-copyts`
+        # above preserves.
         cmd.extend(["-ss", f"{resume_from:.3f}"])
     cmd.extend(
         [

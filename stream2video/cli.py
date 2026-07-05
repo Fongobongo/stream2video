@@ -6,6 +6,7 @@ import signal
 import threading
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import typer
 import yaml
@@ -19,6 +20,7 @@ from rich.progress import (
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
+from typer._click.core import ParameterSource
 
 from stream2video.concat import ConcatError, cut_and_concat
 from stream2video.config import (
@@ -28,6 +30,7 @@ from stream2video.config import (
     VALID_ENCODERS,
     VALID_METHODS,
     VALID_QUALITIES,
+    VALID_THEMES,
 )
 from stream2video.download import (
     DiskSpaceError,
@@ -92,7 +95,12 @@ def _make_file_handler(path: Path) -> logging.FileHandler:
     matches what stream2video.log has always written so existing log-
     parsing scripts keep working across upgrades.
     """
-    fh = logging.FileHandler(path)
+    # Use UTF-8 explicitly so the log file is consistent across platforms
+    # (Windows OEM codepages are often not UTF-8 and would raise
+    # UnicodeEncodeError on non-ASCII paths/labels mid-run, swallowed
+    # by logging.handleError and lost). Matches the cache writers in
+    # silence.py / config.py.
+    fh = logging.FileHandler(path, encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
     return fh
@@ -109,7 +117,16 @@ def _check_ffmpeg():
 
 
 def load_config(config_file: Path | None) -> dict:
-    """Load and validate configuration file."""
+    """Load and validate configuration file.
+
+    Validates BOTH numeric ranges (``CONFIG_RANGES``) AND enum keys
+    (``method``, ``encoder``, ``video_quality``, ``download_quality``,
+    ``theme``) against their ``VALID_*`` lists. This is the single
+    chokepoint for config-file validation — the CLI flag-path goes
+    through its own ``_resolved_*`` check downstream, so an invalid
+    YAML value is rejected here regardless of whether the matching
+    CLI flag was passed.
+    """
     config = CONFIG_DEFAULTS.copy()
 
     if config_file:
@@ -135,7 +152,7 @@ def load_config(config_file: Path | None) -> dict:
                 console.print(f"[red]Error loading config file:[/red] {e}")
                 raise typer.Exit(1) from None
 
-    # Validate ranges
+    # Validate numeric ranges.
     for key, (min_val, max_val) in CONFIG_RANGES.items():
         if key in config:
             try:
@@ -153,12 +170,34 @@ def load_config(config_file: Path | None) -> dict:
                 console.print(f"[red]Invalid {key}:[/red] {config[key]} is not a number")
                 raise typer.Exit(1) from None
 
+    # Validate enum keys against their VALID_* lists. A bad value in
+    # either the YAML or CONFIG_DEFAULTS is rejected here so downstream
+    # code can assume the value is one of the allowed tokens.
+    enum_specs = [
+        ("method", VALID_METHODS),
+        ("encoder", VALID_ENCODERS),
+        ("video_quality", VALID_QUALITIES),
+        ("download_quality", VALID_DOWNLOAD_QUALITIES),
+        ("theme", VALID_THEMES),
+    ]
+    for key, valid in enum_specs:
+        v: Any = config.get(key)
+        if v is None:
+            continue
+        if v not in valid:
+            console.print(
+                f"[red]Invalid {key}:[/red] {v!r} "
+                f"(use {' or '.join(repr(x) for x in valid)})"
+            )
+            raise typer.Exit(1)
+
     logger.debug(f"Final config: {config}")
     return config
 
 
 @app.command()
 def main(
+    ctx: typer.Context,
     input_video: str = typer.Argument(..., help="URL or path to input video"),
     output_dir: Path = typer.Option(
         Path("./compressed_videos"),
@@ -172,44 +211,51 @@ def main(
         "-c",
         help="Path to YAML config file",
     ),
-    force: bool = typer.Option(
-        False,
+    force: bool | None = typer.Option(
+        None,
         "--force",
         "-f",
-        help="Re-detect silence, ignore cache",
+        help="Re-detect silence, ignore cache. If not passed, falls back to "
+        "the config file's `force` key (default False).",
     ),
     method: str = typer.Option(
         "segment",
         "--method",
         "-m",
-        help="Concat method: 'segment' (fast, ~1.5h) or 'batch' (select/aselect filter, ~6-7h)",
+        help="Concat method: 'segment' (fast, ~1.5h) or 'batch' (select/aselect filter, ~6-7h). "
+        "If not passed, the config file's `method` key is used.",
     ),
     encoder: str = typer.Option(
         "h264_mf",
         "--encoder",
         "-e",
-        help="Video encoder: 'h264_nvenc' (NVIDIA), 'h264_amf' (AMD), 'h264_mf' (Media Foundation, default), or 'libx264' (CPU fallback)",
+        help="Video encoder: 'h264_nvenc' (NVIDIA), 'h264_amf' (AMD), 'h264_mf' "
+        "(Media Foundation, default), or 'libx264' (CPU fallback). If not passed, "
+        "the config file's `encoder` key is used.",
     ),
     video_quality: str = typer.Option(
         "medium",
         "--video-quality",
         "-vq",
-        help="Encode quality preset: 'high' (10000k / CRF 18), 'medium' (7000k / CRF 23, default), or 'low' (3500k / CRF 28)",
+        help="Encode quality preset: 'high' (10000k / CRF 18), 'medium' (7000k / CRF 23, default), "
+        "or 'low' (3500k / CRF 28). If not passed, the config file's `video_quality` key is used.",
     ),
     download_quality: str = typer.Option(
         "best",
         "--download-quality",
         "-dq",
         help="Download quality preset (Twitch/YouTube, ignored for local files): "
-        "'best' (default), '1080p', '720p', '480p', '360p'",
+        "'best' (default), '1080p', '720p', '480p', '360p'. If not passed, the "
+        "config file's `download_quality` key is used.",
     ),
-    delete_after: bool = typer.Option(
-        False,
+    delete_after: bool | None = typer.Option(
+        None,
         "--delete-after",
-        help="Delete downloaded source file after successful compression",
+        help="Delete downloaded source file after successful compression. If not "
+        "passed, falls back to the config file's `delete_after` key (default False).",
     ),
-    per_video_dir: bool = typer.Option(
-        CONFIG_DEFAULTS["per_video_dir"],
+    per_video_dir: bool | None = typer.Option(
+        None,
         "--per-video-dir/--no-per-video-dir",
         help="Group all artifacts (source, WAV cache, JSON cache, output, log) "
         "into a per-video subdirectory. Default follows config/per_video_dir.",
@@ -229,29 +275,6 @@ def main(
     2. Detect silence segments
     3. Cut and concatenate video
     """
-    # Validate method and encoder
-    if method not in VALID_METHODS:
-        console.print(
-            f"[red]Invalid method:[/red] {method!r} "
-            f"(use {' or '.join(repr(m) for m in VALID_METHODS)})"
-        )
-        raise typer.Exit(1)
-    if encoder not in VALID_ENCODERS:
-        console.print(f"[red]Invalid encoder:[/red] {encoder!r} (use {', '.join(VALID_ENCODERS)})")
-        raise typer.Exit(1)
-    if video_quality not in VALID_QUALITIES:
-        console.print(
-            f"[red]Invalid video quality:[/red] {video_quality!r} "
-            f"(use {', '.join(VALID_QUALITIES)})"
-        )
-        raise typer.Exit(1)
-    if download_quality not in VALID_DOWNLOAD_QUALITIES:
-        console.print(
-            f"[red]Invalid download quality:[/red] {download_quality!r} "
-            f"(use {', '.join(VALID_DOWNLOAD_QUALITIES)})"
-        )
-        raise typer.Exit(1)
-
     # Verify ffmpeg is available
     _check_ffmpeg()
 
@@ -281,10 +304,47 @@ def main(
         fh = _make_file_handler(log_file)
         logger.addHandler(fh)
 
-        # Load configuration
+        # Load configuration. ``load_config``严格-validates BOTH numeric
+        # ranges (CONFIG_RANGES) AND enum keys (method/encoder/...), so a
+        # bad YAML value for any of these cannot sneak through here.
         config = load_config(config_file)
-        # CLI flag overrides config (CLI flags are the user-facing truth).
-        config["per_video_dir"] = per_video_dir
+
+        # Resolve each CLI flag against the config. A flag that the user
+        # passed explicitly (ParameterSource.COMMANDLINE) wins; one that
+        # the user left at its default falls back to the config value
+        # (which came from YAML if provided, else CONFIG_DEFAULTS).
+        def _resolved_str(name: str, flag_value: str, valid: list[str]) -> str:
+            src = ctx.get_parameter_source(name)
+            value = flag_value if src == ParameterSource.COMMANDLINE else config[name]
+            if value not in valid:
+                console.print(
+                    f"[red]Invalid {name}:[/red] {value!r} "
+                    f"(use {' or '.join(repr(v) for v in valid)})"
+                )
+                raise typer.Exit(1)
+            return value
+
+        method = _resolved_str("method", method, VALID_METHODS)
+        encoder = _resolved_str("encoder", encoder, VALID_ENCODERS)
+        video_quality = _resolved_str("video_quality", video_quality, VALID_QUALITIES)
+        download_quality = _resolved_str(
+            "download_quality", download_quality, VALID_DOWNLOAD_QUALITIES
+        )
+
+        def _resolved_bool(name: str, flag_value: bool | None) -> bool:
+            src = ctx.get_parameter_source(name)
+            if src == ParameterSource.COMMANDLINE:
+                return bool(flag_value)
+            # Config already type-checked in load_config; bool is enforced.
+            return bool(config[name])
+
+        force = _resolved_bool("force", force)
+        delete_after = _resolved_bool("delete_after", delete_after)
+        per_video_dir_resolved = _resolved_bool("per_video_dir", per_video_dir)
+        # Push the resolved value back into config so downstream code that
+        # reads config["per_video_dir"] (e.g. paths.apply_per_video_dir)
+        # sees the same value as the CLI path.
+        config["per_video_dir"] = per_video_dir_resolved
 
         progress_columns = [
             TextColumn("[progress.description]{task.description}"),
@@ -387,7 +447,7 @@ def main(
                 raise typer.Exit(1) from None
 
             # Step 1.5: Apply per-video project directory (if enabled).
-            if per_video_dir:
+            if per_video_dir_resolved:
                 new_output, video_path = apply_per_video_dir(
                     output_dir, video_path, download_result.is_downloaded
                 )
@@ -510,10 +570,16 @@ def main(
         raise typer.Exit(1) from e
 
     finally:
-        if prev_handler not in (signal.SIG_IGN, signal.SIG_DFL):
+        # `signal.getsignal` can return `None` on some interpreters when no
+        # handler has been installed; restoring `None` would raise TypeError
+        # (which the prior `except (OSError, ValueError)` did not catch).
+        # Treat `None` as "no explicit handler installed" → restore SIG_DFL
+        # for a clean state. SIG_IGN / SIG_DFL are restored as-is.
+        restore_to: Any = signal.SIG_DFL if prev_handler is None else prev_handler
+        if restore_to not in (signal.SIG_IGN, signal.SIG_DFL):
             try:
-                signal.signal(signal.SIGINT, prev_handler)
-            except (OSError, ValueError):
+                signal.signal(signal.SIGINT, restore_to)
+            except (OSError, ValueError, TypeError):
                 pass
         if fh is not None:
             logger.removeHandler(fh)

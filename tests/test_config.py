@@ -242,7 +242,7 @@ class TestSaveUserDefaults:
             "threshold": -35.0,
             "min_silence": 3.0,
             "margin": -0.5,
-            "method": "stream",
+            "method": "segment",
             "encoder": "libx264",
             "force": True,
             "delete_after": False,
