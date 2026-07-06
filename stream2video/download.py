@@ -38,43 +38,29 @@ class DownloadProgress(NamedTuple):
 class DownloadError(Exception):
     """Base download error."""
 
-    pass
-
 
 class DownloadCancelledError(DownloadError):
     """Download was cancelled by user (not a real failure)."""
-
-    pass
 
 
 class URLValidationError(DownloadError):
     """Invalid URL format."""
 
-    pass
-
 
 class VideoNotAvailableError(DownloadError):
     """Video not available."""
-
-    pass
 
 
 class DownloadTimeoutError(DownloadError):
     """Download timeout."""
 
-    pass
-
 
 class DiskSpaceError(DownloadError):
     """Insufficient disk space."""
 
-    pass
-
 
 class PermissionDeniedError(DownloadError):
     """Permission denied."""
-
-    pass
 
 
 def _validate_url(url: str) -> bool:
@@ -212,10 +198,17 @@ def _find_downloaded_file(out_dir: Path, expected: Path) -> Path | None:
     """Locate the downloaded file; fall back to glob by video id (video extensions only)."""
     if expected.exists():
         return expected
-    m = re.search(r"[/\\]([\w-]+)\.\w+$", str(expected))
-    if not m:
+    # Use Path.stem so multi-dot suffixes (.mp4.part, .webm.part) and
+    # IDs with characters outside [\w-] are handled correctly. The
+    # previous regex anchored `[/\\]([\w-]+)\.\w+$` which dropped the
+    # leaf for `.mp4.part` (the trailing `\w+$` matches `part`, not the
+    # real stem).
+    try:
+        video_id = Path(expected).stem
+    except (ValueError, OSError):
         return None
-    video_id = m.group(1)
+    if not video_id:
+        return None
     candidates = [p for p in out_dir.glob(f"{video_id}.*") if p.suffix.lower() in _VIDEO_EXTENSIONS]
     if not candidates:
         return None
@@ -379,6 +372,12 @@ def download(
         return DownloadResult(resolved, is_downloaded=True)
 
     finally:
+        # Join drain threads in the finally so cancel/timeout/early-raise
+        # paths still wait for them. Threads exit when their pipes close
+        # (next block), so the join is bounded; a missed join could leak
+        # the daemon thread's pipe reads until process exit on Windows.
+        stdout_thread.join(timeout=2)
+        stderr_thread.join(timeout=2)
         set_active_process(None)
         for pipe in (process.stdout, process.stderr):
             if pipe:

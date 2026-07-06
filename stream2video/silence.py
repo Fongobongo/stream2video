@@ -43,13 +43,9 @@ logger = logging.getLogger(__name__)
 class SilenceDetectionError(Exception):
     """Base silence detection error."""
 
-    pass
-
 
 class SilenceCancelledError(SilenceDetectionError):
     """Silence detection was cancelled by user (not a real failure)."""
-
-    pass
 
 
 class SilenceSegment:
@@ -301,7 +297,7 @@ def detect_silence(
             resume_save_config=current_config,
         )
 
-    segments = apply_margin(segments, margin)
+    segments = apply_margin(segments, margin, duration)
 
     if not segments:
         logger.info("No silence segments detected (video may have no audio track)")
@@ -616,6 +612,18 @@ def _run_silencedetect(
     try:
         with cancel_monitor(process, cancel_callback) as cancelled:
             for raw_line in iter(stdout_pipe.readline, b""):
+                # Direct cancel poll: the cancel_monitor thread also
+                # kills the process on cancel, but on a silent pipe (no
+                # progress lines, short video, or `-t` reached without
+                # progress events) the readline() above would block and
+                # the thread's kill would only surface as EOF latency.
+                # Polling the callback inline on every line keeps cancel
+                # responsive once a line does arrive, matching concat.py.
+                if cancel_callback is not None and cancel_callback():
+                    process.kill()
+                    raise SilenceCancelledError("silence detection cancelled")
+                if cancelled.is_set():
+                    raise SilenceCancelledError("silence detection cancelled")
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if line.startswith("out_time_us="):
                     try:
@@ -772,6 +780,14 @@ def _sample_segments_match(
     not directly comparable. Comparing START times (and counts) is sufficient
     to detect the common case of constant itsoffset broken-PTS, which shifts
     every start by the same offset.
+
+    Additionally, a segment whose start is exactly 0 (after ffmpeg clamps a
+    negative itsoffset on input) is symmetrical: D and A-sample would both
+    report ``(0, _)`` whether the true start was 0, -0.5, or -2.0. We don't
+    *require* matching start-0 counts (a real source can legitimately start
+    silent on both paths), but if one list has a start-0 segment that the
+    other doesn't, that's a sign the negative shift is masked — so we still
+    compare start times strictly, which a masked shift would violate.
     """
     if len(seg_a) != len(seg_b):
         return False
@@ -785,19 +801,32 @@ def _sample_segments_match(
     )
 
 
-def apply_margin(segments: list[SilenceSegment], margin: float) -> list[SilenceSegment]:
+def apply_margin(segments: list[SilenceSegment], margin: float, duration: float | None = None) -> list[SilenceSegment]:
     """Apply margin and merge overlapping segments.
 
     Positive margin shrinks silence (keep more audio around phrases).
     Negative margin expands silence (remove more audio around phrases).
+
+    ``duration`` (optional) is the source media duration in seconds — when
+    supplied, ``end`` is clamped to it so a negative margin can't expand a
+    silence segment past the right neighbour (which the detector marked as
+    loud) or past the end of the media. ``start`` is always clamped to 0.
+    Without this, ``apply_margin([(1, 2)], -10)`` would return ``(0, 12)``,
+    inventing silence over audio the detector said was loud. When
+    ``duration`` is None the right clamp is skipped (callers that don't
+    know the duration keep their old behaviour — namely the GUI's preview
+    overlay path, where over-expansion is harmless and `duration` may not
+    be known).
     """
     if not segments:
         return segments
 
     expanded = []
     for seg in segments:
-        start = max(0, seg.start + margin)
+        start = max(0.0, seg.start + margin)
         end = seg.end - margin
+        if duration is not None:
+            end = min(end, float(duration))
         if start < end:
             expanded.append(SilenceSegment(start, end))
 
@@ -854,6 +883,14 @@ def _save_cache(
         indent: JSON indent level (None for compact, default 2).
         fsync: Whether to fsync after writing (True for final cache,
                False for ephemeral resume checkpoints).
+
+    Note: with ``fsync=False`` (resume checkpoint path), a kernel crash
+    between ``json.dump`` and ``os.replace`` could leave the previous
+    file's bytes partially overwritten on disk. ``os.replace`` is still
+    atomic for the rename so the *name* always points at a complete file
+    or the old one — but the data is not fsync'd so on-disk contents may
+    lag. Resume cache is best-effort by design; the canonical final
+    cache (``fsync=True``) is the durable source of truth.
     """
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     data = {

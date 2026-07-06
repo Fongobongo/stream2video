@@ -25,15 +25,15 @@ logger = logging.getLogger(__name__)
 
 
 class ConcatError(Exception):
-    pass
+    """Raised on concat / encode failures (ffmpeg errors, bad inputs)."""
 
 
 class FFmpegError(ConcatError):
-    pass
+    """ffmpeg itself failed (non-zero exit, timeout, stall)."""
 
 
 class CancelledError(ConcatError):
-    pass
+    """User cancellation during concat/encode (not a real failure)."""
 
 
 def _quote_concat_path(p: str) -> str:
@@ -51,7 +51,10 @@ def _quote_concat_path(p: str) -> str:
         return f"'{p}'"
     if '"' not in p:
         return f'"{p}"'
-    raise ConcatError(f"Path contains both quote types, cannot be represented: {p}")
+    raise ConcatError(
+        f"Path contains both quote types, cannot be represented: {p}. "
+        f"Rename the file or move it into a directory whose path doesn't contain quotes."
+    )
 
 
 _VIDEO_BITRATE = "7000k"
@@ -141,7 +144,11 @@ def generate_keep_segments(
         end = min(float(duration), float(s.end))
         if end <= start:
             continue
-        if (s.start, s.end) != (start, end):
+        # Only warn on a meaningful clamp — sub-microsecond FP drift
+        # between source timestamps and the probed duration would
+        # otherwise fire a noisy warning on every segment of the second
+        # pass.
+        if abs(s.start - start) > 1e-6 or abs(s.end - end) > 1e-6:
             logger.warning(
                 f"Silence segment ({s.start:.2f}s - {s.end:.2f}s) "
                 f"clamped to ({start:.2f}s - {end:.2f}s) to fit duration {duration:.2f}s"
@@ -414,8 +421,11 @@ def _run_segment_concat(
             dur = end - start
             seg_path = seg_dir / f"seg_{i:06d}.mp4"
 
-            # Resume: skip already encoded segments
-            if seg_path.exists() and seg_path.stat().st_size > 0:
+            # Resume: skip already encoded segments. Require a minimum
+            # size so a 1-byte crash artifact (missing moov atom) doesn't
+            # get reused and corrupt the final concat in the middle.
+            _MIN_SEG_BYTES = 1024
+            if seg_path.exists() and seg_path.stat().st_size >= _MIN_SEG_BYTES:
                 skipped += 1
                 encoded_keep += dur
                 if progress_callback and total_duration > 0:
@@ -644,8 +654,11 @@ def _run_batch_concat(
 
             chunk_path = batch_dir / f"chunk_{ci:04d}.mp4"
 
-            # Resume: skip already encoded chunks
-            if chunk_path.exists() and chunk_path.stat().st_size > 0:
+            # Resume: skip already encoded chunks. Require a minimum size
+            # so a tiny crash artifact (missing moov atom) doesn't get
+            # reused and produce a corrupt chunk in the middle of the file.
+            _MIN_CHUNK_BYTES = 1024
+            if chunk_path.exists() and chunk_path.stat().st_size >= _MIN_CHUNK_BYTES:
                 skipped += 1
                 encoded_duration += sum(e - s for s, e in chunk)
                 if progress_callback and total_duration > 0:
@@ -674,7 +687,15 @@ def _run_batch_concat(
                     if progress_callback and total_duration > 0:
                         base = _encoded_duration / total_duration
                         span = chunk_dur / total_duration
-                        progress_callback(min(base + us / 1_000_000 / total_duration, base + span))
+                        # ffmpeg's `out_time_us` reflects *output* time
+                        # (the `select` filter skips silence patterns),
+                        # so dividing it by `total_duration` overruns the
+                        # `base + span` ceiling well before the chunk
+                        # finishes. Convert to a per-chunk fraction first,
+                        # then scale to absolute progress — same trick as
+                        # `_seg_prog` in `_run_segment_concat`.
+                        frac = min(us / 1_000_000 / chunk_dur, 1.0) if chunk_dur > 0 else 1.0
+                        progress_callback(min(base + frac * span, 0.9))
 
                 _run_ffmpeg(
                     [

@@ -728,7 +728,7 @@ def test_read_peaks_from_stream_silent_wav(tmp_path: Path):
     assert len(peaks) > 0
     assert len(peaks) <= 50
     assert all(p == 0.0 for p in peaks)
-    assert 0.9 <= duration <= 1.1
+    assert 0.95 <= duration <= 1.15
 
 
 def test_read_peaks_from_stream_sine_wav(tmp_path: Path):

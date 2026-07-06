@@ -327,6 +327,18 @@ class Stream2VideoGUI(ctk.CTk):
         self.after(100, self._poll_log_queue)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+    def _wave_window_alive(self) -> bool:
+        """True if the waveform popup exists and is still on-screen.
+
+        Centralised so callers don't repeat ``self._wave_window is None or
+        not self._wave_window.winfo_exists()`` — and so a programmatic
+        caller (test / REPL) that invokes a waveform method before
+        ``__init__`` has set ``self._wave_window`` gets a clean False
+        rather than ``AttributeError``.
+        """
+        win = getattr(self, "_wave_window", None)
+        return win is not None and win.winfo_exists()
+
     # ── UI Build ──────────────────────────────────────────────────
 
     def _build_ui(self):
@@ -863,7 +875,7 @@ class Stream2VideoGUI(ctk.CTk):
         this handler skips bursts where the size didn't change (e.g.
         a child widget being re-laid out at the same window size).
         """
-        if self._wave_window is None or not self._wave_window.winfo_exists():
+        if not self._wave_window_alive():
             return
         if event.widget is not self._wave_window:
             return
@@ -890,8 +902,12 @@ class Stream2VideoGUI(ctk.CTk):
         (e.g., first render immediately after the popup is created).
         """
         fallback = (800, 200)
-        if self._wave_window is None or not self._wave_window.winfo_exists():
+        if not self._wave_window_alive():
             return fallback
+        # _wave_window_alive() above guarantees self._wave_window is set,
+        # but mypy can't follow the helper's return type — narrow locally
+        # so the .winfo_width/height() below don't union-attr.
+        assert self._wave_window is not None
         win_w = self._wave_window.winfo_width()
         win_h = self._wave_window.winfo_height()
         if win_w < 100 or win_h < 100:
@@ -916,7 +932,7 @@ class Stream2VideoGUI(ctk.CTk):
         and schedules a new one. The render runs at most a few times
         per second while the user is actively dragging.
         """
-        if self._wave_window is None or not self._wave_window.winfo_exists():
+        if not self._wave_window_alive():
             return
         if getattr(self, "_waveform_threshold_after_id", None) is not None:
             try:
@@ -932,7 +948,7 @@ class Stream2VideoGUI(ctk.CTk):
         hasn't loaded yet.
         """
         self._waveform_threshold_after_id = None
-        if self._wave_window is None or not self._wave_window.winfo_exists():
+        if not self._wave_window_alive():
             return
         if not self._waveform_peaks or self._waveform_duration <= 0:
             return
@@ -1020,7 +1036,7 @@ class Stream2VideoGUI(ctk.CTk):
         """
         if (
             self._waveform_tooltip is None
-            or self._wave_window is None
+            or not self._wave_window_alive()
             or not self._waveform_peaks
             or self._waveform_duration <= 0
             or self._waveform_image_width <= 0
@@ -1687,17 +1703,18 @@ class Stream2VideoGUI(ctk.CTk):
                 self._ui_status(f"Failed: {e}", force=True)
                 return
 
-            # Step 1.5: Apply per-video project directory (if enabled).
-            if per_video_dir:
-                new_output, video_path = apply_per_video_dir(
-                    output_dir, video_path, download_result.is_downloaded
-                )
-                if new_output != output_dir:
-                    if download_result.is_downloaded:
-                        self._log(f"Moved source into project dir: {video_path}")
-                    output_dir = new_output
-                    self._ui_update_output(output_dir)
-                    self._log(f"Project directory: {output_dir}")
+            # Step 1.5: Apply per-video project directory. The function
+            # honours the per_video_dir flag itself, so no outer gate.
+            new_output, video_path = apply_per_video_dir(
+                output_dir, video_path, download_result.is_downloaded,
+                per_video_dir=per_video_dir,
+            )
+            if new_output != output_dir:
+                if download_result.is_downloaded:
+                    self._log(f"Moved source into project dir: {video_path}")
+                output_dir = new_output
+                self._ui_update_output(output_dir)
+                self._log(f"Project directory: {output_dir}")
 
             # Always track the final output dir in recent projects, so
             # users who toggle per_video_dir off still see their work
@@ -1773,13 +1790,24 @@ class Stream2VideoGUI(ctk.CTk):
 
                 def silence_prog(f: float):
                     elapsed = time.monotonic() - silence_start
-                    remaining = elapsed / f - elapsed if f > 0.01 else 0
-                    self._ui_progress(0.05 + f * 0.35)
-                    self._ui_status(
-                        f"Step 2/3: Silence... {f * 100:.0f}% "
-                        f"({fmt_time(elapsed)}/{fmt_time(remaining)})"
-                    )
-                    self._ui_overall(elapsed, remaining, more_phases=True)
+                    if f > 0.01:
+                        remaining = elapsed / f - elapsed
+                        self._ui_progress(0.05 + f * 0.35)
+                        self._ui_status(
+                            f"Step 2/3: Silence... {f * 100:.0f}% "
+                            f"({fmt_time(elapsed)}/{fmt_time(remaining)})"
+                        )
+                        self._ui_overall(elapsed, remaining, more_phases=True)
+                    else:
+                        # ffmpeg emits out_time_us=0 on startup; until the
+                        # first real progress value arrives the rate is
+                        # unknown and a "/0s" suffix would mislead. Show
+                        # an indeterminate, monotonic-elapsed status.
+                        self._ui_progress(0.05)
+                        self._ui_status(
+                            f"Step 2/3: Silence... {fmt_time(elapsed)} (calculating ETA)"
+                        )
+                        self._ui_overall(elapsed, None, more_phases=True)
 
                 def on_segment(seg_list: list[SilenceSegment]) -> None:
                     with self._live_segments_lock:
@@ -2093,7 +2121,9 @@ class Stream2VideoGUI(ctk.CTk):
     def _ui_progress(self, value: float):
         self._tk_after(0, lambda: self.progress.set(max(0.0, min(1.0, value))))
 
-    def _ui_overall(self, phase_elapsed: float, phase_remaining: float, more_phases: bool):
+    def _ui_overall(
+        self, phase_elapsed: float, phase_remaining: float | None, more_phases: bool
+    ):
         """Update the live Elapsed/Remaining line in bottom_frame (the
         label sitting immediately to the right of the progress bar) and
         the Total wall-clock label below the bar.
@@ -2102,11 +2132,13 @@ class Stream2VideoGUI(ctk.CTk):
         phases follow, we append ' + ?' to make clear that the other
         phases' durations are unknown. During phase 1 (no progress
         callback) the label is updated with just elapsed (remaining='?').
+        ``phase_remaining=None`` is treated as "unknown" (e.g. before the
+        first ffmpeg progress value arrives) and rendered as '?'.
         """
         if self._pipeline_start is None:
             return
         total_elapsed = time.monotonic() - self._pipeline_start
-        if phase_remaining <= 0:
+        if phase_remaining is None or phase_remaining <= 0:
             tail = "?" if more_phases else "—"
         else:
             tail = (
@@ -2161,6 +2193,11 @@ class Stream2VideoGUI(ctk.CTk):
                 self.txt_log.insert("end", msg + "\n")
                 self.txt_log.see("end")
                 self.txt_log.configure(state="disabled")
+        except TclError:
+            # The textbox (or the root window) has been destroyed.
+            # Rescheduling would just re-raise forever; stop the poller
+            # quietly so close cleans up.
+            return
         except Exception as e:
             logger.exception("Log queue poller crashed: %s", e)
         self.after(100, self._poll_log_queue)
@@ -2357,10 +2394,17 @@ class Stream2VideoGUI(ctk.CTk):
     def _take_live_snapshot(self, video_path: Path) -> list[SilenceSegment] | None:
         """Return a copy of the current live segments for `video_path`,
         or None if the pipeline has never published state for it
-        (popup opened before detect started, or for a different video)."""
+        (popup opened before detect started, or for a different video).
+
+        The list copy happens inside the lock — a contributor swapping a
+        future in-place mutation (e.g. `.extend(...)`) would otherwise
+        race the iteration here. Reads under lock are cheap (single dict
+        lookup + shallow copy) so this is preferable to a free-standing
+        copy after the lock release.
+        """
         with self._live_segments_lock:
             segs = self._live_segments.get(video_path)
-        return list(segs) if segs is not None else None
+            return list(segs) if segs is not None else None
 
     def _apply_view(self, segments: list[SilenceSegment] | None = None):
         """Render the waveform for the current view (view_start → view_end)
@@ -2482,7 +2526,7 @@ class Stream2VideoGUI(ctk.CTk):
         """
         if token != self._waveform_render_token:
             return
-        if self._wave_window is None or not self._wave_window.winfo_exists():
+        if not self._wave_window_alive():
             return
 
         current_view = (self._waveform_view_start, self._waveform_view_end)
@@ -2568,6 +2612,26 @@ class Stream2VideoGUI(ctk.CTk):
                 self.config[key] = coerced
             else:
                 logger.debug("Dropping settings[%r] with wrong type: %r", key, value)
+        # GUI-only session-state keys that aren't in CONFIG_DEFAULTS (so
+        # coerce_typed_value drops them above): ``input_path`` is the last
+        # submitted URL/local path; ``window_geometry`` is the
+        # "1080x680+24+42" string Tk's geometry() returns. Both are
+        # written by ``_save_settings`` and re-applied here directly so
+        # the GUI re-opens with the previous input and window size — they
+        # are intentionally not in CONFIG_DEFAULTS (they're session state,
+        # not user-tunable defaults, so the "Save current as defaults"
+        # button mustn't pick them up).
+        for gui_key, expected_type in (
+            ("input_path", str),
+            ("window_geometry", str),
+        ):
+            v = loaded.get(gui_key)
+            if isinstance(v, expected_type):
+                self.config[gui_key] = v
+            elif v is not None:
+                logger.debug(
+                    "Dropping settings[%r] with wrong type: %r", gui_key, v
+                )
 
     def _restore_defaults(self):
         self.config = effective_defaults()

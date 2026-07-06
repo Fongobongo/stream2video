@@ -293,11 +293,23 @@ class TestWavCacheFallback:
         output then EOF, .stdout.readline yields 'progress=end' then EOF.
 
         Each Popen() call advances through `stderr_outputs`. If
-        `extract_wav_to` is set, the first Popen call (assumed to be the WAV
-        extract) writes a placeholder file at that path so subsequent WAV
-        cache validity checks pass.
+        `extract_wav_to` is set, the WAV-extract Popen call (detected by the
+        cmd shape: ends in a ``.wav`` path AND contains ``-vn``) writes a
+        placeholder file at that path so subsequent WAV cache validity
+        checks pass. Detecting the extract step by cmd (rather than
+        ``idx == 0``) keeps the test robust to a future refactor that runs
+        D and A-sample in parallel — the stderr list is still positional
+        (call order), but the WAV placeholder file is written from the
+        right Popen() regardless of order.
         """
         call_index = {"i": 0}
+
+        def _is_extract_cmd(cmd) -> bool:
+            if not cmd or cmd[0] != "ffmpeg":
+                return False
+            has_vn = "-vn" in cmd
+            ends_wav = bool(cmd[-1:]) and str(cmd[-1]).endswith(".wav")
+            return has_vn and ends_wav
 
         def fake_popen(cmd, **kwargs):
             idx = call_index["i"]
@@ -315,7 +327,7 @@ class TestWavCacheFallback:
                     self._killed = False
                     # Mimic ffmpeg: when called as the extract step, write the
                     # WAV file so WAV cache validity checks succeed later.
-                    if extract_wav_to is not None and idx == 0:
+                    if extract_wav_to is not None and _is_extract_cmd(cmd):
                         extract_wav_to.write_text("fake-wav")
 
                 def poll(self):
@@ -344,6 +356,13 @@ class TestWavCacheFallback:
             os.utime(video, (1000, 1000))
             os.utime(wav, (2000, 2000))
 
+            # Capture the existing WAV mtime so we can assert afterwards that
+            # detection didn't re-extract (a buggy impl that ran the A path
+            # anyway wouldn't unlink the WAV, but would also not change it —
+            # so `wav.exists()` alone is true before and after; mtime pins
+            # that the D path actually ran instead of the longer A path).
+            wav_mtime_before = wav.stat().st_mtime
+
             # WAV is already valid (mtime newer), so only 1 ffmpeg call happens.
             stderr_D = (
                 "[silencedetect @ 0x0] silence_start: 1.000\n"
@@ -363,6 +382,9 @@ class TestWavCacheFallback:
             assert segs[0].start == 1.0
             assert segs[0].end == 2.5
             assert wav.exists()  # cache kept
+            assert (
+                wav.stat().st_mtime == wav_mtime_before
+            ), "WAV cache was rewritten (D path should not re-extract)"
 
     def test_d_mismatch_a_invalidates_wav_and_uses_a(self):
         """No WAV cache → extract + D + A-sample. On sample mismatch, the WAV

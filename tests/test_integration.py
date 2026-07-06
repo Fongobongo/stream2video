@@ -25,8 +25,13 @@ from stream2video.silence import SilenceSegment
 class TestPipelineIntegration:
     """Integration tests for the full pipeline."""
 
-    def test_full_pipeline_with_local_file(self):
-        """Test pipeline with local file input."""
+    def test_download_passthrough_with_local_file(self):
+        """Local file input is passed through by `download()` (no network).
+
+        End-to-end pipeline coverage (detect → cut → concat) lives in the
+        silence / concat / integration suites; this test only pins the
+        download local-passthrough branch.
+        """
         with TemporaryDirectory() as tmpdir:
             # Create a dummy video file
             video_file = Path(tmpdir) / "input.mp4"

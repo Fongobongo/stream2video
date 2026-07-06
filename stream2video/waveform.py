@@ -453,7 +453,11 @@ def render_waveform_image(
     # ``outline=``) keeps the rectangle visible even where the fill
     # blends with a tall bar; without it the overlay is easy to miss
     # on bright sections of the waveform.
-    if threshold_db is not None and below_threshold_color[3] > 0:
+    if (
+        threshold_db is not None
+        and len(below_threshold_color) >= 4
+        and below_threshold_color[3] > 0
+    ):
         bt_ranges = below_threshold_pixel_ranges(peaks, threshold_db, plot_w)
         if bt_ranges:
             bt_overlay = Image.new("RGBA", (plot_w, plot_h), (0, 0, 0, 0))

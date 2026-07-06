@@ -26,39 +26,38 @@ def cancel_monitor(
     ``cancel_callback()`` directly. The event is also set automatically on
     context exit so the monitor thread terminates cleanly.
 
-    A thread is always started; when ``cancel_callback`` is None the
-    monitor body returns immediately and the thread exits as soon as the
-    context manager fires ``cancelled.set()`` on exit. The yielded event
-    simply stays unset forever in that case.
+    When ``cancel_callback`` is None no monitoring thread is started — the
+    yielded event simply stays unset forever. Callers that still want to
+    poll a cancel flag should do so directly via ``cancel_callback()`` (a
+    None check is required in that case).
     """
     cancelled = threading.Event()
 
-    def _monitor():
-        if cancel_callback is None:
-            return
-        try:
-            while not cancelled.wait(CANCEL_POLL_INTERVAL):
-                if process.poll() is not None:
-                    return
-                if cancel_callback():
-                    process.kill()
-                    cancelled.set()
-                    return
-        except Exception:
-            # A misused callback that raises (instead of returning True)
-            # would previously die WITHOUT setting `cancelled` or killing
-            # the process, silently missing the cancel request. Set the
-            # event and log so the caller's wait loop notices the cancel
-            # flag and the user can see why the cancel never fired.
-            logger.exception("cancel_monitor: cancel_callback raised; forcing cancel")
-            cancelled.set()
+    if cancel_callback is not None:
+        def _monitor():
             try:
-                process.kill()
+                while not cancelled.wait(CANCEL_POLL_INTERVAL):
+                    if process.poll() is not None:
+                        return
+                    if cancel_callback():
+                        process.kill()
+                        cancelled.set()
+                        return
             except Exception:
-                pass
+                # A misused callback that raises (instead of returning True)
+                # would previously die WITHOUT setting `cancelled` or killing
+                # the process, silently missing the cancel request. Set the
+                # event and log so the caller's wait loop notices the cancel
+                # flag and the user can see why the cancel never fired.
+                logger.exception("cancel_monitor: cancel_callback raised; forcing cancel")
+                cancelled.set()
+                try:
+                    process.kill()
+                except Exception:
+                    pass
 
-    thread = threading.Thread(target=_monitor, daemon=True)
-    thread.start()
+        thread = threading.Thread(target=_monitor, daemon=True)
+        thread.start()
     try:
         yield cancelled
     finally:

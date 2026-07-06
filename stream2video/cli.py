@@ -30,7 +30,6 @@ from stream2video.config import (
     VALID_ENCODERS,
     VALID_METHODS,
     VALID_QUALITIES,
-    VALID_THEMES,
 )
 from stream2video.download import (
     DiskSpaceError,
@@ -172,13 +171,15 @@ def load_config(config_file: Path | None) -> dict:
 
     # Validate enum keys against their VALID_* lists. A bad value in
     # either the YAML or CONFIG_DEFAULTS is rejected here so downstream
-    # code can assume the value is one of the allowed tokens.
+    # code can assume the value is one of the allowed tokens. ``theme`` is
+    # GUI-only — the CLI never reads or applies it — so it's intentionally
+    # excluded from the enum validation here (a bad theme in a YAML config
+    # that the CLI loads shouldn't abort the run).
     enum_specs = [
         ("method", VALID_METHODS),
         ("encoder", VALID_ENCODERS),
         ("video_quality", VALID_QUALITIES),
         ("download_quality", VALID_DOWNLOAD_QUALITIES),
-        ("theme", VALID_THEMES),
     ]
     for key, valid in enum_specs:
         v: Any = config.get(key)
@@ -336,7 +337,9 @@ def main(
             if src == ParameterSource.COMMANDLINE:
                 return bool(flag_value)
             # Config already type-checked in load_config; bool is enforced.
-            return bool(config[name])
+            # `config.get(name, False)` so a future CONFIG_DEFAULTS edit
+            # that drops a bool key doesn't raise KeyError here.
+            return bool(config.get(name, False))
 
         force = _resolved_bool("force", force)
         delete_after = _resolved_bool("delete_after", delete_after)
@@ -373,26 +376,25 @@ def main(
                         total=p.total_bytes,
                         completed=p.downloaded_bytes or 0.0,
                     )
-                elif p.downloaded_bytes:
-                    # Known downloaded, unknown total — show at least the
-                    # bytes that came in so the bar visibly advances.
+                else:
+                    # Unknown total — show indeterminate bar (no total) so
+                    # it reads as "spinning" rather than as "0%". We still
+                    # surface the bytes received below so the description
+                    # advances meaningfully.
                     progress.update(task1, total=None, completed=0.0)
-                    progress.update(
-                        task1,
-                        description=f"[cyan]Downloading... {fmt_size(int(p.downloaded_bytes))} "
-                        f"at {fmt_speed(p.speed)}",
+
+                if p.total_bytes:
+                    pct = 100.0 * (p.downloaded_bytes or 0.0) / p.total_bytes
+                    description = (
+                        f"[cyan]Downloading... {pct:.1f}% "
+                        f"at {fmt_speed(p.speed)} ETA {int(p.eta or 0)}s"
                     )
-                    return
-                pct = (
-                    100.0 * (p.downloaded_bytes or 0.0) / p.total_bytes
-                    if p.total_bytes
-                    else 0.0
-                )
-                progress.update(
-                    task1,
-                    description=f"[cyan]Downloading... {pct:.1f}% "
-                    f"at {fmt_speed(p.speed)} ETA {int(p.eta or 0)}s",
-                )
+                else:
+                    description = (
+                        f"[cyan]Downloading... {fmt_size(int(p.downloaded_bytes or 0))} "
+                        f"at {fmt_speed(p.speed)}"
+                    )
+                progress.update(task1, description=description)
 
             try:
                 logger.info(f"Processing: {input_video}")
@@ -446,26 +448,51 @@ def main(
                 logger.exception("Download error")
                 raise typer.Exit(1) from None
 
-            # Step 1.5: Apply per-video project directory (if enabled).
-            if per_video_dir_resolved:
-                new_output, video_path = apply_per_video_dir(
-                    output_dir, video_path, download_result.is_downloaded
-                )
-                if new_output != output_dir:
-                    if download_result.is_downloaded:
-                        logger.info(f"Moved source into project dir: {video_path}")
-                    if fh is not None:
-                        fh.close()
-                        logger.removeHandler(fh)
-                        new_log = new_output / "stream2video.log"
-                        if new_log.exists():
-                            new_log.unlink()
-                        if log_file.exists():
-                            shutil.move(str(log_file), str(new_log))
-                        fh = _make_file_handler(new_log)
-                        logger.addHandler(fh)
-                    output_dir = new_output
-                    console.print(f"Project directory: [cyan]{output_dir}[/cyan]")
+            # Step 1.5: Apply per-video project directory. The function
+            # honours the per_video_dir flag itself, so no outer gate.
+            new_output, video_path = apply_per_video_dir(
+                output_dir, video_path, download_result.is_downloaded,
+                per_video_dir=per_video_dir_resolved,
+            )
+            if new_output != output_dir:
+                if download_result.is_downloaded:
+                    logger.info(f"Moved source into project dir: {video_path}")
+                if fh is not None:
+                    # Safe swap: detach the old handler, then attach the
+                    # new one. If addHandler fails after removeHandler +
+                    # close, `fh` is rolled back to the still-attached old
+                    # handler reference (already closed, but the outer
+                    # finally's removeHandler/close is idempotent) — and
+                    # we never leave a dangling closed handler attached
+                    # to the logger (which would double-log on the next
+                    # run).
+                    old_fh = fh
+                    new_log = new_output / "stream2video.log"
+                    # Close + detach the old handler BEFORE moving the
+                    # log file: on Windows the open FileHandler holds a
+                    # lock that blocks shutil.move (WinError 32) until
+                    # the handle is released.
+                    logger.removeHandler(old_fh)
+                    old_fh.close()
+                    if new_log.exists():
+                        new_log.unlink()
+                    if log_file.exists():
+                        shutil.move(str(log_file), str(new_log))
+                    new_fh = _make_file_handler(new_log)
+                    try:
+                        logger.addHandler(new_fh)
+                    except Exception:
+                        # addHandler raised: new_fh is detached, old_fh
+                        # is already removed+closed. Roll back `fh` to
+                        # old_fh so the outer finally's removeHandler()
+                        # is a no-op and close() is a harmless second
+                        # close on an already-closed handler. Re-raise.
+                        new_fh.close()
+                        fh = old_fh
+                        raise
+                    fh = new_fh
+                output_dir = new_output
+                console.print(f"Project directory: [cyan]{output_dir}[/cyan]")
 
             # Step 2: Detect silence (with cache support)
             task2 = progress.add_task("[cyan]Detecting silence segments...", total=100)
@@ -490,6 +517,11 @@ def main(
                         cancel_callback=cancel_cb,
                     )
                     save_silence_cache(video_path, silence_segments, output_dir, config)
+
+                # By here `silence_segments` is non-None — either loaded
+                # from cache or freshly detected. Narrow the type so the
+                # length read below is unambiguous to the reader / mypy.
+                assert silence_segments is not None
 
                 progress.update(
                     task2,
@@ -579,8 +611,13 @@ def main(
         if restore_to not in (signal.SIG_IGN, signal.SIG_DFL):
             try:
                 signal.signal(signal.SIGINT, restore_to)
-            except (OSError, ValueError, TypeError):
-                pass
+            except (OSError, ValueError, TypeError) as e:
+                # signal.signal raises ValueError when called from a
+                # non-main thread; some platforms raise OSError. Log
+                # rather than silently swallow so a host that runs the
+                # CLI in a worker thread can diagnose why SIGINT wasn't
+                # restored.
+                logger.warning(f"Could not restore SIGINT handler: {e}")
         if fh is not None:
             logger.removeHandler(fh)
             fh.close()

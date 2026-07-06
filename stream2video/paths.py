@@ -81,9 +81,15 @@ def move_into_project(file_path: Path, project_dir: Path) -> Path:
     If the target already exists, ``file_path`` is removed and the existing
     target is kept (avoids clobbering on retry). If ``file_path`` is already
     inside ``project_dir``, returns it unchanged.
+
+    Raises ``FileNotFoundError`` if ``file_path`` does not exist — callers
+    that expect the source to be present (e.g. after a download) should see
+    a clear error rather than a silent unlink of nothing.
     """
     file_path = Path(file_path)
     project_dir = Path(project_dir)
+    if not file_path.exists():
+        raise FileNotFoundError(f"Cannot move into project: source not found: {file_path}")
     if file_path.parent == project_dir:
         return file_path
     new_path = project_dir / file_path.name
@@ -146,13 +152,22 @@ def apply_per_video_dir(
     output_dir: Path,
     video_path: Path,
     is_downloaded: bool,
+    per_video_dir: bool = True,
 ) -> tuple[Path, Path]:
     """Resolve the per-video project directory and move the source if needed.
 
     Returns ``(output_dir, video_path)`` — the (possibly updated) output
     directory and the (possibly moved) source path. The downloaded source is
     moved into the project dir; local files are left untouched.
+
+    When ``per_video_dir`` is False, the user opted out of per-video
+    subdirectories: the function returns its inputs unchanged so callers
+    don't need to gate the call themselves. When True (default), a
+    subdirectory named after ``video_path.stem`` is created inside
+    ``output_dir`` and the downloaded source is moved into it.
     """
+    if not per_video_dir:
+        return output_dir, video_path
     project_dir = ensure_project_dir(output_dir, video_path.stem, True)
     if project_dir != output_dir:
         if is_downloaded:
