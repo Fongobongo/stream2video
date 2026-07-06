@@ -1871,14 +1871,24 @@ class Stream2VideoGUI(ctk.CTk):
 
             def concat_prog(f: float):
                 elapsed = time.monotonic() - cut_start
-                remaining = elapsed / f - elapsed if f > 0.01 else 0
-                self._ui_progress(0.4 + f * 0.6)
-                self._ui_status(
-                    f"Step 3/3: Cutting... {f * 100:.0f}% "
-                    f"({fmt_time(elapsed)}/{fmt_time(remaining)})"
-                )
-                # Phase 3 is the last one — no "more phases" after it.
-                self._ui_overall(elapsed, remaining, more_phases=False)
+                if f > 0.01:
+                    remaining = elapsed / f - elapsed
+                    self._ui_progress(0.4 + f * 0.6)
+                    self._ui_status(
+                        f"Step 3/3: Cutting... {f * 100:.0f}% "
+                        f"({fmt_time(elapsed)}/{fmt_time(remaining)})"
+                    )
+                    # Phase 3 is the last one — no "more phases" after it.
+                    self._ui_overall(elapsed, remaining, more_phases=False)
+                else:
+                    # ffmpeg emits out_time_us=0 on startup; until the
+                    # first real progress value arrives, show an
+                    # indeterminate status so we don't render "/0s".
+                    self._ui_progress(0.4)
+                    self._ui_status(
+                        f"Step 3/3: Cutting... {fmt_time(elapsed)} (calculating ETA)"
+                    )
+                    self._ui_overall(elapsed, None, more_phases=False)
 
             cut_and_concat(
                 video_path,
@@ -2011,6 +2021,15 @@ class Stream2VideoGUI(ctk.CTk):
         Also persists to settings.json eagerly so a GUI crash/kill does not
         lose the list. (Final save still happens in _on_close, but we
         want every pipeline run's project to survive a restart.)
+
+        Called from the pipeline worker thread — the settings write and
+        the recent-projects panel re-render are scheduled on the Tk
+        main loop via ``_tk_after`` so we never touch Tk widgets or do
+        file I/O cross-thread. The config dict (plain Python dict) is
+        mutated in-place under the GIL; the only concurrent reader is
+        the same worker thread and the Tk main thread's read-only access
+        in ``_render_recent_projects`` (which runs after the worker's
+        write, on the main thread).
         """
         if not project_path:
             return
@@ -2019,11 +2038,19 @@ class Stream2VideoGUI(ctk.CTk):
             self.config.get("recent_projects", []),
             path_str,
         )
-        self._render_recent_projects()
-        try:
-            self._save_settings()
-        except Exception as e:
-            logger.warning("Failed to save settings after adding recent project: %s", e)
+        # Schedule widget work + settings save on the Tk main loop. The
+        # worker thread is not allowed to create widgets or touch the
+        # root Tk object directly — Tcl wires events through a single
+        # thread, so cross-thread widget creation raises or races.
+        self._tk_after(0, self._render_recent_projects)
+
+        def _persist():
+            try:
+                self._save_settings()
+            except Exception as e:
+                logger.warning("Failed to save settings after adding recent project: %s", e)
+
+        self._tk_after(0, _persist)
 
     def _delete_recent_project(self, path_str: str):
         """Confirm with the user, then recursively delete the project dir."""

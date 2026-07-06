@@ -305,7 +305,7 @@ def main(
         fh = _make_file_handler(log_file)
         logger.addHandler(fh)
 
-        # Load configuration. ``load_config``严格-validates BOTH numeric
+        # Load configuration. ``load_config`` strictly validates BOTH numeric
         # ranges (CONFIG_RANGES) AND enum keys (method/encoder/...), so a
         # bad YAML value for any of these cannot sneak through here.
         config = load_config(config_file)
