@@ -20,7 +20,19 @@ from rich.progress import (
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
-from typer._click.core import ParameterSource
+
+# ``ParameterSource`` tells us whether a CLI flag came from the command
+# line or a default. Its import path has moved across typer/click
+# releases (it used to be re-exported as ``typer._click.core``, now it
+# lives in ``click.core``). Use a defensive try/except chain so the
+# module keeps importing on all supported versions.
+try:
+    from click.core import ParameterSource  # click >= 8.0
+except ImportError:  # pragma: no cover - legacy fallback
+    try:
+        from typer._click.core import ParameterSource  # type: ignore[import]
+    except ImportError:  # pragma: no cover - very old typer
+        ParameterSource = None  # type: ignore[assignment]
 
 from stream2video.concat import ConcatError, cut_and_concat
 from stream2video.config import (
@@ -127,6 +139,11 @@ def load_config(config_file: Path | None) -> dict:
     CLI flag was passed.
     """
     config = CONFIG_DEFAULTS.copy()
+    # Raw YAML dict (before merging into ``config``). Kept so bool-key
+    # validation below can distinguish "user wrote 1 in YAML" (int,
+    # rejected) from "default value absent" (skip). ``file_config`` is
+    # only assigned inside the try/except when the file loads cleanly.
+    file_config: dict = {}
 
     if config_file:
         if not config_file.exists():
@@ -134,11 +151,12 @@ def load_config(config_file: Path | None) -> dict:
         else:
             try:
                 with open(config_file) as f:
-                    file_config = yaml.safe_load(f) or {}
+                    loaded = yaml.safe_load(f) or {}
 
-                if not isinstance(file_config, dict):
+                if not isinstance(loaded, dict):
                     raise ValueError("Config file must contain a dictionary")
 
+                file_config = loaded
                 config.update(file_config)
 
                 logger.info(f"Loaded config from {config_file}")
@@ -168,6 +186,24 @@ def load_config(config_file: Path | None) -> dict:
             except (ValueError, TypeError):
                 console.print(f"[red]Invalid {key}:[/red] {config[key]} is not a number")
                 raise typer.Exit(1) from None
+
+    # Validate bool keys. YAML booleans (``force: false``) parse to Python
+    # bool, but quoted strings (``force: "false"``) parse to the string
+    # ``"false"`` which is truthy under ``bool(...)`` — so ``_resolved_bool``
+    # later in the run would read it as ``True`` even though the user wrote
+    # ``false``. Same hazard for ``0``/``1`` ints: PyYAML keeps them as
+    # integers, not bools. Reject any non-bool value the user explicitly
+    # wrote in the YAML so downstream ``bool(value)`` matches intent. Keys
+    # the user didn't write keep their bool default from CONFIG_DEFAULTS.
+    bool_keys = ("force", "delete_after", "per_video_dir")
+    for key in bool_keys:
+        if key in file_config:
+            v = file_config[key]
+            if not isinstance(v, bool):
+                console.print(
+                    f"[red]Invalid {key}:[/red] {v!r} must be true or false"
+                )
+                raise typer.Exit(1)
 
     # Validate enum keys against their VALID_* lists. A bad value in
     # either the YAML or CONFIG_DEFAULTS is rejected here so downstream

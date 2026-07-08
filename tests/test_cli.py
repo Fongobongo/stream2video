@@ -7,6 +7,53 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import pytest
+import typer
+import yaml
+
+from stream2video.cli import load_config
+
+
+class TestLoadConfigBoolValidation:
+    """``load_config`` must reject non-bool values for the bool config keys.
+
+    Quoted YAML strings like ``force: "false"`` parse to the Python string
+    ``"false"``, which is truthy — so ``bool("false")`` would return ``True``
+    if the value slipped through, inverting the user's intent. The validator
+    catches this so downstream code can assume booleans are real booleans.
+    """
+
+    def test_bool_default_when_key_absent(self, tmp_path: Path):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("threshold: -30\n")
+        loaded = load_config(cfg)
+        assert loaded["force"] is False
+        assert loaded["delete_after"] is False
+        assert loaded["per_video_dir"] is True  # CONFIG_DEFAULTS
+
+    def test_bool_true_passes(self, tmp_path: Path):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("force: true\ndelete_after: true\n")
+        loaded = load_config(cfg)
+        assert loaded["force"] is True
+        assert loaded["delete_after"] is True
+
+    def test_bool_false_passes(self, tmp_path: Path):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("per_video_dir: false\n")
+        loaded = load_config(cfg)
+        assert loaded["per_video_dir"] is False
+
+    def test_quoted_string_false_rejected(self, tmp_path: Path):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text('force: "false"\n')
+        with pytest.raises(typer.Exit):
+            load_config(cfg)
+
+    def test_int_rejected_for_bool_key(self, tmp_path: Path):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("delete_after: 1\n")
+        with pytest.raises(typer.Exit):
+            load_config(cfg)
 
 
 class TestCliLoggingSetup:

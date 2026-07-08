@@ -233,6 +233,11 @@ class Stream2VideoGUI(ctk.CTk):
         self._waveform_peaks: list[float] = []
         self._waveform_duration: float = 0.0
         self._waveform_margin: float = 0.0
+        # Output dir the most recent waveform render resolved to, so the
+        # post-pipeline poller can locate the final silence cache even
+        # after the in-memory live store is dropped. ``None`` until the
+        # first render runs.
+        self._waveform_output_dir: Path | None = None
         self._waveform_video_name: str = ""
         self._waveform_video_path: Path | None = None
         self._waveform_view_start: float = 0.0
@@ -1831,11 +1836,17 @@ class Stream2VideoGUI(ctk.CTk):
                     resume_cache_path.unlink(missing_ok=True)
                 except OSError as e:
                     self._log(f"[WARN] Could not clean up resume cache: {e}")
-                # Final cache is written — refresh the live store with the
-                # canonical (margin-applied) list so the popup renders the
-                # same data whether it reads the file or the in-memory map.
+                # Final cache is written — drop the live store so the
+                # overlay's consumers (which assume the live store is
+                # RAW and re-apply apply_margin) fall back to the disk
+                # cache, which is margin-applied. Keeping the canonical
+                # list in the live store would make consumers apply
+                # apply_margin TWICE — once by detect_silence above, and
+                # once more by _apply_view / _poll_live_segments —
+                # shrinking the overlay silences by an extra `margin`
+                # beyond what the encode pipeline actually used.
                 with self._live_segments_lock:
-                    self._live_segments[video_path] = list(silence_segments)
+                    self._live_segments.pop(video_path, None)
                 self._log(f"Detected {len(silence_segments)} silence segments")
 
             if self._cancel_event.is_set():
@@ -2346,6 +2357,10 @@ class Stream2VideoGUI(ctk.CTk):
                 # is empty (e.g. popup opened after the pipeline finished).
                 margin = float(config["margin"])
                 self._waveform_margin = margin
+                # Capture the resolved output dir so the post-pipeline
+                # poller (_poll_live_segments) can re-read the final
+                # cache from disk after the live store is dropped.
+                self._waveform_output_dir = out_dir
                 live_segs = self._take_live_snapshot(in_path)
                 cached_segs = load_silence_cache(in_path, out_dir, config)
                 raw_segments = live_segs if live_segs is not None else cached_segs
@@ -2558,17 +2573,48 @@ class Stream2VideoGUI(ctk.CTk):
 
         current_view = (self._waveform_view_start, self._waveform_view_end)
         if not self.running:
-            # Pipeline finished — the in-memory store now has the
-            # canonical (margin'd) list, so do one final render to
-            # pick it up and then stop polling.
+            # Pipeline finished — the live store has been dropped by
+            # _pipeline_worker (post-detect) so we don't double-apply
+            # margin, so fall back to the disk cache (margin-applied).
+            # The cache may not exist yet if the run was cancelled — in
+            # that case we keep the last rendered overlay and stop
+            # polling.
             raw = self._take_live_snapshot(in_path)
             if raw is not None:
+                # A late on_segment callback arrived AFTER the worker
+                # expected the last one but BEFORE the pop took effect
+                # — still raw, apply margin as we do mid-run.
                 segments = apply_margin(raw, margin)
                 if len(segments) != state["last_count"] or current_view != state["last_view"]:
                     self._apply_view(segments)
                     state["last_count"] = len(segments)
                     state["last_view"] = current_view
                     self._log(f"  Pipeline finished — waveform locked at {len(segments)} silences")
+            else:
+                # Live store miss — re-read the final cache from disk so
+                # a popup opened AFTER detect (but before the cache is
+                # re-rendered elsewhere) shows the canonical segments
+                # rather than the last mid-run snapshot. The render
+                # path always sets ``_waveform_output_dir`` first, so
+                # ``None`` here means the popup was opened without an
+                # underlying render (shouldn't happen, but guard
+                # against dereferencing ``None`` — ``load_silence_cache``
+                # would treat ``None`` as "no cache path" and raise
+                # TypeError before the .exists() check).
+                out_dir = self._waveform_output_dir
+                if out_dir is None:
+                    return
+                config = {
+                    "threshold": float(self.config["threshold"]),
+                    "min_silence": float(self.config["min_silence"]),
+                    "margin": margin,
+                }
+                cached = load_silence_cache(in_path, out_dir, config)
+                if cached is not None and len(cached) != state["last_count"]:
+                    self._apply_view(list(cached))
+                    state["last_count"] = len(cached)
+                    state["last_view"] = current_view
+                    self._log(f"  Pipeline finished — waveform locked at {len(cached)} silences")
             return
 
         raw = self._take_live_snapshot(in_path)
