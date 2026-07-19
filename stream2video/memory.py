@@ -157,7 +157,7 @@ class MemoryMonitor:
                         self.hard_exceeded = True
                         msg = (
                             f"{self.label} RSS={rss:.0f}MB >= hard limit "
-                            f"{hard_mb:.0f}MB ({self.hard_threshold_frac*100:.0f}% of "
+                            f"{hard_mb:.0f}MB ({self.hard_threshold_frac * 100:.0f}% of "
                             f"{self.memory_limit_mb:.0f}MB budget) — cancelling"
                         )
                         logger.error(msg)
@@ -180,7 +180,7 @@ class MemoryMonitor:
                         self.soft_exceeded = True
                         msg = (
                             f"{self.label} RSS={rss:.0f}MB >= soft limit "
-                            f"{soft_mb:.0f}MB ({self.soft_threshold_frac*100:.0f}% of "
+                            f"{soft_mb:.0f}MB ({self.soft_threshold_frac * 100:.0f}% of "
                             f"{self.memory_limit_mb:.0f}MB budget)"
                         )
                         logger.warning(msg)

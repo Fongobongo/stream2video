@@ -9,7 +9,7 @@ description = "CLI tool to compress stream recordings by removing silence"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [{name = "stream2video"}]
-requires-python = ">=3.11"
+requires-python = ">=3.13"
 dependencies = [
     "yt-dlp>=2024.01.01",
     "typer>=0.12.0",
@@ -57,7 +57,7 @@ testpaths = ["tests"]
 addopts = "-ra"
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py313"
 line-length = 100
 
 [tool.ruff.lint]
@@ -86,14 +86,14 @@ ignore = [
 known-first-party = ["stream2video"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.13"
 mypy_path = "stream2video"
 ignore_missing_imports = true
 follow_imports = "silent"
 warn_unused_ignores = true
 warn_redundant_casts = true
 no_implicit_optional = true
-check_untyped_defs = false
+check_untyped_defs = true
 disallow_incomplete_defs = false
 disallow_untyped_defs = false
 warn_return_any = false

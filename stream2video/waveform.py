@@ -69,9 +69,8 @@ def read_peaks_from_stream(
     derived from the total sample count (bytes / 2 / 16000).
 
     Returns ``([], 0.0)`` on error or empty audio. Peaks are normalised
-    to ``[0.0, 1.0]`` (max-abs divided by 32768), matching
-    :func:`read_waveform_peaks`. Memory peaks at the raw audio byte
-    count — for a 2 h stream at 16 kHz mono that's ~230 MB.
+    to ``[0.0, 1.0]`` (max-abs divided by 32768). Memory peaks at the
+    raw audio byte count — for a 2 h stream at 16 kHz mono that's ~230 MB.
 
     The function intentionally ignores stderr (silenced via
     ``-loglevel error`` to ``DEVNULL``) so silencedetect noise from
@@ -309,9 +308,9 @@ def slice_peaks_by_time(
     Used by the GUI's zoom/pan controls to map a visible time window
     onto the pre-bucketed peak array. ``peaks`` is assumed to be
     uniformly distributed across ``[0, total_duration]`` (the contract
-    of :func:`read_waveform_peaks` and :func:`read_peaks_from_stream`),
-    so slicing is a simple index range plus a max-pool if the slice
-    contains more peaks than fit in one output bucket.
+    of :func:`read_peaks_from_stream`), so slicing is a simple index
+    range plus a max-pool if the slice contains more peaks than fit
+    in one output bucket.
 
     Clamps ``view_start``/``view_end`` to ``[0, total_duration]``.
     Returns ``[]`` for empty peaks, zero/negative duration, or

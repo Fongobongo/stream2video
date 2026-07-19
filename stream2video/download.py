@@ -104,7 +104,7 @@ _DOWNLOAD_TIMEOUT = 28800
 # Both values are deliberately generous so a slow-but-alive connection
 # (mobile network, saturated shared uplink) doesn't get killed
 # prematurely. Tunable via env vars for users with very slow links.
-_CONNECT_TIMEOUT = 300       # 5 min — DNS+handshake+first byte
+_CONNECT_TIMEOUT = 300  # 5 min — DNS+handshake+first byte
 _NO_PROGRESS_TIMEOUT = 1800  # 30 min — mid-download stall
 
 # yt-dlp format selectors by quality preset.
@@ -209,6 +209,7 @@ def _parse_progress_line(line: str) -> DownloadProgress | None:
         speed=speed,
         eta=eta,
     )
+
 
 _VIDEO_EXTENSIONS = frozenset(
     {
@@ -393,7 +394,13 @@ def download(
     start_time = time.monotonic()
 
     def _drain_stdout():
-        for line in process.stdout:
+        # ``process.stdout`` is non-None here (we set stdout=PIPE in
+        # Popen), but mypy can't prove it. Assert once so the for-loop
+        # below sees a concrete IO[Any] instead of IO[Any] | None.
+        stdout = process.stdout
+        if stdout is None:
+            return
+        for line in stdout:
             text = line.rstrip()
             prog = _parse_progress_line(text)
             if prog is not None:
@@ -410,7 +417,10 @@ def download(
             stdout_lines.append(text)
 
     def _drain_stderr():
-        for line in process.stderr:
+        stderr = process.stderr
+        if stderr is None:
+            return
+        for line in stderr:
             stderr_chunks.append(line)
 
     stdout_thread = threading.Thread(target=_drain_stdout, daemon=True)

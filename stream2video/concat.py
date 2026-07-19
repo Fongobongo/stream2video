@@ -146,10 +146,10 @@ def _set_audio_quality(q: str) -> None:
     global _audio_quality
     if q not in _AUDIO_BITRATES:
         raise ConcatError(
-            f"Unknown audio quality {q!r} "
-            f"(use {' or '.join(repr(k) for k in _AUDIO_BITRATES)})"
+            f"Unknown audio quality {q!r} (use {' or '.join(repr(k) for k in _AUDIO_BITRATES)})"
         )
     _audio_quality = q
+
 
 # Bitrate (HW encoders) and CRF (libx264) per ``video_quality`` preset.
 # ``medium`` keeps the values previously hard-coded in ENCODER_OPTS so
@@ -305,9 +305,7 @@ def encoder_opts(
     bound the decoder's thread pool instead — different effect).
     """
     if encoder not in VALID_ENCODERS:
-        raise ConcatError(
-            f"Unknown encoder {encoder!r} (known: {', '.join(VALID_ENCODERS)})"
-        )
+        raise ConcatError(f"Unknown encoder {encoder!r} (known: {', '.join(VALID_ENCODERS)})")
     if quality not in VALID_QUALITIES:
         raise ConcatError(
             f"Unknown video quality {quality!r} (use {' or '.join(repr(q) for q in VALID_QUALITIES)})"
@@ -363,9 +361,7 @@ def _threads_opt(encoder_threads: str | int) -> list[str]:
         return []
     if isinstance(encoder_threads, int) and encoder_threads > 0:
         return ["-threads", str(encoder_threads)]
-    logger.warning(
-        f"encoder_threads={encoder_threads!r} is not 'auto' or a positive int; ignoring"
-    )
+    logger.warning(f"encoder_threads={encoder_threads!r} is not 'auto' or a positive int; ignoring")
     return []
 
 
@@ -503,9 +499,7 @@ def get_video_encoder(
                 x264_preset=x264_preset,
                 encoder_threads=encoder_threads,
             )
-        raise EncoderUnavailableError(
-            f"{preferred} not available; user declined libx264 fallback"
-        )
+        raise EncoderUnavailableError(f"{preferred} not available; user declined libx264 fallback")
     # software_fallback == "disabled"
     raise EncoderUnavailableError(
         f"{preferred} not available; software_fallback='disabled' — refusing libx264"
@@ -620,11 +614,7 @@ def _run_ffmpeg(
             if memory_monitor.peak_rss_mb > 0:
                 logger.info(
                     f"{label}: peak RSS {memory_monitor.peak_rss_mb:.0f}MB"
-                    + (
-                        " (HARD limit hit — task cancelled)"
-                        if memory_monitor.hard_exceeded
-                        else ""
-                    )
+                    + (" (HARD limit hit — task cancelled)" if memory_monitor.hard_exceeded else "")
                 )
         if not drain_done:
             wait_for_drain()
@@ -739,9 +729,7 @@ def _write_manifest(work_dir: Path, manifest: dict) -> None:
     mkdir'd the work dir.
     """
     manifest_path = _manifest_path(work_dir)
-    fd, tmp_path = tempfile.mkstemp(
-        dir=work_dir, prefix=f".{manifest_path.name}.", suffix=".tmp"
-    )
+    fd, tmp_path = tempfile.mkstemp(dir=work_dir, prefix=f".{manifest_path.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
@@ -790,9 +778,17 @@ def _validate_manifest(
         # and treat as invalid.
         logger.info(f"Resume: no manifest in {work_dir}, treating as stale")
         return False
-    for key in ("pipeline_version", "method", "encoder", "resolved_encoder",
-                "encoder_opts", "video_quality", "audio_quality", "x264_preset",
-                "encoder_threads"):
+    for key in (
+        "pipeline_version",
+        "method",
+        "encoder",
+        "resolved_encoder",
+        "encoder_opts",
+        "video_quality",
+        "audio_quality",
+        "x264_preset",
+        "encoder_threads",
+    ):
         if stored.get(key) != current.get(key):
             logger.info(
                 f"Resume: manifest mismatch on {key}: "
@@ -816,8 +812,7 @@ def _validate_manifest(
     current_segs = current.get("keep_segments") or []
     if len(stored_segs) != len(current_segs):
         logger.info(
-            f"Resume: keep_segments length differs "
-            f"({len(stored_segs)} vs {len(current_segs)})"
+            f"Resume: keep_segments length differs ({len(stored_segs)} vs {len(current_segs)})"
         )
         return False
     for (s1, e1), (s2, e2) in zip(stored_segs, current_segs, strict=True):
@@ -919,8 +914,16 @@ def _run_segment_concat(
 
     seg_dir = output_path.parent / f"_{output_path.stem}_segments"
     manifest = _build_manifest(
-        video_path, keep_segments, "segment", encoder, vcodec, vcodec_opts,
-        video_quality, audio_quality, x264_preset, encoder_threads,
+        video_path,
+        keep_segments,
+        "segment",
+        encoder,
+        vcodec,
+        vcodec_opts,
+        video_quality,
+        audio_quality,
+        x264_preset,
+        encoder_threads,
     )
     _ensure_fresh_work_dir(seg_dir, manifest)
 
@@ -1224,8 +1227,16 @@ def _run_batch_concat(
 
     batch_dir = output_path.parent / f"_{output_path.stem}_batch"
     manifest = _build_manifest(
-        video_path, keep_segments, "batch", encoder, vcodec, vcodec_opts,
-        video_quality, audio_quality, x264_preset, encoder_threads,
+        video_path,
+        keep_segments,
+        "batch",
+        encoder,
+        vcodec,
+        vcodec_opts,
+        video_quality,
+        audio_quality,
+        x264_preset,
+        encoder_threads,
     )
     _ensure_fresh_work_dir(batch_dir, manifest)
 
@@ -1311,10 +1322,7 @@ def _run_batch_concat(
                 )
             else:
                 concat_inputs = "".join(f"[v{i}]" for i in range(n))
-                graph = (
-                    ";".join(v_chains)
-                    + f";{concat_inputs}concat=n={n}:v=1:a=0[outv]"
-                )
+                graph = ";".join(v_chains) + f";{concat_inputs}concat=n={n}:v=1:a=0[outv]"
 
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".txt", delete=False, encoding="utf-8"
@@ -1364,7 +1372,15 @@ def _run_batch_concat(
                         # fail with "Stream map '[outa]' matches no
                         # stream" — see P1.14.
                         *(
-                            ["-map", "[outa]", "-c:a", "aac", "-b:a", _audio_bitrate(), *_audio_opts()]
+                            [
+                                "-map",
+                                "[outa]",
+                                "-c:a",
+                                "aac",
+                                "-b:a",
+                                _audio_bitrate(),
+                                *_audio_opts(),
+                            ]
                             if source_has_audio
                             else []
                         ),
@@ -1484,9 +1500,7 @@ def _with_libx264_fallback(
             # Non-libx264 encoder failed — apply fallback policy.
             if software_fallback == "disabled":
                 raise
-            if software_fallback == "ask" and (
-                fallback_consent is None or not fallback_consent()
-            ):
+            if software_fallback == "ask" and (fallback_consent is None or not fallback_consent()):
                 raise
             # software_fallback == "enabled" OR ask-consented.
             logger.warning(f"{enc} failed: {str(e)[:200]}; falling back to libx264")
@@ -1495,11 +1509,14 @@ def _with_libx264_fallback(
                     on_fallback(enc)
                 except Exception as cleanup_err:
                     logger.warning(f"Cleanup before libx264 retry failed: {cleanup_err}")
-            enc, enc_opts = "libx264", encoder_opts(
+            enc, enc_opts = (
                 "libx264",
-                video_quality,
-                x264_preset=x264_preset,
-                encoder_threads=encoder_threads,
+                encoder_opts(
+                    "libx264",
+                    video_quality,
+                    x264_preset=x264_preset,
+                    encoder_threads=encoder_threads,
+                ),
             )
             # The fallback reuses _audio_bitrate() / _audio_opts() which
             # read the module-level _audio_quality. Keep the call explicit
