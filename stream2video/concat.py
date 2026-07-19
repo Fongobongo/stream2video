@@ -24,6 +24,7 @@ from stream2video.utils import (
     cancel_monitor,
     drain_stderr_lines,
     get_video_duration,
+    has_audio_stream,
     no_window_kwargs,
     set_active_process,
 )
@@ -202,6 +203,16 @@ def cut_and_concat(
     logger.info(f"Encoder: {vcodec} {vcodec_opts} (quality={video_quality})")
     _set_audio_quality(audio_quality)
 
+    # Detect whether the source has an audio stream ONCE. Probing per
+    # segment would be wasteful; passing the flag down lets the
+    # segment/batch builders omit ``-c:a`` / audio mapping for
+    # audio-less sources (otherwise ffmpeg fails with "Output file
+    # does not contain any stream" when ``-map 0:a:0`` is requested
+    # on a video-only input). See P1.14 in the fix plan.
+    source_has_audio = has_audio_stream(video_path)
+    if not source_has_audio:
+        logger.info(f"Source {video_path.name} has no audio stream — encoding video-only")
+
     _run_with_fallback(
         video_path,
         keep_segments,
@@ -217,6 +228,7 @@ def cut_and_concat(
         fallback_consent=fallback_consent,
         x264_preset=x264_preset,
         encoder_threads=encoder_threads,
+        source_has_audio=source_has_audio,
     )
 
     return output_path
@@ -852,6 +864,7 @@ def _run_segment_concat(
     audio_quality: str = "medium",
     x264_preset: str = "medium",
     encoder_threads: str | int = "auto",
+    source_has_audio: bool = True,
 ):
     """Encode each segment, join with concat demuxer.
 
@@ -966,14 +979,27 @@ def _run_segment_concat(
                     str(video_path),
                     "-t",
                     f"{dur:.3f}",
+                    # Explicit stream mapping (P1.14): pick the first
+                    # video stream and the first audio stream rather
+                    # than letting ffmpeg auto-select. A source with
+                    # multiple audio tracks (e.g. dual-language MKV)
+                    # would otherwise have its track choice depend on
+                    # ffmpeg's stream-order heuristic, which isn't
+                    # stable across versions. When the source has no
+                    # audio, audio mapping and the AAC encoder are
+                    # omitted entirely so the segment encode produces
+                    # a valid video-only MP4 instead of failing with
+                    # "Output file does not contain any stream".
+                    "-map",
+                    "0:v:0",
                     "-c:v",
                     vcodec,
                     *vcodec_opts,
-                    "-c:a",
-                    "aac",
-                    "-b:a",
-                    _audio_bitrate(),
-                    *(_audio_opts()),
+                    *(
+                        ["-map", "0:a:0?", "-c:a", "aac", "-b:a", _audio_bitrate(), *_audio_opts()]
+                        if source_has_audio
+                        else []
+                    ),
                     str(seg_path),
                 ],
                 progress_callback=_seg_prog,
@@ -1053,6 +1079,7 @@ def _run_with_fallback(
     fallback_consent: Callable[[], bool] | None = None,
     x264_preset: str = "medium",
     encoder_threads: str | int = "auto",
+    source_has_audio: bool = True,
 ):
     """Run segment or batch concat with the primary encoder; fall back to libx264 on failure.
 
@@ -1104,6 +1131,7 @@ def _run_with_fallback(
             audio_quality=audio_quality,
             x264_preset=x264_preset,
             encoder_threads=encoder_threads,
+            source_has_audio=source_has_audio,
         )
 
     _with_libx264_fallback(
@@ -1134,6 +1162,7 @@ def _run_batch_concat(
     audio_quality: str = "medium",
     x264_preset: str = "medium",
     encoder_threads: str | int = "auto",
+    source_has_audio: bool = True,
 ):
     """Process chunks sequentially: each chunk → temp file, then concat.
 
@@ -1233,13 +1262,27 @@ def _run_batch_concat(
             a_chains = []
             for idx, (s, e) in enumerate(chunk):
                 v_chains.append(f"[0:v]trim={s}:{e},setpts=PTS-STARTPTS[v{idx}]")
-                a_chains.append(f"[0:a]atrim={s}:{e},asetpts=PTS-STARTPTS[a{idx}]")
+                # Audio chain is only built when the source actually has
+                # an audio stream — otherwise ``[0:a]atrim=...`` would
+                # reference a non-existent input pad and ffmpeg would
+                # fail mid-graph. The concat filter's ``a=1`` flag is
+                # similarly dropped for audio-less sources so the output
+                # is video-only. See P1.14 in the fix plan.
+                if source_has_audio:
+                    a_chains.append(f"[0:a]atrim={s}:{e},asetpts=PTS-STARTPTS[a{idx}]")
             n = len(chunk)
-            concat_inputs = "".join(f"[v{i}][a{i}]" for i in range(n))
-            graph = (
-                ";".join(v_chains + a_chains)
-                + f";{concat_inputs}concat=n={n}:v=1:a=1[outv][outa]"
-            )
+            if source_has_audio:
+                concat_inputs = "".join(f"[v{i}][a{i}]" for i in range(n))
+                graph = (
+                    ";".join(v_chains + a_chains)
+                    + f";{concat_inputs}concat=n={n}:v=1:a=1[outv][outa]"
+                )
+            else:
+                concat_inputs = "".join(f"[v{i}]" for i in range(n))
+                graph = (
+                    ";".join(v_chains)
+                    + f";{concat_inputs}concat=n={n}:v=1:a=0[outv]"
+                )
 
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".txt", delete=False, encoding="utf-8"
@@ -1283,13 +1326,16 @@ def _run_batch_concat(
                         "-c:v",
                         vcodec,
                         *vcodec_opts,
-                        "-map",
-                        "[outa]",
-                        "-c:a",
-                        "aac",
-                        "-b:a",
-                        _audio_bitrate(),
-                        *(_audio_opts()),
+                        # Audio mapping only when the source has audio
+                        # (and the graph therefore produced [outa]).
+                        # Without this guard a video-only source would
+                        # fail with "Stream map '[outa]' matches no
+                        # stream" — see P1.14.
+                        *(
+                            ["-map", "[outa]", "-c:a", "aac", "-b:a", _audio_bitrate(), *_audio_opts()]
+                            if source_has_audio
+                            else []
+                        ),
                         str(chunk_path),
                     ],
                     progress_callback=_chunk_prog,
