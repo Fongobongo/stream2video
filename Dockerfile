@@ -1,10 +1,15 @@
-# stream2video CLI / integration test image.
+# stream2video CLI / integration test image (LOCAL USE ONLY — not for CI).
 #
-# Purpose: provide a reproducible environment for running the full test
-# suite (pytest + ruff + mypy) and the CLI against a real ffmpeg/ffprobe
-# without requiring a Windows host. The GUI is intentionally NOT
-# included — customtkinter / Tk require a display server that's not
-# worth wiring up in a CLI-only test image.
+# Purpose: provide a reproducible Linux environment for developers on
+# Windows who want to verify their code runs the same way the GitHub
+# Actions CI sees it, without manually setting up WSL2 + Python + ffmpeg.
+# The existing .github/workflows/ci.yml already runs the full test
+# suite on every push/PR via uv — this Dockerfile does NOT replace it.
+#
+# Why keep it despite the duplication: on a Windows host, `docker run`
+# is faster to spin up than WSL2 + manual apt installs, and it gives
+# a clean-room check that nothing in the code path accidentally relies
+# on Windows-specific behaviour (path separators, ctypes, etc).
 #
 # Usage:
 #   docker build -t stream2video-test .
@@ -13,9 +18,7 @@
 #   docker run --rm -v "$PWD/sample.mp4:/in.mp4" -v "$PWD/out:/out" \
 #     stream2video-test stream2video /in.mp4 -o /out --encoder libx264
 #
-# Size: ~250 MB (Python 3.13 slim + ffmpeg + project deps). The image
-# is intended for CI/local testing, not distribution — a release build
-# would pin to a specific yt-dlp/ffmpeg version and tag accordingly.
+# Size: ~250 MB (Python 3.13 slim + ffmpeg + project deps).
 
 FROM python:3.13-slim
 
