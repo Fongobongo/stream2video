@@ -86,6 +86,117 @@ def _to_float(s: str) -> float:
     return float(s.replace(",", "."))
 
 
+class SilenceParser:
+    """Unified state machine for parsing ffmpeg ``silencedetect`` output.
+
+    The fix plan (P2.5) flagged three divergent parsers:
+      1. ``_parse_ffmpeg_output`` — batch parser, walks the full stderr
+         after ffmpeg exits.
+      2. ``_run_silencedetect``'s ``_on_line`` closure — progressive
+         parser, fires a callback on each new segment.
+      3. ``detect_silence_stream``'s inline loop — progressive parser
+         for the preview path.
+
+    The decimal-comma bug (P1.13) arose precisely because parsers 2
+    and 3 used ``float()`` instead of ``_to_float()``. This class
+    unifies all three paths so a future change to the parsing logic
+    (e.g. a new ``silence_duration`` field) only needs to be made in
+    one place.
+
+    Usage:
+        parser = SilenceParser(on_segment=callback)
+        for line in stderr_lines:
+            parser.feed(line)
+        segments = parser.finalize(duration=media_duration)
+
+    ``on_segment`` (optional) is invoked with a snapshot of the running
+    segment list every time a new ``silence_end`` arrives. The callback
+    runs on the caller's thread; callers touching a UI must dispatch
+    to the main thread themselves.
+
+    ``finalize(duration=...)`` closes a trailing ``silence_start``
+    without a matching ``silence_end`` (P1.12). When ``duration`` is
+    None the trailing start is dropped with a warning (preview path
+    that doesn't know the media duration).
+    """
+
+    def __init__(
+        self,
+        on_segment: Callable[[list[SilenceSegment]], None] | None = None,
+    ) -> None:
+        self._segments: list[SilenceSegment] = []
+        self._pending_start: float | None = None
+        self._on_segment = on_segment
+
+    @property
+    def segments(self) -> list[SilenceSegment]:
+        """Snapshot of the segments detected so far (raw, pre-margin)."""
+        return list(self._segments)
+
+    @property
+    def has_pending_start(self) -> bool:
+        """True if a ``silence_start`` is awaiting its matching ``silence_end``."""
+        return self._pending_start is not None
+
+    @property
+    def pending_start(self) -> float | None:
+        """The timestamp of the unmatched ``silence_start``, if any."""
+        return self._pending_start
+
+    def feed(self, line: str) -> None:
+        """Feed one decoded stderr line to the parser.
+
+        Matches ``silence_start`` and ``silence_end`` patterns; on a
+        matching ``silence_end`` with a pending start, appends the
+        segment and fires the ``on_segment`` callback (if set).
+        """
+        m_s = _SILENCE_START_RE.search(line)
+        if m_s:
+            self._pending_start = _to_float(m_s.group(1))
+            return
+        m_e = _SILENCE_END_RE.search(line)
+        if m_e and self._pending_start is not None:
+            self._segments.append(
+                SilenceSegment(self._pending_start, _to_float(m_e.group(1)))
+            )
+            self._pending_start = None
+            if self._on_segment is not None:
+                self._on_segment(list(self._segments))
+
+    def finalize(self, duration: float | None = None) -> list[SilenceSegment]:
+        """Close out parsing and return the final segment list.
+
+        ``duration``: when known, a trailing ``silence_start`` without a
+        matching ``silence_end`` (input ended while still silent) is
+        closed at the media duration (P1.12). When None, the pending
+        start is dropped with a warning.
+        """
+        if self._pending_start is not None:
+            if duration is not None and duration > 0:
+                clamped_start = min(self._pending_start, duration)
+                if clamped_start < duration:
+                    logger.info(
+                        f"Trailing silence_start at t={self._pending_start:.3f}s "
+                        f"had no matching silence_end; closing at media "
+                        f"duration {duration:.3f}s"
+                    )
+                    self._segments.append(SilenceSegment(clamped_start, duration))
+                    if self._on_segment is not None:
+                        self._on_segment(list(self._segments))
+                else:
+                    logger.debug(
+                        f"Trailing silence_start at t={self._pending_start:.3f}s "
+                        f"is at/after duration {duration:.3f}s; dropping"
+                    )
+            else:
+                logger.warning(
+                    "Unmatched silence_start (no silence_end) and no "
+                    "media duration available; dropped — ffmpeg output "
+                    "may be truncated"
+                )
+        return list(self._segments)
+
+
 def detect_silence(
     video_path: Path,
     threshold: float = CONFIG_DEFAULTS["threshold"],
@@ -382,49 +493,31 @@ def detect_silence_stream(
     assert proc.stderr is not None
     pipe = proc.stderr
 
-    segments: list[SilenceSegment] = []
-    pending_start: float | None = None
+    # P2.5: unified parser. Previously this function had its own
+    # inline ``m_s = _SILENCE_START_RE.search(line)`` loop with a
+    # ``float()`` call that broke on decimal commas (P1.13). Using
+    # :class:`SilenceParser` here keeps the parsing logic in one place
+    # so a future change (e.g. a new ``silence_duration`` field)
+    # only needs to be made once.
+    parser = SilenceParser(on_segment=on_segment)
 
     try:
         for raw in iter(pipe.readline, b""):
             line = raw.decode("utf-8", errors="replace")
-            m_s = _SILENCE_START_RE.search(line)
-            if m_s:
-                # Use ``_to_float`` (not bare ``float(...)``) so a
-                # locale-formatted timestamp with a decimal comma
-                # (e.g. ``silence_start: 1,234``) parses correctly.
-                # The batch path in ``_run_silencedetect`` already
-                # uses ``_to_float``; the progressive path here used
-                # ``float`` which raised ``ValueError`` on comma
-                # locales and dropped the segment silently. See
-                # P1.13 in the fix plan.
-                pending_start = _to_float(m_s.group(1))
-                continue
-            m_e = _SILENCE_END_RE.search(line)
-            if m_e and pending_start is not None:
-                segments.append(SilenceSegment(pending_start, _to_float(m_e.group(1))))
-                pending_start = None
-                on_segment(list(segments))
+            parser.feed(line)
 
         proc.wait(timeout=_SILENCE_TIMEOUT)
         if proc.returncode != 0:
             raise SilenceDetectionError(f"ffmpeg silencedetect failed (rc={proc.returncode})")
-        # Trailing silence: a ``silence_start`` without a matching
-        # ``silence_end`` means the input ended while still silent. The
-        # canonical ``_run_silencedetect`` closes this at the known
-        # media duration; ``detect_silence_stream`` is a preview-only
-        # helper that doesn't always know the duration (callers may
-        # pass a URL or a file we haven't probed), so drop the pending
-        # segment with a warning instead of guessing. A future caller
-        # that does know the duration can post-process the returned
-        # list to add the trailing segment.
-        if pending_start is not None:
-            logger.warning(
-                "detect_silence_stream: unmatched silence_start at "
-                f"t={pending_start:.3f}s (no silence_end before EOF); "
-                "dropped — pass the media duration to close it if needed"
-            )
-        return segments
+        # ``detect_silence_stream`` is a preview-only helper that
+        # doesn't always know the media duration (callers may pass a
+        # URL or a file we haven't probed). Pass ``duration=None`` so
+        # a trailing ``silence_start`` is dropped with a warning
+        # instead of guessing. Callers that know the duration can
+        # post-process the returned list to add the trailing segment,
+        # or call ``detect_silence`` instead (which probes the
+        # duration and closes it via ``SilenceParser.finalize``).
+        return parser.finalize(duration=None)
     except subprocess.TimeoutExpired as e:
         proc.kill()
         raise SilenceDetectionError(f"ffmpeg timeout after {e.timeout}s") from e
@@ -820,23 +913,22 @@ def _extract_audio_wav(
 
 
 def _parse_ffmpeg_output(stderr: str) -> list[SilenceSegment]:
-    """Parse ffmpeg silencedetect output."""
-    starts = [_to_float(m.group(1)) for m in _SILENCE_START_RE.finditer(stderr)]
-    ends = [_to_float(m.group(1)) for m in _SILENCE_END_RE.finditer(stderr)]
+    """Parse ffmpeg silencedetect output (batch path).
 
-    if len(starts) != len(ends):
-        if len(starts) > len(ends):
-            dropped = len(starts) - len(ends)
-            dropped_kind = "unmatched silence_start (no silence_end)"
-        else:
-            dropped = len(ends) - len(starts)
-            dropped_kind = "unmatched silence_end (no silence_start)"
-        logger.warning(
-            f"Mismatched silence_start ({len(starts)}) and silence_end ({len(ends)}) counts; "
-            f"dropping {dropped} {dropped_kind} — ffmpeg output may be truncated"
-        )
+    Delegates to :class:`SilenceParser` so the parsing logic lives in
+    exactly one place — the previous standalone ``zip(starts, ends)``
+    implementation diverged from the progressive path on the
+    decimal-comma handling (P1.13) before P2.5 unified them.
 
-    return [SilenceSegment(start, end) for start, end in zip(starts, ends, strict=False)]
+    Batch callers don't have a media duration to close trailing
+    silence with, so unmatched starts are dropped here (with a
+    warning from ``finalize``). Callers that know the duration
+    should use ``SilenceParser`` directly with ``finalize(duration=...)``.
+    """
+    parser = SilenceParser()
+    for line in stderr.splitlines():
+        parser.feed(line)
+    return parser.finalize(duration=None)
 
 
 def _sample_segments_match(
