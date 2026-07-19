@@ -616,9 +616,7 @@ def _run_ffmpeg(
                     logger.exception("stall watchdog: kill() failed")
                 return
 
-    stall_thread = threading.Thread(
-        target=_stall_watchdog, daemon=True, name=f"stall_{label}"
-    )
+    stall_thread = threading.Thread(target=_stall_watchdog, daemon=True, name=f"stall_{label}")
     stall_thread.start()
 
     try:
@@ -1099,9 +1097,7 @@ def _run_segment_concat(
                         # too, but the filter is the documented way
                         # to do it post-encode PTS normalisation and
                         # matches the batch path's filter chain shape.
-                        ["-vf", f"fps={output_fps}"]
-                        if output_fps != "source"
-                        else []
+                        ["-vf", f"fps={output_fps}"] if output_fps != "source" else []
                     ),
                     "-c:v",
                     vcodec,
@@ -1414,9 +1410,7 @@ def _run_batch_concat(
                 # so the new PTS cadence is the source's, not the
                 # synthetic ``N/FRAME_RATE`` one. ``fps`` duplicates or
                 # drops frames to match the CFR target.
-                v_chains.append(
-                    f"[0:v]trim={s}:{e},setpts=PTS-STARTPTS{fps_suffix}[v{idx}]"
-                )
+                v_chains.append(f"[0:v]trim={s}:{e},setpts=PTS-STARTPTS{fps_suffix}[v{idx}]")
                 # Audio chain is only built when the source actually has
                 # an audio stream — otherwise ``[0:a]atrim=...`` would
                 # reference a non-existent input pad and ffmpeg would
@@ -1434,10 +1428,7 @@ def _run_batch_concat(
                 )
             else:
                 concat_inputs = "".join(f"[v{i}]" for i in range(n))
-                graph = (
-                    ";".join(v_chains)
-                    + f";{concat_inputs}concat=n={n}:v=1:a=0[outv]"
-                )
+                graph = ";".join(v_chains) + f";{concat_inputs}concat=n={n}:v=1:a=0[outv]"
 
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".txt", delete=False, encoding="utf-8"
@@ -1497,7 +1488,15 @@ def _run_batch_concat(
                         # fail with "Stream map '[outa]' matches no
                         # stream" — see P1.14.
                         *(
-                            ["-map", "[outa]", "-c:a", "aac", "-b:a", _audio_bitrate(), *_audio_opts()]
+                            [
+                                "-map",
+                                "[outa]",
+                                "-c:a",
+                                "aac",
+                                "-b:a",
+                                _audio_bitrate(),
+                                *_audio_opts(),
+                            ]
                             if source_has_audio
                             else []
                         ),
