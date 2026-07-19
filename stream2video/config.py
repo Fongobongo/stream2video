@@ -24,6 +24,23 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     # preserves the historical behaviour (no thread hint) so an upgrade
     # doesn't quietly change the load profile of an existing user.
     "encoder_threads": "auto",
+    # Output FPS policy (P1.17). ``source`` (default) preserves the
+    # input's frame cadence — no -r / -fps_mode is added to the encoder
+    # command, so a 30 FPS source comes out at 30 FPS without frame
+    # duplication. ``24`` / ``25`` / ``30`` / ``50`` / ``60`` force a
+    # CFR conversion via the ``fps`` filter; the docs warn about the
+    # size/quality cost of duplicated frames.
+    "output_fps": "source",
+    # RAM budget (P1.17 / Этап 8A). ``auto`` = 60% of total RAM at the
+    # start of the run; a positive int is taken as a MB cap. ``None`` /
+    # ``0`` disables the budget check (only the OS reserve remains).
+    "memory_limit_mb": "auto",
+    # Hard floor of available RAM the pipeline never violates — even
+    # when the budget hasn't been hit, going below this triggers a
+    # cancel so the OS doesn't swap. 2 GB matches the default Windows
+    # commit limit behaviour for the System process; raise it on
+    # memory-constrained laptops.
+    "memory_reserve_mb": 2048,
     "force": False,
     "delete_after": False,
     "per_video_dir": True,
@@ -71,6 +88,10 @@ VALID_X264_PRESETS: list[str] = [
     "slower",
 ]
 
+# Output FPS policy (P1.17). ``source`` preserves the input's frame
+# cadence; the integer values force a CFR conversion.
+VALID_OUTPUT_FPS: list[str] = ["source", "24", "25", "30", "50", "60"]
+
 # Keys that are user-tunable defaults (exclude per-session state like
 # output_dir / recent_projects / input_path). Used by the GUI's
 # "Save current as defaults" button.
@@ -86,6 +107,9 @@ USER_DEFAULT_KEYS: list[str] = [
     "software_fallback",
     "x264_preset",
     "encoder_threads",
+    "output_fps",
+    "memory_limit_mb",
+    "memory_reserve_mb",
     "force",
     "delete_after",
     "per_video_dir",
@@ -143,6 +167,17 @@ def coerce_typed_value(key: str, value: Any) -> Any:
             return None
         if isinstance(value, int) and value > 0:
             return value
+        return None
+    # ``memory_limit_mb`` accepts ``"auto"`` or a non-negative int
+    # (0 = disable). A negative int is rejected; float is coerced to
+    # int since ffmpeg memory budgets are inherently coarse-grained.
+    if key == "memory_limit_mb":
+        if isinstance(value, str) and value == "auto":
+            return value
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)) and value >= 0:
+            return int(value)
         return None
     if isinstance(default, bool):
         return value if isinstance(value, bool) else None
