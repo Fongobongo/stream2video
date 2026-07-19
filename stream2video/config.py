@@ -41,6 +41,13 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     # commit limit behaviour for the System process; raise it on
     # memory-constrained laptops.
     "memory_reserve_mb": 2048,
+    # Download watchdog timeouts (P1.6). Absolute ceiling + two-stage
+    # watchdog so a stalled connection doesn't wait the full ceiling.
+    # Exposed via --download-timeout / --connect-timeout /
+    # --no-progress-timeout in the CLI; the GUI uses these defaults.
+    "download_timeout": 28800,        # 8h
+    "connect_timeout": 300,          # 5 min pre-first-byte
+    "no_progress_timeout": 1800,     # 30 min mid-download stall
     "force": False,
     "delete_after": False,
     "per_video_dir": True,
@@ -110,6 +117,9 @@ USER_DEFAULT_KEYS: list[str] = [
     "output_fps",
     "memory_limit_mb",
     "memory_reserve_mb",
+    "download_timeout",
+    "connect_timeout",
+    "no_progress_timeout",
     "force",
     "delete_after",
     "per_video_dir",

@@ -276,6 +276,9 @@ def download(
     cancel_callback: Callable[[], bool] | None = None,
     quality: str = "best",
     progress_callback: Callable[[DownloadProgress], None] | None = None,
+    download_timeout: int = _DOWNLOAD_TIMEOUT,
+    connect_timeout: int = _CONNECT_TIMEOUT,
+    no_progress_timeout: int = _NO_PROGRESS_TIMEOUT,
 ) -> DownloadResult:
     """
     Download video from URL via yt-dlp CLI, or pass through a local file.
@@ -429,7 +432,7 @@ def download(
     stderr_thread.start()
 
     try:
-        deadline = time.monotonic() + _DOWNLOAD_TIMEOUT
+        deadline = time.monotonic() + download_timeout
         while True:
             if process.poll() is not None:
                 break
@@ -441,29 +444,29 @@ def download(
             if remaining <= 0:
                 process.kill()
                 process.wait()
-                raise DownloadTimeoutError(f"Download timeout after {_DOWNLOAD_TIMEOUT}s")
+                raise DownloadTimeoutError(f"Download timeout after {download_timeout}s")
 
             # Connection / progress watchdog. Two branches:
-            #   1. No progress yet AND we're past _CONNECT_TIMEOUT — the
+            #   1. No progress yet AND we're past connect_timeout — the
             #      connection didn't establish or yt-dlp is stuck before
             #      the first byte. Kill with a clearer error than the
-            #      generic 8h timeout.
-            #   2. Progress seen before but silent for _NO_PROGRESS_TIMEOUT
+            #      generic ceiling.
+            #   2. Progress seen before but silent for no_progress_timeout
             #      — the connection dropped mid-download. yt-dlp's own
             #      retry logic (when enabled) usually fires first, but we
             #      don't enable it, so the watchdog is the only safety.
             now = time.monotonic()
             if last_progress_time[0] is None:
-                if now - start_time > _CONNECT_TIMEOUT:
+                if now - start_time > connect_timeout:
                     process.kill()
                     process.wait()
                     raise DownloadTimeoutError(
                         f"Download stalled before first byte: no progress "
-                        f"within {_CONNECT_TIMEOUT}s (DNS/TLS/handshake?)"
+                        f"within {connect_timeout}s (DNS/TLS/handshake?)"
                     )
             else:
                 silent_for = now - (last_progress_time[0] or now)
-                if silent_for > _NO_PROGRESS_TIMEOUT:
+                if silent_for > no_progress_timeout:
                     process.kill()
                     process.wait()
                     raise DownloadTimeoutError(
