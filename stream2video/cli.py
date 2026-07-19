@@ -338,6 +338,27 @@ def main(
         "-l",
         help="Logging level (DEBUG, INFO, WARNING, ERROR)",
     ),
+    download_timeout: int = typer.Option(
+        28800,
+        "--download-timeout",
+        help="Absolute ceiling for the whole download in seconds (default 28800 = 8h, "
+        "sized for big VODs). Lower for quick test runs; raise for very large "
+        "streams. Ignored for local files.",
+    ),
+    connect_timeout: int = typer.Option(
+        300,
+        "--connect-timeout",
+        help="Seconds to wait for the first progress event (DNS+TLS+handshake+first "
+        "byte) before killing yt-dlp with a clear timeout error. Default 300s "
+        "(5 min). Increase on very slow / satellite links.",
+    ),
+    no_progress_timeout: int = typer.Option(
+        1800,
+        "--no-progress-timeout",
+        help="Seconds of silence mid-download before killing yt-dlp (stalled "
+        "connection watchdog). Default 1800s (30 min). Increase for very "
+        "slow / unstable links where mid-download pauses are normal.",
+    ),
 ):
     """
     Compress stream recording by removing silence segments.
@@ -524,6 +545,9 @@ def main(
                     cancel_callback=cancel_cb,
                     quality=download_quality,
                     progress_callback=_download_progress_cb,
+                    download_timeout=download_timeout,
+                    connect_timeout=connect_timeout,
+                    no_progress_timeout=no_progress_timeout,
                 )
                 video_path = download_result.path
                 if download_result.is_downloaded:
