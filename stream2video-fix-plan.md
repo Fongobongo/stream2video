@@ -6,13 +6,13 @@
 
 ## Статус исполнения (обновление от 19 июля 2026)
 
-Все пункты P0 и P1 выполнены и закоммичены. Media reproduction тест
-проходит: на 6s/30FPS источнике с keep=[(0,2),(4,6)] оба метода
+Все пункты P0, P1, P2 и P3 выполнены и закоммичены. Media reproduction
+тест проходит: на 6s/30FPS источнике с keep=[(0,2),(4,6)] оба метода
 (`segment` и `batch`) дают 4.02s / 120 frames (ожидалось 4.00s / 120;
 расхождение 0.02s — AAC encoder priming, в пределах одного кадра).
 `ruff check`, `ruff format --check`, `mypy stream2video` (с
-`check_untyped_defs=true`) и 336 unit/integration тестов проходят
-зелёными.
+`check_untyped_defs=true`) и 357 unit/integration/媒体-correctness
+тестов проходят зелёными.
 
 | Пункт | Статус | Коммит |
 | --- | --- | --- |
@@ -41,10 +41,21 @@
 | P1.16 dry-run preview (detect_silence_stream) | ✅ | 55084ba |
 | P1.17 FPS policy + RAM budget + memory monitor | ✅ | bd9ef06 + 969d0d5 |
 | Этап 8A RAM/VRAM limits + OS guardrails | ✅ базовая инфраструктура | bd9ef06 |
+| P2.1 gui.py monolith (2884 → 2607 строк; _Tooltip + QueueHandler extracted; pure helpers в gui_helpers.py) | ✅ частично | 993bdbf + c6e97a7 |
+| P2.2 GUI/pipeline tests (pure helpers покрыты; widget tests остаются known gap) | ⚠️ частично | c6e97a7 |
+| P2.3 media correctness regression tests (21 тест: CFR matrix 24/25/30/50/60, silence@start/end, 10 segments drift, audio_quality, output_fps=60, audio-less) | ✅ | 8184d08 |
+| P2.4 duplicated subprocess lifecycle | ⚠️ остаётся (concat/silence/waveform/download каждый имеет свой Popen+drain) | — |
+| P2.5 silencedetect parsers unified в SilenceParser | ✅ | 94202f9 |
+| P2.6 duplicated segment/batch finalize/resume paths | ⚠️ частично (manifest валидация общая, но _run_segment_concat и _run_batch_concat остаются раздельными) | e861fcc |
+| P2.7 CLI использует gui_helpers для progress formatting | ✅ | a496650 |
+| P2.8 CLI defaults из CONFIG_DEFAULTS (не строковые литералы) | ✅ | a496650 |
 | P2.9 logging.basicConfig из import → entry point | ✅ | 26e89fa |
 | P2.10 мёртвые doc refs (_get_resume_cache_path, read_waveform_peaks) | ✅ | 26e89fa |
+| P2.11 ENCODER_OPTS — документирован как public API | ✅ | a496650 |
+| P2.12 NVENC rate-control — RC-модель документирована inline | ✅ | a496650 |
+| P2.13 check_encoder("libx264") — реальный smoke test | ✅ | e861fcc |
+| P2.14 exact float comparison в cache key — документирован | ✅ | a496650 |
 | P2.15 v already-defined в cli.load_config | ✅ | 26e89fa |
-| P2.x pure helpers extracted from gui.py (gui_helpers.py + 28 tests) | ✅ | c6e97a7 |
 | Этап 10 GUI refactor (incremental: _Tooltip → gui_widgets, QueueHandler → gui_log_handler; gui.py 2884 → 2607 строк) | ✅ частично | 993bdbf |
 | P3.1 Python target sync (3.13: requires-python + ruff + mypy) | ✅ | 26e89fa |
 | P3.2 mypy check_untyped_defs=true | ✅ | 26e89fa |
@@ -53,24 +64,29 @@
 
 ### Что НЕ сделано (намеренно отложено)
 
-Этап 10 (полный GUI refactor на `gui/` package) — большой объём
-работы по переносу ~2600 строк с круговой зависимостью и риском
-регрессий. Сделан **частичный** refactor: `_Tooltip` и `QueueHandler`
-вынесены в отдельные модули как pattern (993bdbf); pure-логика
-(CLI command builder, status formatting, throttle decision) — в
-`gui_helpers.py` с 28 unit-тестами (c6e97a7). Полный перенос
-`Stream2VideoGUI` на package лучше делать отдельным PR после
-добавления GUI-тестов (pytest-qt / tkinter simulator).
+**P2.4 / P2.6 — дублирование subprocess lifecycle и segment/batch
+finalize/resume paths.** Эти два пункта требуют большого рефакторинга
+с выносом общего `SubprocessRunner` и `ConcatFinalizer` — риск
+регрессий в media correctness высок без полного GUI/pipeline test
+покрытия. Текущая реализация работает корректно (357 тестов зелёные,
+включая 21 media correctness regression test); дедупликация — это
+чисто архитектурное улучшение, не влияет на функциональность.
 
-Тесты GUI (P2.2) — known gap. Pure-логика покрыта (formatters,
-paths, waveform, gui_helpers), но реальных widget и pipeline
-controller тестов нет. Для зрелого решения стоит добавить
+**Этап 10 (полный GUI refactor на `gui/` package)** — большой объём
+работы по переносу ~2600 строк с круговой зависимостью. Сделан
+**частичный** refactor: `_Tooltip` и `QueueHandler` вынесены в
+отдельные модули (993bdbf); pure-логика — в `gui_helpers.py` с 28
+unit-тестами (c6e97a7). Полный перенос `Stream2VideoGUI` на package
+лучше делать отдельным PR после добавления GUI-тестов (pytest-qt /
+tkinter simulator).
+
+**Тесты GUI (P2.2)** — known gap. Pure-логика покрыта (formatters,
+paths, waveform, gui_helpers, SilenceParser), но реальных widget и
+pipeline controller тестов нет. Для зрелого решения стоит добавить
 pytest-qt или вынести pipeline controller в чистый state machine.
 
-P1.6 (значения таймаутов теперь настраиваемые через CLI/config):
-watchdog ловит зависания независимо от readline, поэтому практический
-риск 8-часового ожидания устранён; настраиваемость таймаутов через
-config добавлена.
+**Этап 12 — обновление README/CHANGELOG** — не сделано. Dockerfile
+готов (789447f), но docs не обновлены. Это отдельная doc-задача.
 
 
 ## 1. Проверенные выводы
