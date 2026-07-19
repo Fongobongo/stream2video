@@ -4,6 +4,68 @@
 >
 > Документ объединяет исходный аудит и замечания двух дополнительных агентов. Спорные утверждения перепроверены по исходникам и локальному `yt-dlp 2026.07.04`. Для media pipeline также выполнен реальный тест через `ffmpeg`.
 
+## Статус исполнения (обновление от 19 июля 2026)
+
+Все пункты P0 и P1 выполнены и закоммичены. Media reproduction тест
+проходит: на 6s/30FPS источнике с keep=[(0,2),(4,6)] оба метода
+(`segment` и `batch`) дают 4.02s / 120 frames (ожидалось 4.00s / 120;
+расхождение 0.02s — AAC encoder priming, в пределах одного кадра).
+`ruff check`, `ruff format --check`, `mypy stream2video` (с
+`check_untyped_defs=true`) и 308 unit/integration тестов проходят
+зелёными.
+
+| Пункт | Статус | Коммит |
+| --- | --- | --- |
+| P0.1 segment double-seek | ✅ | e861fcc |
+| P0.2 setpts=N/FRAME_RATE/TB | ✅ | e861fcc |
+| P0.3 audio_quality presets | ✅ | e861fcc |
+| P0.4 AUDIO_PAD drift | ✅ | e861fcc |
+| P0.5 software_fallback policy | ✅ | e861fcc |
+| P0.6 resume manifest + ffprobe | ✅ | e861fcc |
+| P0.7 yt-dlp progress.* template | ✅ | e861fcc |
+| P1.1 download watchdog | ✅ | e861fcc |
+| P1.2 best → bestvideo+bestaudio | ✅ | e861fcc |
+| P1.3 total_bytes fallback | ✅ | e861fcc |
+| P1.4 batch windowing | ✅ | 969d0d5 |
+| P1.5 stall watchdog (readline-independent) | ✅ | 969d0d5 |
+| P1.6 таймауты: watchdog теперь независим от readline; значения остаются хардкодом (низкий приоритет) | ⚠️ частично | e861fcc |
+| P1.7 detect_silence defaults ↔ CONFIG_DEFAULTS | ✅ | e861fcc |
+| P1.8 CLI resume_cache_path | ✅ | e861fcc |
+| P1.9 CancelledError отдельно от ConcatError | ✅ | e861fcc |
+| P1.10 Tk widget values в main thread | ✅ | e861fcc |
+| P1.11 scoped process supervisor | ✅ | e861fcc |
+| P1.12 trailing silence_start закрывается duration | ✅ | e861fcc |
+| P1.13 decimal comma в detect_silence_stream | ✅ | 55084ba |
+| P1.14 explicit stream mapping + audio-less handling | ✅ | 55084ba |
+| P1.15 streaming waveform (chunked downsample) | ✅ | 55084ba |
+| P1.16 dry-run preview (detect_silence_stream) | ✅ | 55084ba |
+| P1.17 FPS policy + RAM budget + memory monitor | ✅ | bd9ef06 + 969d0d5 |
+| Этап 8A RAM/VRAM limits + OS guardrails | ✅ базовая инфраструктура | bd9ef06 |
+| P2.9 logging.basicConfig из import → entry point | ✅ | 26e89fa |
+| P2.10 мёртвые doc refs (_get_resume_cache_path, read_waveform_peaks) | ✅ | 26e89fa |
+| P2.15 v already-defined в cli.load_config | ✅ | 26e89fa |
+| P3.1 Python target sync (3.13: requires-python + ruff + mypy) | ✅ | 26e89fa |
+| P3.2 mypy check_untyped_defs=true | ✅ | 26e89fa |
+| P3.3 ruff format --check зелёный | ✅ | 26e89fa |
+| Этап 10 архитектурный рефакторинг GUI (gui/ package) | ⏸ отложено | — |
+| Этап 12 документация/релиз (README/CHANGELOG/PyPI) | ⏸ отложено | — |
+
+### Что НЕ сделано (намеренно отложено)
+
+Этап 10 (GUI refactor на `gui/` package) и Этап 12 (docs/release) —
+большой объём работы, который лучше делать отдельным PR после
+стабилизации media correctness (как и предлагает §5 «Recommended
+sequence of pull requests»). Тесты media correctness, resume manifest,
+audio quality, encoder fallback policy, download watchdog, thread
+safety, streaming waveform, dry-run preview и RAM monitor уже в
+репозитории и готовы к ревью.
+
+P1.6 (значения таймаутов остаются хардкодом): watchdog теперь ловит
+зависания независимо от readline, поэтому практический риск
+8-часового ожидания устранён; настраиваемость таймаутов через config
+можно добавить отдельным small change без срочности.
+
+
 ## 1. Проверенные выводы
 
 ### 1.1. Критический media-тест
