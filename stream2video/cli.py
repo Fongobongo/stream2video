@@ -30,9 +30,9 @@ try:
     from click.core import ParameterSource  # click >= 8.0
 except ImportError:  # pragma: no cover - legacy fallback
     try:
-        from typer._click.core import ParameterSource  # type: ignore[import]
+        from typer._click.core import ParameterSource
     except ImportError:  # pragma: no cover - very old typer
-        ParameterSource = None  # type: ignore[assignment]
+        ParameterSource = None
 
 from stream2video.concat import CancelledError, ConcatError, cut_and_concat
 from stream2video.config import (
@@ -66,13 +66,13 @@ from stream2video.silence import (
     save_silence_cache,
 )
 
-# Setup logging
+# Logging setup is deferred to ``main()`` so importing ``stream2video.cli``
+# (e.g. from tests, or from a host application embedding the library)
+# doesn't reconfigure the root logger. The historical ``basicConfig``
+# at import time would override the host's own logging config, which is
+# especially noisy for GUI embeds and pytest's caplog. See P2.9 in the
+# fix plan.
 _console_handler = RichHandler(rich_tracebacks=True)
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(message)s",
-    handlers=[_console_handler],
-)
 logger = logging.getLogger("stream2video")
 
 console = Console()
@@ -200,11 +200,9 @@ def load_config(config_file: Path | None) -> dict:
     bool_keys = ("force", "delete_after", "per_video_dir")
     for key in bool_keys:
         if key in file_config:
-            v = file_config[key]
-            if not isinstance(v, bool):
-                console.print(
-                    f"[red]Invalid {key}:[/red] {v!r} must be true or false"
-                )
+            bool_val = file_config[key]
+            if not isinstance(bool_val, bool):
+                console.print(f"[red]Invalid {key}:[/red] {bool_val!r} must be true or false")
                 raise typer.Exit(1)
 
     # Validate enum keys against their VALID_* lists. A bad value in
@@ -222,12 +220,12 @@ def load_config(config_file: Path | None) -> dict:
         ("x264_preset", VALID_X264_PRESETS),
     ]
     for key, valid in enum_specs:
-        v: Any = config.get(key)
-        if v is None:
+        enum_val: Any = config.get(key)
+        if enum_val is None:
             continue
-        if v not in valid:
+        if enum_val not in valid:
             console.print(
-                f"[red]Invalid {key}:[/red] {v!r} "
+                f"[red]Invalid {key}:[/red] {enum_val!r} "
                 f"(use {' or '.join(repr(x) for x in valid)})"
             )
             raise typer.Exit(1)
@@ -349,6 +347,19 @@ def main(
     2. Detect silence segments
     3. Cut and concatenate video
     """
+    # Configure root logging ONCE at entry — see P2.9 in the fix plan.
+    # Previously ``logging.basicConfig`` ran at import time, which
+    # hijacked the root logger of any host application that imported
+    # stream2video.cli (tests, GUI embeds, downstream tools). Doing it
+    # here keeps the CLI's user-facing logging behaviour (Rich stderr
+    # handler + DEBUG-level root) for ``stream2video`` invocations
+    # while leaving importers' logging untouched.
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format="%(message)s",
+        handlers=[_console_handler],
+    )
+
     # Verify ffmpeg is available
     _check_ffmpeg()
 
@@ -560,7 +571,9 @@ def main(
             # Step 1.5: Apply per-video project directory. The function
             # honours the per_video_dir flag itself, so no outer gate.
             new_output, video_path = apply_per_video_dir(
-                output_dir, video_path, download_result.is_downloaded,
+                output_dir,
+                video_path,
+                download_result.is_downloaded,
                 per_video_dir=per_video_dir_resolved,
             )
             if new_output != output_dir:
@@ -623,9 +636,7 @@ def main(
                     # silently discarded any resume state the GUI had
                     # written for the same source/output_dir pair (see
                     # P1.8 in the fix plan).
-                    resume_cache_path = (
-                        output_dir / f"{video_path.stem}_silence_cache.json.resume"
-                    )
+                    resume_cache_path = output_dir / f"{video_path.stem}_silence_cache.json.resume"
                     # ``--force`` invalidates the resume cache the same
                     # way it invalidates the final cache, so a forced
                     # re-detection doesn't pick up segments from a
@@ -634,9 +645,7 @@ def main(
                         try:
                             resume_cache_path.unlink()
                         except OSError as e:
-                            logger.warning(
-                                f"Could not remove stale resume cache: {e}"
-                            )
+                            logger.warning(f"Could not remove stale resume cache: {e}")
 
                     silence_segments = detect_silence(
                         video_path,

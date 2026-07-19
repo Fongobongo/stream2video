@@ -494,8 +494,16 @@ class TestEncoderQualityPresets:
             "h264_mf": ["-b:v", "7000k", "-quality", "100"],
             "h264_amf": ["-usage", "transcoding", "-quality", "speed", "-b:v", "7000k"],
             "h264_nvenc": [
-                "-preset", "p7", "-rc", "vbr", "-b:v", "7000k",
-                "-maxrate", "7000k", "-cq", "18",
+                "-preset",
+                "p7",
+                "-rc",
+                "vbr",
+                "-b:v",
+                "7000k",
+                "-maxrate",
+                "7000k",
+                "-cq",
+                "18",
             ],
             "libx264": ["-crf", "23", "-preset", "medium"],
         }

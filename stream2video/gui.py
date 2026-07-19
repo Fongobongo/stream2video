@@ -721,9 +721,10 @@ class Stream2VideoGUI(ctk.CTk):
         if not self._can_preview_waveform():
             self._log("Set a local input file before opening the waveform preview")
             return
-        if getattr(self, "_wave_window", None) is not None and self._wave_window.winfo_exists():
-            self._wave_window.focus_force()
-            self._wave_window.lift()
+        wave_win_existing = getattr(self, "_wave_window", None)
+        if wave_win_existing is not None and wave_win_existing.winfo_exists():
+            wave_win_existing.focus_force()
+            wave_win_existing.lift()
             return
 
         win = ctk.CTkToplevel(self)
@@ -846,8 +847,9 @@ class Stream2VideoGUI(ctk.CTk):
 
     def _on_waveform_close(self):
         """Destroy the waveform popup and null its refs."""
-        if getattr(self, "_wave_window", None) is not None:
-            self._wave_window.destroy()
+        wave_win = getattr(self, "_wave_window", None)
+        if wave_win is not None:
+            wave_win.destroy()
         self._wave_window = None
         self.lbl_wave_status = None
         self.lbl_wave_image = None
@@ -1076,8 +1078,11 @@ class Stream2VideoGUI(ctk.CTk):
         # event.x_root/.y_root are screen coords; winfo_rootx() gives
         # the popup's screen origin.
         try:
-            root_x = self._wave_window.winfo_rootx()
-            root_y = self._wave_window.winfo_rooty()
+            wave_win = self._wave_window
+            if wave_win is None:
+                return
+            root_x = wave_win.winfo_rootx()
+            root_y = wave_win.winfo_rooty()
         except Exception:
             return
         self._waveform_tooltip.place(
@@ -1664,11 +1669,7 @@ class Stream2VideoGUI(ctk.CTk):
                 else:
                     self._ui_progress(min(0.04, 0.005 * elapsed))
 
-                pct = (
-                    100.0 * (p.downloaded_bytes or 0.0) / p.total_bytes
-                    if p.total_bytes
-                    else 0.0
-                )
+                pct = 100.0 * (p.downloaded_bytes or 0.0) / p.total_bytes if p.total_bytes else 0.0
                 downloaded_s = fmt_size(int(p.downloaded_bytes)) if p.downloaded_bytes else "?"
                 total_s = fmt_size(int(p.total_bytes)) if p.total_bytes else "?"
                 speed_s = fmt_speed(p.speed)
@@ -1721,7 +1722,9 @@ class Stream2VideoGUI(ctk.CTk):
             # Step 1.5: Apply per-video project directory. The function
             # honours the per_video_dir flag itself, so no outer gate.
             new_output, video_path = apply_per_video_dir(
-                output_dir, video_path, download_result.is_downloaded,
+                output_dir,
+                video_path,
+                download_result.is_downloaded,
                 per_video_dir=per_video_dir,
             )
             if new_output != output_dir:
@@ -1883,9 +1886,7 @@ class Stream2VideoGUI(ctk.CTk):
 
             self.after(
                 0,
-                lambda: self.lbl_encoder.configure(
-                    text=f"Encoder: {encoder} ({video_quality})"
-                ),
+                lambda: self.lbl_encoder.configure(text=f"Encoder: {encoder} ({video_quality})"),
             )
 
             cut_start = time.monotonic()
@@ -1906,9 +1907,7 @@ class Stream2VideoGUI(ctk.CTk):
                     # first real progress value arrives, show an
                     # indeterminate status so we don't render "/0s".
                     self._ui_progress(0.4)
-                    self._ui_status(
-                        f"Step 3/3: Cutting... {fmt_time(elapsed)} (calculating ETA)"
-                    )
+                    self._ui_status(f"Step 3/3: Cutting... {fmt_time(elapsed)} (calculating ETA)")
                     self._ui_overall(elapsed, None, more_phases=False)
 
             cut_and_concat(
@@ -2172,9 +2171,7 @@ class Stream2VideoGUI(ctk.CTk):
     def _ui_progress(self, value: float):
         self._tk_after(0, lambda: self.progress.set(max(0.0, min(1.0, value))))
 
-    def _ui_overall(
-        self, phase_elapsed: float, phase_remaining: float | None, more_phases: bool
-    ):
+    def _ui_overall(self, phase_elapsed: float, phase_remaining: float | None, more_phases: bool):
         """Update the live Elapsed/Remaining line in bottom_frame (the
         label sitting immediately to the right of the progress bar) and
         the Total wall-clock label below the bar.
@@ -2744,9 +2741,7 @@ class Stream2VideoGUI(ctk.CTk):
             if isinstance(v, expected_type):
                 self.config[gui_key] = v
             elif v is not None:
-                logger.debug(
-                    "Dropping settings[%r] with wrong type: %r", gui_key, v
-                )
+                logger.debug("Dropping settings[%r] with wrong type: %r", gui_key, v)
 
     def _restore_defaults(self):
         self.config = effective_defaults()

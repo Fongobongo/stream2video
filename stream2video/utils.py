@@ -34,6 +34,7 @@ def cancel_monitor(
     cancelled = threading.Event()
 
     if cancel_callback is not None:
+
         def _monitor():
             try:
                 while not cancelled.wait(CANCEL_POLL_INTERVAL):

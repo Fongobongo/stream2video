@@ -145,9 +145,10 @@ def detect_silence(
                     detection picks up from the last throttled checkpoint
                     written by a previous cancelled/crashed run. The file
                     is unlinked at the start of detection so a retry
-                    within the same call doesn't re-load it. Use
-                    ``_get_resume_cache_path(video_path, output_dir)`` to
-                    compute the conventional path. Throttled checkpoints
+                    within the same call doesn't re-load it. The CLI and
+                    GUI both pass ``{output_dir}/{stem}_silence_cache.json.resume``;
+                    callers that want a custom location can pass any
+                    Path. Throttled checkpoints
                     are written when `resume_cache_path` is set; a new
                     run that uses resume will overwrite the file as it
                     progresses, so leave it in place for cancellation /
@@ -705,9 +706,7 @@ def _run_silencedetect(
                             f"had no matching silence_end; closing at media "
                             f"duration {duration:.3f}s"
                         )
-                        progressive_segments.append(
-                            SilenceSegment(clamped_start, duration)
-                        )
+                        progressive_segments.append(SilenceSegment(clamped_start, duration))
                         if on_segment is not None:
                             on_segment(list(progressive_segments))
                     else:
@@ -873,7 +872,9 @@ def _sample_segments_match(
     )
 
 
-def apply_margin(segments: list[SilenceSegment], margin: float, duration: float | None = None) -> list[SilenceSegment]:
+def apply_margin(
+    segments: list[SilenceSegment], margin: float, duration: float | None = None
+) -> list[SilenceSegment]:
     """Apply margin and merge overlapping segments.
 
     Positive margin shrinks silence (keep more audio around phrases).

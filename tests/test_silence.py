@@ -382,9 +382,9 @@ class TestWavCacheFallback:
             assert segs[0].start == 1.0
             assert segs[0].end == 2.5
             assert wav.exists()  # cache kept
-            assert (
-                wav.stat().st_mtime == wav_mtime_before
-            ), "WAV cache was rewritten (D path should not re-extract)"
+            assert wav.stat().st_mtime == wav_mtime_before, (
+                "WAV cache was rewritten (D path should not re-extract)"
+            )
 
     def test_d_mismatch_a_invalidates_wav_and_uses_a(self):
         """No WAV cache → extract + D + A-sample. On sample mismatch, the WAV
