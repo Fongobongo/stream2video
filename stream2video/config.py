@@ -45,9 +45,9 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     # watchdog so a stalled connection doesn't wait the full ceiling.
     # Exposed via --download-timeout / --connect-timeout /
     # --no-progress-timeout in the CLI; the GUI uses these defaults.
-    "download_timeout": 28800,        # 8h
-    "connect_timeout": 300,          # 5 min pre-first-byte
-    "no_progress_timeout": 1800,     # 30 min mid-download stall
+    "download_timeout": 28800,  # 8h
+    "connect_timeout": 300,  # 5 min pre-first-byte
+    "no_progress_timeout": 1800,  # 30 min mid-download stall
     "force": False,
     "delete_after": False,
     "per_video_dir": True,

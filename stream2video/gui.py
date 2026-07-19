@@ -6,7 +6,6 @@ import math
 import os
 import queue
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -56,6 +55,14 @@ from stream2video.formatters import (
     fmt_time,
     fmt_total_label,
     fmt_zoom_text,
+)
+from stream2video.gui_helpers import (
+    STATUS_MAX,
+    build_cli_command,
+    build_eta_tail,
+    build_overall_line,
+    should_update_status,
+    truncate_status,
 )
 from stream2video.paths import (
     RECENT_NAME_MAX,
@@ -2186,15 +2193,11 @@ class Stream2VideoGUI(ctk.CTk):
         if self._pipeline_start is None:
             return
         total_elapsed = time.monotonic() - self._pipeline_start
-        if phase_remaining is None or phase_remaining <= 0:
-            tail = "?" if more_phases else "—"
-        else:
-            tail = (
-                f"~{fmt_time(phase_remaining)} + ?"
-                if more_phases
-                else f"~{fmt_time(phase_remaining)}"
-            )
-        text = f"Elapsed: {fmt_time(total_elapsed)} | Remaining: {tail}"
+        # ``build_eta_tail`` and ``build_overall_line`` are pure helpers
+        # extracted from gui.py so the formatting can be unit-tested
+        # without a running Tk main loop. See gui_helpers.py.
+        tail = build_eta_tail(phase_remaining, more_phases)
+        text = build_overall_line(total_elapsed, tail)
         self._tk_after(0, lambda: self.lbl_overall.configure(text=text))
         self._ui_total(total_elapsed)
 
@@ -2205,15 +2208,17 @@ class Stream2VideoGUI(ctk.CTk):
             lambda: self.lbl_total.configure(text=fmt_total_label(total_elapsed)),
         )
 
-    _STATUS_MAX = 50
+    _STATUS_MAX = STATUS_MAX
 
     def _ui_status(self, text: str, force: bool = False):
         now = time.monotonic()
-        if not force and now - self._last_status_update < 0.5:
+        # ``should_update_status`` is a pure helper extracted from gui.py
+        # so the throttle logic can be unit-tested. See gui_helpers.py
+        # and P2.x in the fix plan.
+        if not should_update_status(self._last_status_update, now, force=force):
             return
         self._last_status_update = now
-        if len(text) > self._STATUS_MAX:
-            text = text[: self._STATUS_MAX - 1] + "…"
+        text = truncate_status(text, self._STATUS_MAX)
         self._tk_after(0, lambda: self.lbl_status.configure(text=text))
 
     def _ui_info(self, text: str):
@@ -2860,20 +2865,21 @@ class Stream2VideoGUI(ctk.CTk):
             self._log(f"[WARN] Could not write CLI config: {e}")
             config_path = None
 
-        parts = ["stream2video"]
-        if inp:
-            parts.append(shlex.quote(inp))
-        parts.extend(["-o", shlex.quote(str(out_path))])
-        if config_path is not None:
-            parts.extend(["-c", shlex.quote(str(config_path))])
-        parts.extend(["--method", method, "--encoder", encoder])
-        parts.extend(["--video-quality", video_quality])
-        parts.extend(["--download-quality", download_quality])
-        if force:
-            parts.append("-f")
-        if delete_after:
-            parts.append("--delete-after")
-        cmd = " ".join(parts)
+        # ``build_cli_command`` is a pure helper extracted from gui.py
+        # so the CLI command shape can be unit-tested without
+        # instantiating the GUI. See gui_helpers.py and P2.x in the
+        # fix plan.
+        cmd = build_cli_command(
+            inp,
+            out_path,
+            method=method,
+            encoder=encoder,
+            video_quality=video_quality,
+            download_quality=download_quality,
+            force=force,
+            delete_after=delete_after,
+            config_path=config_path,
+        )
         self.clipboard_clear()
         self.clipboard_append(cmd)
         if config_path is not None:

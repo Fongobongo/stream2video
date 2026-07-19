@@ -1,0 +1,222 @@
+"""Pure-function helpers extracted from ``gui.py`` (P2.x in the fix plan).
+
+These functions have no Tk / no side effects so they can be unit-tested
+without instantiating the GUI. The GUI class delegates formatting and
+string construction to them; this both shrinks ``gui.py`` and lets the
+test suite cover the actual logic (CLI command shape, status-line
+truncation, ETA breakdown) instead of trying to drive the widgets via
+pytest-qt or a Tkinter event loop.
+
+Anything that touches ``self``, ``ctk``, ``messagebox``, ``Tk``, or the
+clipboard stays in ``gui.py`` — only pure transformations live here.
+"""
+
+from __future__ import annotations
+
+import shlex
+from pathlib import Path
+
+from stream2video.formatters import fmt_clock_time, fmt_size, fmt_speed, fmt_time
+
+# Maximum length of the GUI's status-line text. Kept as a module-level
+# constant so tests can pin it and the GUI can import it without a
+# circular dependency on the class.
+STATUS_MAX = 50
+
+# Throttle for ``_ui_status``: subsequent updates closer than this many
+# seconds apart are dropped (unless ``force=True``). Keeps the status
+# line readable during fast yt-dlp progress bursts.
+STATUS_UPDATE_INTERVAL = 0.5
+
+
+def build_cli_command(
+    input_raw: str,
+    output_dir: Path,
+    *,
+    method: str,
+    encoder: str,
+    video_quality: str,
+    download_quality: str,
+    audio_quality: str = "medium",
+    software_fallback: str = "ask",
+    x264_preset: str = "medium",
+    encoder_threads: str | int = "auto",
+    output_fps: str = "source",
+    force: bool = False,
+    delete_after: bool = False,
+    config_path: Path | None = None,
+) -> str:
+    """Build the equivalent CLI invocation for the current GUI settings.
+
+    Used by the GUI's "Copy CLI command" button so a user who's tuned
+    the GUI can paste the same operation into a shell, a script, or
+    documentation. Pure: returns the string, doesn't touch the
+    clipboard.
+
+    The shape mirrors what the CLI actually accepts (see
+    ``stream2video.cli.main``). The newer flags (``--audio-quality``,
+    ``--software-fallback``, ``--x264-preset``, ``--encoder-threads``,
+    ``--output-fps``) are appended only when their value diverges from
+    the default — that keeps the copied command readable when the user
+    hasn't customised everything.
+
+    ``config_path``: when set, the GUI writes the slider-only values
+    (threshold/min_silence/margin) to this YAML file and passes it via
+    ``-c`` so the copied command stays short. When None, those slider
+    values are NOT in the command (the CLI would then use its own
+    defaults for them); the caller should warn the user.
+    """
+    parts = ["stream2video"]
+    if input_raw:
+        parts.append(shlex.quote(input_raw))
+    parts.extend(["-o", shlex.quote(str(output_dir))])
+    if config_path is not None:
+        parts.extend(["-c", shlex.quote(str(config_path))])
+    parts.extend(["--method", method, "--encoder", encoder])
+    parts.extend(["--video-quality", video_quality])
+    parts.extend(["--download-quality", download_quality])
+    # Newer flags — only append when they're not the default so the
+    # copied command stays compact. The defaults match CONFIG_DEFAULTS
+    # so a user who hasn't touched the advanced panel gets a clean
+    # command-line reproducing their GUI choices.
+    if audio_quality != "medium":
+        parts.extend(["--audio-quality", audio_quality])
+    if software_fallback != "ask":
+        parts.extend(["--software-fallback", software_fallback])
+    if x264_preset != "medium":
+        parts.extend(["--x264-preset", x264_preset])
+    if encoder_threads != "auto":
+        parts.extend(["--encoder-threads", str(encoder_threads)])
+    if output_fps != "source":
+        parts.extend(["--output-fps", output_fps])
+    if force:
+        parts.append("-f")
+    if delete_after:
+        parts.append("--delete-after")
+    return " ".join(parts)
+
+
+def truncate_status(text: str, max_len: int = STATUS_MAX) -> str:
+    """Truncate a status-line string to ``max_len`` chars.
+
+    Adds an ellipsis when truncating so the user can see the line was
+    cut. A string at or under the limit is returned unchanged. The
+    GUI's status bar has a fixed width; without truncation a long
+    download URL or ffmpeg error would push the layout around.
+    """
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1] + "…"
+
+
+def build_download_status(
+    *,
+    downloaded_bytes: float | None,
+    total_bytes: float | None,
+    speed: float | None,
+    eta: float | None,
+    pct: float | None = None,
+) -> str:
+    """Format a yt-dlp progress update as a status-line string.
+
+    Two shapes:
+      * ``total_bytes`` known: ``"Downloading 42.3% (123 MB / 291 MB) at 5.2 MiB/s ETA 1m 12s"``
+      * ``total_bytes`` unknown: ``"Downloading 89 MB at 5.2 MiB/s"``
+
+    Falls back to ``"?"`` for unknown fields so the line is always
+    readable. Pure: callers (GUI worker thread, CLI progress callback)
+    format the bytes/sizes via :mod:`stream2video.formatters` and pass
+    them here.
+    """
+    downloaded_s = fmt_size(int(downloaded_bytes)) if downloaded_bytes else "?"
+    speed_s = fmt_speed(speed)
+    eta_s = fmt_time(eta) if eta else "?"
+    if total_bytes:
+        total_s = fmt_size(int(total_bytes))
+        if pct is None:
+            # Caller didn't compute percent — derive it here so the
+            # status line stays self-contained.
+            pct = 100.0 * (downloaded_bytes or 0.0) / total_bytes
+        return f"Downloading {pct:.1f}% ({downloaded_s} / {total_s}) at {speed_s} ETA {eta_s}"
+    return f"Downloading {downloaded_s} at {speed_s}"
+
+
+def build_eta_tail(
+    phase_remaining: float | None,
+    more_phases: bool,
+) -> str:
+    """Render the ``Remaining:`` tail of the Elapsed/Remaining line.
+
+    * ``phase_remaining=None`` or ``<=0``: ``"?"`` when more phases
+      follow (we don't know how long they'll take), ``"—"`` when this
+      is the last phase (the line is about to disappear).
+    * Otherwise: ``"~1m 12s"`` for the last phase, ``"~1m 12s + ?"``
+      when more phases follow (the ``+ ?`` flags that the total ETA
+      is a lower bound, not a precise estimate).
+
+    Pure: takes the ETA float and the more-phases flag, returns the
+    display string. The GUI uses it inside its ``_ui_overall`` method.
+    """
+    if phase_remaining is None or phase_remaining <= 0:
+        return "?" if more_phases else "—"
+    formatted = f"~{fmt_time(phase_remaining)}"
+    return f"{formatted} + ?" if more_phases else formatted
+
+
+def build_overall_line(total_elapsed: float, eta_tail: str) -> str:
+    """Format the full ``Elapsed: X | Remaining: Y`` line."""
+    return f"Elapsed: {fmt_time(total_elapsed)} | Remaining: {eta_tail}"
+
+
+def build_silence_info_line(
+    *,
+    num_silence: int,
+    num_keep: int,
+    keep_duration: float | None,
+) -> str:
+    """Format the ``Silence: N segments / Keep: M segments (Xm Ys)`` line.
+
+    ``keep_duration=None`` skips the duration parenthetical so the line
+    works for the pre-cut preview where we don't yet know how long the
+    output will be.
+    """
+    if keep_duration is not None and keep_duration > 0:
+        return (
+            f"Silence: {num_silence} segments\n"
+            f"Keep: {num_keep} segments ({fmt_time(keep_duration)})"
+        )
+    return f"Silence: {num_silence} segments\nKeep: {num_keep} segments"
+
+
+def build_waveform_view_label(
+    *,
+    view_start: float,
+    view_end: float,
+    zoom: float,
+) -> str:
+    """Format the waveform popup's view-range label.
+
+    Renders as ``"00:00:00 - 00:01:30  |  15x"`` so the user can see
+    both the visible window and the zoom level at a glance. Pure: takes
+    the view bounds and zoom multiplier, returns the display string.
+    """
+    return f"{fmt_clock_time(view_start)} - {fmt_clock_time(view_end)}  |  {zoom:.1f}x"
+
+
+def should_update_status(
+    last_update_monotonic: float,
+    now_monotonic: float,
+    *,
+    force: bool = False,
+    interval: float = STATUS_UPDATE_INTERVAL,
+) -> bool:
+    """Decide whether a status-line update should be applied or throttled.
+
+    The GUI's ``_ui_status`` receives many rapid updates from yt-dlp
+    progress callbacks; without throttling the status bar redraws
+    faster than the eye can read. ``force=True`` bypasses the throttle
+    for explicit user-initiated updates (step transitions, errors).
+    """
+    if force:
+        return True
+    return now_monotonic - last_update_monotonic >= interval
