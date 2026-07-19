@@ -11,7 +11,7 @@
 (`segment` и `batch`) дают 4.02s / 120 frames (ожидалось 4.00s / 120;
 расхождение 0.02s — AAC encoder priming, в пределах одного кадра).
 `ruff check`, `ruff format --check`, `mypy stream2video` (с
-`check_untyped_defs=true`) и 308 unit/integration тестов проходят
+`check_untyped_defs=true`) и 336 unit/integration тестов проходят
 зелёными.
 
 | Пункт | Статус | Коммит |
@@ -28,7 +28,7 @@
 | P1.3 total_bytes fallback | ✅ | e861fcc |
 | P1.4 batch windowing | ✅ | 969d0d5 |
 | P1.5 stall watchdog (readline-independent) | ✅ | 969d0d5 |
-| P1.6 таймауты: watchdog теперь независим от readline; значения остаются хардкодом (низкий приоритет) | ⚠️ частично | e861fcc |
+| P1.6 download/connect/no-progress timeouts configurable via CLI + config | ✅ | 9d77752 |
 | P1.7 detect_silence defaults ↔ CONFIG_DEFAULTS | ✅ | e861fcc |
 | P1.8 CLI resume_cache_path | ✅ | e861fcc |
 | P1.9 CancelledError отдельно от ConcatError | ✅ | e861fcc |
@@ -44,26 +44,33 @@
 | P2.9 logging.basicConfig из import → entry point | ✅ | 26e89fa |
 | P2.10 мёртвые doc refs (_get_resume_cache_path, read_waveform_peaks) | ✅ | 26e89fa |
 | P2.15 v already-defined в cli.load_config | ✅ | 26e89fa |
+| P2.x pure helpers extracted from gui.py (gui_helpers.py + 28 tests) | ✅ | c6e97a7 |
+| Этап 10 GUI refactor (incremental: _Tooltip → gui_widgets, QueueHandler → gui_log_handler; gui.py 2884 → 2607 строк) | ✅ частично | 993bdbf |
 | P3.1 Python target sync (3.13: requires-python + ruff + mypy) | ✅ | 26e89fa |
 | P3.2 mypy check_untyped_defs=true | ✅ | 26e89fa |
 | P3.3 ruff format --check зелёный | ✅ | 26e89fa |
-| Этап 10 архитектурный рефакторинг GUI (gui/ package) | ⏸ отложено | — |
-| Этап 12 документация/релиз (README/CHANGELOG/PyPI) | ⏸ отложено | — |
+| Этап 12 Docker image для CLI/integration testing | ✅ | 789447f |
 
 ### Что НЕ сделано (намеренно отложено)
 
-Этап 10 (GUI refactor на `gui/` package) и Этап 12 (docs/release) —
-большой объём работы, который лучше делать отдельным PR после
-стабилизации media correctness (как и предлагает §5 «Recommended
-sequence of pull requests»). Тесты media correctness, resume manifest,
-audio quality, encoder fallback policy, download watchdog, thread
-safety, streaming waveform, dry-run preview и RAM monitor уже в
-репозитории и готовы к ревью.
+Этап 10 (полный GUI refactor на `gui/` package) — большой объём
+работы по переносу ~2600 строк с круговой зависимостью и риском
+регрессий. Сделан **частичный** refactor: `_Tooltip` и `QueueHandler`
+вынесены в отдельные модули как pattern (993bdbf); pure-логика
+(CLI command builder, status formatting, throttle decision) — в
+`gui_helpers.py` с 28 unit-тестами (c6e97a7). Полный перенос
+`Stream2VideoGUI` на package лучше делать отдельным PR после
+добавления GUI-тестов (pytest-qt / tkinter simulator).
 
-P1.6 (значения таймаутов остаются хардкодом): watchdog теперь ловит
-зависания независимо от readline, поэтому практический риск
-8-часового ожидания устранён; настраиваемость таймаутов через config
-можно добавить отдельным small change без срочности.
+Тесты GUI (P2.2) — known gap. Pure-логика покрыта (formatters,
+paths, waveform, gui_helpers), но реальных widget и pipeline
+controller тестов нет. Для зрелого решения стоит добавить
+pytest-qt или вынести pipeline controller в чистый state machine.
+
+P1.6 (значения таймаутов теперь настраиваемые через CLI/config):
+watchdog ловит зависания независимо от readline, поэтому практический
+риск 8-часового ожидания устранён; настраиваемость таймаутов через
+config добавлена.
 
 
 ## 1. Проверенные выводы
