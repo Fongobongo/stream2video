@@ -389,17 +389,40 @@ def detect_silence_stream(
             line = raw.decode("utf-8", errors="replace")
             m_s = _SILENCE_START_RE.search(line)
             if m_s:
-                pending_start = float(m_s.group(1))
+                # Use ``_to_float`` (not bare ``float(...)``) so a
+                # locale-formatted timestamp with a decimal comma
+                # (e.g. ``silence_start: 1,234``) parses correctly.
+                # The batch path in ``_run_silencedetect`` already
+                # uses ``_to_float``; the progressive path here used
+                # ``float`` which raised ``ValueError`` on comma
+                # locales and dropped the segment silently. See
+                # P1.13 in the fix plan.
+                pending_start = _to_float(m_s.group(1))
                 continue
             m_e = _SILENCE_END_RE.search(line)
             if m_e and pending_start is not None:
-                segments.append(SilenceSegment(pending_start, float(m_e.group(1))))
+                segments.append(SilenceSegment(pending_start, _to_float(m_e.group(1))))
                 pending_start = None
                 on_segment(list(segments))
 
         proc.wait(timeout=_SILENCE_TIMEOUT)
         if proc.returncode != 0:
             raise SilenceDetectionError(f"ffmpeg silencedetect failed (rc={proc.returncode})")
+        # Trailing silence: a ``silence_start`` without a matching
+        # ``silence_end`` means the input ended while still silent. The
+        # canonical ``_run_silencedetect`` closes this at the known
+        # media duration; ``detect_silence_stream`` is a preview-only
+        # helper that doesn't always know the duration (callers may
+        # pass a URL or a file we haven't probed), so drop the pending
+        # segment with a warning instead of guessing. A future caller
+        # that does know the duration can post-process the returned
+        # list to add the trailing segment.
+        if pending_start is not None:
+            logger.warning(
+                "detect_silence_stream: unmatched silence_start at "
+                f"t={pending_start:.3f}s (no silence_end before EOF); "
+                "dropped — pass the media duration to close it if needed"
+            )
         return segments
     except subprocess.TimeoutExpired as e:
         proc.kill()

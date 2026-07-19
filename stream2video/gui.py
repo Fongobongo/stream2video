@@ -70,6 +70,7 @@ from stream2video.silence import (
     SilenceSegment,
     apply_margin,
     detect_silence,
+    detect_silence_stream,
     load_silence_cache,
     save_silence_cache,
 )
@@ -2378,17 +2379,46 @@ class Stream2VideoGUI(ctk.CTk):
                 raw_segments = live_segs if live_segs is not None else cached_segs
                 if raw_segments is None:
                     cache_path = out_dir / f"{in_path.stem}_silence_cache.json"
+                    # P1.16: dry-run detection. Previously the waveform
+                    # popup showed "No silence cache — run the pipeline
+                    # first" and skipped detect entirely, leaving the
+                    # overlay empty even though the user just wanted to
+                    # preview what the current threshold/min_silence
+                    # would do. Run ``detect_silence_stream`` (a
+                    # lightweight ffmpeg invocation on the source file,
+                    # no WAV extract, no cache writes) so the overlay
+                    # appears immediately. The result is NOT written
+                    # to the final cache — the user must still run the
+                    # pipeline to commit the cut plan.
                     self.after(
                         0,
-                        lambda: self._safe_status_set("No silence cache — run the pipeline first"),
+                        lambda: self._safe_status_set(
+                            "No silence cache — running dry-run detect..."
+                        ),
                     )
                     self._log(
                         f"  Waveform preview: no segments in live store and no cache at "
                         f"{cache_path} for threshold={config['threshold']}dB, "
                         f"min_silence={config['min_silence']}s, "
-                        f"margin={config['margin']}s — skipping detect"
+                        f"margin={config['margin']}s — running dry-run detect"
                     )
-                    return
+                    # ``detect_silence_stream`` doesn't apply margin
+                    # (returns raw segments); apply it here so the
+                    # overlay matches what the pipeline would cut.
+                    try:
+                        raw_dry = detect_silence_stream(
+                            in_path,
+                            threshold=float(config["threshold"]),
+                            min_silence=float(config["min_silence"]),
+                        )
+                    except SilenceDetectionError as e:
+                        logger.warning(f"Dry-run detect failed: {e}")
+                        raw_dry = []
+                    raw_segments = apply_margin(raw_dry, margin)
+                    self._log(
+                        f"  Dry-run detected {len(raw_segments)} silence segments "
+                        f"(not cached — run the pipeline to commit)"
+                    )
                 # Apply margin so the overlay matches cut_and_concat.
                 # The live store holds raw (pre-margin) segments during
                 # detect; the cache holds the canonical margin-applied

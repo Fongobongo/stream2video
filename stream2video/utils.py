@@ -96,6 +96,52 @@ def get_video_duration(video_path: Path) -> float | None:
         return None
 
 
+def has_audio_stream(video_path: Path) -> bool:
+    """Return True if ``video_path`` has at least one audio stream.
+
+    Used by the concat pipeline to decide whether to pass ``-c:a`` /
+    ``-map 0:a:0`` (an audio-less source would make ffmpeg fail with
+    "Output file does not contain any stream" when audio mapping is
+    requested). Probed once at the start of ``cut_and_concat`` so the
+    per-segment encode can skip audio options entirely for audio-less
+    sources. See P1.14 in the fix plan.
+    """
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "a",
+        "-show_entries",
+        "stream=codec_type",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(video_path),
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+            **no_window_kwargs(),
+        )
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        FileNotFoundError,
+    ) as e:
+        # If we can't probe, assume audio exists so the historical
+        # command shape is preserved — the encoder will fail with a
+        # clear error if the source really has no audio, which is
+        # better than silently producing a video-only output the user
+        # didn't ask for.
+        logger.warning(f"Could not probe audio streams in {video_path}: {e}")
+        return True
+    return bool(result.stdout.strip())
+
+
 def drain_stderr_lines(
     pipe: IO[bytes],
     sink: list[str],
