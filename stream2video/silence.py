@@ -156,9 +156,7 @@ class SilenceParser:
             return
         m_e = _SILENCE_END_RE.search(line)
         if m_e and self._pending_start is not None:
-            self._segments.append(
-                SilenceSegment(self._pending_start, _to_float(m_e.group(1)))
-            )
+            self._segments.append(SilenceSegment(self._pending_start, _to_float(m_e.group(1))))
             self._pending_start = None
             if self._on_segment is not None:
                 self._on_segment(list(self._segments))
@@ -1139,6 +1137,17 @@ def _load_silence_cache_from_path(
     except (OSError, json.JSONDecodeError) as e:
         logger.warning(f"Could not read silence cache: {e}")
         return None
+    # Cache key comparison (P2.14): exact ``!=`` on the float values
+    # stored in the JSON cache vs the runtime config. This is
+    # intentional — a tolerance-based comparison would let a user's
+    # ``threshold: -30.0001`` (typed into the GUI) silently match a
+    # cache built with ``threshold: -30.0`` (the slider default),
+    # producing cuts from a different detection than the user just
+    # requested. The trade-off is that hand-editing the YAML with
+    # ``2.0000001`` invalidates the cache, but that's the safer
+    # failure mode (re-detect is cheap; wrong cuts are not).
+    # UI sliders write rounded floats (1 decimal) so this never bites
+    # the common path; only affects hand-edited configs.
     for key in ("threshold", "min_silence", "margin"):
         if data.get("config", {}).get(key) != config.get(key):
             logger.info(f"Silence cache ignored: config mismatch ({key})")

@@ -56,7 +56,7 @@ from stream2video.download import (
     VideoNotAvailableError,
     download,
 )
-from stream2video.formatters import fmt_size, fmt_speed
+from stream2video.gui_helpers import build_download_status
 from stream2video.paths import apply_per_video_dir
 from stream2video.silence import (
     SilenceCancelledError,
@@ -258,14 +258,14 @@ def main(
         "the config file's `force` key (default False).",
     ),
     method: str = typer.Option(
-        "segment",
+        CONFIG_DEFAULTS["method"],
         "--method",
         "-m",
         help="Concat method: 'segment' (fast, ~1.5h) or 'batch' (select/aselect filter, ~6-7h). "
         "If not passed, the config file's `method` key is used.",
     ),
     encoder: str = typer.Option(
-        "h264_mf",
+        CONFIG_DEFAULTS["encoder"],
         "--encoder",
         "-e",
         help="Video encoder: 'h264_nvenc' (NVIDIA), 'h264_amf' (AMD), 'h264_mf' "
@@ -273,14 +273,14 @@ def main(
         "the config file's `encoder` key is used.",
     ),
     video_quality: str = typer.Option(
-        "medium",
+        CONFIG_DEFAULTS["video_quality"],
         "--video-quality",
         "-vq",
         help="Encode quality preset: 'high' (10000k / CRF 18), 'medium' (7000k / CRF 23, default), "
         "or 'low' (3500k / CRF 28). If not passed, the config file's `video_quality` key is used.",
     ),
     audio_quality: str = typer.Option(
-        "medium",
+        CONFIG_DEFAULTS["audio_quality"],
         "--audio-quality",
         "-aq",
         help="Audio (AAC) bitrate preset: 'high' (256k), 'medium' (128k, default), "
@@ -288,7 +288,7 @@ def main(
         "key is used.",
     ),
     download_quality: str = typer.Option(
-        "best",
+        CONFIG_DEFAULTS["download_quality"],
         "--download-quality",
         "-dq",
         help="Download quality preset (Twitch/YouTube, ignored for local files): "
@@ -296,7 +296,7 @@ def main(
         "config file's `download_quality` key is used.",
     ),
     software_fallback: str = typer.Option(
-        "ask",
+        CONFIG_DEFAULTS["software_fallback"],
         "--software-fallback",
         help="What to do when the requested hardware encoder is unavailable "
         "or fails mid-run: 'ask' (default — refuse silent fallback to libx264; "
@@ -305,7 +305,7 @@ def main(
         "passed, the config file's `software_fallback` key is used.",
     ),
     x264_preset: str = typer.Option(
-        "medium",
+        CONFIG_DEFAULTS["x264_preset"],
         "--x264-preset",
         help="libx264 preset (ultrafast..slow, default 'medium'). Faster presets "
         "reduce CPU load at the cost of file size / quality. Use 'ultrafast' or "
@@ -313,7 +313,7 @@ def main(
         "file's `x264_preset` key is used.",
     ),
     encoder_threads: str = typer.Option(
-        "auto",
+        CONFIG_DEFAULTS["encoder_threads"],
         "--encoder-threads",
         help="Encoder thread count: 'auto' (default — let ffmpeg pick, usually "
         "one per logical core) or a positive int to cap libx264's thread pool. "
@@ -339,21 +339,21 @@ def main(
         help="Logging level (DEBUG, INFO, WARNING, ERROR)",
     ),
     download_timeout: int = typer.Option(
-        28800,
+        CONFIG_DEFAULTS["download_timeout"],
         "--download-timeout",
         help="Absolute ceiling for the whole download in seconds (default 28800 = 8h, "
         "sized for big VODs). Lower for quick test runs; raise for very large "
         "streams. Ignored for local files.",
     ),
     connect_timeout: int = typer.Option(
-        300,
+        CONFIG_DEFAULTS["connect_timeout"],
         "--connect-timeout",
         help="Seconds to wait for the first progress event (DNS+TLS+handshake+first "
         "byte) before killing yt-dlp with a clear timeout error. Default 300s "
         "(5 min). Increase on very slow / satellite links.",
     ),
     no_progress_timeout: int = typer.Option(
-        1800,
+        CONFIG_DEFAULTS["no_progress_timeout"],
         "--no-progress-timeout",
         help="Seconds of silence mid-download before killing yt-dlp (stalled "
         "connection watchdog). Default 1800s (30 min). Increase for very "
@@ -524,17 +524,22 @@ def main(
                     # advances meaningfully.
                     progress.update(task1, total=None, completed=0.0)
 
-                if p.total_bytes:
-                    pct = 100.0 * (p.downloaded_bytes or 0.0) / p.total_bytes
-                    description = (
-                        f"[cyan]Downloading... {pct:.1f}% "
-                        f"at {fmt_speed(p.speed)} ETA {int(p.eta or 0)}s"
-                    )
-                else:
-                    description = (
-                        f"[cyan]Downloading... {fmt_size(int(p.downloaded_bytes or 0))} "
-                        f"at {fmt_speed(p.speed)}"
-                    )
+                # P2.7: delegate the description formatting to the shared
+                # helper so the CLI and GUI stay in sync. Previously the
+                # CLI rolled its own percent/speed/ETA string here; when
+                # the GUI's format diverged (different separator, different
+                # rounding) users saw inconsistent output between the two
+                # entry points. ``build_download_status`` is pure and
+                # unit-tested in tests/test_gui_helpers.py.
+                description = "[cyan]" + build_download_status(
+                    downloaded_bytes=p.downloaded_bytes,
+                    total_bytes=p.total_bytes,
+                    speed=p.speed,
+                    eta=p.eta,
+                    pct=(100.0 * (p.downloaded_bytes or 0.0) / p.total_bytes)
+                    if p.total_bytes
+                    else None,
+                )
                 progress.update(task1, description=description)
 
             try:

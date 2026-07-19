@@ -330,6 +330,18 @@ def encoder_opts(
     if encoder == "h264_amf":
         return ["-usage", "transcoding", "-quality", "speed", "-b:v", bitrate, *threads_opt]
     if encoder == "h264_nvenc":
+        # NVENC rate-control model (P2.12): constrained VBR via
+        # ``-rc vbr`` with ``-b:v`` (target) and ``-maxrate`` (cap)
+        # both set to the preset bitrate, plus ``-cq 18`` as the
+        # quality floor. This is NVIDIA's recommended RC model for
+        # offline encoding: VBR lets the encoder spend bits where
+        # they're needed (motion, detail) while ``-maxrate``
+        # guarantees a worst-case size, and ``-cq`` prevents quality
+        # from dropping below 18 even when the bitrate budget would
+        # allow it. ``-preset p7`` is the slowest / highest-quality
+        # NVENC preset (lookahead enabled, 2-pass). On a 6h stream
+        # this is ~5-10x faster than libx264 -preset medium at
+        # similar quality.
         return [
             "-preset",
             "p7",
@@ -396,10 +408,15 @@ def _fps_filter_chain(output_fps: str) -> str:
     return ""
 
 
-# Back-compat registry: maps each supported encoder to its default (medium)
-# options. Used by tests as a sanity check that VALID_ENCODERS and the
-# encoder registry stay in sync; not for runtime use — callers should
-# use ``encoder_opts()`` so the ``video_quality`` preset is applied.
+# Public back-compat registry (P2.11): maps each supported encoder to
+# its default (medium) options. Kept as a documented public API because:
+#   1. Tests use it as a sanity check that VALID_ENCODERS and the
+#      encoder registry stay in sync.
+#   2. Downstream tools that import stream2video as a library may rely
+#      on it to enumerate available encoders and their default options.
+# Runtime callers should prefer ``encoder_opts(encoder, quality)`` so
+# the ``video_quality`` / ``x264_preset`` / ``encoder_threads`` presets
+# are applied; ENCODER_OPTS always returns the ``medium`` defaults.
 ENCODER_OPTS: dict[str, list[str]] = {enc: encoder_opts(enc) for enc in VALID_ENCODERS}
 
 
