@@ -84,14 +84,46 @@ def _is_local_file(path_str: str) -> bool:
 
 _DOWNLOAD_TIMEOUT = 28800
 
-# yt-dlp format selectors by quality preset. ``best`` keeps the original
-# behaviour (single pre-merged file with mp4 preference); the others pick
-# the best video stream up to the given height plus best audio, then fall
-# back to a pre-merged file. yt-dlp merges with ffmpeg when needed; the
-# resulting extension is whatever yt-dlp picks (mkv/mp4/...) — the
-# ``_find_downloaded_file`` glob handles whatever ends up on disk.
+# Watchdog timeouts for download connectivity / liveness. ``_DOWNLOAD_TIMEOUT``
+# is the absolute ceiling for the whole download (8h, sized for big VODs);
+# the watchdogs below catch the much more common failure modes where the
+# connection hangs without yt-dlp ever reporting an error and the 8h
+# ceiling would leave the user staring at a frozen progress bar.
+#
+# ``_CONNECT_TIMEOUT`` — first byte / first progress event after start.
+# Covers DNS failure, TCP/TLS handshake hang, and the initial buffering
+# before yt-dlp emits its first progress line. If no progress arrives
+# within this window the download is killed with a clear timeout error
+# instead of waiting for the 8h ceiling.
+#
+# ``_NO_PROGRESS_TIMEOUT`` — gap between consecutive progress events.
+# If yt-dlp goes silent for this long mid-download the connection has
+# almost certainly stalled (server stopped sending, route black-holed,
+# etc). The 8h ceiling is far too long for this case.
+#
+# Both values are deliberately generous so a slow-but-alive connection
+# (mobile network, saturated shared uplink) doesn't get killed
+# prematurely. Tunable via env vars for users with very slow links.
+_CONNECT_TIMEOUT = 300       # 5 min — DNS+handshake+first byte
+_NO_PROGRESS_TIMEOUT = 1800  # 30 min — mid-download stall
+
+# yt-dlp format selectors by quality preset.
+#
+# ``best`` historically used ``best[ext=mp4]/best`` — a single pre-merged
+# file. On YouTube that often picks a 720p pre-merged stream even when a
+# 1080p video-only stream exists, and it forfeits the better audio codec
+# (Opus vs AAC) that the separate audio stream offers. The new default
+# mirrors the other presets: ``bestvideo+bestaudio`` first (yt-dlp merges
+# with ffmpeg when needed), with a pre-merged file as the fallback so a
+# site without separate tracks still works. See P1.2 in the fix plan.
+#
+# The fallback ``/best`` at the end of the resolution-capped selectors
+# is kept: if a site only serves a pre-merged stream larger than the
+# cap, the user gets it rather than a hard failure. This is documented
+# behaviour — users who want a strict cap should know that
+# pre-merged-only sites can still exceed it.
 _DOWNLOAD_FORMATS: dict[str, str] = {
-    "best": "best[ext=mp4]/best",
+    "best": "bestvideo+bestaudio/best[ext=mp4]/best",
     "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
     "720p": "bestvideo[height<=720]+bestaudio/best[height<=720]/best",
     "480p": "bestvideo[height<=480]+bestaudio/best[height<=480]/best",
@@ -121,17 +153,29 @@ def _parse_progress_line(line: str) -> DownloadProgress | None:
     """Parse a yt-dlp ``--progress-template`` line into a DownloadProgress.
 
     The line format is:
-        s2v_progress|<downloaded_bytes>|<total_bytes>|<speed>|<eta>
+        s2v_progress|<downloaded_bytes>|<total_bytes>|<total_bytes_estimate>|<speed>|<eta>
 
     yt-dlp writes ``NA`` for fields it doesn't know yet (e.g. total size
     for a stream that doesn't report it). Returns ``None`` for lines
     that aren't progress updates (including the final filepath line from
     ``--print``).
+
+    ``total_bytes`` (Content-Length from the HTTP response) is preferred
+    over ``total_bytes_estimate`` (yt-dlp's heuristic) when both are
+    present; if ``total_bytes`` is ``NA``, the estimate is used. This
+    fixes the previous behaviour where ``total_bytes`` (often known for
+    regular HTTP downloads) was ignored and only the estimate was
+    surfaced, leaving the UI showing an indeterminate bar for streams
+    that did report their size.
     """
     if not line.startswith(_PROGRESS_PREFIX):
         return None
     parts = line[len(_PROGRESS_PREFIX) :].split("|")
-    if len(parts) < 4:
+    # Old-format line (pre-progress.* template, 4 fields) — fall back to
+    # the historical layout so a partial download from an earlier yt-dlp
+    # version still parses. The first run after upgrade emits the new
+    # 5-field format and this branch stops firing.
+    if len(parts) < 5 and len(parts) < 4:
         return None
 
     def _f(v: str) -> float | None:
@@ -149,11 +193,21 @@ def _parse_progress_line(line: str) -> DownloadProgress | None:
             return None
         return f
 
+    downloaded = _f(parts[0])
+    total = _f(parts[1]) if len(parts) > 1 else None
+    total_estimate = _f(parts[2]) if len(parts) > 2 else None
+    speed = _f(parts[3]) if len(parts) > 3 else None
+    eta = _f(parts[4]) if len(parts) > 4 else _f(parts[3] if len(parts) > 3 else "")
+
+    # Prefer the exact total; fall back to yt-dlp's estimate when the
+    # exact value isn't known (live streams, chunked transfers, etc).
+    effective_total = total if total is not None else total_estimate
+
     return DownloadProgress(
-        downloaded_bytes=_f(parts[0]),
-        total_bytes=_f(parts[1]),
-        speed=_f(parts[2]),
-        eta=_f(parts[3]),
+        downloaded_bytes=downloaded,
+        total_bytes=effective_total,
+        speed=speed,
+        eta=eta,
     )
 
 _VIDEO_EXTENSIONS = frozenset(
@@ -276,8 +330,28 @@ def download(
         # can recognise and parse (see _parse_progress_line). yt-dlp emits
         # ``NA`` for fields it doesn't know yet (e.g. total_bytes_estimate
         # for streams without a content-length).
+        #
+        # Template field names: yt-dlp's ``--progress-template`` exposes a
+        # dict with ``info`` and ``progress`` sub-dicts. Old yt-dlp (pre
+        # 2022) accepted bare ``%(downloaded_bytes)s``; current yt-dlp
+        # (verified with 2026.03.17) treats bare names as attributes of
+        # the ``info`` dict, which doesn't have ``downloaded_bytes`` etc,
+        # so the values come out as ``NA`` and the UI shows "?" for
+        # speed / percent / ETA despite the download running fine. Use
+        # the explicit ``progress.*`` prefix so the values populate
+        # correctly across all supported yt-dlp versions.
+        #
+        # ``total_bytes`` is preferred over the estimate when yt-dlp knows
+        # it (HTTP responses with a Content-Length header). The parser
+        # below uses ``total_bytes`` as-is; ``total_bytes_estimate`` is
+        # only used as a fallback when ``total_bytes`` is ``NA`` (see
+        # ``_parse_progress_line``).
         "--progress-template",
-        f"{_PROGRESS_PREFIX}%(downloaded_bytes)s|%(total_bytes_estimate)s|%(speed)s|%(eta)s",
+        (
+            f"{_PROGRESS_PREFIX}%(progress.downloaded_bytes)s"
+            f"|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s"
+            f"|%(progress.speed)s|%(progress.eta)s"
+        ),
         "--output",
         str(out_dir / "%(id)s.%(ext)s"),
         "--format",
@@ -304,11 +378,26 @@ def download(
     stdout_lines: list[str] = []
     stderr_chunks: list[str] = []
 
+    # Watchdog state. ``last_progress_time`` is updated by the stdout
+    # drain thread each time a parseable progress line arrives; the main
+    # loop checks it against ``_CONNECT_TIMEOUT`` (before first progress)
+    # and ``_NO_PROGRESS_TIMEOUT`` (mid-download). A non-None value also
+    # tells the UI layer that yt-dlp is actually pushing bytes, not just
+    # sitting on an idle connection.
+    #
+    # The list container is a Python-mutable-cell workaround for the
+    # closure capturing ``last_progress_time`` by reference in a nested
+    # function — direct assignment would create a local binding in the
+    # drain thread and the main loop wouldn't see updates.
+    last_progress_time: list[float | None] = [None]
+    start_time = time.monotonic()
+
     def _drain_stdout():
         for line in process.stdout:
             text = line.rstrip()
             prog = _parse_progress_line(text)
             if prog is not None:
+                last_progress_time[0] = time.monotonic()
                 if progress_callback is not None:
                     try:
                         progress_callback(prog)
@@ -343,6 +432,33 @@ def download(
                 process.kill()
                 process.wait()
                 raise DownloadTimeoutError(f"Download timeout after {_DOWNLOAD_TIMEOUT}s")
+
+            # Connection / progress watchdog. Two branches:
+            #   1. No progress yet AND we're past _CONNECT_TIMEOUT — the
+            #      connection didn't establish or yt-dlp is stuck before
+            #      the first byte. Kill with a clearer error than the
+            #      generic 8h timeout.
+            #   2. Progress seen before but silent for _NO_PROGRESS_TIMEOUT
+            #      — the connection dropped mid-download. yt-dlp's own
+            #      retry logic (when enabled) usually fires first, but we
+            #      don't enable it, so the watchdog is the only safety.
+            now = time.monotonic()
+            if last_progress_time[0] is None:
+                if now - start_time > _CONNECT_TIMEOUT:
+                    process.kill()
+                    process.wait()
+                    raise DownloadTimeoutError(
+                        f"Download stalled before first byte: no progress "
+                        f"within {_CONNECT_TIMEOUT}s (DNS/TLS/handshake?)"
+                    )
+            else:
+                silent_for = now - (last_progress_time[0] or now)
+                if silent_for > _NO_PROGRESS_TIMEOUT:
+                    process.kill()
+                    process.wait()
+                    raise DownloadTimeoutError(
+                        f"Download stalled: no progress for {int(silent_for)}s"
+                    )
             try:
                 process.wait(timeout=min(CANCEL_POLL_INTERVAL, remaining))
             except subprocess.TimeoutExpired:

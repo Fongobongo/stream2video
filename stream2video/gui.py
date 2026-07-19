@@ -1548,7 +1548,9 @@ class Stream2VideoGUI(ctk.CTk):
         # Sync slider entries → config (in case FocusOut didn't fire)
         self._sync_slider_entries()
 
-        # Read controls
+        # Read controls (in main thread — Tk widget reads are unsafe from
+        # worker threads; the worker receives the values as args, see
+        # _pipeline_worker's signature and P1.10 in the fix plan).
         input_raw = self.entry_input.get().strip()
         output_dir = Path(self.entry_output.get().strip() or "./compressed_videos")
         output_dir = output_dir.resolve()
@@ -1558,6 +1560,7 @@ class Stream2VideoGUI(ctk.CTk):
         download_quality = self.combo_download_quality.get()
         force = bool(self.chk_force.get())
         per_video_dir = bool(self.chk_per_video_dir.get())
+        delete_after = bool(self.chk_delete.get())
 
         self._ui_update_output(output_dir)
 
@@ -1569,7 +1572,7 @@ class Stream2VideoGUI(ctk.CTk):
             f"threshold={self.config['threshold']}, "
             f"min_silence={self.config['min_silence']}, "
             f"margin={self.config['margin']}, "
-            f"delete_after={bool(self.chk_delete.get())}, "
+            f"delete_after={delete_after}, "
             f"per_video_dir={per_video_dir}"
         )
 
@@ -1584,6 +1587,7 @@ class Stream2VideoGUI(ctk.CTk):
                 download_quality,
                 force,
                 per_video_dir,
+                delete_after,
             ),
             daemon=True,
         ).start()
@@ -1617,9 +1621,14 @@ class Stream2VideoGUI(ctk.CTk):
         download_quality: str,
         force: bool,
         per_video_dir: bool = False,
+        delete_after: bool = False,
     ):
         # Copy config values we need so the worker thread doesn't race
-        # with the main thread's slider/save-settings writes.
+        # with the main thread's slider/save-settings writes. Tk widget
+        # reads must happen in the main thread (Tk/Tcl is not thread-safe
+        # for cross-thread widget access); the caller (_start_pipeline)
+        # snapshots the widget state into args, the worker only reads
+        # these local copies. See P1.10 in the fix plan.
         cfg_threshold = float(self.config["threshold"])
         cfg_min_silence = float(self.config["min_silence"])
         cfg_margin = float(self.config["margin"])
@@ -1946,8 +1955,11 @@ class Stream2VideoGUI(ctk.CTk):
             # Freeze the Total wall-clock label at its final value.
             self._ui_total(total_elapsed)
 
-            # Delete downloaded source if requested
-            if bool(self.chk_delete.get()) and self._download_path is not None:
+            # Delete downloaded source if requested. Uses the value
+            # snapshotted in the main thread (passed as an arg to the
+            # worker); reading self.chk_delete.get() here would touch a
+            # Tk widget from a worker thread, which is unsafe.
+            if delete_after and self._download_path is not None:
                 try:
                     self._download_path.unlink()
                     self._log(f"Deleted source: {self._download_path}")

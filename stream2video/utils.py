@@ -155,21 +155,86 @@ def drain_stderr_lines(
 _active_proc: subprocess.Popen | None = None
 _active_proc_lock = threading.Lock()
 
+# Scoped process registry (P1.11). The single-slot ``_active_proc`` above
+# was overwritten by every subprocess — a parallel preview waveform and a
+# pipeline encode would race for the slot, and one's ``finally`` would
+# clear the other's registration, so cancel/close couldn't reach the
+# right process. The dict below keys processes by an opaque owner string
+# (caller-chosen, e.g. "pipeline", "preview", "download") so multiple
+# subprocesses can coexist and cancellation can target the right one.
+#
+# ``set_active_process`` / ``get_active_process`` are retained as thin
+# wrappers around the registry so existing call sites (concat.py,
+# silence.py, download.py) keep working — they implicitly use the
+# "default" owner. New call sites should prefer the scoped API.
+_proc_registry: dict[str, subprocess.Popen] = {}
+_proc_registry_lock = threading.Lock()
 
-def get_active_process() -> subprocess.Popen | None:
-    """Return the currently running ffmpeg Popen, or None if no pipeline is active.
 
-    Used by callers (e.g. GUI) that need to terminate a running ffmpeg.
+def get_active_process(owner: str = "default") -> subprocess.Popen | None:
+    """Return the currently registered subprocess for ``owner`` (default slot).
+
+    Back-compat: callers that don't pass ``owner`` get the historical
+    single-slot behaviour (the "default" key). The registry also stores
+    the most-recently-registered process under "default" so legacy code
+    that didn't specify an owner still sees a process to cancel.
     """
-    with _active_proc_lock:
-        return _active_proc
+    with _proc_registry_lock:
+        return _proc_registry.get(owner) or _proc_registry.get("default")
 
 
-def set_active_process(proc: subprocess.Popen | None) -> None:
-    """Register or clear the active ffmpeg Popen. Thread-safe."""
-    with _active_proc_lock:
+def set_active_process(proc: subprocess.Popen | None, owner: str = "default") -> None:
+    """Register or clear the active subprocess for ``owner``. Thread-safe.
+
+    Passing ``proc=None`` removes the registration. Multiple owners can
+    coexist (e.g. "pipeline" + "preview") so parallel subprocesses don't
+    clobber each other's registration — see P1.11 in the fix plan.
+    """
+    with _proc_registry_lock:
         global _active_proc
-        _active_proc = proc
+        if owner == "default":
+            # Mirror to the legacy single-slot so existing readers see
+            # the latest "default" registration as before.
+            _active_proc = proc
+        if proc is None:
+            _proc_registry.pop(owner, None)
+        else:
+            _proc_registry[owner] = proc
+
+
+def cancel_process(owner: str, timeout: float = 2.0) -> bool:
+    """Kill the subprocess registered under ``owner`` if any. Returns True if killed.
+
+    Uses ``process.kill()`` (SIGKILL on Unix, TerminateProcess on Windows)
+    because we don't know which subprocess type it is and graceful
+    shutdown would race with the pipeline's own cancel_callback. The
+    caller's wait loop already handles the cleanup once the process exits.
+    """
+    with _proc_registry_lock:
+        proc = _proc_registry.get(owner)
+    if proc is None or proc.poll() is not None:
+        return False
+    try:
+        proc.kill()
+    except Exception:
+        logger.exception(f"cancel_process({owner!r}): kill() failed")
+        return False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        pass
+    return True
+
+
+def list_active_owners() -> list[str]:
+    """Return the owner strings currently holding a live subprocess.
+
+    Useful for diagnostics and for the GUI's shutdown handler to make
+    sure every spawned ffmpeg has been cleaned up before the interpreter
+    exits.
+    """
+    with _proc_registry_lock:
+        return [owner for owner, proc in _proc_registry.items() if proc.poll() is None]
 
 
 def no_window_kwargs() -> dict:

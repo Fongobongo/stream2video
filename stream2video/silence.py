@@ -27,6 +27,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from stream2video.config import CONFIG_DEFAULTS
 from stream2video.utils import (
     cancel_monitor,
     drain_stderr_lines,
@@ -87,9 +88,9 @@ def _to_float(s: str) -> float:
 
 def detect_silence(
     video_path: Path,
-    threshold: float = -20,
-    min_silence: float = 0.5,
-    margin: float = -0.5,
+    threshold: float = CONFIG_DEFAULTS["threshold"],
+    min_silence: float = CONFIG_DEFAULTS["min_silence"],
+    margin: float = CONFIG_DEFAULTS["margin"],
     output_dir: Path | None = None,
     progress_callback: Callable[[float], None] | None = None,
     cancel_callback: Callable[[], bool] | None = None,
@@ -108,9 +109,16 @@ def detect_silence(
 
     Args:
         video_path: Path to video file
-        threshold: Silence threshold in dB (default -20, range [-60, -5])
-        min_silence: Minimum silence duration in seconds (default 0.5, range [0.1, 60])
-        margin: How much to shrink silence zones in seconds (default 0.5, range [-3, 5]).
+        threshold: Silence threshold in dB (default from CONFIG_DEFAULTS,
+                currently -30, range [-60, -5]). The default was historically
+                -20 when called directly via the API; that diverged from the
+                config-file / GUI value of -30, so an API call cut more
+                aggressively than a config-file run on the same source. The
+                defaults are now unified (see P1.7 in the fix plan).
+        min_silence: Minimum silence duration in seconds (default from
+                CONFIG_DEFAULTS, currently 2.0, range [0.1, 60]).
+        margin: How much to shrink silence zones in seconds (default from
+                CONFIG_DEFAULTS, currently 0.5, range [-3, 5]).
                 Positive = shrink silence (keep more audio around phrases).
                 Negative = expand silence (cut more aggressively).
                 0 = no adjustment.
@@ -138,7 +146,7 @@ def detect_silence(
                     written by a previous cancelled/crashed run. The file
                     is unlinked at the start of detection so a retry
                     within the same call doesn't re-load it. Use
-                    `_get_resume_cache_path(video_path, output_dir)` to
+                    ``_get_resume_cache_path(video_path, output_dir)`` to
                     compute the conventional path. Throttled checkpoints
                     are written when `resume_cache_path` is set; a new
                     run that uses resume will overwrite the file as it
@@ -648,12 +656,53 @@ def _run_silencedetect(
                 raise SilenceDetectionError(f"ffmpeg silencedetect failed: {error_msg}")
 
             if on_segment is not None:
-                if pending_start[0] is not None:
+                # Trailing silence: ffmpeg emitted a ``silence_start`` but
+                # never the matching ``silence_end`` because the input
+                # ended while still silent. Previously we just dropped
+                # the pending segment — that lost real trailing silence
+                # and made the cut plan shorter than reality. When the
+                # caller passed a known ``duration`` (always the case
+                # for the canonical pipeline via ``_probe_duration``),
+                # close the segment at the end of the media so the cut
+                # plan reflects what the user actually heard. See P1.12
+                # in the fix plan.
+                if pending_start[0] is not None and duration is not None and duration > 0:
+                    pending_start_t = pending_start[0]
+                    # ``pending_start_t`` may already exceed duration
+                    # (ffmpeg clamps the reported time to the actual
+                    # packet PTS, which on a truncated file can be a
+                    # hair past the probed container duration). Clamp
+                    # start to duration so we don't emit a (start>end)
+                    # segment; in that degenerate case the segment is
+                    # dropped.
+                    clamped_start = min(pending_start_t, duration)
+                    if clamped_start < duration:
+                        logger.info(
+                            f"Trailing silence_start at t={pending_start_t:.3f}s "
+                            f"had no matching silence_end; closing at media "
+                            f"duration {duration:.3f}s"
+                        )
+                        progressive_segments.append(
+                            SilenceSegment(clamped_start, duration)
+                        )
+                        if on_segment is not None:
+                            on_segment(list(progressive_segments))
+                    else:
+                        logger.debug(
+                            f"Trailing silence_start at t={pending_start_t:.3f}s "
+                            f"is at/after duration {duration:.3f}s; dropping"
+                        )
+                elif pending_start[0] is not None:
                     logger.warning(
-                        "Unmatched silence_start (no silence_end); dropped — "
-                        "ffmpeg output may be truncated"
+                        "Unmatched silence_start (no silence_end) and no "
+                        "media duration available; dropped — ffmpeg output "
+                        "may be truncated"
                     )
                 return list(progressive_segments)
+            # Batch path: _parse_ffmpeg_output already logs mismatched
+            # starts/ends; trailing silence there is handled by the same
+            # warning path (can't recover in batch mode without the
+            # progressive state machine).
             return _parse_ffmpeg_output("".join(stderr_lines))
 
     except subprocess.TimeoutExpired as e:

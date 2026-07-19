@@ -8,7 +8,6 @@ from tempfile import TemporaryDirectory
 
 import pytest
 import typer
-import yaml
 
 from stream2video.cli import load_config
 

@@ -34,7 +34,7 @@ except ImportError:  # pragma: no cover - legacy fallback
     except ImportError:  # pragma: no cover - very old typer
         ParameterSource = None  # type: ignore[assignment]
 
-from stream2video.concat import ConcatError, cut_and_concat
+from stream2video.concat import CancelledError, ConcatError, cut_and_concat
 from stream2video.config import (
     CONFIG_DEFAULTS,
     CONFIG_RANGES,
@@ -42,6 +42,8 @@ from stream2video.config import (
     VALID_ENCODERS,
     VALID_METHODS,
     VALID_QUALITIES,
+    VALID_SOFTWARE_FALLBACKS,
+    VALID_X264_PRESETS,
 )
 from stream2video.download import (
     DiskSpaceError,
@@ -216,6 +218,8 @@ def load_config(config_file: Path | None) -> dict:
         ("encoder", VALID_ENCODERS),
         ("video_quality", VALID_QUALITIES),
         ("download_quality", VALID_DOWNLOAD_QUALITIES),
+        ("software_fallback", VALID_SOFTWARE_FALLBACKS),
+        ("x264_preset", VALID_X264_PRESETS),
     ]
     for key, valid in enum_specs:
         v: Any = config.get(key)
@@ -277,6 +281,14 @@ def main(
         help="Encode quality preset: 'high' (10000k / CRF 18), 'medium' (7000k / CRF 23, default), "
         "or 'low' (3500k / CRF 28). If not passed, the config file's `video_quality` key is used.",
     ),
+    audio_quality: str = typer.Option(
+        "medium",
+        "--audio-quality",
+        "-aq",
+        help="Audio (AAC) bitrate preset: 'high' (256k), 'medium' (128k, default), "
+        "or 'low' (128k). If not passed, the config file's `audio_quality` "
+        "key is used.",
+    ),
     download_quality: str = typer.Option(
         "best",
         "--download-quality",
@@ -284,6 +296,31 @@ def main(
         help="Download quality preset (Twitch/YouTube, ignored for local files): "
         "'best' (default), '1080p', '720p', '480p', '360p'. If not passed, the "
         "config file's `download_quality` key is used.",
+    ),
+    software_fallback: str = typer.Option(
+        "ask",
+        "--software-fallback",
+        help="What to do when the requested hardware encoder is unavailable "
+        "or fails mid-run: 'ask' (default — refuse silent fallback to libx264; "
+        "the run fails with a clear error), 'disabled' (fail immediately), or "
+        "'enabled' (silently retry with libx264, legacy behaviour). If not "
+        "passed, the config file's `software_fallback` key is used.",
+    ),
+    x264_preset: str = typer.Option(
+        "medium",
+        "--x264-preset",
+        help="libx264 preset (ultrafast..slow, default 'medium'). Faster presets "
+        "reduce CPU load at the cost of file size / quality. Use 'ultrafast' or "
+        "'veryfast' on an unstable / overclocked CPU. If not passed, the config "
+        "file's `x264_preset` key is used.",
+    ),
+    encoder_threads: str = typer.Option(
+        "auto",
+        "--encoder-threads",
+        help="Encoder thread count: 'auto' (default — let ffmpeg pick, usually "
+        "one per logical core) or a positive int to cap libx264's thread pool. "
+        "Lowering this reduces peak CPU at the cost of slower encode. If not "
+        "passed, the config file's `encoder_threads` key is used.",
     ),
     delete_after: bool | None = typer.Option(
         None,
@@ -334,7 +371,7 @@ def main(
     console.print(f"Logs saved to: {log_file}\n")
 
     prev_handler = signal.getsignal(signal.SIGINT)
-    cancel_event, cancel_cb = _make_sigint_cancel()
+    _cancel_event, cancel_cb = _make_sigint_cancel()
 
     fh = None
     try:
@@ -367,6 +404,42 @@ def main(
         download_quality = _resolved_str(
             "download_quality", download_quality, VALID_DOWNLOAD_QUALITIES
         )
+        audio_quality = _resolved_str("audio_quality", audio_quality, VALID_QUALITIES)
+        software_fallback = _resolved_str(
+            "software_fallback", software_fallback, VALID_SOFTWARE_FALLBACKS
+        )
+        x264_preset = _resolved_str("x264_preset", x264_preset, VALID_X264_PRESETS)
+
+        # ``encoder_threads`` accepts ``"auto"`` or a positive int (see
+        # ``config.coerce_typed_value``). The CLI flag arrives as a
+        # string; the config-file value arrives as int (already validated).
+        # Resolve: CLI override parses to int when possible, else "auto".
+        def _resolved_encoder_threads(
+            flag_value: str,
+        ) -> str | int:
+            src = ctx.get_parameter_source("encoder_threads")
+            if src == ParameterSource.COMMANDLINE:
+                v = flag_value.strip()
+                if v == "auto":
+                    return "auto"
+                try:
+                    n = int(v)
+                except (TypeError, ValueError) as e:
+                    console.print(
+                        f"[red]Invalid encoder-threads:[/red] {flag_value!r} "
+                        f"(use 'auto' or a positive integer)"
+                    )
+                    raise typer.Exit(1) from e
+                if n <= 0:
+                    console.print(
+                        f"[red]Invalid encoder-threads:[/red] {n} (must be > 0 or 'auto')"
+                    )
+                    raise typer.Exit(1)
+                return n
+            # Fall back to config value (already int-or-"auto" validated).
+            return config.get("encoder_threads", "auto")
+
+        resolved_encoder_threads: str | int = _resolved_encoder_threads(encoder_threads)
 
         def _resolved_bool(name: str, flag_value: bool | None) -> bool:
             src = ctx.get_parameter_source(name)
@@ -543,6 +616,28 @@ def main(
                     def silence_progress(f: float):
                         progress.update(task2, completed=min(f * 100, 100))
 
+                    # Resume cache: the CLI now wires the same resume
+                    # path the GUI uses, so a Ctrl+C mid-detection can
+                    # pick up from the last throttled checkpoint instead
+                    # of restarting from t=0. Without this the CLI
+                    # silently discarded any resume state the GUI had
+                    # written for the same source/output_dir pair (see
+                    # P1.8 in the fix plan).
+                    resume_cache_path = (
+                        output_dir / f"{video_path.stem}_silence_cache.json.resume"
+                    )
+                    # ``--force`` invalidates the resume cache the same
+                    # way it invalidates the final cache, so a forced
+                    # re-detection doesn't pick up segments from a
+                    # prior run with different (threshold/margin) params.
+                    if force and resume_cache_path.exists():
+                        try:
+                            resume_cache_path.unlink()
+                        except OSError as e:
+                            logger.warning(
+                                f"Could not remove stale resume cache: {e}"
+                            )
+
                     silence_segments = detect_silence(
                         video_path,
                         threshold=config["threshold"],
@@ -551,8 +646,12 @@ def main(
                         output_dir=output_dir,
                         progress_callback=silence_progress,
                         cancel_callback=cancel_cb,
+                        resume_cache_path=resume_cache_path,
                     )
                     save_silence_cache(video_path, silence_segments, output_dir, config)
+                    # Detection succeeded → the final cache is the
+                    # source of truth, the resume file can be removed.
+                    resume_cache_path.unlink(missing_ok=True)
 
                 # By here `silence_segments` is non-None — either loaded
                 # from cache or freshly detected. Narrow the type so the
@@ -593,17 +692,29 @@ def main(
                     method=method,
                     encoder=encoder,
                     video_quality=video_quality,
+                    audio_quality=audio_quality,
                     cancel_callback=cancel_cb,
+                    software_fallback=software_fallback,
+                    x264_preset=x264_preset,
+                    encoder_threads=resolved_encoder_threads,
                 )
 
                 progress.update(
                     task3, completed=100, description="[green]+[/green] Video compressed"
                 )
 
+            except CancelledError:
+                # ``CancelledError`` is a subclass of ``ConcatError`` so
+                # it MUST be caught first — otherwise the generic
+                # ``ConcatError`` handler would run, re-check the cancel
+                # event, and emit a misleading "concatenation failed"
+                # log line for what was actually a clean cancel. This
+                # mirrors the silence-detection handler above which
+                # catches ``SilenceCancelledError`` (subclass of
+                # ``SilenceDetectionError``) before the generic handler.
+                console.print("[yellow]Concatenation cancelled.[/yellow]")
+                raise typer.Exit(130) from None
             except ConcatError as e:
-                if cancel_event.is_set():
-                    console.print("[yellow]Concatenation cancelled.[/yellow]")
-                    raise typer.Exit(130) from None
                 console.print(f"[red]Concatenation failed:[/red] {e}")
                 logger.exception("Concatenation error")
                 raise typer.Exit(1) from None

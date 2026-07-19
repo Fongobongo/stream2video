@@ -403,6 +403,7 @@ class TestEncoderFallbackCleanup:
             _try,
             (ConcatError, OSError),
             _cleanup,
+            software_fallback="enabled",
         )
         assert calls["try"] == ["h264_mf", "libx264"]
         assert calls["cleanup"] == ["h264_mf"], (
@@ -423,6 +424,7 @@ class TestEncoderFallbackCleanup:
             _try,
             (ConcatError, OSError),
             lambda e: calls["cleanup"].append(e),
+            software_fallback="enabled",
         )
         assert calls["cleanup"] == [], (
             "on_fallback must not be called when the primary encoder succeeds"
@@ -446,6 +448,7 @@ class TestEncoderFallbackCleanup:
                 _try,
                 (ConcatError, OSError),
                 _cleanup,
+                software_fallback="enabled",
             )
         assert calls["cleanup"] == [], (
             "on_fallback must not run on CancelledError (no fallback retry)"
@@ -471,6 +474,7 @@ class TestEncoderFallbackCleanup:
                 _try,
                 (ConcatError, OSError),
                 _cleanup,
+                software_fallback="enabled",
             )
         assert calls["cleanup"] == ["h264_mf"], (
             "on_fallback should only fire once (before the libx264 retry)"
@@ -569,6 +573,7 @@ class TestEncoderQualityPresets:
                 (ConcatError, OSError),
                 None,
                 video_quality="low",
+                software_fallback="enabled",
             )
 
         # Two attempts: first h264_nvenc (fails), then libx264 (succeeds).

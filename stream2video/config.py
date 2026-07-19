@@ -1,9 +1,12 @@
 """Shared configuration defaults and validation ranges."""
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 CONFIG_DEFAULTS: dict[str, Any] = {
     "threshold": -30.0,
@@ -12,7 +15,15 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     "method": "segment",
     "encoder": "h264_mf",
     "video_quality": "medium",
+    "audio_quality": "medium",
     "download_quality": "best",
+    "software_fallback": "ask",
+    "x264_preset": "medium",
+    # Encoder thread budget. ``auto`` = let ffmpeg decide (-threads 0,
+    # which usually picks one per logical core); an int caps it. ``auto``
+    # preserves the historical behaviour (no thread hint) so an upgrade
+    # doesn't quietly change the load profile of an existing user.
+    "encoder_threads": "auto",
     "force": False,
     "delete_after": False,
     "per_video_dir": True,
@@ -37,6 +48,29 @@ VALID_DOWNLOAD_QUALITIES: list[str] = ["best", "1080p", "720p", "480p", "360p"]
 
 VALID_THEMES: list[str] = ["dark", "light", "system"]
 
+# Encoder fallback policy when the user-selected HW encoder (AMF/NVENC/MF)
+# is unavailable or fails mid-run. ``ask`` (default) refuses silent
+# fallback to libx264 — heavy CPU workload can overload an overclocked
+# machine, so the user must explicitly confirm. ``disabled`` raises
+# immediately. ``enabled`` preserves the legacy silent-fallback behaviour
+# for users running on a known-stable CPU.
+VALID_SOFTWARE_FALLBACKS: list[str] = ["ask", "disabled", "enabled"]
+
+# x264 preset ladder. Kept narrow: ffmpeg accepts ultrafast..placebo but
+# we only expose the slice that matches a CPU quality/speed/size trade-off
+# the user can reason about. The CLI/GUI passes one of these verbatim to
+# ffmpeg ``-preset``.
+VALID_X264_PRESETS: list[str] = [
+    "ultrafast",
+    "superfast",
+    "veryfast",
+    "faster",
+    "fast",
+    "medium",
+    "slow",
+    "slower",
+]
+
 # Keys that are user-tunable defaults (exclude per-session state like
 # output_dir / recent_projects / input_path). Used by the GUI's
 # "Save current as defaults" button.
@@ -47,7 +81,11 @@ USER_DEFAULT_KEYS: list[str] = [
     "method",
     "encoder",
     "video_quality",
+    "audio_quality",
     "download_quality",
+    "software_fallback",
+    "x264_preset",
+    "encoder_threads",
     "force",
     "delete_after",
     "per_video_dir",
@@ -93,6 +131,19 @@ def coerce_typed_value(key: str, value: Any) -> Any:
     if key not in CONFIG_DEFAULTS:
         return None
     default = CONFIG_DEFAULTS[key]
+    # Special case: ``encoder_threads`` accepts ``"auto"`` (str default)
+    # OR a positive int from the user. The two types are both legitimate
+    # expressions of the same setting, so accept either explicitly. A
+    # non-positive int is dropped (it would be a no-op or harmful hint
+    # to ffmpeg's thread pool — negative values raise on the CLI side).
+    if key == "encoder_threads":
+        if isinstance(value, str) and value == "auto":
+            return value
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int) and value > 0:
+            return value
+        return None
     if isinstance(default, bool):
         return value if isinstance(value, bool) else None
     if isinstance(default, (int, float)):
