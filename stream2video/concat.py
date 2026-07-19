@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from stream2video.config import (
     VALID_ENCODERS,
     VALID_METHODS,
+    VALID_OUTPUT_FPS,
     VALID_QUALITIES,
     VALID_SOFTWARE_FALLBACKS,
     VALID_X264_PRESETS,
@@ -183,6 +184,9 @@ def cut_and_concat(
     x264_preset: str = "medium",
     encoder_threads: str | int = "auto",
     fallback_consent: Callable[[], bool] | None = None,
+    output_fps: str = "source",
+    memory_limit_mb: str | int = "auto",
+    memory_reserve_mb: int = 2048,
 ) -> Path:
     if not video_path.exists():
         raise ConcatError(f"Input video not found: {video_path}")
@@ -233,6 +237,7 @@ def cut_and_concat(
         x264_preset=x264_preset,
         encoder_threads=encoder_threads,
         source_has_audio=source_has_audio,
+        output_fps=output_fps,
     )
 
     return output_path
@@ -363,6 +368,32 @@ def _threads_opt(encoder_threads: str | int) -> list[str]:
         return ["-threads", str(encoder_threads)]
     logger.warning(f"encoder_threads={encoder_threads!r} is not 'auto' or a positive int; ignoring")
     return []
+
+
+def _fps_filter_chain(output_fps: str) -> str:
+    """Return the ffmpeg filter chain fragment that enforces ``output_fps``.
+
+    ``source`` (default) returns an empty string — the encoder receives
+    the original PTS without any fps filter, so a 30 FPS source comes
+    out at 30 FPS without frame duplication. This is the historical
+    behaviour preserved by the trim+concat rewrite.
+
+    A numeric value (``24`` / ``25`` / ``30`` / ``50`` / ``60``) returns
+    a ``fps=<target>`` filter fragment. Callers must splice it into the
+    filter chain AFTER ``setpts=PTS-STARTPTS`` so the new PTS cadence
+    is the source's, not the synthetic ``N/FRAME_RATE`` one.
+
+    The ``fps`` filter duplicates or drops frames to match the target
+    CFR; the docs warn that this changes file size and quality.
+    """
+    if output_fps == "source":
+        return ""
+    if output_fps in VALID_OUTPUT_FPS:
+        return f",fps={output_fps}"
+    logger.warning(
+        f"output_fps={output_fps!r} is not 'source' or one of {VALID_OUTPUT_FPS}; ignoring"
+    )
+    return ""
 
 
 # Back-compat registry: maps each supported encoder to its default (medium)
@@ -559,6 +590,37 @@ def _run_ffmpeg(
     drain_done = False
     last_progress_time = time.monotonic()
 
+    # P1.5: stall watchdog. The ``track_progress=True`` branch checks
+    # ``elapsed_since_progress`` inside its readline loop, but readline
+    # blocks until ffmpeg emits a line — a fully-hung ffmpeg (deadlock,
+    # no stdout at all) would never surface as a stall there. This
+    # daemon thread polls ``last_progress_time`` independently of
+    # stdout availability and kills the process when the stall window
+    # expires. The track_progress loop's inline check is retained as
+    # a fast path (it kills ASAP after a stalled line arrives).
+    stall_stop = threading.Event()
+
+    def _stall_watchdog():
+        while not stall_stop.wait(CANCEL_POLL_INTERVAL):
+            if process.poll() is not None:
+                return
+            elapsed = time.monotonic() - last_progress_time
+            if elapsed > _STALL_KILL:
+                logger.error(
+                    f"{label}: stall watchdog firing — no progress for "
+                    f"{int(elapsed)}s, killing process"
+                )
+                try:
+                    process.kill()
+                except Exception:
+                    logger.exception("stall watchdog: kill() failed")
+                return
+
+    stall_thread = threading.Thread(
+        target=_stall_watchdog, daemon=True, name=f"stall_{label}"
+    )
+    stall_thread.start()
+
     try:
         with cancel_monitor(process, cancel_callback) as cancelled:
             if track_progress:
@@ -606,6 +668,7 @@ def _run_ffmpeg(
         process.kill()
         raise FFmpegError(f"{label} timeout after {e.timeout}s") from None
     finally:
+        stall_stop.set()
         if memory_monitor is not None:
             memory_monitor.stop()
             # Surface the peak RSS so the user can see how close they
@@ -892,6 +955,7 @@ def _run_segment_concat(
     x264_preset: str = "medium",
     encoder_threads: str | int = "auto",
     source_has_audio: bool = True,
+    output_fps: str = "source",
 ):
     """Encode each segment, join with concat demuxer.
 
@@ -1027,6 +1091,18 @@ def _run_segment_concat(
                     # "Output file does not contain any stream".
                     "-map",
                     "0:v:0",
+                    *(
+                        # P1.17: when the user requests a CFR target
+                        # (output_fps != "source"), apply the ``fps``
+                        # filter on the video stream. Without a filter
+                        # graph the ``-r`` output option would work
+                        # too, but the filter is the documented way
+                        # to do it post-encode PTS normalisation and
+                        # matches the batch path's filter chain shape.
+                        ["-vf", f"fps={output_fps}"]
+                        if output_fps != "source"
+                        else []
+                    ),
                     "-c:v",
                     vcodec,
                     *vcodec_opts,
@@ -1115,6 +1191,7 @@ def _run_with_fallback(
     x264_preset: str = "medium",
     encoder_threads: str | int = "auto",
     source_has_audio: bool = True,
+    output_fps: str = "source",
 ):
     """Run segment or batch concat with the primary encoder; fall back to libx264 on failure.
 
@@ -1167,6 +1244,7 @@ def _run_with_fallback(
             x264_preset=x264_preset,
             encoder_threads=encoder_threads,
             source_has_audio=source_has_audio,
+            output_fps=output_fps,
         )
 
     _with_libx264_fallback(
@@ -1198,6 +1276,7 @@ def _run_batch_concat(
     x264_preset: str = "medium",
     encoder_threads: str | int = "auto",
     source_has_audio: bool = True,
+    output_fps: str = "source",
 ):
     """Process chunks sequentially: each chunk → temp file, then concat.
 
@@ -1265,6 +1344,25 @@ def _run_batch_concat(
                     progress_callback(min(encoded_duration / total_duration, 0.9))
                 continue
 
+            chunk_start = chunk[0][0]
+            chunk_end = chunk[-1][1]
+            # P1.4: windowed decode. Previously each chunk read the
+            # entire source from t=0 even though only [chunk_start,
+            # chunk_end] was relevant — on a 6h stream with 100 chunks
+            # that's 600h of wasted decode. Coarse-seek ffmpeg to the
+            # first keep segment's start with input-side ``-ss`` (fast
+            # keyframe seek) and cap with ``-t`` so the demuxer stops
+            # reading once we're past the chunk's last keep segment.
+            # ``-copyts`` preserves source PTS so the ``trim`` filters
+            # below still match the original timestamps (the seek just
+            # skips keyframes; ffmpeg rewrites PTS to 0 without
+            # ``-copyts`` and our absolute-time ``trim`` filters would
+            # never match). A small keyframe-safety margin is added so
+            # the seek doesn't drop a frame at the chunk's left edge.
+            _CHUNK_SEEK_MARGIN = 0.5
+            seek_to = max(0.0, chunk_start - _CHUNK_SEEK_MARGIN)
+            chunk_dur = chunk_end - seek_to
+
             # Frame-accurate, gapless chunk filter — ``trim`` per keep
             # segment + ``concat`` filter glue.
             #
@@ -1287,7 +1385,7 @@ def _run_batch_concat(
             #
             # The fix uses the ``concat`` filter on ``trim``-ed pieces —
             # the explicit concat operation is what actually closes the
-            # gap and renumerates PTS so the chunk is gapless CFR. This
+            # gap and renumbers PTS so the chunk is gapless CFR. This
             # mirrors the segment path's "encode each piece, concat
             # demuxer" philosophy but inside a single ffmpeg invocation.
             #
@@ -1303,8 +1401,22 @@ def _run_batch_concat(
             # ``setpts`` is needed after the final concat.
             v_chains = []
             a_chains = []
+            fps_suffix = _fps_filter_chain(output_fps)
             for idx, (s, e) in enumerate(chunk):
-                v_chains.append(f"[0:v]trim={s}:{e},setpts=PTS-STARTPTS[v{idx}]")
+                # ``s``/``e`` are absolute source timestamps; the seek
+                # above made ffmpeg start at ``seek_to``, so PTS in the
+                # filter graph are still absolute (thanks to ``-copyts``)
+                # and the trim endpoints match the source timeline
+                # directly — no offset arithmetic needed.
+                #
+                # P1.17: when ``output_fps != "source"``, splice an
+                # ``fps=<target>`` filter AFTER ``setpts=PTS-STARTPTS``
+                # so the new PTS cadence is the source's, not the
+                # synthetic ``N/FRAME_RATE`` one. ``fps`` duplicates or
+                # drops frames to match the CFR target.
+                v_chains.append(
+                    f"[0:v]trim={s}:{e},setpts=PTS-STARTPTS{fps_suffix}[v{idx}]"
+                )
                 # Audio chain is only built when the source actually has
                 # an audio stream — otherwise ``[0:a]atrim=...`` would
                 # reference a non-existent input pad and ffmpeg would
@@ -1322,7 +1434,10 @@ def _run_batch_concat(
                 )
             else:
                 concat_inputs = "".join(f"[v{i}]" for i in range(n))
-                graph = ";".join(v_chains) + f";{concat_inputs}concat=n={n}:v=1:a=0[outv]"
+                graph = (
+                    ";".join(v_chains)
+                    + f";{concat_inputs}concat=n={n}:v=1:a=0[outv]"
+                )
 
             with tempfile.NamedTemporaryFile(
                 mode="w", suffix=".txt", delete=False, encoding="utf-8"
@@ -1357,8 +1472,18 @@ def _run_batch_concat(
                         "error",
                         "-progress",
                         "pipe:1",
+                        # P1.4: windowed decode. ``-ss`` before ``-i``
+                        # fast-seeks to chunk_start; ``-copyts`` keeps
+                        # source PTS so the absolute-time ``trim=...``
+                        # filters below still match. ``-t`` caps the
+                        # demuxer so we don't decode the whole source.
+                        "-ss",
+                        f"{seek_to:.3f}",
+                        "-copyts",
                         "-i",
                         str(video_path),
+                        "-t",
+                        f"{chunk_dur:.3f}",
                         "-filter_complex_script",
                         script_path,
                         "-map",
@@ -1372,15 +1497,7 @@ def _run_batch_concat(
                         # fail with "Stream map '[outa]' matches no
                         # stream" — see P1.14.
                         *(
-                            [
-                                "-map",
-                                "[outa]",
-                                "-c:a",
-                                "aac",
-                                "-b:a",
-                                _audio_bitrate(),
-                                *_audio_opts(),
-                            ]
+                            ["-map", "[outa]", "-c:a", "aac", "-b:a", _audio_bitrate(), *_audio_opts()]
                             if source_has_audio
                             else []
                         ),
