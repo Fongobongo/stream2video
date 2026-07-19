@@ -1,0 +1,30 @@
+# Files excluded from the Docker build context to keep the image small
+# and the build fast. The cache layers under .venv/ and .mypy_cache/
+# would otherwise be copied in (huge) and invalidated on every code
+# change (slow). The GUI _portable/ tree is Windows-specific and not
+# useful in the Linux container.
+
+.git/
+.github/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+_portable/
+stream2video.egg-info/
+compressed_videos/
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+
+# Local artefacts that don't belong in a reproducible image.
+stream2video.log
+*.mp4
+*.mkv
+*.webm
+*.wav
+
+# The fix plan and dev notes are documentation, not runtime deps.
+stream2video-fix-plan.md
+PLAN.md
+STREAM2VIDEO_DEVELOPMENT_PLAN.md
