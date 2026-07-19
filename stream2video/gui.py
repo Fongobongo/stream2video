@@ -64,6 +64,8 @@ from stream2video.gui_helpers import (
     should_update_status,
     truncate_status,
 )
+from stream2video.gui_log_handler import QueueHandler
+from stream2video.gui_widgets import Tooltip as _Tooltip
 from stream2video.paths import (
     RECENT_NAME_MAX,
     add_recent_project,
@@ -92,70 +94,11 @@ from stream2video.waveform import (
 logger = logging.getLogger("stream2video.gui")
 
 
-class _Tooltip:
-    """A hover tooltip for any tkinter/ctk widget."""
-
-    def __init__(self, widget, text: str):
-        self.widget = widget
-        self.text = text
-        self._tip: ctk.CTkToplevel | None = None
-        self._after_id: str | None = None
-        widget.bind("<Enter>", self._schedule_show, add="+")
-        widget.bind("<Leave>", self._schedule_hide, add="+")
-
-    def _schedule_show(self, event=None):
-        self._cancel_scheduled()
-        self._after_id = self.widget.after(400, self._show)
-
-    def _schedule_hide(self, event=None):
-        self._cancel_scheduled()
-        if self._tip:
-            self.widget.after(200, self._hide)
-
-    def _cancel_scheduled(self):
-        if self._after_id:
-            self.widget.after_cancel(self._after_id)
-            self._after_id = None
-
-    def _show(self, event=None):
-        self._after_id = None
-        if self._tip or not self.text:
-            return
-        x = self.widget.winfo_rootx() + 20
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
-        self._tip = tw = ctk.CTkToplevel(self.widget)
-        tw.wm_overrideredirect(True)
-        tw.wm_geometry(f"+{x}+{y}")
-        tw.attributes("-topmost", True)
-        ctk.CTkLabel(
-            tw,
-            text=self.text,
-            wraplength=320,
-            fg_color=("gray85", "gray15"),
-            text_color=("gray10", "gray90"),
-            corner_radius=4,
-            padx=8,
-            pady=4,
-        ).pack()
-        tw.bind("<Enter>", self._cancel_scheduled, add="+")
-        tw.bind("<Leave>", self._schedule_hide, add="+")
-
-    def _hide(self, event=None):
-        tw = self._tip
-        self._tip = None
-        if tw:
-            tw.destroy()
-
-
-class QueueHandler(logging.Handler):
-    """Send log records to a queue for GUI display."""
-
-    def __init__(self, log_queue: queue.Queue):
-        super().__init__()
-        self.log_queue = log_queue
-
-    def emit(self, record):
-        self.log_queue.put(self.format(record))
+# ``_Tooltip`` and ``QueueHandler`` were extracted to ``gui_widgets.py``
+# and ``gui_log_handler.py`` respectively as part of the Этап 10
+# incremental refactor — they're imported above (Tooltip as _Tooltip
+# for back-compat). The class bodies that used to live here are gone;
+# see those modules for the implementations.
 
 
 def _build_completion_summary(
