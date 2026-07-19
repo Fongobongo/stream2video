@@ -49,7 +49,7 @@
 | P3.1 Python target sync (3.13: requires-python + ruff + mypy) | ✅ | 26e89fa |
 | P3.2 mypy check_untyped_defs=true | ✅ | 26e89fa |
 | P3.3 ruff format --check зелёный | ✅ | 26e89fa |
-| Этап 12 Docker image для CLI/integration testing | ✅ | 789447f |
+| Этап 12 Dockerfile для локальной проверки на Windows (не для CI — существующий GitHub Actions уже покрывает) | ✅ | 789447f |
 
 ### Что НЕ сделано (намеренно отложено)
 
