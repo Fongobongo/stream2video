@@ -10,6 +10,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from stream2video.config import (
     VALID_ENCODERS,
@@ -28,6 +29,9 @@ from stream2video.utils import (
     no_window_kwargs,
     set_active_process,
 )
+
+if TYPE_CHECKING:
+    from stream2video.memory import MemoryMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -515,6 +519,7 @@ def _run_ffmpeg(
     label: str = "ffmpeg",
     cancel_callback: Callable[[], bool] | None = None,
     track_progress: bool = True,
+    memory_monitor: "MemoryMonitor | None" = None,
 ) -> None:
     """Run an ffmpeg command. With track_progress=True (default), parses ffmpeg's
     -progress stream from stdout and invokes progress_callback(us). With False,
@@ -526,6 +531,13 @@ def _run_ffmpeg(
     (no progress for _STALL_KILL seconds -> kill) only runs in the
     track_progress=True branch: per-segment encodes get their progress
     implicitly from the segment index, so per-byte stalls aren't meaningful.
+
+    ``memory_monitor`` (optional, P1.17): when provided, the monitor's
+    daemon thread is started AFTER the subprocess is spawned and stopped
+    in the finally block. The monitor fires ``cancel_callback`` on a
+    hard memory threshold, which routes through the same cancel path
+    the user's Ctrl+C uses. None disables the monitor (preserves
+    historical behaviour for callers that haven't been updated).
     """
     stdout_target = subprocess.PIPE if track_progress else subprocess.DEVNULL
     try:
@@ -540,6 +552,12 @@ def _run_ffmpeg(
         raise FFmpegError("ffmpeg not found in PATH") from e
 
     set_active_process(process)
+    if memory_monitor is not None:
+        # Late-bind the pid now that the process exists, then start
+        # the monitor thread. The monitor reads RSS by pid, so this
+        # must happen after Popen returns.
+        memory_monitor.pid = process.pid
+        memory_monitor.start()
     stderr_pipe = process.stderr
     assert stderr_pipe is not None
     stderr_lines: list[str] = []
@@ -594,6 +612,20 @@ def _run_ffmpeg(
         process.kill()
         raise FFmpegError(f"{label} timeout after {e.timeout}s") from None
     finally:
+        if memory_monitor is not None:
+            memory_monitor.stop()
+            # Surface the peak RSS so the user can see how close they
+            # came to the budget. Logged at INFO (always visible) when
+            # the monitor saw any progress; debug otherwise.
+            if memory_monitor.peak_rss_mb > 0:
+                logger.info(
+                    f"{label}: peak RSS {memory_monitor.peak_rss_mb:.0f}MB"
+                    + (
+                        " (HARD limit hit — task cancelled)"
+                        if memory_monitor.hard_exceeded
+                        else ""
+                    )
+                )
         if not drain_done:
             wait_for_drain()
         set_active_process(None)
