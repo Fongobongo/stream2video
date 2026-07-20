@@ -590,3 +590,33 @@ class TestEncoderQualityPresets:
         libx264_opts = calls[-1][1]
         crf_idx = libx264_opts.index("-crf")
         assert libx264_opts[crf_idx + 1] == _X264_CRF["low"]
+
+
+class TestEncoderThreadsPosition:
+    """``-threads`` must appear after the encoder spec and before output path.
+
+    The fix plan (Этап 3, item 17) requires that ``-threads N`` is
+    positioned AFTER ``-c:v libx264`` (or the HW encoder equivalent) so
+    it caps the encoder's thread pool, not the decoder's. This is tested
+    at the ``encoder_opts()`` level since the full command construction
+    appends opts after the encoder declaration.
+    """
+
+    def test_auto_omits_threads_flag(self):
+        for enc in ("h264_mf", "h264_amf", "h264_nvenc", "libx264"):
+            opts = encoder_opts(enc, "medium", x264_preset="medium", encoder_threads="auto")
+            assert "-threads" not in opts, f"{enc}: auto should not add -threads"
+
+    def test_explicit_threads_appended_at_end(self):
+        for enc in ("h264_mf", "h264_amf", "h264_nvenc", "libx264"):
+            opts = encoder_opts(enc, "medium", x264_preset="medium", encoder_threads=2)
+            assert "-threads" in opts, f"{enc}: explicit threads should add -threads"
+            # ``-threads`` must be one of the final arguments (after codec opts).
+            # ``encoder_opts()`` appends ``*threads_opt`` last, so ``-threads``
+            # must appear in the last two positions.
+            threads_idx = opts.index("-threads")
+            assert threads_idx >= len(opts) - 2, (
+                f"{enc}: -threads at position {threads_idx}/{len(opts)} "
+                f"but expected near end: {opts}"
+            )
+            assert opts[threads_idx + 1] == "2", f"{enc}: -threads value should be '2'"

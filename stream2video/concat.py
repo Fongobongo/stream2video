@@ -88,7 +88,7 @@ _VIDEO_BITRATE = "7000k"
 _AUDIO_BITRATE = "128k"
 _AUDIO_BITRATES: dict[str, str] = {
     "high": "256k",
-    "medium": _AUDIO_BITRATE,
+    "medium": "192k",
     "low": "128k",
 }
 # Sample rate / channel policy. ``-ar 48000 -ac 2`` historically

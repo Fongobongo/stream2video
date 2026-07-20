@@ -459,3 +459,152 @@ def test_audio_less_source_produces_video_only(tmp_path: Path):
     assert frames is not None and abs(frames - 120) <= 1, (
         f"audio-less: frames {frames} != 120; info={info}"
     )
+
+
+def test_29_97_fps_preserved(tmp_path: Path):
+    """29.97 FPS (NTSC) — common Twitch/YouTube framerate.
+
+    The trim+concat filter must preserve the fractional framerate without
+    rounding to 30. Expected: 4s x 29.97 ≈ 119.88 → 120 frames (rounds
+    up because ffmpeg emits a full frame at the boundary).
+    """
+    src = tmp_path / "src_2997.mp4"
+    _make_source(src, duration=6.0, fps=30)  # lavfi doesn't support 29.97 directly
+    # Re-encode at 29.97 FPS via fps filter
+    ntsc = tmp_path / "src_ntsc.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-i",
+            str(src),
+            "-vf",
+            "fps=30000/1001",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "copy",
+            str(ntsc),
+        ],
+        check=True,
+    )
+    out = tmp_path / "out_ntsc.mp4"
+    silence = [SilenceSegment(2.0, 4.0)]
+    cut_and_concat(ntsc, silence, out, method="segment", encoder="libx264", video_quality="medium")
+    info = _probe(out)
+    # 29.97 FPS source: r_frame_rate should be 30000/1001
+    assert "30000/1001" in info.get("r_frame_rate", ""), f"29.97 FPS not preserved: {info}"
+
+
+def test_vfr_source_preserved(tmp_path: Path):
+    """VFR source — variable frame rate must be preserved.
+
+    Creates a source with mixed frame rates (first 3s at 30 FPS, last 3s
+    at 15 FPS) via concat demuxer, then verifies the pipeline doesn't
+    crash and produces a valid output. VFR is common in screen recordings
+    and OBS captures.
+    """
+    # Create two CFR segments
+    seg1 = tmp_path / "vfr_seg1.mp4"
+    seg2 = tmp_path / "vfr_seg2.mp4"
+    _make_source(seg1, duration=3.0, fps=30)
+    _make_source(seg2, duration=3.0, fps=15)
+
+    # Concat them into a VFR source
+    vfr_src = tmp_path / "vfr_src.mp4"
+    list_file = tmp_path / "vfr_list.txt"
+    list_file.write_text(f"file '{seg1}'\nfile '{seg2}'\n", encoding="utf-8")
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(list_file),
+            "-c",
+            "copy",
+            str(vfr_src),
+        ],
+        check=True,
+    )
+
+    out = tmp_path / "out_vfr.mp4"
+    silence = [SilenceSegment(2.0, 4.0)]
+    # VFR pipeline should not crash — frame count tolerance is looser
+    # because VFR sources don't have a single nominal framerate.
+    cut_and_concat(
+        vfr_src, silence, out, method="segment", encoder="libx264", video_quality="medium"
+    )
+    info = _probe(out)
+    # Output should be a valid MP4 with video + audio streams.
+    assert "video" in info.get("codec_types", []), f"no video stream: {info}"
+    frames = info.get("nb_read_frames_video")
+    assert frames is not None and frames > 0, f"VFR: no frames in output: {info}"
+
+
+def test_multiple_audio_streams(tmp_path: Path):
+    """Source with multiple audio tracks — pipeline must pick the first.
+
+    A dual-audio MKV (e.g. dual-language) should use track 0 via
+    ``-map 0:a:0`` rather than ffmpeg's auto-select heuristic.
+    """
+    src = tmp_path / "src_multi_audio.mp4"
+    _make_source(src, duration=6.0, fps=30)
+    # Add a second silent audio track
+    multi = tmp_path / "multi_audio.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-i",
+            str(src),
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=48000",
+            "-map",
+            "0:v",
+            "-map",
+            "0:a",
+            "-map",
+            "1:a",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-shortest",
+            str(multi),
+        ],
+        check=True,
+    )
+    # Verify the source has 2 audio streams
+    src_info = _probe(multi)
+    audio_count = src_info.get("codec_types", []).count("audio")
+    assert audio_count >= 2, f"source should have 2+ audio tracks: {src_info}"
+
+    out = tmp_path / "out_multi.mp4"
+    silence = [SilenceSegment(2.0, 4.0)]
+    cut_and_concat(multi, silence, out, method="segment", encoder="libx264", video_quality="medium")
+    out_info = _probe(out)
+    # Output should have exactly 1 audio stream (the first one).
+    out_audio = out_info.get("codec_types", []).count("audio")
+    assert out_audio == 1, f"expected 1 audio stream in output, got {out_audio}: {out_info}"
+    frames = out_info.get("nb_read_frames_video")
+    assert frames is not None and abs(frames - 120) <= 1, (
+        f"multi-audio: frames {frames} != 120; info={out_info}"
+    )

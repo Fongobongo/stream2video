@@ -21,19 +21,6 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
-# ``ParameterSource`` tells us whether a CLI flag came from the command
-# line or a default. Its import path has moved across typer/click
-# releases (it used to be re-exported as ``typer._click.core``, now it
-# lives in ``click.core``). Use a defensive try/except chain so the
-# module keeps importing on all supported versions.
-try:
-    from click.core import ParameterSource  # click >= 8.0
-except ImportError:  # pragma: no cover - legacy fallback
-    try:
-        from typer._click.core import ParameterSource
-    except ImportError:  # pragma: no cover - very old typer
-        ParameterSource = None
-
 from stream2video.concat import CancelledError, ConcatError, cut_and_concat
 from stream2video.config import (
     CONFIG_DEFAULTS,
@@ -65,6 +52,23 @@ from stream2video.silence import (
     load_silence_cache,
     save_silence_cache,
 )
+
+# ``ParameterSource`` tells us whether a CLI flag came from the command
+# line or a default. Its import path has moved across typer/click
+# releases. Use a defensive try/except chain so the module keeps
+# importing on all supported versions.
+ParameterSource: Any = None
+try:
+    from click.core import ParameterSource as _PS  # click >= 8.0
+
+    ParameterSource = _PS
+except ImportError:  # pragma: no cover - legacy fallback
+    try:
+        from typer._click.core import ParameterSource as _PS
+
+        ParameterSource = _PS
+    except ImportError:  # pragma: no cover - very old typer
+        pass
 
 # Logging setup is deferred to ``main()`` so importing ``stream2video.cli``
 # (e.g. from tests, or from a host application embedding the library)
