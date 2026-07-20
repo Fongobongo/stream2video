@@ -193,6 +193,13 @@ class PipelineController:
     # with the running segment list so the GUI's waveform popup updates
     # in near real-time. Optional because the CLI doesn't need it.
     on_live_segment: Callable[[list[SilenceSegment]], None] | None = None
+    # ``on_output_resolved`` fires after the download phase completes
+    # and ``apply_per_video_dir`` has resolved the final output dir.
+    # The GUI uses it to add the project to the recent-projects panel,
+    # update the output label, and refresh the file-info panel — all
+    # mid-pipeline side effects that need to happen BEFORE silence
+    # detection starts. Optional because the CLI doesn't need it.
+    on_output_resolved: Callable[[Path, Path, bool], None] | None = None
 
     # Mutable per-run state. The GUI reads these after ``run()`` to
     # drive the completion summary + recent-projects panel; on error
@@ -296,6 +303,15 @@ class PipelineController:
         self._output_dir_resolved = output_dir
 
         self._download_path = video_path if download_result.is_downloaded else None
+
+        # Fire the mid-pipeline hook so the GUI can update its
+        # recent-projects panel, output label, and file-info widgets
+        # BEFORE silence detection starts. The CLI doesn't use this.
+        if self.on_output_resolved is not None:
+            try:
+                self.on_output_resolved(output_dir, video_path, download_result.is_downloaded)
+            except Exception:
+                logger.debug("on_output_resolved raised", exc_info=True)
 
         src_size_bytes = video_path.stat().st_size
         src_duration = get_video_duration(video_path)
