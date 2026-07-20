@@ -121,6 +121,30 @@ class TestBuildCliCommand:
         assert "stream2video  -o" not in cmd
         assert "stream2video -o" in cmd
 
+    def test_x264_low_memory_appended_when_true(self):
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+            x264_low_memory=True,
+        )
+        assert "--x264-low-memory" in cmd
+
+    def test_x264_low_memory_omitted_when_false(self):
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+            x264_low_memory=False,
+        )
+        assert "--x264-low-memory" not in cmd
+
 
 class TestTruncateStatus:
     def test_short_string_unchanged(self):

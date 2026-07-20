@@ -620,3 +620,17 @@ class TestEncoderThreadsPosition:
                 f"but expected near end: {opts}"
             )
             assert opts[threads_idx + 1] == "2", f"{enc}: -threads value should be '2'"
+
+    def test_low_memory_adds_x264_params_only_for_libx264(self):
+        for enc in ("h264_mf", "h264_amf", "h264_nvenc"):
+            opts = encoder_opts(enc, "medium", x264_low_memory=True)
+            assert "-x264-params" not in opts, f"{enc}: low_memory should not affect HW encoders"
+        opts = encoder_opts("libx264", "medium", x264_low_memory=True)
+        assert "-x264-params" in opts
+        assert "rc-lookahead=10" in " ".join(opts)
+        assert "ref=1" in " ".join(opts)
+        assert "bframes=0" in " ".join(opts)
+
+    def test_low_memory_omitted_by_default(self):
+        opts = encoder_opts("libx264", "medium")
+        assert "-x264-params" not in opts
