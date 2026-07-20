@@ -1,6 +1,5 @@
 """stream2video GUI — cross-platform desktop application."""
 
-import json
 import logging
 import math
 import os
@@ -32,7 +31,6 @@ from stream2video.config import (
     VALID_METHODS,
     VALID_QUALITIES,
     VALID_THEMES,
-    coerce_typed_value,
     effective_defaults,
     save_user_defaults,
     settings_path,
@@ -65,6 +63,8 @@ from stream2video.gui_helpers import (
     truncate_status,
 )
 from stream2video.gui_log_handler import QueueHandler
+from stream2video.gui_settings import load_settings as _load_settings_from_disk
+from stream2video.gui_settings import save_settings as _save_settings_to_disk
 from stream2video.gui_widgets import Tooltip as _Tooltip
 from stream2video.paths import (
     RECENT_NAME_MAX,
@@ -2643,53 +2643,22 @@ class Stream2VideoGUI(ctk.CTk):
         self.config["per_video_dir"] = bool(self.chk_per_video_dir.get())
         self.config["theme"] = self.combo_theme.get()
         self.config["window_geometry"] = self.geometry()
+        # P2.6 / Этап 10: JSON write delegated to gui_settings so the
+        # serialisation is unit-testable without a Tk main loop.
         try:
-            path = self._settings_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(path.suffix + ".tmp")
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self.config, f, indent=2)
-            os.replace(str(tmp), str(path))
+            _save_settings_to_disk(self.config)
         except Exception as e:
             self._log(f"[WARN] Could not save settings: {e}")
 
     def _load_settings(self):
-        sp = self._settings_path()
-        if not sp.exists():
-            return
-        try:
-            with open(sp, encoding="utf-8") as f:
-                loaded = json.load(f)
-        except (OSError, json.JSONDecodeError) as e:
-            logger.warning("Failed to load settings: %s", e)
-            return
-        if not isinstance(loaded, dict):
-            logger.warning("Settings file is not a JSON object; ignoring")
-            return
+        # P2.6 / Этап 10: JSON read + validation delegated to
+        # gui_settings.load_settings so the type guards and the
+        # GUI_SESSION_KEYS handling are unit-testable without driving
+        # the Tk main loop. Returns a flat dict that the GUI merges
+        # into self.config.
+        loaded = _load_settings_from_disk()
         for key, value in loaded.items():
-            coerced = coerce_typed_value(key, value)
-            if coerced is not None:
-                self.config[key] = coerced
-            else:
-                logger.debug("Dropping settings[%r] with wrong type: %r", key, value)
-        # GUI-only session-state keys that aren't in CONFIG_DEFAULTS (so
-        # coerce_typed_value drops them above): ``input_path`` is the last
-        # submitted URL/local path; ``window_geometry`` is the
-        # "1080x680+24+42" string Tk's geometry() returns. Both are
-        # written by ``_save_settings`` and re-applied here directly so
-        # the GUI re-opens with the previous input and window size — they
-        # are intentionally not in CONFIG_DEFAULTS (they're session state,
-        # not user-tunable defaults, so the "Save current as defaults"
-        # button mustn't pick them up).
-        for gui_key, expected_type in (
-            ("input_path", str),
-            ("window_geometry", str),
-        ):
-            v = loaded.get(gui_key)
-            if isinstance(v, expected_type):
-                self.config[gui_key] = v
-            elif v is not None:
-                logger.debug("Dropping settings[%r] with wrong type: %r", gui_key, v)
+            self.config[key] = value
 
     def _restore_defaults(self):
         self.config = effective_defaults()
