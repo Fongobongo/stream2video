@@ -100,6 +100,9 @@ _AUDIO_BITRATES: dict[str, str] = {
 _AUDIO_SAMPLE_RATE = "48000"
 _AUDIO_CHANNELS = "2"
 _BATCH_CHUNK_SIZE = 40
+# Minimum chunk size used for small files that would produce too many
+# tiny chunks; also protects against zero-length chunk lists.
+_BATCH_CHUNK_MIN = 5
 ENCODER_CHECK_TIMEOUT = 10
 _FINAL_CONCAT_TIMEOUT = 86400
 _SEGMENT_ENCODE_TIMEOUT = 600
@@ -187,6 +190,7 @@ def cut_and_concat(
     output_fps: str = "source",
     memory_limit_mb: str | int = "auto",
     memory_reserve_mb: int = 2048,
+    x264_low_memory: bool = False,
 ) -> Path:
     if not video_path.exists():
         raise ConcatError(f"Input video not found: {video_path}")
@@ -207,6 +211,7 @@ def cut_and_concat(
         on_unavailable=fallback_consent,
         x264_preset=x264_preset,
         encoder_threads=encoder_threads,
+        x264_low_memory=x264_low_memory,
     )
     logger.info(f"Encoder: {vcodec} {vcodec_opts} (quality={video_quality})")
     _set_audio_quality(audio_quality)
@@ -238,6 +243,7 @@ def cut_and_concat(
         encoder_threads=encoder_threads,
         source_has_audio=source_has_audio,
         output_fps=output_fps,
+        x264_low_memory=x264_low_memory,
     )
 
     return output_path
@@ -286,11 +292,27 @@ def generate_keep_segments(
     return keep_segments
 
 
+def _x264_low_memory_opts() -> list[str]:
+    """Return extra x264 options that reduce peak memory usage.
+
+    These tune the lookahead, reference frames, and B-frame pyramid so
+    the encoder holds fewer frame buffers in RAM simultaneously. The
+    trade-off is slightly worse compression efficiency (larger file for
+    the same CRF), which is acceptable when the alternative is an OOM
+    kill on a memory-constrained machine.
+    """
+    return [
+        "-x264-params",
+        "rc-lookahead=10:ref=1:bframes=0",
+    ]
+
+
 def encoder_opts(
     encoder: str,
     quality: str = "medium",
     x264_preset: str = "medium",
     encoder_threads: str | int = "auto",
+    x264_low_memory: bool = False,
 ) -> list[str]:
     """Return the ffmpeg encoder options for ``encoder`` at ``quality`` preset.
 
@@ -308,6 +330,12 @@ def encoder_opts(
     constructed command (``-c:v libx264 ... -threads N``) so it applies to
     the encoder, not to the decoder (a ``-threads`` before ``-i`` would
     bound the decoder's thread pool instead — different effect).
+
+    ``x264_low_memory`` (libx264 only): when True, appends
+    ``-x264-params rc-lookahead=10:ref=1:bframes=0`` to reduce the
+    encoder's frame-buffer footprint. Useful on memory-constrained
+    machines (4-8 GB RAM) where a default-medium encode of a long
+    stream could push the process into swap.
     """
     if encoder not in VALID_ENCODERS:
         raise ConcatError(f"Unknown encoder {encoder!r} (known: {', '.join(VALID_ENCODERS)})")
@@ -361,7 +389,8 @@ def encoder_opts(
     # frame evaluations so an 8-core machine doesn't saturate to 100% on
     # a long encode.
     crf = _X264_CRF[quality]
-    return ["-crf", crf, "-preset", x264_preset, *threads_opt]
+    low_mem = _x264_low_memory_opts() if x264_low_memory else []
+    return ["-crf", crf, "-preset", x264_preset, *threads_opt, *low_mem]
 
 
 def _threads_opt(encoder_threads: str | int) -> list[str]:
@@ -483,6 +512,7 @@ def get_video_encoder(
     on_unavailable: Callable[[], bool] | None = None,
     x264_preset: str = "medium",
     encoder_threads: str | int = "auto",
+    x264_low_memory: bool = False,
 ) -> tuple[str, list[str]]:
     """Resolve the encoder to use for this run.
 
@@ -500,7 +530,8 @@ def get_video_encoder(
     ``x264_preset`` and ``encoder_threads`` are forwarded to
     :func:`encoder_opts` so the resolved options match the user's
     settings (also on a fallback retry — the fallback call site keeps
-    the same values).
+    the same values). ``x264_low_memory`` reduces x264 frame buffer
+    usage (see ``encoder_opts`` for details).
     """
     if preferred not in VALID_ENCODERS:
         raise ConcatError(f"Unknown encoder {preferred!r} (known: {', '.join(VALID_ENCODERS)})")
@@ -521,6 +552,7 @@ def get_video_encoder(
             video_quality,
             x264_preset=x264_preset,
             encoder_threads=encoder_threads,
+            x264_low_memory=x264_low_memory,
         )
 
     # HW encoder unavailable — apply fallback policy.
@@ -531,6 +563,7 @@ def get_video_encoder(
             video_quality,
             x264_preset=x264_preset,
             encoder_threads=encoder_threads,
+            x264_low_memory=x264_low_memory,
         )
     if software_fallback == "ask":
         if on_unavailable is None:
@@ -546,6 +579,7 @@ def get_video_encoder(
                 video_quality,
                 x264_preset=x264_preset,
                 encoder_threads=encoder_threads,
+                x264_low_memory=x264_low_memory,
             )
         raise EncoderUnavailableError(f"{preferred} not available; user declined libx264 fallback")
     # software_fallback == "disabled"
@@ -1241,6 +1275,7 @@ def _run_with_fallback(
     encoder_threads: str | int = "auto",
     source_has_audio: bool = True,
     output_fps: str = "source",
+    x264_low_memory: bool = False,
 ):
     """Run segment or batch concat with the primary encoder; fall back to libx264 on failure.
 
@@ -1308,6 +1343,7 @@ def _run_with_fallback(
         fallback_consent=fallback_consent,
         x264_preset=x264_preset,
         encoder_threads=encoder_threads,
+        x264_low_memory=x264_low_memory,
     )
 
 
@@ -1343,10 +1379,17 @@ def _run_batch_concat(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     total_duration = sum(e - s for s, e in keep_segments)
-    chunks = [
-        keep_segments[i : i + _BATCH_CHUNK_SIZE]
-        for i in range(0, len(keep_segments), _BATCH_CHUNK_SIZE)
-    ]
+    # Dynamic chunk size: scale down for large files to reduce per-chunk
+    # RAM, scale up for small files to keep chunks productive.
+    n_segs = len(keep_segments)
+    if n_segs > 200:
+        chunk_size = max(_BATCH_CHUNK_MIN, _BATCH_CHUNK_SIZE * 200 // n_segs)
+    elif n_segs > 100 and total_duration > 3600:
+        chunk_size = max(_BATCH_CHUNK_MIN, _BATCH_CHUNK_SIZE * 100 // n_segs)
+    else:
+        chunk_size = _BATCH_CHUNK_SIZE
+    chunk_size = max(_BATCH_CHUNK_MIN, min(chunk_size, _BATCH_CHUNK_SIZE))
+    chunks = [keep_segments[i : i + chunk_size] for i in range(0, n_segs, chunk_size)]
     n_chunks = len(chunks)
     logger.info(
         f"batch: {len(keep_segments)} segments in {n_chunks} chunks, "
@@ -1607,6 +1650,7 @@ def _with_libx264_fallback(
     fallback_consent: Callable[[], bool] | None = None,
     x264_preset: str = "medium",
     encoder_threads: str | int = "auto",
+    x264_low_memory: bool = False,
 ):
     """Run ``try_fn(primary_codec, primary_opts)``; on failure, retry once with libx264.
 
@@ -1630,6 +1674,8 @@ def _with_libx264_fallback(
     ``x264_preset`` / ``encoder_threads`` likewise follow the user's
     settings so the fallback respects the low-CPU intent for users who
     chose ``ultrafast`` + a thread cap to protect an unstable CPU.
+    ``x264_low_memory`` reduces the encoder's frame-buffer footprint
+    (see ``encoder_opts`` for details).
     """
     enc, enc_opts = primary_codec, primary_opts
     while True:
@@ -1660,6 +1706,7 @@ def _with_libx264_fallback(
                     video_quality,
                     x264_preset=x264_preset,
                     encoder_threads=encoder_threads,
+                    x264_low_memory=x264_low_memory,
                 ),
             )
             # The fallback reuses _audio_bitrate() / _audio_opts() which

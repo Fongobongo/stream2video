@@ -324,6 +324,13 @@ def main(
         "Lowering this reduces peak CPU at the cost of slower encode. If not "
         "passed, the config file's `encoder_threads` key is used.",
     ),
+    x264_low_memory: bool = typer.Option(
+        False,
+        "--x264-low-memory/--no-x264-low-memory",
+        help="Reduce x264's frame-buffer footprint via rc-lookahead=10, ref=1, "
+        "bframes=0. Produces slightly larger files but uses significantly less "
+        "RAM during encode. Useful on memory-constrained machines (4-8 GB).",
+    ),
     delete_after: bool | None = typer.Option(
         None,
         "--delete-after",
@@ -362,6 +369,21 @@ def main(
         help="Seconds of silence mid-download before killing yt-dlp (stalled "
         "connection watchdog). Default 1800s (30 min). Increase for very "
         "slow / unstable links where mid-download pauses are normal.",
+    ),
+    memory_limit_mb: str = typer.Option(
+        str(CONFIG_DEFAULTS["memory_limit_mb"]),
+        "--memory-limit-mb",
+        help="RAM budget for the encode pipeline: 'auto' (60%% of total RAM, "
+        "default) or a positive MB value. 0 disables the budget check (only "
+        "the OS reserve remains). If not passed, the config file's "
+        "`memory_limit_mb` key is used.",
+    ),
+    memory_reserve_mb: int = typer.Option(
+        CONFIG_DEFAULTS["memory_reserve_mb"],
+        "--memory-reserve-mb",
+        help="Hard floor of available RAM in MB that the pipeline never violates. "
+        "Default 2048 (2 GB). Raise on memory-constrained laptops. If not "
+        "passed, the config file's `memory_reserve_mb` key is used.",
     ),
 ):
     """
@@ -476,6 +498,51 @@ def main(
             return config.get("encoder_threads", "auto")
 
         resolved_encoder_threads: str | int = _resolved_encoder_threads(encoder_threads)
+
+        def _resolved_memory_limit_mb(flag_value: str) -> str | int:
+            src = ctx.get_parameter_source("memory_limit_mb")
+            if src == ParameterSource.COMMANDLINE:
+                v = flag_value.strip()
+                if v == "auto":
+                    return "auto"
+                try:
+                    n = int(v)
+                except (TypeError, ValueError) as e:
+                    console.print(
+                        f"[red]Invalid memory-limit-mb:[/red] {flag_value!r} "
+                        f"(use 'auto' or a non-negative integer)"
+                    )
+                    raise typer.Exit(1) from e
+                if n < 0:
+                    console.print(
+                        f"[red]Invalid memory-limit-mb:[/red] {n} (must be >= 0 or 'auto')"
+                    )
+                    raise typer.Exit(1)
+                return n
+            return config.get("memory_limit_mb", "auto")
+
+        resolved_memory_limit_mb: str | int = _resolved_memory_limit_mb(memory_limit_mb)
+
+        def _resolved_memory_reserve_mb(flag_value: int) -> int:
+            src = ctx.get_parameter_source("memory_reserve_mb")
+            if src == ParameterSource.COMMANDLINE:
+                if flag_value < 0:
+                    console.print(
+                        f"[red]Invalid memory-reserve-mb:[/red] {flag_value} (must be >= 0)"
+                    )
+                    raise typer.Exit(1)
+                return flag_value
+            return int(config.get("memory_reserve_mb", 2048))
+
+        resolved_memory_reserve_mb: int = _resolved_memory_reserve_mb(memory_reserve_mb)
+
+        def _resolved_x264_low_memory(flag_value: bool) -> bool:
+            src = ctx.get_parameter_source("x264_low_memory")
+            if src == ParameterSource.COMMANDLINE:
+                return flag_value
+            return bool(config.get("x264_low_memory", False))
+
+        resolved_x264_low_memory: bool = _resolved_x264_low_memory(x264_low_memory)
 
         def _resolved_bool(name: str, flag_value: bool | None) -> bool:
             src = ctx.get_parameter_source(name)
@@ -739,6 +806,9 @@ def main(
                     software_fallback=software_fallback,
                     x264_preset=x264_preset,
                     encoder_threads=resolved_encoder_threads,
+                    memory_limit_mb=resolved_memory_limit_mb,
+                    memory_reserve_mb=resolved_memory_reserve_mb,
+                    x264_low_memory=resolved_x264_low_memory,
                 )
 
                 progress.update(

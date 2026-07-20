@@ -41,6 +41,13 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     # commit limit behaviour for the System process; raise it on
     # memory-constrained laptops.
     "memory_reserve_mb": 2048,
+    # Reduce x264 frame-buffer footprint when True. Adds
+    # ``-x264-params rc-lookahead=10:ref=1:bframes=0`` to the encoder
+    # command, which trades slightly worse compression for significantly
+    # lower peak RAM during encode. Useful on memory-constrained machines
+    # (4-8 GB RAM) where a long libx264 encode would otherwise push the
+    # process into swap.
+    "x264_low_memory": False,
     # Download watchdog timeouts (P1.6). Absolute ceiling + two-stage
     # watchdog so a stalled connection doesn't wait the full ceiling.
     # Exposed via --download-timeout / --connect-timeout /
@@ -117,6 +124,7 @@ USER_DEFAULT_KEYS: list[str] = [
     "output_fps",
     "memory_limit_mb",
     "memory_reserve_mb",
+    "x264_low_memory",
     "download_timeout",
     "connect_timeout",
     "no_progress_timeout",
