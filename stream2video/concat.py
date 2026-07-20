@@ -956,6 +956,67 @@ def _ffprobe_is_valid_mp4(path: Path) -> bool:
     return r.returncode == 0 and bool(r.stdout.strip())
 
 
+def _run_final_concat(
+    work_dir: Path,
+    output_path: Path,
+    part_paths: list[Path],
+    *,
+    total_duration: float,
+    progress_callback: Callable[[float], None] | None,
+    cancel_callback: Callable[[], bool] | None,
+    label: str,
+) -> None:
+    """Build ``concat.txt`` and run the final concat-demuxer pass.
+
+    Shared by ``_run_segment_concat`` and ``_run_batch_concat`` (P2.6).
+    Both methods previously had identical 30-line blocks here: open
+    ``concat.txt``, write one ``file <name>`` line per part, run
+    ``ffmpeg -f concat -safe 0 -i ... -c copy -fflags +genpts``,
+    cleanup. The only real differences were the part filename pattern
+    (``seg_NNNNNN.mp4`` vs ``chunk_NNNN.mp4``) and the label string;
+    both are now parameters so the body lives once.
+
+    The progress callback maps ffmpeg's ``out_time_us`` (which reflects
+    output time across the whole concat, not per-segment) to the last
+    10% of the overall progress bar — both call sites reserve 0..0.9
+    for the per-segment encodes and 0.9..1.0 for this final concat.
+    """
+    list_path = work_dir / "concat.txt"
+    with open(list_path, "w", encoding="utf-8") as lf:
+        for part in part_paths:
+            lf.write(f"file {_quote_concat_path(part.name)}\n")
+
+    def _concat_prog(us: int):
+        if progress_callback and total_duration > 0:
+            progress_callback(min(us / 1_000_000 / total_duration * 0.1, 0.1) + 0.9)
+
+    _run_ffmpeg(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-progress",
+            "pipe:1",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(list_path),
+            "-c",
+            "copy",
+            "-fflags",
+            "+genpts",
+            str(output_path),
+        ],
+        progress_callback=_concat_prog,
+        timeout=_FINAL_CONCAT_TIMEOUT,
+        label=label,
+        cancel_callback=cancel_callback,
+    )
+
+
 def _run_segment_concat(
     video_path: Path,
     keep_segments: list[tuple[float, float]],
@@ -1141,41 +1202,16 @@ def _run_segment_concat(
                 f"segment: resumed {skipped}/{n_segs} already encoded, encoded {n_segs - skipped}"
             )
 
-        # Build concat list
-        list_path = seg_dir / "concat.txt"
-        with open(list_path, "w", encoding="utf-8") as lf:
-            for i in range(n_segs):
-                sp = seg_dir / f"seg_{i:06d}.mp4"
-                lf.write(f"file {_quote_concat_path(sp.name)}\n")
-
-        def _concat_prog(us: int):
-            if progress_callback and total_duration > 0:
-                progress_callback(min(us / 1_000_000 / total_duration * 0.1, 0.1) + 0.9)
-
-        _run_ffmpeg(
-            [
-                "ffmpeg",
-                "-y",
-                "-loglevel",
-                "error",
-                "-progress",
-                "pipe:1",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(list_path),
-                "-c",
-                "copy",
-                "-fflags",
-                "+genpts",
-                str(output_path),
-            ],
-            progress_callback=_concat_prog,
-            timeout=_FINAL_CONCAT_TIMEOUT,
-            label="segment concat",
+        # Final concat demuxer pass — shared with _run_batch_concat (P2.6).
+        part_paths = [seg_dir / f"seg_{i:06d}.mp4" for i in range(n_segs)]
+        _run_final_concat(
+            seg_dir,
+            output_path,
+            part_paths,
+            total_duration=total_duration,
+            progress_callback=progress_callback,
             cancel_callback=cancel_callback,
+            label="segment concat",
         )
         logger.info(f"Successfully created output: {output_path}")
 
@@ -1537,41 +1573,16 @@ def _run_batch_concat(
                 f"batch: resumed {skipped}/{n_chunks} already encoded, encoded {n_chunks - skipped}"
             )
 
-        # Concat all chunk files
-        list_path = batch_dir / "concat.txt"
-        with open(list_path, "w", encoding="utf-8") as lf:
-            for ci in range(n_chunks):
-                cp = batch_dir / f"chunk_{ci:04d}.mp4"
-                lf.write(f"file {_quote_concat_path(cp.name)}\n")
-
-        def _concat_prog(us: int):
-            if progress_callback and total_duration > 0:
-                progress_callback(min(us / 1_000_000 / total_duration * 0.1, 0.1) + 0.9)
-
-        _run_ffmpeg(
-            [
-                "ffmpeg",
-                "-y",
-                "-loglevel",
-                "error",
-                "-progress",
-                "pipe:1",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(list_path),
-                "-c",
-                "copy",
-                "-fflags",
-                "+genpts",
-                str(output_path),
-            ],
-            progress_callback=_concat_prog,
-            timeout=_FINAL_CONCAT_TIMEOUT,
-            label="batch concat",
+        # Final concat demuxer pass — shared with _run_segment_concat (P2.6).
+        part_paths = [batch_dir / f"chunk_{ci:04d}.mp4" for ci in range(n_chunks)]
+        _run_final_concat(
+            batch_dir,
+            output_path,
+            part_paths,
+            total_duration=total_duration,
+            progress_callback=progress_callback,
             cancel_callback=cancel_callback,
+            label="batch concat",
         )
         logger.info(f"batch: successfully created {output_path}")
 
