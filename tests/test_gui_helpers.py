@@ -14,6 +14,7 @@ from stream2video.gui_helpers import (
     STATUS_MAX,
     STATUS_UPDATE_INTERVAL,
     build_cli_command,
+    build_completion_summary,
     build_download_status,
     build_eta_tail,
     build_overall_line,
@@ -252,3 +253,65 @@ class TestShouldUpdateStatus:
         # 10s interval — a 5s gap shouldn't pass.
         assert should_update_status(100.0, 105.0, interval=10.0) is False
         assert should_update_status(100.0, 111.0, interval=10.0) is True
+
+
+class TestBuildCompletionSummary:
+    def test_status_has_complete_and_pipeline_time(self):
+        s = build_completion_summary(
+            src_size_bytes=100_000_000,
+            src_duration=3600.0,
+            dst_size_bytes=20_000_000,
+            dst_duration=2700.0,
+            pipeline_seconds=600.0,
+            output_path="/tmp/out.mp4",
+        )
+        assert s["status"].startswith("Complete!")
+        assert "10m" in s["status"]  # 600s = 10m
+
+    def test_log_lines_have_separator_and_output_path(self):
+        s = build_completion_summary(
+            src_size_bytes=100,
+            src_duration=10.0,
+            dst_size_bytes=50,
+            dst_duration=8.0,
+            pipeline_seconds=2.0,
+            output_path="/tmp/myfile.mp4",
+        )
+        lines = s["log_lines"]
+        # First and last lines are the '======' separator.
+        assert lines[0] == "=" * 60
+        assert lines[-1] == "=" * 60
+        # Output path is mentioned in the SUCCESS line.
+        success_lines = [ln for ln in lines if "[SUCCESS]" in ln]
+        assert len(success_lines) == 1
+        assert "/tmp/myfile.mp4" in success_lines[0]
+
+    def test_popup_contains_size_duration_and_path(self):
+        s = build_completion_summary(
+            src_size_bytes=100,
+            src_duration=10.0,
+            dst_size_bytes=50,
+            dst_duration=8.0,
+            pipeline_seconds=2.0,
+            output_path="/tmp/myfile.mp4",
+        )
+        popup = s["popup"]
+        assert "/tmp/myfile.mp4" in popup
+        assert "Source:" in popup
+        assert "Output:" in popup
+        assert "Pipeline:" in popup
+
+    def test_handles_none_src_duration(self):
+        # src_duration=None can happen when the source video couldn't
+        # be probed; fmt_clock_time handles None.
+        s = build_completion_summary(
+            src_size_bytes=100,
+            src_duration=None,
+            dst_size_bytes=50,
+            dst_duration=8.0,
+            pipeline_seconds=2.0,
+            output_path="/tmp/out.mp4",
+        )
+        # Should not crash; the popup just shows "—" or similar for
+        # the source duration.
+        assert "Source:" in s["popup"]
