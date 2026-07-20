@@ -42,6 +42,7 @@ def build_cli_command(
     x264_preset: str = "medium",
     encoder_threads: str | int = "auto",
     output_fps: str = "source",
+    x264_low_memory: bool = False,
     force: bool = False,
     delete_after: bool = False,
     config_path: Path | None = None,
@@ -89,6 +90,8 @@ def build_cli_command(
         parts.extend(["--encoder-threads", str(encoder_threads)])
     if output_fps != "source":
         parts.extend(["--output-fps", output_fps])
+    if x264_low_memory:
+        parts.append("--x264-low-memory")
     if force:
         parts.append("-f")
     if delete_after:

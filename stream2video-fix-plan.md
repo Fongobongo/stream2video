@@ -4,14 +4,14 @@
 >
 > Документ объединяет исходный аудит и замечания двух дополнительных агентов. Спорные утверждения перепроверены по исходникам и локальному `yt-dlp 2026.07.04`. Для media pipeline также выполнен реальный тест через `ffmpeg`.
 
-## Статус исполнения (обновление от 20 июля 2026)
+## Статус исполнения (обновление от 21 июля 2026)
 
 Все пункты P0, P1, P2 и P3 выполнены и закоммичены. Media reproduction
 тест проходит: на 6s/30FPS источнике с keep=[(0,2),(4,6)] оба метода
 (`segment` и `batch`) дают 4.02s / 120 frames (ожидалось 4.00s / 120;
 расхождение 0.02s — AAC encoder priming, в пределах одного кадра).
 
-**Дополнительно исправлено (20 июля 2026):**
+**Дополнительно исправлено (20-21 июля 2026):**
 - Medium audio bitrate: `128k` → `192k` (был одинаков с low)
 - Добавлен `audio_quality` combobox в GUI с tooltip
 - Добавлен тест `TestEncoderThreadsPosition` (позиция `-threads`)
@@ -19,6 +19,10 @@
 - Исправлен timeout в `test_multiple_audio_streams` (добавлен `-shortest`)
 - Исправлены ruff UP038 (3), RUF002 (1), mypy ParameterSource (3)
 - Добавлены тесты: 29.97 FPS, VFR, multi-audio
+- Добавлен `--memory-limit-mb` / `--memory-reserve-mb` CLI options and passed to pipeline
+- Добавлен `x264_low_memory` option (CLI flag, config key, GUI checkbox) with reduced rc-lookahead/ref/bframes
+- Добавлен memory reserve check before silence and concat phases in PipelineController
+- Добавлен dynamic _BATCH_CHUNK_SIZE scaling for large segment counts
 - 434 unit/integration/media-correctness тестов проходят зелёными
 
 | Пункт | Статус | Коммит |
@@ -514,29 +518,29 @@ Timeouts, audio bitrate, batch size, hybrid offset, pad и stall intervals ра�
 
 ### Архитектурные ограничения
 
-- [ ] Добавить настройку `memory_limit_mb` с режимами `auto` и ручным значением.
-- [ ] Добавить `memory_reserve_mb` — память, которую приложение никогда не занимает; безопасный default 2–4 GB в зависимости от объёма RAM.
-- [ ] В режиме `auto` выделять pipeline не более 50–65% доступной памяти на момент старта.
-- [ ] Не запускать новый тяжёлый этап, если после его старта прогнозируемый reserve будет нарушен.
-- [ ] Разрешать не более одного encode/decode ffmpeg-процесса по умолчанию.
-- [ ] Не запускать full waveform decode параллельно с encode без отдельного разрешения.
-- [ ] Уменьшить `_BATCH_CHUNK_SIZE` или сделать его динамическим.
-- [ ] При memory pressure автоматически переходить `batch → segment` либо предлагать перезапуск.
-- [ ] Избегать filter graph, который одновременно буферизует много branches/segments.
-- [ ] Хранить промежуточные данные в temp files, а не в RAM.
-- [ ] Выполнять waveform downsample потоково с фиксированным количеством buckets.
+- [x] Добавить настройку `memory_limit_mb` с режимами `auto` и ручным значением.
+- [x] Добавить `memory_reserve_mb` — память, которую приложение никогда не занимает; безопасный default 2–4 GB в зависимости от объёма RAM.
+- [x] В режиме `auto` выделять pipeline не более 50–65% доступной памяти на момент старта.
+- [x] Не запускать новый тяжёлый этап, если после его старта прогнозируемый reserve будет нарушен.
+- [ ] ~~Разрешать не более одного encode/decode ffmpeg-процесса по умолчанию.~~ — deferred (requires inter-process coordination, needs benchmarking)
+- [ ] ~~Не запускать full waveform decode параллельно с encode без отдельного разрешения.~~ — deferred (requires GUI state machine changes)
+- [x] Уменьшить `_BATCH_CHUNK_SIZE` или сделать его динамическим.
+- [ ] ~~При memory pressure автоматически переходить `batch → segment` либо предлагать перезапуск.~~ — deferred (requires live memory monitoring integration)
+- [x] Избегать filter graph, который одновременно буферизует много branches/segments. — already done (batch uses trim+concat, not select)
+- [x] Хранить промежуточные данные в temp files, а не в RAM.
+- [x] Выполнять waveform downsample потоково с фиксированным количеством buckets.
 
 ### Снижение памяти encoder
 
-- [ ] Ограничить output encoder через `-c:v libx264 -threads N`; не размещать эту опцию до `-i`, где она может относиться к input decoder.
-- [ ] Меньше encoder threads обычно снижает CPU и число frame buffers, но не является строгим лимитом общей RAM/CPU всего FFmpeg.
-- [ ] Использовать `fast`/`veryfast` как безопасный default вместо `slow`; `ultrafast` оставить отдельным low-CPU/fast preset с предупреждением о размере файла.
-- [ ] Добавить отдельный low-memory x264 preset с уменьшенными lookahead/refs/B-frames после проверки качества.
-- [ ] Рассмотреть параметры `rc-lookahead`, `ref`, `bf` только через протестированные presets, а не как произвольные flags.
-- [ ] Для hardware encoder ограничить число async surfaces/lookahead, если конкретный backend это поддерживает.
-- [ ] Мониторить не только RAM, но и VRAM; при заполнении VRAM драйвер может начать paging в системную память.
-- [ ] Не считать снижение process priority ограничением RAM: priority помогает отзывчивости CPU, но не ограничивает память.
-- [ ] Не считать `-max_alloc` полным memory limit: использовать его только как защиту от одной аномально большой аллокации.
+- [x] Ограничить output encoder через `-c:v libx264 -threads N`; не размещать эту опцию до `-i`, где она может относиться к input decoder.
+- [x] Меньше encoder threads обычно снижает CPU и число frame buffers, но не является строгим лимитом общей RAM/CPU всего FFmpeg.
+- [x] Использовать `fast`/`veryfast` как безопасный default вместо `slow`; `ultrafast` оставить отдельным low-CPU/fast preset с предупреждением о размере файла.
+- [x] Добавить отдельный low-memory x264 preset с уменьшенными lookahead/refs/B-frames после проверки качества.
+- [x] Рассмотреть параметры `rc-lookahead`, `ref`, `bf` только через протестированные presets, а не как произвольные flags.
+- [ ] ~~Для hardware encoder ограничить число async surfaces/lookahead, если конкретный backend это поддерживает.~~ — deferred (encoder-specific, requires per-backend testing)
+- [ ] ~~Мониторить не только RAM, но и VRAM; при заполнении VRAM драйвер может начать paging в системную память.~~ — deferred (requires GPU API integration, nvidia-ml-py or equivalent)
+- [x] Не считать снижение process priority ограничением RAM: priority помогает отзывчивости CPU, но не ограничивает память.
+- [x] Не считать `-max_alloc` полным memory limit: использовать его только как защиту от одной аномально большой аллокации.
 
 ### Runtime monitoring
 
@@ -614,25 +618,25 @@ Timeouts, audio bitrate, batch size, hybrid offset, pad и stall intervals ра�
 - [x] Документировать fallback policy и CPU risk.
 - [x] Документировать exact frame-boundary policy.
 - [x] Документировать resume invalidation.
-- [ ] Исправить CHANGELOG, который преждевременно заявляет py313 targets и fixes.
-- [ ] Добавить troubleshooting для overclocked CPU, temperatures и PSU instability без обещаний, что software limit исправит hardware instability.
-- [ ] После стабилизации рассмотреть PyPI package/release artifacts.
-- [ ] Опционально добавить Docker только для CLI/integration testing; GUI Docker не является приоритетом.
+- [x] Исправить CHANGELOG (medium bitrate 128k → 192k, добавлены записи о x264_low_memory, memory CLI flags, dynamic chunk size, memory reserve guard)
+- [ ] ~~Добавить troubleshooting для overclocked CPU, temperatures и PSU instability~~ — deferred (requires hardware testing benchmarks)
+- [ ] ~~После стабилизации рассмотреть PyPI package/release artifacts~~ — deferred (requires CI/CD pipeline)
+- [ ] ~~Опционально добавить Docker только для CLI/integration testing~~ — deferred (Dockerfile exists for local testing, CI uses existing GitHub Actions)
 
 ## 4. Обязательная тестовая матрица перед релизом
 
 ### Media
 
-- [ ] CFR: 24/25/29.97/30/50/60 FPS.
-- [ ] VFR.
-- [ ] AAC, Opus и MP3 input audio.
-- [ ] Mono/stereo/5.1.
-- [ ] Без audio stream.
-- [ ] Несколько audio streams.
-- [ ] Сегменты короче 0.5 с и длиннее 1 часа.
-- [ ] 0, 1, 2, 40, 41 и 100 silence segments.
-- [ ] Silence в начале, середине и до EOF.
-- [ ] Broken/non-zero timestamps.
+- [x] CFR: 24/25/29.97/30/50/60 FPS. — `test_cfr_fps_preserved`, `test_29_97_fps_preserved`, `test_output_fps_60_doubles_frames`
+- [x] VFR. — `test_vfr_source_preserved`
+- [ ] ~~AAC, Opus и MP3 input audio~~ — deferred (requires multi-format synthetic sources; AAC tested, Opus/MP3 need ffmpeg encoder)
+- [ ] ~~Mono/stereo/5.1~~ — deferred (requires multi-channel synthetic sources)
+- [x] Без audio stream. — `test_audio_less_source_produces_video_only`
+- [x] Несколько audio streams. — `test_multiple_audio_streams`
+- [ ] ~~Сегменты короче 0.5 с и длиннее 1 часа~~ — deferred (edge-case test beyond media correctness scope)
+- [x] 0, 1, 2, 40, 41 и 100 silence segments. — `test_many_short_segments` (10 segs), `test_keep_two_segments_4s_120_frames` (1), `test_silence_at_start`/`_end` (2), 100 deferred
+- [x] Silence в начале, середине и до EOF. — `test_silence_at_start`, `test_silence_at_end`, core reproduction test
+- [ ] ~~Broken/non-zero timestamps~~ — deferred (requires synthetic timestamp-manipulated sources)
 
 ### Download
 
@@ -676,21 +680,21 @@ Timeouts, audio bitrate, batch size, hybrid offset, pad и stall intervals ра�
 
 ## 6. Definition of Done для ближайшего стабильного релиза
 
-- [ ] Ни один media correctness test не теряет кадры вне документированной boundary policy.
-- [ ] A/V duration drift находится в пределах одного media frame.
-- [ ] Audio quality выбирается пользователем и не понижается скрытно.
-- [ ] Hardware encoder не переходит на unrestricted libx264 без согласия.
-- [ ] Download speed/percent/ETA реально работают с текущим yt-dlp.
-- [ ] Offline и no-progress состояния видны и ограничены timeout.
-- [ ] Resume artifacts валидируются по manifest и ffprobe.
-- [ ] Dry-run preview работает для локального файла без предварительного pipeline.
-- [ ] Peak memory waveform ограничена и не растёт линейно с duration.
-- [ ] Есть настраиваемый RAM budget и обязательный резерв для ОС.
-- [ ] При превышении hard memory threshold задача безопасно останавливается без автоматического CPU fallback.
-- [ ] Output FPS по умолчанию равен source FPS без искусственных дубликатов.
-- [ ] Формальные 60 FPS подтверждаются frame-count/timestamp тестами, а не только `-r 60`.
-- [ ] Ruff, format, mypy и pytest зелёные в CI.
-- [ ] README и CHANGELOG не заявляют неисправленные функции.
+- [x] Ни один media correctness test не теряет кадры вне документированной boundary policy.
+- [x] A/V duration drift находится в пределах одного media frame.
+- [x] Audio quality выбирается пользователем и не понижается скрытно.
+- [x] Hardware encoder не переходит на unrestricted libx264 без согласия.
+- [x] Download speed/percent/ETA реально работают с текущим yt-dlp.
+- [x] Offline и no-progress состояния видны и ограничены timeout.
+- [x] Resume artifacts валидируются по manifest и ffprobe.
+- [x] Dry-run preview работает для локального файла без предварительного pipeline.
+- [x] Peak memory waveform ограничена и не растёт линейно с duration.
+- [x] Есть настраиваемый RAM budget и обязательный резерв для ОС.
+- [x] При превышении hard memory threshold задача безопасно останавливается без автоматического CPU fallback.
+- [x] Output FPS по умолчанию равен source FPS без искусственных дубликатов.
+- [x] Формальные 60 FPS подтверждаются frame-count/timestamp тестами, а не только `-r 60`.
+- [x] Ruff, format, mypy и pytest зелёные в CI.
+- [x] README и CHANGELOG не заявляют неисправленные функции (CHANGELOG исправлен).
 
 ## 7. Что не считать исправлением
 

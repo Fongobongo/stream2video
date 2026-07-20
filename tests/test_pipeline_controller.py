@@ -58,6 +58,7 @@ def _valid_config(**overrides) -> PipelineConfig:
         "download_timeout": 28800,
         "connect_timeout": 300,
         "no_progress_timeout": 1800,
+        "x264_low_memory": False,
     }
     defaults.update(overrides)
     return PipelineConfig(**defaults)
@@ -102,6 +103,7 @@ class TestPipelineConfig:
             "download_timeout",
             "connect_timeout",
             "no_progress_timeout",
+            "x264_low_memory",
         }
         assert set(cfg.__dataclass_fields__.keys()) == expected
 

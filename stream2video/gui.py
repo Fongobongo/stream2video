@@ -508,6 +508,14 @@ class Stream2VideoGUI(ctk.CTk):
             self.chk_per_video_dir.select()
         self.chk_per_video_dir.pack(anchor="w", padx=5, pady=(4, 1))
 
+        self.chk_x264_low_memory = ctk.CTkCheckBox(
+            ctrl_frame,
+            text="Low-memory x264 (reduces RAM, slightly larger file)",
+        )
+        if self.config.get("x264_low_memory", False):
+            self.chk_x264_low_memory.select()
+        self.chk_x264_low_memory.pack(anchor="w", padx=5, pady=(4, 1))
+
         ctk.CTkFrame(ctrl_frame, height=2, fg_color=("gray70", "gray30")).pack(
             fill="x", padx=5, pady=4
         )
@@ -1583,6 +1591,7 @@ class Stream2VideoGUI(ctk.CTk):
             margin=float(self.config["margin"]),
             memory_limit_mb=self.config.get("memory_limit_mb", "auto"),
             memory_reserve_mb=self.config.get("memory_reserve_mb", 2048),
+            x264_low_memory=self.config.get("x264_low_memory", False),
             download_timeout=self.config.get("download_timeout", 28800),
             connect_timeout=self.config.get("connect_timeout", 300),
             no_progress_timeout=self.config.get("no_progress_timeout", 1800),
@@ -2404,6 +2413,7 @@ class Stream2VideoGUI(ctk.CTk):
         self.config["force"] = bool(self.chk_force.get())
         self.config["delete_after"] = bool(self.chk_delete.get())
         self.config["per_video_dir"] = bool(self.chk_per_video_dir.get())
+        self.config["x264_low_memory"] = bool(self.chk_x264_low_memory.get())
         self.config["theme"] = self.combo_theme.get()
         self.config["window_geometry"] = self.geometry()
         # P2.6 / Этап 10: JSON write delegated to gui_settings so the
@@ -2439,6 +2449,7 @@ class Stream2VideoGUI(ctk.CTk):
         self._set_checkbox(self.chk_force, self.config["force"])
         self._set_checkbox(self.chk_delete, self.config["delete_after"])
         self._set_checkbox(self.chk_per_video_dir, self.config["per_video_dir"])
+        self._set_checkbox(self.chk_x264_low_memory, self.config.get("x264_low_memory", False))
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
         win_w, win_h = self._fit_to_screen(sw, sh)
@@ -2497,6 +2508,7 @@ class Stream2VideoGUI(ctk.CTk):
             "force": bool(self.chk_force.get()),
             "delete_after": bool(self.chk_delete.get()),
             "per_video_dir": bool(self.chk_per_video_dir.get()),
+            "x264_low_memory": bool(self.chk_x264_low_memory.get()),
             "theme": self.combo_theme.get(),
         }
         try:
@@ -2517,6 +2529,7 @@ class Stream2VideoGUI(ctk.CTk):
         download_quality = self.combo_download_quality.get()
         force = bool(self.chk_force.get())
         delete_after = bool(self.chk_delete.get())
+        x264_low_memory = bool(self.chk_x264_low_memory.get())
 
         out_path = Path(out_raw).expanduser()
         config_path = None
@@ -2548,6 +2561,7 @@ class Stream2VideoGUI(ctk.CTk):
             download_quality=download_quality,
             force=force,
             delete_after=delete_after,
+            x264_low_memory=x264_low_memory,
             config_path=config_path,
         )
         self.clipboard_clear()

@@ -48,6 +48,7 @@ from stream2video.download import (
     download,
 )
 from stream2video.formatters import fmt_size, fmt_time
+from stream2video.memory import _available_ram_mb
 from stream2video.paths import apply_per_video_dir
 from stream2video.silence import (
     SilenceCancelledError,
@@ -60,6 +61,36 @@ from stream2video.silence import (
 from stream2video.utils import get_video_duration
 
 logger = logging.getLogger(__name__)
+
+_MEMORY_POLL_INTERVAL = 2.0
+
+
+def _check_memory_reserve(
+    cfg_memory_reserve_mb: int,
+    phase_name: str,
+    on_log: Callable[[str], None],
+) -> bool:
+    """Check if available RAM is above the reserve. Return True if OK.
+
+    Logs a warning when the reserve is tight and returns False when
+    the reserve is already violated so the caller can refuse to start
+    the next heavy stage.
+    """
+    avail = _available_ram_mb()
+    if avail is None:
+        return True
+    if avail < cfg_memory_reserve_mb * 1.5:
+        on_log(
+            f"[WARN] Available RAM {avail:.0f} MB is tight "
+            f"(reserve={cfg_memory_reserve_mb} MB) — {phase_name} may be risky."
+        )
+    if avail < cfg_memory_reserve_mb:
+        on_log(
+            f"[ERROR] Available RAM {avail:.0f} MB is below reserve "
+            f"{cfg_memory_reserve_mb} MB — refusing to start {phase_name}."
+        )
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -92,6 +123,7 @@ class PipelineConfig:
     margin: float
     memory_limit_mb: str | int
     memory_reserve_mb: int
+    x264_low_memory: bool
     download_timeout: int
     connect_timeout: int
     no_progress_timeout: int
@@ -227,9 +259,29 @@ class PipelineController:
             video_path, src_size_bytes, src_duration = self._run_download_phase()
             if self.cancel_event.is_set():
                 raise PipelineCancelled("cancelled between download and silence")
+            if not _check_memory_reserve(
+                self.cfg.memory_reserve_mb,
+                "silence detection",
+                self.cb.on_log,
+            ):
+                raise PipelineSilenceError(
+                    f"Available RAM below reserve ({self.cfg.memory_reserve_mb} MB) — "
+                    "cannot start silence detection. Close other applications or "
+                    "reduce --memory-reserve-mb."
+                )
             silence_segments = self._run_silence_phase(video_path)
             if self.cancel_event.is_set():
                 raise PipelineCancelled("cancelled between silence and concat")
+            if not _check_memory_reserve(
+                self.cfg.memory_reserve_mb,
+                "concat phase",
+                self.cb.on_log,
+            ):
+                raise PipelineConcatError(
+                    f"Available RAM below reserve ({self.cfg.memory_reserve_mb} MB) — "
+                    "cannot start concat phase. Close other applications or "
+                    "reduce --memory-reserve-mb."
+                )
             keep_segments = generate_keep_segments(video_path, silence_segments)
             keep_dur = sum(e - s for s, e in keep_segments)
             output_path = self._run_concat_phase(video_path, silence_segments, keep_dur)
@@ -473,6 +525,7 @@ class PipelineController:
             output_fps=self.cfg.output_fps,
             memory_limit_mb=self.cfg.memory_limit_mb,
             memory_reserve_mb=self.cfg.memory_reserve_mb,
+            x264_low_memory=self.cfg.x264_low_memory,
         )
 
         self._output_path = None
