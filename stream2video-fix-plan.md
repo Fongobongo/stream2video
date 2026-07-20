@@ -23,7 +23,7 @@
 - Добавлен `x264_low_memory` option (CLI flag, config key, GUI checkbox) with reduced rc-lookahead/ref/bframes
 - Добавлен memory reserve check before silence and concat phases in PipelineController
 - Добавлен dynamic _BATCH_CHUNK_SIZE scaling for large segment counts
-- 434 unit/integration/media-correctness тестов проходят зелёными
+- 440 unit/integration/media-correctness тестов проходят зелёными (3 skipped — platform-specific)
 
 | Пункт | Статус | Коммит |
 | --- | --- | --- |
@@ -52,7 +52,7 @@
 | P1.16 dry-run preview (detect_silence_stream) | ✅ | 55084ba |
 | P1.17 FPS policy + RAM budget + memory monitor | ✅ | bd9ef06 + 969d0d5 |
 | Этап 8A RAM/VRAM limits + OS guardrails | ✅ базовая инфраструктура | bd9ef06 |
-| P2.1 gui.py monolith (2884 → 2351 строк; 8 модулей extracted; PipelineController.run() wired) | ✅ частично | 993bdbf + c6e97a7 + bd1b802 + b0be872 + f4b62dd + 6c885fb + 90a64e4 |
+| P2.1 gui.py monolith (2884 → 2378 строк; 8 модулей extracted; PipelineController.run() wired) | ✅ частично | 993bdbf + c6e97a7 + bd1b802 + b0be872 + f4b62dd + 6c885fb + 90a64e4 |
 | P2.2 GUI/pipeline tests (pure helpers + settings I/O + SubprocessRunner + SilenceParser + 9 GUI widget smoke tests + 19 pipeline controller orchestration tests) | ✅ near-complete | c6e97a7 + bd1b802 + 1c7a11a + 6c885fb + 90a64e4 |
 | P2.3 media correctness regression tests (24 тест: CFR matrix 24/25/29.97/30/50/60, silence@start/end, 10 segments, VFR, multi-audio, audio_quality, output_fps=60, audio-less) | ✅ | 8184d08 + (current) |
 | P2.4 shared SubprocessRunner (context manager: Popen + drain + cancel + cleanup) + 8 unit tests | ✅ | 4130d78 |
@@ -73,6 +73,8 @@
 | P3.2 mypy check_untyped_defs=true | ✅ | 26e89fa |
 | P3.3 ruff format --check зелёный | ✅ | 26e89fa |
 | Этап 12 Dockerfile для локальной проверки на Windows (не для CI — существующий GitHub Actions уже покрывает) | ✅ | 789447f |
+| P3.4 централизация жёстких констант в CONFIG_DEFAULTS (timeouts, batch size, hybrid offset, audio pad, stall intervals) | ⏸ deferred | — |
+| Documentation sync (cli.py helptext + concat.py docstring + README: medium 128k → 192k после P0.3) | ✅ | (current) |
 
 ### Что НЕ сделано (намеренно отложено)
 
@@ -84,7 +86,7 @@ pure-логика → `gui_helpers.py` (32 теста), settings I/O →
 (15 тестов), `SubprocessRunner` → `utils.py` (8 тестов),
 `SilenceParser` → `silence.py`, `_run_final_concat` shared,
 `PipelineController.run()` extracted and wired to GUI (19 тестов).
-9 GUI widget smoke tests. gui.py: 2884 → 2351 строк (-533, -18.5%).
+9 GUI widget smoke tests. gui.py: 2884 → 2378 строк (-506, -17.5%).
 Полный перенос `Stream2VideoGUI` на package лучше делать отдельным PR
 после добавления pytest-qt. Добавлен `audio_quality` combobox (был
 только в config, не в GUI).
@@ -105,6 +107,18 @@ tests, 19 pipeline controller orchestration tests. Полное event-loop
 - Тест 100 keep segments — deferred (10 segments test покрывает boundary)
 - Текстовый список cut/keep интервалов в waveform — UX improvement, deferred
 - Полный memory stress test на 4-32 GB — требует CI matrix
+
+**P3.4 централизация жёстких констант в `CONFIG_DEFAULTS`** — deferred.
+Часть таймаутов уже в config (`download_timeout` / `connect_timeout` /
+`no_progress_timeout` / `memory_limit_mb` / `memory_reserve_mb`).
+Остаются module-level: `_SEGMENT_ENCODE_TIMEOUT`, `_FINAL_CONCAT_TIMEOUT`,
+`_STALL_KILL` / `_STALL_WARNING`, `_BATCH_CHUNK_SIZE` / `_BATCH_CHUNK_MIN`,
+`_HYBRID_SEEK_OFFSET`, `_AUDIO_PAD`, `_SILENCE_TIMEOUT`,
+`_WAVEFORM_TIMEOUT`, `_RESUME_THROTTLE_*`. Полный перенос требует
+validation ranges, CLI flags, GUI exposure и тестов для каждой
+константы — лучше делать отдельным PR (затрагивает 6 модулей и
+конфигурационный API), не нарушая замысла «не торопить
+архитектурные изменения».
 
 
 ## 1. Проверенные выводы
@@ -596,7 +610,7 @@ Timeouts, audio bitrate, batch size, hybrid offset, pad и stall intervals ра�
 - [x] Создать общий concat finalizer (`_run_final_concat`) и resume validator (`_ensure_fresh_work_dir`, `_ffprobe_is_valid_mp4`).
 - [x] Убрать import-time `logging.basicConfig()` из `cli.py`.
 - [x] Удалить дубли и мёртвые doc refs (P2.10).
-- [x] gui.py: 2884 → 2351 строк.
+- [x] gui.py: 2884 → 2378 строк.
 - [x] Добавлен audio_quality combobox (был только в config, не в GUI).
 
 ## Этап 11 — typing, lint и CI
