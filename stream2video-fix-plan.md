@@ -41,8 +41,8 @@
 | P1.16 dry-run preview (detect_silence_stream) | ✅ | 55084ba |
 | P1.17 FPS policy + RAM budget + memory monitor | ✅ | bd9ef06 + 969d0d5 |
 | Этап 8A RAM/VRAM limits + OS guardrails | ✅ базовая инфраструктура | bd9ef06 |
-| P2.1 gui.py monolith (2884 → 2514 строк; 7 модулей extracted: gui_widgets, gui_log_handler, gui_helpers, gui_settings, gui_platform, PipelineController.run(), SubprocessRunner в utils) | ✅ частично | 993bdbf + c6e97a7 + bd1b802 + b0be872 + f4b62dd + 6c885fb |
-| P2.2 GUI/pipeline tests (pure helpers + settings I/O + SubprocessRunner + SilenceParser + 9 GUI widget smoke tests + 19 pipeline controller orchestration tests) | ✅ partial→near-complete | c6e97a7 + bd1b802 + 1c7a11a + 6c885fb |
+| P2.1 gui.py monolith (2884 → 2351 строк; 8 модулей extracted; PipelineController.run() wired) | ✅ частично | 993bdbf + c6e97a7 + bd1b802 + b0be872 + f4b62dd + 6c885fb + 90a64e4 |
+| P2.2 GUI/pipeline tests (pure helpers + settings I/O + SubprocessRunner + SilenceParser + 9 GUI widget smoke tests + 19 pipeline controller orchestration tests) | ✅ near-complete | c6e97a7 + bd1b802 + 1c7a11a + 6c885fb + 90a64e4 |
 | P2.3 media correctness regression tests (21 тест: CFR matrix 24/25/30/50/60, silence@start/end, 10 segments drift, audio_quality, output_fps=60, audio-less) | ✅ | 8184d08 |
 | P2.4 shared SubprocessRunner (context manager: Popen + drain + cancel + cleanup) + 8 unit tests | ✅ | 4130d78 |
 | P2.5 silencedetect parsers unified в SilenceParser | ✅ | 94202f9 |
@@ -65,24 +65,22 @@
 ### Что НЕ сделано (намеренно отложено)
 
 **Этап 10 (полный GUI refactor на `gui/` package)** — большой объём
-работы по переносу ~2530 строк с круговой зависимостью. Сделан
-**частичный** refactor: `_Tooltip` → `gui_widgets.py`, `QueueHandler`
-→ `gui_log_handler.py`, pure-логика (CLI command builder, status
-formatting, completion summary, throttle decision) → `gui_helpers.py`
-с 32 unit-тестами, settings I/O → `gui_settings.py` с 13 unit-тестами,
-platform helpers (dir_size_mb, open_in_file_manager) → `gui_platform.py`
-с 7 unit-тестами, `SubprocessRunner` → `utils.py` с 8 unit-тестами,
-`SilenceParser` → `silence.py`, `_run_final_concat` shared. 9 GUI
-widget smoke tests instantiate Stream2VideoGUI без mainloop и
-проверяют widgets/helpers wiring. Полный перенос `Stream2VideoGUI`
-на package лучше делать отдельным PR после добавления pytest-qt.
+работы по переносу ~2350 строк. Сделан **частичный** refactor:
+`_Tooltip` → `gui_widgets.py`, `QueueHandler` → `gui_log_handler.py`,
+pure-логика → `gui_helpers.py` (32 теста), settings I/O →
+`gui_settings.py` (13 тестов), platform helpers → `gui_platform.py`
+(15 тестов), `SubprocessRunner` → `utils.py` (8 тестов),
+`SilenceParser` → `silence.py`, `_run_final_concat` shared,
+`PipelineController.run()` extracted and wired to GUI (19 тестов).
+9 GUI widget smoke tests. gui.py: 2884 → 2351 строк (-533, -18.5%).
+Полный перенос `Stream2VideoGUI` на package лучше делать отдельным PR
+после добавления pytest-qt.
 
-**Тесты GUI (P2.2)** — partial gap closed. Pure-логика покрыта
-(formatters, paths, waveform, gui_helpers, gui_settings, gui_platform,
+**Тесты GUI (P2.2)** — near-complete. Pure-логика покрыта (formatters,
+paths, waveform, gui_helpers, gui_settings, gui_platform,
 SubprocessRunner, SilenceParser, media correctness), 9 widget smoke
-tests инстанцируют GUI и проверяют widgets/helpers wiring. Для зрелого
-решения стоит добавить pytest-qt или вынести pipeline controller в
-чистый state machine (отдельный PR).
+tests, 19 pipeline controller orchestration tests. Полное event-loop
+покрытие требует pytest-qt (отдельный PR).
 
 
 ## 1. Проверенные выводы
