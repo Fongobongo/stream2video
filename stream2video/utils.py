@@ -178,7 +178,13 @@ def drain_stderr_lines(
     def _run():
         try:
             for raw in iter(pipe.readline, b""):
-                line = raw.decode("utf-8", errors="replace")
+                # In text mode (Popen with text=True) ``raw`` is already
+                # a str; in bytes mode it's bytes. Decode bytes only so
+                # text-mode callers don't trigger AttributeError.
+                if isinstance(raw, bytes):
+                    line = raw.decode("utf-8", errors="replace")
+                else:
+                    line = raw
                 sink.append(line)
                 if on_line is not None:
                     try:
@@ -289,3 +295,134 @@ def no_window_kwargs() -> dict:
     if sys.platform == "win32":
         return {"creationflags": subprocess.CREATE_NO_WINDOW}
     return {}
+
+
+# ---------------------------------------------------------------------------
+# Shared subprocess runner (P2.4)
+# ---------------------------------------------------------------------------
+# Popen + stderr drain + cancel_monitor + pipe cleanup was duplicated across
+# concat._run_ffmpeg, silence._run_silencedetect, silence._extract_audio_wav,
+# silence.detect_silence_stream, download.download, and waveform.read_peaks_from_stream.
+# Each had its own slightly-different version of the same try/finally +
+# set_active_process + drain_stderr_lines + close pattern. The duplication
+# was the root cause of P1.13 (decimal comma) — the silence parser was
+# inlined into each call site and drifted.
+#
+# ``SubprocessRunner`` is a context manager that owns the Popen, drains
+# stderr into a list (with an optional on_line callback for progressive
+# parsing), registers the process with the scoped supervisor, and guarantees
+# pipe cleanup in __exit__. The caller still owns the high-level flow
+# (timeout, stall watchdog, progress parsing) because those vary per call
+# site; the runner just eliminates the boilerplate that was identical
+# everywhere.
+#
+# Not yet wired into all call sites — the existing ones still use their
+# inline patterns. New code should use this runner so the next refactor
+# doesn't have to repeat the dedup.
+
+
+class SubprocessRunner:
+    """Context manager that runs a subprocess with stderr drain + cleanup.
+
+    Spawns the process on entry; on exit, drains stderr, joins the drain
+    thread, closes both pipes, and clears the active-process registration
+    (so cancel/close can't reach a dead handle). The process itself is
+    NOT waited for here — callers are responsible for ``proc.wait()``
+    with their own timeout / cancel logic, because those vary per call
+    site (ffmpeg -progress loop is different from yt-dlp stdout drain).
+
+    Usage:
+        with SubprocessRunner(cmd, owner="pipeline") as runner:
+            proc = runner.process
+            # ... read proc.stdout, call proc.wait(timeout=...), etc.
+        # stderr_lines is fully populated here
+        lines = runner.stderr_lines
+
+    The ``owner`` string routes the process into the scoped supervisor
+    (P1.11) so cancel_process(owner="preview") doesn't kill the pipeline.
+
+    The ``on_line`` callback (optional) is invoked with each decoded
+    stderr line. Useful for progressive parsers (silencedetect) that
+    want to update state as lines arrive instead of waiting for the
+    full stderr at exit. Exceptions raised by the callback are logged
+    and swallowed so a buggy callback doesn't kill the drain thread.
+    """
+
+    def __init__(
+        self,
+        cmd: list[str],
+        *,
+        owner: str = "default",
+        on_line: Callable[[str], None] | None = None,
+        stdout_pipe: int = subprocess.PIPE,
+        stderr_pipe: int = subprocess.PIPE,
+        text: bool = False,
+        bufsize: int = -1,
+    ) -> None:
+        self.cmd = cmd
+        self.owner = owner
+        self.on_line = on_line
+        self._stdout_pipe = stdout_pipe
+        self._stderr_pipe = stderr_pipe
+        self._text = text
+        self._bufsize = bufsize
+        self.process: subprocess.Popen | None = None
+        self.stderr_lines: list[str] = []
+        self._wait_for_drain: Callable[[], None] | None = None
+        self._drain_done = False
+
+    def __enter__(self) -> "SubprocessRunner":
+        try:
+            self.process = subprocess.Popen(
+                self.cmd,
+                stdout=self._stdout_pipe,
+                stderr=self._stderr_pipe,
+                text=self._text,
+                bufsize=self._bufsize,
+                **no_window_kwargs(),
+            )
+        except FileNotFoundError as e:
+            raise FileNotFoundError(
+                f"Executable not found in PATH while running {self.cmd[0]!r}"
+            ) from e
+        set_active_process(self.process, owner=self.owner)
+        stderr = self.process.stderr
+        if stderr is not None:
+            self._wait_for_drain = drain_stderr_lines(
+                stderr, self.stderr_lines, on_line=self.on_line
+            )
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        # Drain stderr in case the caller raised before reaching its
+        # own wait_for_drain() call — without this the drain thread
+        # would outlive the context and leak the pipe read.
+        if self._wait_for_drain is not None and not self._drain_done:
+            try:
+                self._wait_for_drain()
+            except Exception:
+                logger.debug("drain_stderr_lines wait failed on exit", exc_info=True)
+        set_active_process(None, owner=self.owner)
+        if self.process is not None:
+            if self.process.stdout is not None:
+                try:
+                    self.process.stdout.close()
+                except OSError:
+                    pass
+            if self.process.stderr is not None:
+                try:
+                    self.process.stderr.close()
+                except OSError:
+                    pass
+
+    def drain_stderr(self) -> None:
+        """Block until the stderr drain thread has finished.
+
+        Call this after ``process.wait()`` returns so ``stderr_lines``
+        is fully populated before the caller inspects it. Safe to call
+        multiple times (idempotent — marks the drain as done so the
+        ``__exit__`` cleanup doesn't repeat the wait).
+        """
+        if self._wait_for_drain is not None and not self._drain_done:
+            self._wait_for_drain()
+            self._drain_done = True
