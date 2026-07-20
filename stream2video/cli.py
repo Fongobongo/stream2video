@@ -287,7 +287,7 @@ def main(
         CONFIG_DEFAULTS["audio_quality"],
         "--audio-quality",
         "-aq",
-        help="Audio (AAC) bitrate preset: 'high' (256k), 'medium' (128k, default), "
+        help="Audio (AAC) bitrate preset: 'high' (256k), 'medium' (192k, default), "
         "or 'low' (128k). If not passed, the config file's `audio_quality` "
         "key is used.",
     ),

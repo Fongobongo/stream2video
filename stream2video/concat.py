@@ -123,7 +123,7 @@ def _audio_bitrate() -> str:
     """Bitrate string for the AAC encoder based on ``audio_quality``.
 
     Reads the module-level ``_audio_quality`` set by ``cut_and_concat``
-    via ``_set_audio_quality``. Defaults to ``medium`` (128k) when unset
+    via ``_set_audio_quality``. Defaults to ``medium`` (192k) when unset
     so existing tests/benchmarks that don't go through the pipeline
     entry point keep their historical output.
     """
