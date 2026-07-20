@@ -15,11 +15,7 @@ from typing import Any, ClassVar
 import customtkinter as ctk
 
 from stream2video.concat import (
-    CancelledError,
-    ConcatError,
     check_encoder,
-    cut_and_concat,
-    generate_keep_segments,
 )
 from stream2video.config import (
     CONFIG_DEFAULTS,
@@ -34,14 +30,7 @@ from stream2video.config import (
     user_defaults_path,
 )
 from stream2video.download import (
-    DiskSpaceError,
-    DownloadCancelledError,
-    DownloadError,
     DownloadProgress,
-    DownloadTimeoutError,
-    PermissionDeniedError,
-    VideoNotAvailableError,
-    download,
 )
 from stream2video.formatters import (
     fmt_clock_time,
@@ -59,9 +48,6 @@ from stream2video.gui_helpers import (
     should_update_status,
     truncate_status,
 )
-from stream2video.gui_helpers import (
-    build_completion_summary as _build_completion_summary,
-)
 from stream2video.gui_log_handler import QueueHandler
 from stream2video.gui_platform import (
     dir_size_mb,
@@ -75,19 +61,15 @@ from stream2video.gui_widgets import Tooltip as _Tooltip
 from stream2video.paths import (
     RECENT_NAME_MAX,
     add_recent_project,
-    apply_per_video_dir,
     prune_recent_projects,
     truncate_recent_name,
 )
 from stream2video.silence import (
-    SilenceCancelledError,
     SilenceDetectionError,
     SilenceSegment,
     apply_margin,
-    detect_silence,
     detect_silence_stream,
     load_silence_cache,
-    save_silence_cache,
 )
 from stream2video.utils import get_active_process, get_video_duration
 from stream2video.waveform import (
@@ -1528,357 +1510,166 @@ class Stream2VideoGUI(ctk.CTk):
         per_video_dir: bool = False,
         delete_after: bool = False,
     ):
-        # Copy config values we need so the worker thread doesn't race
-        # with the main thread's slider/save-settings writes. Tk widget
-        # reads must happen in the main thread (Tk/Tcl is not thread-safe
-        # for cross-thread widget access); the caller (_start_pipeline)
-        # snapshots the widget state into args, the worker only reads
-        # these local copies. See P1.10 in the fix plan.
-        cfg_threshold = float(self.config["threshold"])
-        cfg_min_silence = float(self.config["min_silence"])
-        cfg_margin = float(self.config["margin"])
+        """Worker thread: delegates to PipelineController.run().
 
-        # Wall-clock anchor for the overall-time label.
-        self._pipeline_start = time.monotonic()
-        try:
-            output_dir.mkdir(parents=True, exist_ok=True)
+        The orchestration (download → silence → cut+concat) lives in
+        :class:`stream2video.pipeline_controller.PipelineController` so
+        it can be unit-tested without Tk. This method's job is to:
+          1. Build PipelineConfig from the widget snapshot (P1.10).
+          2. Build PipelineCallbacks whose callables dispatch to the
+             Tk main loop via ``self._tk_after``.
+          3. Wire the on_live_segment callback for the waveform popup.
+          4. Call ``controller.run()`` and map errors to status lines.
+          5. Handle the success summary / popup + cleanup.
+        """
+        from stream2video.pipeline_controller import (
+            PipelineCallbacks,
+            PipelineCancelled,
+            PipelineConcatError,
+            PipelineConfig,
+            PipelineController,
+            PipelineDownloadError,
+            PipelineSilenceError,
+            PipelineUnexpectedError,
+        )
 
-            # Step 1: Download / resolve path
-            self._ui_progress(0.0)
-            self._ui_status("Step 1/3: Downloading / resolving video...", force=True)
-            self._log("Step 1/3: Downloading / resolving video...")
+        # Build the immutable config snapshot. All widget reads happen
+        # HERE in the main thread (the caller _start_pipeline already
+        # snapshoted the widgets into args); the worker only reads these
+        # local copies. See P1.10 in the fix plan.
+        cfg = PipelineConfig(
+            input_raw=input_raw,
+            output_dir=output_dir,
+            method=method,
+            encoder=encoder,
+            video_quality=video_quality,
+            audio_quality=self.config.get("audio_quality", "medium"),
+            download_quality=download_quality,
+            software_fallback=self.config.get("software_fallback", "ask"),
+            x264_preset=self.config.get("x264_preset", "medium"),
+            encoder_threads=self.config.get("encoder_threads", "auto"),
+            output_fps=self.config.get("output_fps", "source"),
+            force=force,
+            delete_after=delete_after,
+            per_video_dir=per_video_dir,
+            threshold=float(self.config["threshold"]),
+            min_silence=float(self.config["min_silence"]),
+            margin=float(self.config["margin"]),
+            memory_limit_mb=self.config.get("memory_limit_mb", "auto"),
+            memory_reserve_mb=self.config.get("memory_reserve_mb", 2048),
+            download_timeout=self.config.get("download_timeout", 28800),
+            connect_timeout=self.config.get("connect_timeout", 300),
+            no_progress_timeout=self.config.get("no_progress_timeout", 1800),
+        )
 
-            # Setup the download-progress callback so Step 1 advances the
-            # overall progress bar (download covers 0.0..0.05) and shows
-            # percent + speed + ETA in the status and Elapsed/Remaining
-            # labels. Runs from yt-dlp's stdout drain thread — all UI
-            # writes are scheduled on the Tk main loop via ``after``.
-            download_start = time.monotonic()
+        # Download progress callback — maps yt-dlp's progress to the
+        # overall bar (0..5%) and formats the status string with
+        # percent + size + speed + ETA. Runs from yt-dlp's stdout drain
+        # thread; all UI writes dispatch to Tk via self._tk_after.
+        download_start = time.monotonic()
 
-            def _download_cb(p: DownloadProgress) -> None:
-                elapsed = time.monotonic() - download_start
-
-                # 0.0..0.05 of the overall bar maps to download 0..100%.
-                # When yt-dlp doesn't know the total size, fall back to a
-                # visible but non-bounded indicator (advance by elapsed
-                # capped at 0.04 so the next phase still leaves headroom).
-                if p.total_bytes and p.total_bytes > 0:
-                    frac = min(1.0, (p.downloaded_bytes or 0.0) / p.total_bytes)
-                    self._ui_progress(0.05 * frac)
-                else:
-                    self._ui_progress(min(0.04, 0.005 * elapsed))
-
-                pct = 100.0 * (p.downloaded_bytes or 0.0) / p.total_bytes if p.total_bytes else 0.0
-                downloaded_s = fmt_size(int(p.downloaded_bytes)) if p.downloaded_bytes else "?"
-                total_s = fmt_size(int(p.total_bytes)) if p.total_bytes else "?"
-                speed_s = fmt_speed(p.speed)
-                eta_s = fmt_time(p.eta) if p.eta else "?"
-                self._ui_status(
-                    f"Step 1/3: Downloading {pct:.0f}% ({downloaded_s}/{total_s}) "
-                    f"at {speed_s} ETA {eta_s}",
-                    force=True,
-                )
-                # Reuse the Elapsed/Remaining line in bottom_frame:
-                # yt-dlp's ETA is for THIS phase — no other phases follow
-                # in the same callback, but the silence/cut phases do, so
-                # mark ``more_phases=True``.
-                self._ui_overall(elapsed, p.eta or 0.0, more_phases=True)
-
-            try:
-                download_result = download(
-                    input_raw,
-                    output_dir,
-                    cancel_callback=lambda: self._cancel_event.is_set(),
-                    quality=download_quality,
-                    progress_callback=_download_cb,
-                )
-                video_path = download_result.path
-            except DownloadCancelledError:
-                self._log("Download cancelled")
-                self._ui_status("Cancelled", force=True)
-                return
-            except VideoNotAvailableError as e:
-                self._log(f"[ERROR] Video unavailable: {e}")
-                self._ui_status("Failed: video unavailable", force=True)
-                return
-            except DownloadTimeoutError as e:
-                self._log(f"[ERROR] Download timed out: {e}")
-                self._ui_status("Failed: download timeout", force=True)
-                return
-            except DiskSpaceError as e:
-                self._log(f"[ERROR] Disk space error: {e}")
-                self._ui_status("Failed: insufficient disk space", force=True)
-                return
-            except PermissionDeniedError as e:
-                self._log(f"[ERROR] Permission denied: {e}")
-                self._ui_status("Failed: permission denied", force=True)
-                return
-            except DownloadError as e:
-                self._log(f"[ERROR] Download failed: {e}")
-                self._ui_status(f"Failed: {e}", force=True)
-                return
-
-            # Step 1.5: Apply per-video project directory. The function
-            # honours the per_video_dir flag itself, so no outer gate.
-            new_output, video_path = apply_per_video_dir(
-                output_dir,
-                video_path,
-                download_result.is_downloaded,
-                per_video_dir=per_video_dir,
-            )
-            if new_output != output_dir:
-                if download_result.is_downloaded:
-                    self._log(f"Moved source into project dir: {video_path}")
-                output_dir = new_output
-                self._ui_update_output(output_dir)
-                self._log(f"Project directory: {output_dir}")
-
-            # Always track the final output dir in recent projects, so
-            # users who toggle per_video_dir off still see their work
-            # surfaces in the panel.
-            self._add_to_recent_projects(output_dir)
-
-            self._download_path = video_path if download_result.is_downloaded else None
-            self._ui_update_file_info(video_path)
-            src_size_bytes = video_path.stat().st_size
-            file_size_mb = src_size_bytes // 1024 // 1024
-            # Probe source duration synchronously so the final summary
-            # has both size and duration. ffprobe on a local file is fast
-            # (< 100ms typically); if it fails we show '?' in the summary.
-            src_duration = get_video_duration(video_path)
-            if download_result.is_downloaded:
-                self._log(f"Downloaded: {input_raw} -> {video_path}")
+        def _on_download_progress(p: DownloadProgress) -> None:
+            elapsed = time.monotonic() - download_start
+            if p.total_bytes and p.total_bytes > 0:
+                frac = min(1.0, (p.downloaded_bytes or 0.0) / p.total_bytes)
+                self._ui_progress(0.05 * frac)
             else:
-                self._log(f"Download skipped (file already on disk): {video_path}")
-            self._log(f"Size: {fmt_size(src_size_bytes)}")
-
-            if method == "batch" and file_size_mb > 4096:
-                self._log(
-                    f"[WARN] File is {file_size_mb} MB — batch mode may use a lot of RAM. "
-                    f"If it crashes, re-run with method=segment."
-                )
-
-            if self._cancel_event.is_set():
-                self._ui_status("Cancelled", force=True)
-                return
-
-            # Step 2: Silence detection
-            self._ui_progress(0.05)
-            self._ui_status("Step 2/3: Detecting silence...", force=True)
-            self._log(
-                f"Step 2/3: Detecting silence "
-                f"(threshold={cfg_threshold}dB, "
-                f"min_silence={cfg_min_silence}s, "
-                f"margin={cfg_margin}s)..."
+                self._ui_progress(min(0.04, 0.005 * elapsed))
+            pct = 100.0 * (p.downloaded_bytes or 0.0) / p.total_bytes if p.total_bytes else 0.0
+            self._ui_status(
+                f"Step 1/3: Downloading {pct:.0f}% "
+                f"({fmt_size(int(p.downloaded_bytes or 0))}/{fmt_size(int(p.total_bytes or 0))}) "
+                f"at {fmt_speed(p.speed)} ETA {fmt_time(p.eta) if p.eta else '?'}",
+                force=True,
             )
+            self._ui_overall(elapsed, p.eta or 0.0, True)
 
-            config = {
-                "threshold": cfg_threshold,
-                "min_silence": cfg_min_silence,
-                "margin": cfg_margin,
-            }
+        # Live-segment callback for the waveform popup.
+        def _on_live_segment(seg_list: list[SilenceSegment]) -> None:
+            with self._live_segments_lock:
+                self._live_segments[video_path_ref[0]] = list(seg_list)
 
-            # Resume cache: lets a cancelled / crashed run pick up from
-            # a throttled checkpoint (every 30s or 100 new segments)
-            # instead of restarting from t=0. The canonical final cache
-            # still wins on success — see `load_silence_cache` check above.
-            resume_cache_path = output_dir / f"{video_path.stem}_silence_cache.json.resume"
-            # If force: drop any leftover resume from a previous cancelled
-            # run so we start fresh. The final cache is also bypassed
-            # (cache = None above) so this matches the user intent.
-            if force and resume_cache_path.exists():
-                try:
-                    resume_cache_path.unlink()
-                    self._log("Cleared stale resume cache (force re-detect)")
-                except OSError as e:
-                    self._log(f"[WARN] Could not clear resume cache: {e}")
+        # Mid-pipeline hook: after download resolves the output dir,
+        # update recent projects + file info panel + output label.
+        video_path_ref: list[Path] = [Path()]  # filled by on_output_resolved
 
-            cache = None if force else load_silence_cache(video_path, output_dir, config)
-            if cache is not None:
-                silence_segments = cache
-            else:
-                # Pre-seed the in-memory live store so the waveform popup's
-                # poller sees a stable empty list before the first segment
-                # arrives (otherwise the dict lookup would race with the
-                # first callback).
-                with self._live_segments_lock:
-                    self._live_segments[video_path] = []
-                silence_start = time.monotonic()
-
-                def silence_prog(f: float):
-                    elapsed = time.monotonic() - silence_start
-                    if f > 0.01:
-                        remaining = elapsed / f - elapsed
-                        self._ui_progress(0.05 + f * 0.35)
-                        self._ui_status(
-                            f"Step 2/3: Silence... {f * 100:.0f}% "
-                            f"({fmt_time(elapsed)}/{fmt_time(remaining)})"
-                        )
-                        self._ui_overall(elapsed, remaining, more_phases=True)
-                    else:
-                        # ffmpeg emits out_time_us=0 on startup; until the
-                        # first real progress value arrives the rate is
-                        # unknown and a "/0s" suffix would mislead. Show
-                        # an indeterminate, monotonic-elapsed status.
-                        self._ui_progress(0.05)
-                        self._ui_status(
-                            f"Step 2/3: Silence... {fmt_time(elapsed)} (calculating ETA)"
-                        )
-                        self._ui_overall(elapsed, None, more_phases=True)
-
-                def on_segment(seg_list: list[SilenceSegment]) -> None:
-                    with self._live_segments_lock:
-                        self._live_segments[video_path] = list(seg_list)
-
-                silence_segments = detect_silence(
-                    video_path,
-                    **config,
-                    output_dir=output_dir,
-                    progress_callback=silence_prog,
-                    cancel_callback=lambda: self._cancel_event.is_set(),
-                    on_segment=on_segment,
-                    resume_cache_path=resume_cache_path,
-                )
-                save_silence_cache(video_path, silence_segments, output_dir, config)
-                # Final cache is the source of truth — the resume
-                # checkpoint is no longer needed. Unlink so a future
-                # "force re-detect" can't accidentally pick it up, and
-                # so the project dir stays clean.
-                try:
-                    resume_cache_path.unlink(missing_ok=True)
-                except OSError as e:
-                    self._log(f"[WARN] Could not clean up resume cache: {e}")
-                # Final cache is written — drop the live store so the
-                # overlay's consumers (which assume the live store is
-                # RAW and re-apply apply_margin) fall back to the disk
-                # cache, which is margin-applied. Keeping the canonical
-                # list in the live store would make consumers apply
-                # apply_margin TWICE — once by detect_silence above, and
-                # once more by _apply_view / _poll_live_segments —
-                # shrinking the overlay silences by an extra `margin`
-                # beyond what the encode pipeline actually used.
-                with self._live_segments_lock:
-                    self._live_segments.pop(video_path, None)
-                self._log(f"Detected {len(silence_segments)} silence segments")
-
-            if self._cancel_event.is_set():
-                self._ui_status("Cancelled", force=True)
-                return
-
-            # Update info
-            keep = generate_keep_segments(video_path, silence_segments)
-            keep_dur = sum(e - s for s, e in keep)
-            self._ui_info(
-                f"Silence: {len(silence_segments)} segments\nKeep: {len(keep)} segments ({fmt_time(keep_dur)})"
-            )
-
-            # Step 3: Cut & concat
-            self._ui_progress(0.4)
-            self._ui_status("Step 3/3: Cutting and concatenating...", force=True)
-            self._log(
-                f"Step 3/3: Cutting & concatenating "
-                f"(method={method}, encoder={encoder}, video_quality={video_quality})..."
-            )
-
-            output_path = output_dir / f"{video_path.stem}_compressed.mp4"
-            self._output_path = output_path
-
+        def _on_output_resolved(out_dir: Path, vpath: Path, is_dl: bool) -> None:
+            video_path_ref[0] = vpath
+            self._add_to_recent_projects(out_dir)
+            self._ui_update_output(out_dir)
+            self._ui_update_file_info(vpath)
+            self._log(f"Project directory: {out_dir}")
             self.after(
                 0,
                 lambda: self.lbl_encoder.configure(text=f"Encoder: {encoder} ({video_quality})"),
             )
 
-            cut_start = time.monotonic()
+        # Pipeline-complete callback: build summary + show popup.
+        def _on_pipeline_complete(summary: dict) -> None:
+            from stream2video.gui_helpers import build_completion_summary
 
-            def concat_prog(f: float):
-                elapsed = time.monotonic() - cut_start
-                if f > 0.01:
-                    remaining = elapsed / f - elapsed
-                    self._ui_progress(0.4 + f * 0.6)
-                    self._ui_status(
-                        f"Step 3/3: Cutting... {f * 100:.0f}% "
-                        f"({fmt_time(elapsed)}/{fmt_time(remaining)})"
-                    )
-                    # Phase 3 is the last one — no "more phases" after it.
-                    self._ui_overall(elapsed, remaining, more_phases=False)
-                else:
-                    # ffmpeg emits out_time_us=0 on startup; until the
-                    # first real progress value arrives, show an
-                    # indeterminate status so we don't render "/0s".
-                    self._ui_progress(0.4)
-                    self._ui_status(f"Step 3/3: Cutting... {fmt_time(elapsed)} (calculating ETA)")
-                    self._ui_overall(elapsed, None, more_phases=False)
-
-            cut_and_concat(
-                video_path,
-                silence_segments,
-                output_path,
-                progress_callback=concat_prog,
-                method=method,
-                encoder=encoder,
-                video_quality=video_quality,
-                cancel_callback=lambda: self._cancel_event.is_set(),
+            result = build_completion_summary(
+                src_size_bytes=summary["src_size_bytes"],
+                src_duration=summary["src_duration"],
+                dst_size_bytes=summary["dst_size_bytes"],
+                dst_duration=summary["keep_duration"],
+                pipeline_seconds=summary["pipeline_seconds"],
+                output_path=summary["output_path"],
             )
-
-            self._output_path = None
-            self._ui_progress(1.0)
-
-            # ── Build the final summary ────────────────────────────
-            # Pure function — builds the status line, log block,
-            # popup body, and overall label from the four metrics.
-            dst_size_bytes = output_path.stat().st_size
-            total_elapsed = time.monotonic() - self._pipeline_start
-            summary = _build_completion_summary(
-                src_size_bytes=src_size_bytes,
-                src_duration=src_duration,
-                dst_size_bytes=dst_size_bytes,
-                dst_duration=keep_dur,
-                pipeline_seconds=total_elapsed,
-                output_path=str(output_path),
-            )
-
-            # Status line — one-line headline so the user sees the result
-            # without opening the popup. Format: "Complete! (23m 5s)" —
-            # headline + total wall-clock in parentheses. Size and duration
-            # go in the popup and the log block.
-            self._ui_status(summary["status"], force=True)
-
-            # Log — multi-line, delimited by '=' so the user can grep
-            # for the end of a run.
-            for line in summary["log_lines"]:
+            self._ui_status(result["status"], force=True)
+            for line in result["log_lines"]:
                 self._log(line)
-
-            # Clear the Elapsed/Remaining line — its job is done once
-            # the status line carries the final pipeline time.
             self._tk_after(0, lambda: self.lbl_overall.configure(text=""))
-            # Freeze the Total wall-clock label at its final value.
-            self._ui_total(total_elapsed)
+            self._ui_total(summary["pipeline_seconds"])
+            self._tk_after(0, lambda: messagebox.showinfo("Complete", result["popup"]))
 
-            # Delete downloaded source if requested. Uses the value
-            # snapshotted in the main thread (passed as an arg to the
-            # worker); reading self.chk_delete.get() here would touch a
-            # Tk widget from a worker thread, which is unsafe.
-            if delete_after and self._download_path is not None:
+        cb = PipelineCallbacks(
+            on_progress=self._ui_progress,
+            on_status=self._ui_status,
+            on_log=self._log,
+            on_info=self._ui_info,
+            on_overall=self._ui_overall,
+            on_total=self._ui_total,
+            on_download_progress=_on_download_progress,
+            on_pipeline_complete=_on_pipeline_complete,
+        )
+
+        controller = PipelineController(
+            cfg=cfg,
+            cb=cb,
+            cancel_event=self._cancel_event,
+            on_live_segment=_on_live_segment,
+            on_output_resolved=_on_output_resolved,
+        )
+
+        self._pipeline_start = time.monotonic()
+        try:
+            controller.run()
+            # On success, clean up live segments and delete source if
+            # requested. The controller's _finish already handled the
+            # completion callback; we just do the GUI-specific cleanup.
+            if video_path_ref[0]:
+                with self._live_segments_lock:
+                    self._live_segments.pop(video_path_ref[0], None)
+            if delete_after and controller._download_path is not None:
                 try:
-                    self._download_path.unlink()
-                    self._log(f"Deleted source: {self._download_path}")
+                    controller._download_path.unlink()
+                    self._log(f"Deleted source: {controller._download_path}")
                 except OSError as e:
                     self._log(f"[WARN] Could not delete source: {e}")
-            self._download_path = None
-
-            # Show completion popup
-            self._tk_after(0, lambda: messagebox.showinfo("Complete", summary["popup"]))
-
-        except (CancelledError, SilenceCancelledError):
+        except PipelineCancelled:
             self._log("Pipeline cancelled")
             self._ui_status("Cancelled", force=True)
-        except SilenceDetectionError as e:
+        except PipelineDownloadError as e:
+            self._log(f"[ERROR] Download failed: {e}")
+            self._ui_status(f"Failed: {e}", force=True)
+        except PipelineSilenceError as e:
             self._log(f"[ERROR] Silence detection failed: {e}")
             self._ui_status(f"Failed: {e}", force=True)
-        except ConcatError as e:
+        except PipelineConcatError as e:
             self._log(f"[ERROR] {e}")
             self._ui_status(f"Failed: {e}", force=True)
-        except Exception as e:
+        except PipelineUnexpectedError as e:
             self._log(f"[ERROR] Unexpected: {e}")
             logger.exception("Pipeline error")
             self._ui_status(f"Error: {e}", force=True)
