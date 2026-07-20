@@ -1,44 +1,65 @@
 """Pipeline controller extracted from ``gui.py`` (Этап 10 incremental).
 
-The pipeline worker in ``gui._pipeline_worker`` is a ~300-line method
+The pipeline worker in ``gui._pipeline_worker`` is a ~350-line method
 that interleaves:
   * pure pipeline orchestration (download → silence → cut+concat)
   * Tk widget updates (progress bar, status label, log textbox)
   * cancel / error handling
-  * per-step progress mapping (download 0..5%, silence 5..60%, cut 60..100%)
+  * per-step progress mapping (download 0..5%, silence 5..40%, cut 40..100%)
 
-This module defines the dataclass and callback interface that let the
-orchestration be unit-tested without a Tk main loop. The actual run
-logic still lives in ``gui._pipeline_worker`` for now — this is the
-skeleton that a future refactor will populate. New code should use
-``PipelineConfig`` and ``PipelineCallbacks`` so the migration stays
-incremental.
+This module defines:
+  * ``PipelineConfig`` — immutable snapshot of the 22 inputs.
+  * ``PipelineCallbacks`` — bundle of 8 callables for progress/status.
+  * ``PipelineResult`` — what ``run()`` returns on success.
+  * ``PipelineController`` — orchestrator with ``run()`` that drives
+    download → silence → cut+concat through the callbacks. No Tk;
+    the GUI passes bound methods that dispatch to the Tk main loop.
 
-Why not extract the whole run() in one go:
-  * The run() body is deeply intertwined with ``self._ui_progress(0.0)``
-    and ``self._ui_status(...)`` calls that are scheduled on the Tk
-    main loop via ``self._tk_after``. Moving them requires designing
-    a callback protocol that preserves the main-thread dispatch
-    guarantee (Tk widgets are not thread-safe).
-  * The download progress callback (``_download_cb``) is a closure
-    over ``download_start`` and ``self._ui_*`` — extracting it needs
-    a state object to carry the timing anchor.
-  * Error handling distinguishes CancelledError / ConcatError /
-    DownloadError subclasses and maps each to a specific Tk dialog —
-    that mapping belongs in the GUI, not in a pure controller.
-
-The skeleton here lets us at least validate the config shape and
-the callback signatures in tests, and gives the next refactor a
-target to fill in.
+The controller is unit-testable with mock callbacks + monkeypatched
+``download`` / ``detect_silence`` / ``cut_and_concat`` — no ffmpeg
+needed for the orchestration tests (media correctness is covered
+separately by ``tests/test_media_correctness.py``).
 """
 
 from __future__ import annotations
 
+import logging
+import threading
+import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from stream2video.download import DownloadProgress
+from stream2video.concat import (
+    CancelledError,
+    ConcatError,
+    cut_and_concat,
+    generate_keep_segments,
+)
+from stream2video.download import (
+    DiskSpaceError,
+    DownloadCancelledError,
+    DownloadError,
+    DownloadProgress,
+    DownloadTimeoutError,
+    PermissionDeniedError,
+    URLValidationError,
+    VideoNotAvailableError,
+    download,
+)
+from stream2video.formatters import fmt_size, fmt_time
+from stream2video.paths import apply_per_video_dir
+from stream2video.silence import (
+    SilenceCancelledError,
+    SilenceDetectionError,
+    SilenceSegment,
+    detect_silence,
+    load_silence_cache,
+    save_silence_cache,
+)
+from stream2video.utils import get_video_duration
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -95,6 +116,396 @@ class PipelineCallbacks:
     on_total: Callable[[float], None]
     on_download_progress: Callable[[DownloadProgress], None]
     on_pipeline_complete: Callable[[dict], None]
+
+
+@dataclass(frozen=True)
+class PipelineResult:
+    """What ``PipelineController.run()`` returns on success.
+
+    Failure paths raise ``PipelineError`` (or its subclasses), so the
+    return value is only for the success case — the GUI's worker uses
+    it to drive the completion popup + log block.
+    """
+
+    output_path: Path
+    video_path: Path
+    src_size_bytes: int
+    src_duration: float | None
+    dst_size_bytes: int
+    keep_duration: float
+    pipeline_seconds: float
+
+
+class PipelineError(Exception):
+    """Base error for ``PipelineController.run()`` failures."""
+
+
+class PipelineCancelled(PipelineError):
+    """User cancelled the pipeline (cancel_event set)."""
+
+
+class PipelineDownloadError(PipelineError):
+    """Download phase failed (network / disk / permission / unavailable)."""
+
+
+class PipelineSilenceError(PipelineError):
+    """Silence detection phase failed."""
+
+
+class PipelineConcatError(PipelineError):
+    """Cut+concat phase failed."""
+
+
+class PipelineUnexpectedError(PipelineError):
+    """Any other exception not mapped to a specific phase."""
+
+
+# Progress-bar fractions for each phase. Sum to 1.0:
+#   0.00..0.05  download (5%)
+#   0.05..0.40  silence detection (35%)
+#   0.40..1.00  cut+concat (60%)
+# Kept as module constants so tests can pin them and the controller
+# stays in sync with the GUI's _ui_overall more_phases flag.
+PROG_DOWNLOAD_END = 0.05
+PROG_SILENCE_END = 0.40
+PROG_CONCAT_END = 1.00
+
+
+@dataclass
+class PipelineController:
+    """Orchestrates the download → silence → cut+concat pipeline.
+
+    Pure-Python (no Tk) so it can be unit-tested with mock callbacks
+    + monkeypatched ``download`` / ``detect_silence`` / ``cut_and_concat``.
+    The GUI constructs the controller per run with the user's
+    ``PipelineConfig`` and a ``PipelineCallbacks`` bundle whose
+    callables dispatch to the Tk main loop.
+
+    Single-use: not designed to be reused across runs (state like
+    ``_download_path`` accumulates); construct a fresh controller for
+    each pipeline invocation.
+    """
+
+    cfg: PipelineConfig
+    cb: PipelineCallbacks
+    cancel_event: threading.Event
+    # ``on_live_segment`` is the callback ``detect_silence`` invokes
+    # with the running segment list so the GUI's waveform popup updates
+    # in near real-time. Optional because the CLI doesn't need it.
+    on_live_segment: Callable[[list[SilenceSegment]], None] | None = None
+
+    # Mutable per-run state. The GUI reads these after ``run()`` to
+    # drive the completion summary + recent-projects panel; on error
+    # they're still populated up to the point where the failure occurred.
+    _download_path: Path | None = field(default=None, init=False)
+    _output_path: Path | None = field(default=None, init=False)
+    _pipeline_start: float = field(default=0.0, init=False)
+
+    def run(self) -> PipelineResult:
+        """Run the three-phase pipeline. Raises ``PipelineError`` on failure.
+
+        Phases:
+          1. Download / resolve input path (5% of progress bar)
+          2. Silence detection (35% of progress bar)
+          3. Cut + concat (60% of progress bar)
+
+        Each phase checks ``self.cancel_event`` before starting so a
+        Ctrl+C between phases aborts cleanly. Mid-phase cancellation
+        comes from the cancel_callback passed to download / detect_silence
+        / cut_and_concat; those raise ``*Cancelled`` exceptions that
+        ``run()`` maps to ``PipelineCancelled``.
+        """
+        self._pipeline_start = time.monotonic()
+        try:
+            video_path, src_size_bytes, src_duration = self._run_download_phase()
+            if self.cancel_event.is_set():
+                raise PipelineCancelled("cancelled between download and silence")
+            silence_segments = self._run_silence_phase(video_path)
+            if self.cancel_event.is_set():
+                raise PipelineCancelled("cancelled between silence and concat")
+            keep_segments = generate_keep_segments(video_path, silence_segments)
+            keep_dur = sum(e - s for s, e in keep_segments)
+            output_path = self._run_concat_phase(video_path, silence_segments, keep_dur)
+            return self._finish(video_path, output_path, src_size_bytes, src_duration, keep_dur)
+        except PipelineError:
+            # Already mapped by a phase method (PipelineDownloadError,
+            # PipelineSilenceError, PipelineConcatError, PipelineCancelled).
+            # Re-raise as-is so the caller sees the specific phase that
+            # failed, not a generic PipelineUnexpectedError.
+            raise
+        except (CancelledError, SilenceCancelledError, DownloadCancelledError) as e:
+            raise PipelineCancelled(str(e)) from e
+        except (DownloadError, URLValidationError) as e:
+            raise PipelineDownloadError(str(e)) from e
+        except SilenceDetectionError as e:
+            raise PipelineSilenceError(str(e)) from e
+        except ConcatError as e:
+            raise PipelineConcatError(str(e)) from e
+        except Exception as e:
+            logger.exception("Pipeline unexpected error")
+            raise PipelineUnexpectedError(str(e)) from e
+
+    # ── Phase 1: Download / resolve ──────────────────────────────
+
+    def _run_download_phase(self) -> tuple[Path, int, float | None]:
+        """Download the URL (or passthrough local file).
+
+        Returns ``(video_path, src_size_bytes, src_duration)`` on
+        success. Raises ``PipelineDownloadError`` on download failure
+        and ``PipelineCancelled`` on user cancel.
+        """
+        self.cb.on_progress(0.0)
+        self.cb.on_status("Step 1/3: Downloading / resolving video...")
+        self.cb.on_log("Step 1/3: Downloading / resolving video...")
+
+        try:
+            download_result = download(
+                self.cfg.input_raw,
+                self.cfg.output_dir,
+                cancel_callback=lambda: self.cancel_event.is_set(),
+                quality=self.cfg.download_quality,
+                progress_callback=self.cb.on_download_progress,
+                download_timeout=self.cfg.download_timeout,
+                connect_timeout=self.cfg.connect_timeout,
+                no_progress_timeout=self.cfg.no_progress_timeout,
+            )
+        except DownloadCancelledError as e:
+            raise PipelineCancelled(str(e)) from e
+        except (
+            VideoNotAvailableError,
+            DownloadTimeoutError,
+            DiskSpaceError,
+            PermissionDeniedError,
+            DownloadError,
+            URLValidationError,
+        ) as e:
+            raise PipelineDownloadError(str(e)) from e
+
+        video_path = download_result.path
+        # Per-video project directory (the function honours
+        # per_video_dir itself).
+        output_dir, video_path = apply_per_video_dir(
+            self.cfg.output_dir,
+            video_path,
+            download_result.is_downloaded,
+            per_video_dir=self.cfg.per_video_dir,
+        )
+        # Re-bind output_dir on the controller so phases 2+ use it.
+        # dataclass(frozen=False) on PipelineConfig would be cleaner;
+        # for now we mutate a local var and pass it to phase 2/3.
+        self._output_dir_resolved = output_dir
+
+        self._download_path = video_path if download_result.is_downloaded else None
+
+        src_size_bytes = video_path.stat().st_size
+        src_duration = get_video_duration(video_path)
+        self.cb.on_log(f"Size: {fmt_size(src_size_bytes)}")
+
+        file_size_mb = src_size_bytes // 1024 // 1024
+        if self.cfg.method == "batch" and file_size_mb > 4096:
+            self.cb.on_log(
+                f"[WARN] File is {file_size_mb} MB — batch mode may use a lot of RAM. "
+                "If it crashes, re-run with method=segment."
+            )
+
+        if download_result.is_downloaded:
+            self.cb.on_log(f"Downloaded: {self.cfg.input_raw} -> {video_path}")
+        else:
+            self.cb.on_log(f"Download skipped (file already on disk): {video_path}")
+
+        return video_path, src_size_bytes, src_duration
+
+    # ── Phase 2: Silence detection ───────────────────────────────
+
+    def _run_silence_phase(self, video_path: Path) -> list[SilenceSegment]:
+        """Run silence detection (with cache + resume support).
+
+        Returns the margin-applied silence segments. Raises
+        ``PipelineSilenceError`` on ffmpeg failure and
+        ``PipelineCancelled`` on user cancel.
+        """
+        output_dir = getattr(self, "_output_dir_resolved", self.cfg.output_dir)
+        self.cb.on_progress(PROG_DOWNLOAD_END)
+        self.cb.on_status("Step 2/3: Detecting silence...")
+        self.cb.on_log(
+            f"Step 2/3: Detecting silence "
+            f"(threshold={self.cfg.threshold}dB, "
+            f"min_silence={self.cfg.min_silence}s, "
+            f"margin={self.cfg.margin}s)..."
+        )
+
+        config = {
+            "threshold": self.cfg.threshold,
+            "min_silence": self.cfg.min_silence,
+            "margin": self.cfg.margin,
+        }
+
+        resume_cache_path = output_dir / f"{video_path.stem}_silence_cache.json.resume"
+        if self.cfg.force and resume_cache_path.exists():
+            try:
+                resume_cache_path.unlink()
+                self.cb.on_log("Cleared stale resume cache (force re-detect)")
+            except OSError as e:
+                self.cb.on_log(f"[WARN] Could not clear resume cache: {e}")
+
+        cache = None if self.cfg.force else load_silence_cache(video_path, output_dir, config)
+        if cache is not None:
+            self.cb.on_log(f"Loaded {len(cache)} silence segments from cache")
+            return cache
+
+        silence_start = time.monotonic()
+        controller = self
+
+        def silence_prog(f: float):
+            elapsed = time.monotonic() - silence_start
+            if f > 0.01:
+                remaining = elapsed / f - elapsed
+                controller.cb.on_progress(
+                    PROG_DOWNLOAD_END + f * (PROG_SILENCE_END - PROG_DOWNLOAD_END)
+                )
+                controller.cb.on_status(
+                    f"Step 2/3: Silence... {f * 100:.0f}% "
+                    f"({fmt_time(elapsed)}/{fmt_time(remaining)})"
+                )
+                controller.cb.on_overall(elapsed, remaining, True)
+            else:
+                controller.cb.on_progress(PROG_DOWNLOAD_END)
+                controller.cb.on_status(
+                    f"Step 2/3: Silence... {fmt_time(elapsed)} (calculating ETA)"
+                )
+                controller.cb.on_overall(elapsed, None, True)
+
+        silence_segments = detect_silence(
+            video_path,
+            threshold=self.cfg.threshold,
+            min_silence=self.cfg.min_silence,
+            margin=self.cfg.margin,
+            output_dir=output_dir,
+            progress_callback=silence_prog,
+            cancel_callback=lambda: self.cancel_event.is_set(),
+            on_segment=self.on_live_segment,
+            resume_cache_path=resume_cache_path,
+        )
+        save_silence_cache(video_path, silence_segments, output_dir, config)
+        try:
+            resume_cache_path.unlink(missing_ok=True)
+        except OSError as e:
+            self.cb.on_log(f"[WARN] Could not clean up resume cache: {e}")
+        self.cb.on_log(f"Detected {len(silence_segments)} silence segments")
+        return silence_segments
+
+    # ── Phase 3: Cut + concat ────────────────────────────────────
+
+    def _run_concat_phase(
+        self,
+        video_path: Path,
+        silence_segments: list[SilenceSegment],
+        keep_dur: float,
+    ) -> Path:
+        """Run cut+concat. Returns the output path on success.
+
+        Raises ``PipelineConcatError`` on ffmpeg failure and
+        ``PipelineCancelled`` on user cancel.
+        """
+        output_dir = getattr(self, "_output_dir_resolved", self.cfg.output_dir)
+        self.cb.on_progress(PROG_SILENCE_END)
+        self.cb.on_status("Step 3/3: Cutting and concatenating...")
+        self.cb.on_log(
+            f"Step 3/3: Cutting & concatenating "
+            f"(method={self.cfg.method}, encoder={self.cfg.encoder}, "
+            f"video_quality={self.cfg.video_quality})..."
+        )
+
+        output_path = output_dir / f"{video_path.stem}_compressed.mp4"
+        self._output_path = output_path
+
+        cut_start = time.monotonic()
+        controller = self
+
+        def concat_prog(f: float):
+            elapsed = time.monotonic() - cut_start
+            if f > 0.01:
+                remaining = elapsed / f - elapsed
+                controller.cb.on_progress(
+                    PROG_SILENCE_END + f * (PROG_CONCAT_END - PROG_SILENCE_END)
+                )
+                controller.cb.on_status(
+                    f"Step 3/3: Cutting... {f * 100:.0f}% "
+                    f"({fmt_time(elapsed)}/{fmt_time(remaining)})"
+                )
+                controller.cb.on_overall(elapsed, remaining, False)
+            else:
+                controller.cb.on_progress(PROG_SILENCE_END)
+                controller.cb.on_status(
+                    f"Step 3/3: Cutting... {fmt_time(elapsed)} (calculating ETA)"
+                )
+                controller.cb.on_overall(elapsed, None, False)
+
+        cut_and_concat(
+            video_path,
+            silence_segments,
+            output_path,
+            progress_callback=concat_prog,
+            method=self.cfg.method,
+            encoder=self.cfg.encoder,
+            video_quality=self.cfg.video_quality,
+            audio_quality=self.cfg.audio_quality,
+            cancel_callback=lambda: self.cancel_event.is_set(),
+            software_fallback=self.cfg.software_fallback,
+            x264_preset=self.cfg.x264_preset,
+            encoder_threads=self.cfg.encoder_threads,
+            output_fps=self.cfg.output_fps,
+            memory_limit_mb=self.cfg.memory_limit_mb,
+            memory_reserve_mb=self.cfg.memory_reserve_mb,
+        )
+
+        self._output_path = None
+        return output_path
+
+    # ── Phase 4: Finish ──────────────────────────────────────────
+
+    def _finish(
+        self,
+        video_path: Path,
+        output_path: Path,
+        src_size_bytes: int,
+        src_duration: float | None,
+        keep_dur: float,
+    ) -> PipelineResult:
+        """Build the success summary and clean up."""
+        self.cb.on_progress(PROG_CONCAT_END)
+        dst_size_bytes = output_path.stat().st_size
+        total_elapsed = time.monotonic() - self._pipeline_start
+
+        summary = {
+            "src_size_bytes": src_size_bytes,
+            "src_duration": src_duration,
+            "dst_size_bytes": dst_size_bytes,
+            "keep_duration": keep_dur,
+            "pipeline_seconds": total_elapsed,
+            "output_path": str(output_path),
+            "video_path": str(video_path),
+        }
+        self.cb.on_pipeline_complete(summary)
+
+        # Delete downloaded source if requested.
+        if self.cfg.delete_after and self._download_path is not None:
+            try:
+                self._download_path.unlink()
+                self.cb.on_log(f"Deleted source: {self._download_path}")
+            except OSError as e:
+                self.cb.on_log(f"[WARN] Could not delete source: {e}")
+        self._download_path = None
+
+        return PipelineResult(
+            output_path=output_path,
+            video_path=video_path,
+            src_size_bytes=src_size_bytes,
+            src_duration=src_duration,
+            dst_size_bytes=dst_size_bytes,
+            keep_duration=keep_dur,
+            pipeline_seconds=total_elapsed,
+        )
 
 
 def validate_pipeline_config(cfg: PipelineConfig) -> list[str]:
