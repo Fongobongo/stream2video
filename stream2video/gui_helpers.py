@@ -43,6 +43,8 @@ def build_cli_command(
     encoder_threads: str | int = "auto",
     output_fps: str = "source",
     x264_low_memory: bool = False,
+    memory_limit_mb: str | int = "auto",
+    memory_reserve_mb: int = 2048,
     force: bool = False,
     delete_after: bool = False,
     config_path: Path | None = None,
@@ -92,6 +94,10 @@ def build_cli_command(
         parts.extend(["--output-fps", output_fps])
     if x264_low_memory:
         parts.append("--x264-low-memory")
+    if memory_limit_mb != "auto":
+        parts.extend(["--memory-limit-mb", str(memory_limit_mb)])
+    if memory_reserve_mb != 2048:
+        parts.extend(["--memory-reserve-mb", str(memory_reserve_mb)])
     if force:
         parts.append("-f")
     if delete_after:
