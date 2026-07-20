@@ -2,12 +2,10 @@
 
 import logging
 import math
-import os
 import queue
 import re
 import shutil
 import subprocess
-import sys
 import threading
 import time
 from collections.abc import Callable
@@ -62,7 +60,11 @@ from stream2video.gui_helpers import (
     should_update_status,
     truncate_status,
 )
+from stream2video.gui_helpers import (
+    build_completion_summary as _build_completion_summary,
+)
 from stream2video.gui_log_handler import QueueHandler
+from stream2video.gui_platform import dir_size_mb, open_in_file_manager
 from stream2video.gui_settings import load_settings as _load_settings_from_disk
 from stream2video.gui_settings import save_settings as _save_settings_to_disk
 from stream2video.gui_widgets import Tooltip as _Tooltip
@@ -99,57 +101,11 @@ logger = logging.getLogger("stream2video.gui")
 # incremental refactor — they're imported above (Tooltip as _Tooltip
 # for back-compat). The class bodies that used to live here are gone;
 # see those modules for the implementations.
-
-
-def _build_completion_summary(
-    src_size_bytes: int,
-    src_duration: float | None,
-    dst_size_bytes: int,
-    dst_duration: float,
-    pipeline_seconds: float,
-    output_path: str,
-) -> dict:
-    """Build the user-facing strings emitted on pipeline completion.
-    Pure function — no Tk / no side effects — so it can be unit-tested
-    without instantiating the GUI.
-
-    Returns a dict with keys:
-      - status:    one-line headline for the status bar: 'Complete!' plus
-                   the total wall-clock in parentheses, e.g. 'Complete! (23m 5s)'.
-                   Size and duration go in the log block and the popup only.
-      - log_lines: list of log lines (with '=' separators) for grep-ability.
-                   Contains the full src->dst size/duration breakdown.
-      - popup:     multi-line message for the 'Complete' messagebox.
-                   Full breakdown with Source/Output labels.
-    """
-    src_size_s = fmt_size(src_size_bytes)
-    dst_size_s = fmt_size(dst_size_bytes)
-    src_dur_s = fmt_clock_time(src_duration)
-    dst_dur_s = fmt_clock_time(dst_duration)
-    pipe_s = fmt_time(pipeline_seconds)
-
-    sep = "=" * 60
-    log_lines = [
-        sep,
-        f"[SUCCESS] Output: {output_path}",
-        f"  Size:     {src_size_s} -> {dst_size_s}",
-        f"  Duration: {src_dur_s} -> {dst_dur_s}",
-        f"  Pipeline: {pipe_s}",
-        sep,
-    ]
-
-    popup = (
-        f"Video saved to:\n{output_path}\n\n"
-        f"Source:  {src_size_s}, {src_dur_s}\n"
-        f"Output:  {dst_size_s}, {dst_dur_s}\n\n"
-        f"Pipeline: {pipe_s}"
-    )
-
-    return {
-        "status": f"Complete! ({pipe_s})",
-        "log_lines": log_lines,
-        "popup": popup,
-    }
+#
+# ``_build_completion_summary`` was extracted to ``gui_helpers.py`` as
+# ``build_completion_summary`` (back-compat alias imported above).
+# Pure function — no Tk — so it can be unit-tested without
+# instantiating the GUI.
 
 
 class Stream2VideoGUI(ctk.CTk):
@@ -2064,23 +2020,23 @@ class Stream2VideoGUI(ctk.CTk):
         self._render_recent_projects()
 
     def _dir_size_mb(self, path: Path) -> float:
-        """Approximate directory size in MB. Fast — sums stat().st_size."""
-        total = 0
-        try:
-            for p in path.rglob("*"):
-                if p.is_file():
-                    try:
-                        total += p.stat().st_size
-                    except OSError:
-                        pass
-        except OSError:
-            pass
-        return total / 1024 / 1024
+        """Delegates to gui_platform.dir_size_mb (pure, testable)."""
+        return dir_size_mb(path)
 
     def _open_in_explorer(self, path_str: str):
-        """Open the project directory in the platform's file manager."""
+        """Open the project directory in the platform's file manager.
+
+        Delegates the OS-level call to ``gui_platform.open_in_file_manager``
+        so the cross-platform logic (Windows ``os.startfile`` / macOS
+        ``open`` / Linux ``xdg-open``) can be unit-tested without a Tk
+        main loop. The GUI owns the messagebox + recent-projects prune
+        path because those touch widgets; ``FileNotFoundError`` from
+        the helper is the signal to prune.
+        """
         path = Path(path_str)
-        if not path.is_dir():
+        try:
+            open_in_file_manager(path)
+        except FileNotFoundError:
             messagebox.showwarning(
                 "Folder not found",
                 f"Directory no longer exists:\n{path_str}",
@@ -2089,14 +2045,6 @@ class Stream2VideoGUI(ctk.CTk):
                 p for p in self.config.get("recent_projects", []) if p != path_str
             ]
             self._render_recent_projects()
-            return
-        try:
-            if os.name == "nt":
-                os.startfile(str(path))
-            elif sys.platform == "darwin":
-                subprocess.Popen(["open", str(path)])
-            else:
-                subprocess.Popen(["xdg-open", str(path)])
         except OSError as e:
             self._log(f"[ERROR] Could not open {path}: {e}")
 

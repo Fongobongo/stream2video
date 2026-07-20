@@ -220,3 +220,62 @@ def should_update_status(
     if force:
         return True
     return now_monotonic - last_update_monotonic >= interval
+
+
+def build_completion_summary(
+    src_size_bytes: int,
+    src_duration: float | None,
+    dst_size_bytes: int,
+    dst_duration: float,
+    pipeline_seconds: float,
+    output_path: str,
+) -> dict:
+    """Build the user-facing strings emitted on pipeline completion.
+
+    Pure function — no Tk / no side effects — so it can be unit-tested
+    without instantiating the GUI. Previously lived inline in
+    ``gui._build_completion_summary`` (Этап 10 extraction).
+
+    Returns a dict with keys:
+      - status:    one-line headline for the status bar: 'Complete!' plus
+                   the total wall-clock in parentheses, e.g. 'Complete! (23m 5s)'.
+                   Size and duration go in the log block and the popup only.
+      - log_lines: list of log lines (with '=' separators) for grep-ability.
+                   Contains the full src->dst size/duration breakdown.
+      - popup:     multi-line message for the 'Complete' messagebox.
+                   Full breakdown with Source/Output labels.
+    """
+    src_size_s = fmt_size(src_size_bytes)
+    dst_size_s = fmt_size(dst_size_bytes)
+    src_dur_s = fmt_clock_time(src_duration)
+    dst_dur_s = fmt_clock_time(dst_duration)
+    pipe_s = fmt_time(pipeline_seconds)
+
+    sep = "=" * 60
+    log_lines = [
+        sep,
+        f"[SUCCESS] Output: {output_path}",
+        f"  Size:     {src_size_s} -> {dst_size_s}",
+        f"  Duration: {src_dur_s} -> {dst_dur_s}",
+        f"  Pipeline: {pipe_s}",
+        sep,
+    ]
+
+    popup = (
+        f"Video saved to:\n{output_path}\n\n"
+        f"Source:  {src_size_s}, {src_dur_s}\n"
+        f"Output:  {dst_size_s}, {dst_dur_s}\n\n"
+        f"Pipeline: {pipe_s}"
+    )
+
+    return {
+        "status": f"Complete! ({pipe_s})",
+        "log_lines": log_lines,
+        "popup": popup,
+    }
+
+
+# Back-compat alias so existing imports of ``_build_completion_summary``
+# (inside gui.py and any downstream code) keep working during the
+# incremental refactor.
+_build_completion_summary = build_completion_summary
