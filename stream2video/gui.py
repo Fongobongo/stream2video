@@ -3,7 +3,6 @@
 import logging
 import math
 import queue
-import re
 import shutil
 import subprocess
 import threading
@@ -64,7 +63,12 @@ from stream2video.gui_helpers import (
     build_completion_summary as _build_completion_summary,
 )
 from stream2video.gui_log_handler import QueueHandler
-from stream2video.gui_platform import dir_size_mb, open_in_file_manager
+from stream2video.gui_platform import (
+    dir_size_mb,
+    fit_to_screen,
+    is_previewable_input,
+    open_in_file_manager,
+)
 from stream2video.gui_settings import load_settings as _load_settings_from_disk
 from stream2video.gui_settings import save_settings as _save_settings_to_disk
 from stream2video.gui_widgets import Tooltip as _Tooltip
@@ -1330,23 +1334,12 @@ class Stream2VideoGUI(ctk.CTk):
     def _can_preview_waveform(self) -> bool:
         """True iff the input field points at a readable local file.
 
-        Mirrors the guards in ``_render_waveform_preview`` so the button
-        reflects the actual preconditions (no file, URL, or non-existent
-        path = no preview).
+        Delegates the URL-vs-local-file check to
+        ``gui_platform.is_previewable_input`` so the logic is unit-
+        testable without a Tk main loop.
         """
         raw = self.input_var.get().strip()
-        if not raw:
-            return False
-        # URLs aren't previewable (they need a download first). Use the
-        # same strict `^https?://` check as ``download._validate_url`` so
-        # a local filename containing '://' (rare but legal on some
-        # filesystems) isn't misclassified as a URL and silently disabled.
-        if re.match(r"^https?://", raw, re.IGNORECASE):
-            return False
-        try:
-            return Path(raw).is_file()
-        except OSError:
-            return False
+        return is_previewable_input(raw)
 
     def _update_waveform_button_state(self) -> None:
         """Enable / disable the Waveform button based on the current
@@ -2657,17 +2650,8 @@ class Stream2VideoGUI(ctk.CTk):
 
     @staticmethod
     def _fit_to_screen(sw: int, sh: int) -> tuple[int, int]:
-        """Return the default window size (w, h) clamped to the screen.
-
-        Targets 1080x680 on a typical desktop; shrinks to (sw-40) x (sh-60)
-        on smaller displays. The ``max(1, ...)`` floor guards against
-        negative/zero values from absurdly small screens (e.g., a remote
-        session at 200x150) where ``sw - 40`` could otherwise go negative.
-        """
-        return (
-            max(1, min(1080, sw - 40)),
-            max(1, min(680, sh - 60)),
-        )
+        """Delegates to gui_platform.fit_to_screen (pure, testable)."""
+        return fit_to_screen(sw, sh)
 
     def _save_user_defaults(self):
         """Snapshot the current tunable GUI values to user_defaults.json.
