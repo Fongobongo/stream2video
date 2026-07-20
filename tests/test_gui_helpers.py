@@ -145,6 +145,32 @@ class TestBuildCliCommand:
         )
         assert "--x264-low-memory" not in cmd
 
+    def test_memory_limit_flags_omitted_at_defaults(self):
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+        )
+        assert "--memory-limit-mb" not in cmd
+        assert "--memory-reserve-mb" not in cmd
+
+    def test_memory_limit_flags_appended_when_non_default(self):
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+            memory_limit_mb=4096,
+            memory_reserve_mb=1024,
+        )
+        assert "--memory-limit-mb 4096" in cmd
+        assert "--memory-reserve-mb 1024" in cmd
+
 
 class TestTruncateStatus:
     def test_short_string_unchanged(self):

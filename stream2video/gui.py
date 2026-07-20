@@ -2530,6 +2530,8 @@ class Stream2VideoGUI(ctk.CTk):
         force = bool(self.chk_force.get())
         delete_after = bool(self.chk_delete.get())
         x264_low_memory = bool(self.chk_x264_low_memory.get())
+        memory_limit_mb = self.config.get("memory_limit_mb", "auto")
+        memory_reserve_mb = self.config.get("memory_reserve_mb", 2048)
 
         out_path = Path(out_raw).expanduser()
         config_path = None
@@ -2562,6 +2564,8 @@ class Stream2VideoGUI(ctk.CTk):
             force=force,
             delete_after=delete_after,
             x264_low_memory=x264_low_memory,
+            memory_limit_mb=memory_limit_mb,
+            memory_reserve_mb=memory_reserve_mb,
             config_path=config_path,
         )
         self.clipboard_clear()
