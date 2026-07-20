@@ -64,9 +64,9 @@ try:
     ParameterSource = _PS
 except ImportError:  # pragma: no cover - legacy fallback
     try:
-        from typer._click.core import ParameterSource as _PS
+        from typer._click.core import ParameterSource as _PS2
 
-        ParameterSource = _PS
+        ParameterSource = _PS2
     except ImportError:  # pragma: no cover - very old typer
         pass
 
