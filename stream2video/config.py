@@ -186,13 +186,13 @@ def coerce_typed_value(key: str, value: Any) -> Any:
             return value
         if isinstance(value, bool):
             return None
-        if isinstance(value, (int, float)) and value >= 0:
+        if isinstance(value, int | float) and value >= 0:
             return int(value)
         return None
     if isinstance(default, bool):
         return value if isinstance(value, bool) else None
-    if isinstance(default, (int, float)):
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(default, int | float):
+        if isinstance(value, bool) or not isinstance(value, int | float):
             return None
         return value
     if isinstance(default, str):

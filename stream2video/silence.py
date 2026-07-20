@@ -487,7 +487,7 @@ def detect_silence_stream(
     except FileNotFoundError as e:
         raise SilenceDetectionError("ffmpeg not found in PATH") from e
 
-    set_active_process(proc)
+    set_active_process(proc, owner="preview")
     assert proc.stderr is not None
     pipe = proc.stderr
 

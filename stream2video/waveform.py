@@ -23,7 +23,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from stream2video.formatters import fmt_clock_time
 from stream2video.silence import SilenceSegment
-from stream2video.utils import no_window_kwargs
+from stream2video.utils import no_window_kwargs, set_active_process
 
 # Canvas sizing constants. Exposed as module-level so tests can pin them.
 _DEFAULT_WIDTH = 800
@@ -111,6 +111,7 @@ def read_peaks_from_stream(
         )
     except FileNotFoundError:
         return [], 0.0
+    set_active_process(proc, owner="preview")
 
     assert proc.stdout is not None
     # Stream-decode the PCM bytes in chunks and downsample online into a

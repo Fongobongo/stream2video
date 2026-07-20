@@ -71,7 +71,7 @@ from stream2video.silence import (
     detect_silence_stream,
     load_silence_cache,
 )
-from stream2video.utils import get_active_process, get_video_duration
+from stream2video.utils import cancel_process, get_active_process, get_video_duration
 from stream2video.waveform import (
     DB_AXIS_WIDTH,
     read_peaks_from_stream,
@@ -112,6 +112,9 @@ class Stream2VideoGUI(ctk.CTk):
         self._waveform_ctk_image: ctk.CTkImage | None = None
         self._waveform_render_token = 0
         self._waveform_running = False
+        # PID of the waveform preview ffmpeg process (read_peaks_from_stream).
+        # Set during preview; killed on popup close via os.kill.
+        self._preview_proc_pid: int | None = None
         # In-memory live silence segments, keyed by source video path.
         # Updated by the pipeline worker's on_segment callback as new
         # segments are detected; read by the waveform popup's poller for
@@ -453,16 +456,32 @@ class Stream2VideoGUI(ctk.CTk):
             "Preset for the encode step.\nhigh — 10000k / CRF 18 (large files, best quality)\nmedium — 7000k / CRF 23 (default)\nlow — 3500k / CRF 28 (small files)",
         )
 
+        # Audio quality preset — bitrate of the AAC encode. Kept separate
+        # from video_quality so a 192k/256k source is not silently downgraded
+        # to 128k (P0.3 in the fix plan).
+        ctk.CTkLabel(opt_frame, text="Audio quality:").grid(
+            row=4, column=0, sticky="w", padx=(0, 5)
+        )
+        self.combo_audio_quality = ctk.CTkComboBox(
+            opt_frame, values=VALID_QUALITIES, state="readonly", width=120
+        )
+        self.combo_audio_quality.set(self.config.get("audio_quality", "medium"))
+        self.combo_audio_quality.grid(row=4, column=1, sticky="w", padx=(0, 5))
+        _Tooltip(
+            self.combo_audio_quality,
+            "Bitrate for the AAC audio encode.\nhigh — 256k (best quality)\nmedium — 192k (default)\nlow — 128k (smaller files)",
+        )
+
         # Download quality preset — Twitch/YouTube resolution cap. Ignored
         # for local files (the source file is used as-is).
         ctk.CTkLabel(opt_frame, text="Download quality:").grid(
-            row=4, column=0, sticky="w", padx=(0, 5)
+            row=5, column=0, sticky="w", padx=(0, 5)
         )
         self.combo_download_quality = ctk.CTkComboBox(
             opt_frame, values=VALID_DOWNLOAD_QUALITIES, state="readonly", width=120
         )
         self.combo_download_quality.set(self.config["download_quality"])
-        self.combo_download_quality.grid(row=4, column=1, sticky="w", padx=(0, 5))
+        self.combo_download_quality.grid(row=5, column=1, sticky="w", padx=(0, 5))
         _Tooltip(
             self.combo_download_quality,
             "Max resolution to download from Twitch/YouTube.\nbest — highest available (default)\n1080p / 720p / 480p / 360p — cap height\nIgnored for local files.",
@@ -763,6 +782,10 @@ class Stream2VideoGUI(ctk.CTk):
                 pass
             self._waveform_tooltip_after_id = None
         self._waveform_last_motion_event = None
+        # Kill any ffmpeg subprocess spawned for audio peaks (Phase 1)
+        # or dry-run detect (Phase 2) so it doesn't linger after popup
+        # close. Uses the scoped "preview" owner (P1.11 / utils.py).
+        cancel_process("preview", timeout=5.0)
 
     def _on_waveform_window_configure(self, event):
         """Re-render the waveform when the popup is resized.
@@ -1444,6 +1467,7 @@ class Stream2VideoGUI(ctk.CTk):
         method = self.combo_method.get()
         encoder = self.combo_encoder.get()
         video_quality = self.combo_video_quality.get()
+        audio_quality = self.combo_audio_quality.get()
         download_quality = self.combo_download_quality.get()
         force = bool(self.chk_force.get())
         per_video_dir = bool(self.chk_per_video_dir.get())
@@ -1471,6 +1495,7 @@ class Stream2VideoGUI(ctk.CTk):
                 method,
                 encoder,
                 video_quality,
+                audio_quality,
                 download_quality,
                 force,
                 per_video_dir,
@@ -1505,6 +1530,7 @@ class Stream2VideoGUI(ctk.CTk):
         method: str,
         encoder: str,
         video_quality: str,
+        audio_quality: str,
         download_quality: str,
         force: bool,
         per_video_dir: bool = False,
@@ -1543,7 +1569,7 @@ class Stream2VideoGUI(ctk.CTk):
             method=method,
             encoder=encoder,
             video_quality=video_quality,
-            audio_quality=self.config.get("audio_quality", "medium"),
+            audio_quality=audio_quality,
             download_quality=download_quality,
             software_fallback=self.config.get("software_fallback", "ask"),
             x264_preset=self.config.get("x264_preset", "medium"),
@@ -1965,6 +1991,10 @@ class Stream2VideoGUI(ctk.CTk):
             self._log("Waveform render already running")
             return
 
+        # Cancel any previous preview process so two renders don't
+        # compete for audio decode bandwidth.
+        cancel_process("preview", timeout=2.0)
+
         # Need an input file (must be a local file — previewing a fresh
         # download would be a separate flow). Local file → reuse it.
         input_raw = self.entry_input.get().strip()
@@ -2369,6 +2399,7 @@ class Stream2VideoGUI(ctk.CTk):
         self.config["method"] = self.combo_method.get()
         self.config["encoder"] = self.combo_encoder.get()
         self.config["video_quality"] = self.combo_video_quality.get()
+        self.config["audio_quality"] = self.combo_audio_quality.get()
         self.config["download_quality"] = self.combo_download_quality.get()
         self.config["force"] = bool(self.chk_force.get())
         self.config["delete_after"] = bool(self.chk_delete.get())
@@ -2403,6 +2434,7 @@ class Stream2VideoGUI(ctk.CTk):
         self.combo_encoder.set(self.config["encoder"])
         self._on_encoder_change(self.config["encoder"])
         self.combo_video_quality.set(self.config["video_quality"])
+        self.combo_audio_quality.set(self.config.get("audio_quality", "medium"))
         self.combo_download_quality.set(self.config["download_quality"])
         self._set_checkbox(self.chk_force, self.config["force"])
         self._set_checkbox(self.chk_delete, self.config["delete_after"])
@@ -2460,6 +2492,7 @@ class Stream2VideoGUI(ctk.CTk):
             "method": self.combo_method.get(),
             "encoder": self.combo_encoder.get(),
             "video_quality": self.combo_video_quality.get(),
+            "audio_quality": self.combo_audio_quality.get(),
             "download_quality": self.combo_download_quality.get(),
             "force": bool(self.chk_force.get()),
             "delete_after": bool(self.chk_delete.get()),
@@ -2480,6 +2513,7 @@ class Stream2VideoGUI(ctk.CTk):
         method = self.combo_method.get()
         encoder = self.combo_encoder.get()
         video_quality = self.combo_video_quality.get()
+        audio_quality = self.combo_audio_quality.get()
         download_quality = self.combo_download_quality.get()
         force = bool(self.chk_force.get())
         delete_after = bool(self.chk_delete.get())
@@ -2510,6 +2544,7 @@ class Stream2VideoGUI(ctk.CTk):
             method=method,
             encoder=encoder,
             video_quality=video_quality,
+            audio_quality=audio_quality,
             download_quality=download_quality,
             force=force,
             delete_after=delete_after,

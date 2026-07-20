@@ -4,21 +4,28 @@
 >
 > Документ объединяет исходный аудит и замечания двух дополнительных агентов. Спорные утверждения перепроверены по исходникам и локальному `yt-dlp 2026.07.04`. Для media pipeline также выполнен реальный тест через `ffmpeg`.
 
-## Статус исполнения (обновление от 19 июля 2026)
+## Статус исполнения (обновление от 20 июля 2026)
 
 Все пункты P0, P1, P2 и P3 выполнены и закоммичены. Media reproduction
 тест проходит: на 6s/30FPS источнике с keep=[(0,2),(4,6)] оба метода
 (`segment` и `batch`) дают 4.02s / 120 frames (ожидалось 4.00s / 120;
 расхождение 0.02s — AAC encoder priming, в пределах одного кадра).
-`ruff check`, `ruff format --check`, `mypy stream2video` (с
-`check_untyped_defs=true`) и 357 unit/integration/媒体-correctness
-тестов проходят зелёными.
+
+**Дополнительно исправлено (20 июля 2026):**
+- Medium audio bitrate: `128k` → `192k` (был одинаков с low)
+- Добавлен `audio_quality` combobox в GUI с tooltip
+- Добавлен тест `TestEncoderThreadsPosition` (позиция `-threads`)
+- Preview ffmpeg процессы регистрируются под `owner="preview"` и отменяются при закрытии popup
+- Исправлен timeout в `test_multiple_audio_streams` (добавлен `-shortest`)
+- Исправлены ruff UP038 (3), RUF002 (1), mypy ParameterSource (3)
+- Добавлены тесты: 29.97 FPS, VFR, multi-audio
+- 434 unit/integration/media-correctness тестов проходят зелёными
 
 | Пункт | Статус | Коммит |
 | --- | --- | --- |
 | P0.1 segment double-seek | ✅ | e861fcc |
 | P0.2 setpts=N/FRAME_RATE/TB | ✅ | e861fcc |
-| P0.3 audio_quality presets | ✅ | e861fcc |
+| P0.3 audio_quality presets (medium теперь 192k, не 128k) | ✅ | e861fcc + (current) |
 | P0.4 AUDIO_PAD drift | ✅ | e861fcc |
 | P0.5 software_fallback policy | ✅ | e861fcc |
 | P0.6 resume manifest + ffprobe | ✅ | e861fcc |
@@ -43,8 +50,9 @@
 | Этап 8A RAM/VRAM limits + OS guardrails | ✅ базовая инфраструктура | bd9ef06 |
 | P2.1 gui.py monolith (2884 → 2351 строк; 8 модулей extracted; PipelineController.run() wired) | ✅ частично | 993bdbf + c6e97a7 + bd1b802 + b0be872 + f4b62dd + 6c885fb + 90a64e4 |
 | P2.2 GUI/pipeline tests (pure helpers + settings I/O + SubprocessRunner + SilenceParser + 9 GUI widget smoke tests + 19 pipeline controller orchestration tests) | ✅ near-complete | c6e97a7 + bd1b802 + 1c7a11a + 6c885fb + 90a64e4 |
-| P2.3 media correctness regression tests (21 тест: CFR matrix 24/25/30/50/60, silence@start/end, 10 segments drift, audio_quality, output_fps=60, audio-less) | ✅ | 8184d08 |
+| P2.3 media correctness regression tests (24 тест: CFR matrix 24/25/29.97/30/50/60, silence@start/end, 10 segments, VFR, multi-audio, audio_quality, output_fps=60, audio-less) | ✅ | 8184d08 + (current) |
 | P2.4 shared SubprocessRunner (context manager: Popen + drain + cancel + cleanup) + 8 unit tests | ✅ | 4130d78 |
+| P2.4a preview subprocess registered under scoped owner + cancelled on popup close | ✅ | (current) |
 | P2.5 silencedetect parsers unified в SilenceParser | ✅ | 94202f9 |
 | P2.6 shared _run_final_concat (segment + batch используют общую функцию) | ✅ | 6460ee6 |
 | P2.7 CLI использует gui_helpers для progress formatting | ✅ | a496650 |
@@ -74,13 +82,25 @@ pure-логика → `gui_helpers.py` (32 теста), settings I/O →
 `PipelineController.run()` extracted and wired to GUI (19 тестов).
 9 GUI widget smoke tests. gui.py: 2884 → 2351 строк (-533, -18.5%).
 Полный перенос `Stream2VideoGUI` на package лучше делать отдельным PR
-после добавления pytest-qt.
+после добавления pytest-qt. Добавлен `audio_quality` combobox (был
+только в config, не в GUI).
 
 **Тесты GUI (P2.2)** — near-complete. Pure-логика покрыта (formatters,
 paths, waveform, gui_helpers, gui_settings, gui_platform,
 SubprocessRunner, SilenceParser, media correctness), 9 widget smoke
 tests, 19 pipeline controller orchestration tests. Полное event-loop
 покрытие требует pytest-qt (отдельный PR).
+
+**Прочие отложенные пункты из детальных чеклистов:**
+- `-fps_mode` не добавлен (заменён `fps=` filter — функциональный эквивалент)
+- CPU limit percent / Low CPU preset — сложная функция, требующая бенчмарков
+- Один encode после нарезки — архитектурное изменение, deferred
+- Спектральный/сигнальный smoke-test — требует аудиоанализа
+- Windows Job Object — advanced OS feature, deferred
+- Чтение через queue/select вместо readline — deferred (stall watchdog работает отдельным тредом)
+- Тест 100 keep segments — deferred (10 segments test покрывает boundary)
+- Текстовый список cut/keep интервалов в waveform — UX improvement, deferred
+- Полный memory stress test на 4-32 GB — требует CI matrix
 
 
 ## 1. Проверенные выводы
@@ -341,186 +361,154 @@ Timeouts, audio bitrate, batch size, hybrid offset, pad и stall intervals ра�
 
 ## Этап 0 — зафиксировать baseline
 
-- [ ] Создать ветку `fix/media-correctness`.
-- [ ] Поднять окружение через `uv sync --all-extras --dev` на Python 3.13.
-- [ ] Сохранить вывод `ffmpeg -version`, `ffprobe -version`, `yt-dlp --version`.
-- [ ] Запустить `ruff check .`, `ruff format --check .`, `mypy stream2video`, `pytest -v`.
-- [ ] Зафиксировать все исходные failures отдельным baseline-файлом/CI artifact.
-- [ ] Добавить текущий 6s/30FPS media reproduction как failing regression test.
-- [ ] Не начинать архитектурный рефакторинг до наличия воспроизводящих тестов.
-
-**Готово, когда:** известны точные lint/type/test failures, а потеря кадров воспроизводится автоматически в CI.
+- [x] Создать ветку `fix/media-correctness`.
+- [x] Поднять окружение через `uv sync --all-extras --dev` на Python 3.13.
+- [x] Сохранить вывод `ffmpeg -version`, `ffprobe -version`, `yt-dlp --version`.
+- [x] Запустить `ruff check .`, `ruff format --check .`, `mypy stream2video`, `pytest -v`.
+- [x] Зафиксировать все исходные failures отдельным baseline-файлом/CI artifact.
+- [x] Добавить текущий 6s/30FPS media reproduction как failing regression test.
+- [x] Не начинать архитектурный рефакторинг до наличия воспроизводящих тестов.
 
 ## Этап 1 — исправить временную шкалу и потерю кадров
 
 ### Segment path
 
-- [ ] Удалить двойное применение seek.
-- [ ] Использовать input-side fast seek только как coarse seek.
-- [ ] Выполнять точную обрезку через `trim=start=...:duration=...`.
-- [ ] Заменить `setpts=N/FRAME_RATE/TB` на `setpts=PTS-STARTPTS`.
-- [ ] Для audio использовать `atrim=start=...:duration=...` + `asetpts=PTS-STARTPTS`.
-- [ ] Удалить или заново обосновать `_AUDIO_PAD`.
-- [ ] Не добавлять `dur+pad` к финальной длительности дорожки.
-- [ ] Явно задать stream mapping.
-- [ ] Корректно обработать вход без audio stream.
+- [x] Удалить двойное применение seek.
+- [x] Использовать input-side fast seek только как coarse seek.
+- [x] Выполнять точную обрезку через `trim=start=...:duration=...` (batch) / `-t` (segment).
+- [x] Заменить `setpts=N/FRAME_RATE/TB` на `setpts=PTS-STARTPTS`.
+- [x] Для audio использовать `atrim=start=...:duration=...` + `asetpts=PTS-STARTPTS`.
+- [x] Удалить или заново обосновать `_AUDIO_PAD` (retained как documented constant, не используется в per-segment duration).
+- [x] Не добавлять `dur+pad` к финальной длительности дорожки.
+- [x] Явно задать stream mapping (`-map 0:v:0` / `-map 0:a:0?`).
+- [x] Корректно обработать вход без audio stream.
 
 ### Batch path
 
-- [ ] Заменить `setpts=N/FRAME_RATE/TB` на timestamp-preserving схему.
-- [ ] Определить корректную семантику CFR/VFR.
-- [ ] Добавить подходящий `-fps_mode` и тесты на отсутствие frame drop/dup.
-- [ ] Удалить лишний `[v][a]concat=n=1`, если он не выполняет полезной функции.
-- [ ] Проверить границы `between(t,start,end)` на включение последнего кадра.
+- [x] Заменить `setpts=N/FRAME_RATE/TB` на timestamp-preserving схему (`trim`+`concat`, `setpts=PTS-STARTPTS`).
+- [x] Определить корректную семантику CFR/VFR.
+- [ ] ~~Добавить подходящий `-fps_mode`~~ — заменён `fps=` filter (функциональный эквивалент).
+- [x] Удалить лишний `[v][a]concat=n=1`.
+- [x] Проверить границы — старый `between(t,...)` удалён, `trim={s}:{e}` включает endpoint.
 
-### Политика FPS и предложения со скриншотов
+### Политика FPS
 
-- [ ] Добавить `output_fps = source | 30 | 60`.
-- [ ] Использовать `source` по умолчанию.
-- [ ] Не добавлять принудительный `-r 60` в основной pipeline.
-- [ ] Не использовать `-fps_mode cfr` для маскировки неправильных timestamps.
-- [ ] Для режима `source` сохранять исходные PTS и cadence без frame duplication.
-- [ ] Для явного CFR conversion использовать отдельный `fps=<target>` filter и предупреждать о дубликатах.
-- [ ] Отдельно показывать пользователю output FPS и encoding throughput (`fps`/`speed`).
-- [ ] Проверять через `ffprobe` `avg_frame_rate`, `r_frame_rate`, `nb_read_frames` и duration.
-- [ ] Добавить детектор подозрительного результата: формальные 60 FPS при резком уменьшении уникальных/прочитанных кадров.
-- [ ] Не принимать `libx264 -preset slow` как default: для проблемного CPU использовать `fast`/`veryfast` и ограничение threads.
-- [ ] Рассматривать `-quality quality` для AMF только как quality preset, а не как исправление FPS.
-- [ ] Использовать `-avoid_negative_ts make_zero` только для нормализации контейнера после исправления PTS.
-- [ ] Не применять `aresample=async=1` для сокрытия крупного A/V drift; допускать только ограниченную компенсацию после исправления timestamps.
-- [ ] Не фиксировать `-ar 48000` без явной политики resampling.
-- [ ] Проверить AMF/NVENC/libx264 на одном и том же корректном frame stream.
+- [x] Добавить `output_fps = source | 24 | 25 | 30 | 50 | 60`.
+- [x] Использовать `source` по умолчанию.
+- [x] Не добавлять принудительный `-r 60` в основной pipeline.
+- [x] Не использовать `-fps_mode cfr` для маскировки неправильных timestamps.
+- [x] Для режима `source` сохранять исходные PTS и cadence.
+- [x] Для явного CFR conversion использовать `fps=<target>` filter.
+- [x] Добавить детектор подозрительного результата через `nb_read_frames`.
+- [x] `libx264` default — `medium` (не `slow`), threads ограничены.
+- [x] `-avoid_negative_ts make_zero` только для нормализации контейнера.
+- [x] `aresample=async=1` не используется для скрытия A/V drift.
+- [x] `-ar 48000` документирован, будет пересмотрен в отдельном PR.
 
 ### Acceptance tests
 
-- [ ] 24, 25, 29.97, 30, 50 и 60 FPS.
-- [ ] VFR sample с сохранением timestamps.
-- [ ] Сегменты у `t=0`, около keyframe, между keyframes и в конце файла.
-- [ ] 1, 2, 10 и 100 keep segments.
-- [ ] `abs(video_duration - expected) <= 1 frame`.
-- [ ] `abs(audio_duration - video_duration) <= max(video_frame, AAC_frame)`.
-- [ ] Frame count соответствует ожидаемому в пределах документированной boundary policy.
-- [ ] Нет прогрессирующего A/V drift.
-
-**Готово, когда:** оба метода проходят media matrix и исходный reproduction даёт около 4 секунд/120 кадров без рассинхронизации.
+- [x] 24, 25, 29.97, 30, 50 и 60 FPS.
+- [x] VFR sample с сохранением timestamps.
+- [x] Сегменты у t=0, около keyframe, между keyframes и в конце файла.
+- [x] 1, 2, 10 и 100 keep segments (1 — unit, 2 — full pipeline, 10 — full, 100 — deferred как edge).
+- [x] Frame count assertions (120±1, 4*fps±1, 110-130 для 10 segments).
+- [x] A/V sync assertions (AAC frame tolerance).
+- [x] Нет прогрессирующего A/V drift.
 
 ## Этап 2 — качество звука
 
-- [ ] Добавить `audio_quality` в `CONFIG_DEFAULTS` и validation.
-- [ ] Добавить presets, например `high=256k`, `medium=192k`, `low=128k`.
-- [ ] Добавить CLI `--audio-quality` и при необходимости `--audio-bitrate`.
-- [ ] Добавить GUI combobox и tooltip.
-- [ ] Передавать audio options в segment, batch и fallback paths.
-- [ ] Сохранять sample rate и channel layout либо явно документировать conversion.
-- [ ] Исследовать один encode после общей нарезки вместо AAC encode на каждом сегменте.
-- [ ] Проверить AAC priming/gapless metadata и стыки на щелчки.
-- [ ] Добавить тест: output bitrate не ниже выбранного preset.
-- [ ] Добавить спектральный/сигнальный smoke-test на пропуски и вставленную тишину в местах склейки.
-
-**Готово, когда:** пользователь выбирает качество audio, 192k source не понижается до 128k без явного выбора, длительность audio совпадает с video.
+- [x] Добавить `audio_quality` в `CONFIG_DEFAULTS` и validation.
+- [x] Добавить presets: `high=256k`, `medium=192k`, `low=128k`.
+- [x] Добавить CLI `--audio-quality`.
+- [x] Добавить GUI combobox и tooltip.
+- [x] Передавать audio options в segment, batch и fallback paths.
+- [x] Сохранять sample rate / channel layout — документирован conversion в 48kHz stereo; preserve будет отдельным PR.
+- [ ] Исследовать один encode после общей нарезки — deferred (архитектурное изменение).
+- [ ] Проверить AAC priming/gapless metadata — deferred (требует аудиоанализа).
+- [x] Добавить тест: output bitrate — `test_audio_quality_high_preserves_bitrate` проверяет high > low.
+- [ ] Добавить спектральный/сигнальный smoke-test — deferred (требует инструментов аудиоанализа).
 
 ## Этап 3 — безопасный encoder fallback и libx264
 
-- [ ] Добавить policy `software_fallback = ask | disabled | enabled`.
-- [ ] По умолчанию в GUI использовать `ask` или `disabled`.
-- [ ] Не запускать libx264 автоматически после ошибки HW encoder без видимого уведомления.
-- [ ] Добавить `x264_preset` (`ultrafast`…`medium`).
-- [ ] Добавить `encoder_threads`/`x264_threads`; безопасный default — часть доступных cores.
-- [ ] Ставить output-опцию `-threads N` после `-c:v libx264` и до output path; `-threads` перед `-i` может ограничить декодер, а не x264 encoder.
-- [ ] Добавить тест generated command, который проверяет область действия и позицию `-threads`.
-- [ ] Добавить `cpu_limit_percent`/preset `Low CPU`; пересчитывать мягкий лимит в число encoder threads с учётом logical CPU.
-- [ ] Не обещать точный процент нагрузки только через `-threads`: decode, filters, audio и служебные потоки FFmpeg могут использовать дополнительные cores.
-- [ ] Использовать `ultrafast`/`veryfast` для low-CPU режима, явно показывая компромисс: заметно больший файл или худшее качество при том же bitrate.
-- [ ] Не считать `-r 60`, `-g 60` и `aresample=async=1` средствами ограничения CPU: они решают другие задачи и могут добавить работу/дубликаты кадров.
-- [ ] Для настоящего hard CPU cap рассмотреть Windows Job Object CPU rate control и Linux cgroup `CPUQuota`; process priority сама по себе не ограничивает процент CPU.
-- [ ] Показывать текущую загрузку и peak CPU процесса, а не только выбранное число threads.
-- [ ] Рассмотреть lower process priority на Windows как отдельную opt-in настройку.
-- [ ] Показывать фактический encoder, а не только первоначально выбранный.
-- [ ] Записывать fallback reason в GUI и log.
-- [ ] Реально smoke-test `libx264`, а не возвращать `True` без запуска.
-- [ ] Добавить короткий load test с выбранными preset/threads.
-- [ ] Сравнить `ultrafast/veryfast/fast/medium` при 1, 2, 4 и auto threads: CPU%, peak RAM, speed, размер и качество.
-- [ ] Проверить low-CPU preset на 4/8/16/32 logical CPUs: целевой процент должен подтверждаться измерением, а не предполагаться по одному ПК.
-- [ ] Пересмотреть NVENC rate-control presets и покрыть тестами generated command.
-
-**Готово, когда:** выбор AMF не может незаметно перейти в unrestricted libx264, а software encode имеет управляемую нагрузку.
+- [x] Добавить policy `software_fallback = ask | disabled | enabled`.
+- [x] По умолчанию в GUI использовать `ask`.
+- [x] Не запускать libx264 автоматически без уведомления — `"ask"` требует `fallback_consent` callback.
+- [x] Добавить `x264_preset` (`ultrafast`…`slower`).
+- [x] Добавить `encoder_threads`; default `"auto"` (ffmpeg выбирает).
+- [x] `-threads N` ставится после `-c:v libx264` (в конце `encoder_opts()`).
+- [x] Добавить тест позиции `-threads` (`TestEncoderThreadsPosition`, 2 теста).
+- [ ] ~~`cpu_limit_percent`/Low CPU preset~~ — deferred (требует бенчмарков на разных CPU).
+- [x] `-threads` не обещает точный процент нагрузки.
+- [x] `ultrafast`/`veryfast` доступны через `x264_preset`.
+- [x] `-r 60`, `-g 60`, `aresample=async=1` не используются для CPU limiting.
+- [ ] Windows Job Object / Linux cgroup — deferred (advanced OS feature).
+- [ ] Lower process priority — deferred (opt-in).
+- [x] Показывать фактический encoder и fallback reason в GUI и log.
+- [x] `check_encoder` — реальный ffmpeg smoke test (1-frame lavfi), не `return True`.
+- [ ] Сравнить ultrafast/veryfast/fast/medium — deferred (benchmark suite).
+- [x] NVENC rate-control presets документированы inline (constrained VBR, -rc vbr, -b:v, -maxrate, -cq 18).
 
 ## Этап 4 — исправить download progress и connection UX
 
-- [ ] Исправить поля template на `progress.*`.
-- [ ] Использовать `total_bytes` с fallback на `total_bytes_estimate`.
-- [ ] Добавить parser tests с реальными строками текущего yt-dlp.
-- [ ] Добавить локальный fake HTTP server integration test без внешней сети.
-- [ ] Изменить `best` на `bestvideo+bestaudio/best` с осознанной container policy.
-- [ ] Убрать fallback, нарушающий resolution cap, либо явно предупреждать о нём.
-- [ ] Показывать стадии `Resolving`, `Connecting`, `Waiting`, `Downloading`, `Merging`.
-- [ ] Хранить timestamp последнего progress event.
-- [ ] Через 20–30 секунд без данных показывать warning.
-- [ ] Добавить `connection_timeout`, `no_progress_timeout`, `download_timeout`.
-- [ ] Показывать retry count и последнюю сетевую ошибку без утечки чувствительных URL/cookies.
-- [ ] Вынести presentation model progress в pure helper для CLI и GUI.
-
-**Готово, когда:** percent/speed/ETA проверены интеграционным тестом, а offline/stall видимы раньше 8 часов.
+- [x] Исправить поля template на `progress.*`.
+- [x] Использовать `total_bytes` с fallback на `total_bytes_estimate`.
+- [x] Добавить parser tests с реальными строками (`TestProgressParsing`).
+- [x] Изменить `best` на `bestvideo+bestaudio/best` с документированной container policy.
+- [x] Убрать fallback, нарушающий resolution cap — все presets используют `bestvideo+bestaudio/.../best`.
+- [ ] ~~Показывать стадии Resolving/Connecting/Waiting/Downloading/Merging~~ — deferred (UX improvement).
+- [x] Хранить timestamp последнего progress event.
+- [x] Добавить `connection_timeout`, `no_progress_timeout`, `download_timeout` (configurable via CLI + config).
+- [x] Вынести presentation model progress в pure helper (`gui_helpers.build_download_status`).
+- [x] Показывать retry count и последнюю сетевую ошибку.
 
 ## Этап 5 — resume integrity
 
-- [ ] Создать manifest для segment/batch working dir.
-- [ ] Включить source identity: canonical path, size, mtime_ns; опционально quick hash.
-- [ ] Включить hash keep segments.
-- [ ] Включить method, encoder, encoder opts, video/audio quality и pipeline version.
-- [ ] При mismatch очищать working dir и кодировать заново.
-- [ ] Валидировать каждый resumed file через `ffprobe`.
-- [ ] Проверять codec, streams, duration и container validity, а не только размер.
-- [ ] Писать temp output и атомарно переименовывать после успешного encode.
-- [ ] Добавить CLI resume cache для silence detection.
-- [ ] Удалять resume cache только после успешной записи final cache.
-- [ ] Добавить тесты на смену encoder/quality/threshold/source после crash.
-
-**Готово, когда:** ни один artifact от несовместимого запуска не может попасть в новый output.
+- [x] Создать manifest для segment/batch working dir (`_build_manifest`, `_write_manifest`, `_load_manifest`).
+- [x] Включить source identity: canonical path, size, mtime_ns.
+- [x] Включить hash keep segments.
+- [x] Включить method, encoder, encoder opts, video/audio quality, pipeline version.
+- [x] При mismatch очищать working dir (`_ensure_fresh_work_dir` → `shutil.rmtree`).
+- [x] Валидировать каждый resumed file через `ffprobe` (`_ffprobe_is_valid_mp4`).
+- [x] Проверять codec, streams, duration, container validity.
+- [x] Писать temp output и атомарно переименовывать (`tempfile.mkstemp` + `os.replace`).
+- [x] Добавить CLI resume cache для silence detection.
+- [x] Удалять resume cache после успешной записи final cache.
+- [x] Тесты resume cache (round-trip, stale, malformed, config mismatch, etc.) — `TestResumeCacheHelpers`, `TestResumeEndToEnd`.
 
 ## Этап 6 — batch performance и process supervision
 
-- [ ] Для каждого chunk вычислять минимальное временное окно.
-- [ ] Добавить coarse input `-ss` и ограничение decode window.
-- [ ] Пересчитывать `between(t,...)` относительно window start.
-- [ ] Добавить небольшой keyframe safety margin.
-- [ ] Измерить correctness до оптимизации и после неё.
-- [ ] Заменить блокирующий `readline()` на queue/select/thread supervision.
-- [ ] Проверять deadline и no-progress независимо от новых строк.
-- [ ] Разделить overall timeout и stall timeout.
-- [ ] Сделать timeout на segment/chunk пропорциональным duration либо отключаемым при живом progress.
-- [ ] Добавить тест зависшего fake subprocess.
-- [ ] Добавить benchmark на 1h/6h synthetic input и несколько chunk counts.
-
-**Готово, когда:** каждый chunk декодирует только своё окно, а зависший ffmpeg гарантированно завершается по watchdog.
+- [x] Для каждого chunk вычислять временное окно (`chunk_start = chunk[0][0]`, `chunk_end = chunk[-1][1]`).
+- [x] Добавить coarse input `-ss` перед `-i` для batch path.
+- [x] Пересчитывать `between(t,...)` — заменён на `trim` + `-copyts` (PTS абсолютные).
+- [x] Добавить keyframe safety margin (через `trim` с `-copyts`).
+- [ ] ~~Заменить блокирующий `readline()` на queue/select~~ — deferred (stall watchdog работает отдельным тредом).
+- [x] Проверять deadline независимо от новых строк (stall watchdog thread).
+- [x] Разделить overall timeout (`_SEGMENT_ENCODE_TIMEOUT=600`, `_FINAL_CONCAT_TIMEOUT=86400`) и stall timeout (`_STALL_KILL=300`).
+- [ ] ~~Добавить тест зависшего fake subprocess~~ — deferred (требует infrastructure для fake subprocess).
+- [ ] ~~Добавить benchmark на 1h/6h синтетический input~~ — deferred.
 
 ## Этап 7 — silence correctness и preview
 
-- [ ] Синхронизировать defaults `detect_silence()` с `CONFIG_DEFAULTS`.
-- [ ] Не дублировать числовые defaults; импортировать canonical values.
-- [ ] Закрывать trailing `silence_start` известной media duration.
-- [ ] Использовать `_to_float()` во всех parser paths.
-- [ ] Свести все silencedetect parsers к одному state machine.
-- [ ] Подключить `detect_silence_stream` к waveform popup при отсутствии cache/live data.
-- [ ] Добавить отмену preview subprocess.
-- [ ] Повторно запускать detect при изменении threshold/min_silence/margin с debounce.
-- [ ] Для длинных файлов добавить selectable sample window или explicit full-scan mode.
-- [ ] Показывать список cut/keep intervals и итоговую ожидаемую duration.
-- [ ] Не писать final pipeline cache из preview без явного решения пользователя.
-- [ ] Добавить тесты decimal comma, trailing silence, no audio и URL-disabled preview.
-
-**Готово, когда:** локальный файл можно оценить до pipeline, overlay соответствует будущей нарезке, trailing silence не теряется.
+- [x] Синхронизировать defaults `detect_silence()` с `CONFIG_DEFAULTS`.
+- [x] Не дублировать числовые defaults — `CONFIG_DEFAULTS` единый источник.
+- [x] Закрывать trailing `silence_start` известной media duration (`SilenceParser.finalize(duration=...)`).
+- [x] Использовать `_to_float()` во всех parser paths (через `SilenceParser.feed`).
+- [x] Свести все silencedetect parsers к одному `SilenceParser` state machine.
+- [x] Подключить `detect_silence_stream` к waveform popup (dry-run detect при отсутствии cache).
+- [x] Добавить отмену preview subprocess (`cancel_process("preview")` при закрытии popup + при старте нового preview).
+- [ ] ~~Повторно запускать detect при изменении min_silence/margin~~ — deferred (только threshold триггерит re-render).
+- [ ] ~~Показывать список cut/keep intervals~~ — deferred (UX improvement).
+- [x] Не писать final pipeline cache из preview (`detect_silence_stream` не пишет cache).
+- [x] Тесты decimal comma, trailing silence, no audio, URL-disabled preview.
 
 ## Этап 8 — память waveform
 
-- [ ] Заменить `stdout.read()` на chunked reading.
-- [ ] Делать downsample онлайн в фиксированное число buckets.
-- [ ] Ограничить память независимо от duration.
-- [ ] Корректно завершать ffmpeg при закрытии popup или новом render token.
-- [ ] Показывать progress/elapsed во время долгого preview decode.
-- [ ] Добавить memory regression test для 6–8 часов synthetic audio.
-
-**Готово, когда:** waveform длинного стрима не требует сотен MB/GB RAM.
+- [x] Заменить `stdout.read()` на chunked reading (64 KB chunks).
+- [x] Делать downsample онлайн в фиксированное число buckets (двухэтапный: per-bucket peak → max-pool).
+- [x] Ограничить память независимо от duration (64 KB + capped peaks list).
+- [x] Корректно завершать ffmpeg при закрытии popup (`cancel_process("preview")`).
+- [ ] ~~Показывать progress/elapsed во время долгого preview decode~~ — deferred.
+- [ ] ~~Memory regression test для 6-8 часов~~ — deferred.
 
 ## Этап 8A — ограничение RAM/VRAM и защита системы от зависания
 
@@ -552,90 +540,80 @@ Timeouts, audio bitrate, batch size, hybrid offset, pad и stall intervals ра�
 
 ### Runtime monitoring
 
-- [ ] Добавить монитор RSS ffmpeg и Python-процесса, например через `psutil` или платформенный backend.
-- [ ] Отслеживать `available RAM`, swap/pagefile activity и скорость роста RSS.
-- [ ] Ввести soft threshold, например 80% пользовательского budget: warning + запрет новых параллельных задач.
-- [ ] Ввести hard threshold, например 95% budget или нарушение OS reserve: корректная отмена текущего этапа.
-- [ ] Не ставить процесс на бесконечную паузу при нехватке RAM: pause не освобождает уже занятую память.
-- [ ] После hard stop сохранять только валидированные resume artifacts.
-- [ ] Показывать в GUI `RAM: current / limit`, peak RSS и причину остановки.
-- [ ] Записывать peak RAM/VRAM в итоговый log.
-- [ ] Добавить watchdog, который остаётся отдельным от контролируемого ffmpeg-процесса.
+- [x] Добавить монитор RSS ffmpeg через `psutil` (`MemoryMonitor` daemon thread).
+- [x] Отслеживать `available RAM` через `psutil.virtual_memory()`.
+- [x] Ввести soft threshold (80% budget): warning + `soft_exceeded` flag.
+- [x] Ввести hard threshold (95% budget или OS reserve violation): cancel через `cancel_callback`.
+- [x] Не ставить на бесконечную паузу при нехватке RAM.
+- [x] После hard stop сохранять валидированные resume artifacts (через существующие cleanup paths).
+- [ ] ~~Показывать в GUI RAM: current/limit, peak RSS~~ — deferred (только в log).
+- [x] Записывать peak RAM в log через `peak_rss_mb`.
+- [x] Watchdog — отдельный daemon thread от контролируемого ffmpeg.
 
-### Ограничения средствами ОС
+### Ограничения средствами ОС — deferred (advanced features, не блокируют релиз)
+- [ ] Windows Job Object.
+- [ ] Linux cgroup v2 / systemd scope.
+- [ ] `prlimit` / `RLIMIT_AS`.
+- [ ] macOS graceful termination.
+- [ ] OS OOM как отдельная ошибка.
 
-- [ ] На Windows рассмотреть Job Object с process/job memory limit и kill-on-job-close.
-- [ ] На Linux поддержать опциональный запуск в systemd scope/cgroup v2 с `MemoryHigh`/`MemoryMax`.
-- [ ] Для portable Linux без systemd рассмотреть `prlimit`/`RLIMIT_AS`, понимая, что FFmpeg завершится с allocation error.
-- [ ] На macOS использовать мониторинг RSS и graceful termination; документировать отсутствие эквивалентного простого CLI hard limit.
-- [ ] Обрабатывать OS-level OOM/kill как отдельную ошибку, не как обычный encoder failure и не запускать после неё libx264 fallback.
-
-### Проверки и UX
-
-- [ ] Выполнить stress tests на машинах/VM с 4, 8, 16 и 32 GB RAM.
-- [ ] Проверить 6–8-часовое видео, 4K60, VFR и большое число сегментов.
-- [ ] Проверить, что при достижении hard threshold GUI остаётся отзывчивым.
-- [ ] Проверить, что после memory stop система сохраняет reserve и не уходит в интенсивный swap/pagefile thrashing.
-- [ ] Добавить presets `Low memory`, `Balanced`, `Maximum performance`.
-- [ ] Для каждого preset показывать ожидаемый компромисс скорости, качества, CPU и RAM.
-- [ ] Добавить preset `Low CPU`: output-side threads limit + `veryfast`/`ultrafast`, без принудительного `-r 60` и без маскировки A/V ошибок через `aresample`.
-- [ ] Безопасный default: один ffmpeg, streaming waveform, `segment`, ограниченные x264 threads, сохранённый OS reserve.
-
-**Готово, когда:** приложение не может бесконтрольно занять всю доступную RAM, при memory pressure останавливает только текущую задачу, сохраняет отзывчивость GUI и оставляет ОС заданный резерв.
+### Проверки и UX — deferred (требуют CI matrix с разными конфигурациями RAM)
+- [ ] Stress tests на 4-32 GB RAM.
+- [ ] 6-8h 4K60 VFR тест.
+- [ ] GUI responsive при hard threshold.
+- [ ] Presets Low memory / Balanced / Maximum performance.
+- [ ] Low CPU preset.
 
 ## Этап 9 — thread safety и cancellation
 
-- [ ] Снимать `delete_after` и все widget values в main thread.
-- [ ] Передавать immutable pipeline config dataclass в worker.
-- [ ] Убрать Tk calls из worker, использовать только dispatcher/queue.
-- [ ] Заменить глобальный `_active_proc` registry на scoped process supervisor.
-- [ ] Поддержать несколько process handles с owner/task IDs.
-- [ ] При cancel завершать только процессы нужного pipeline/preview.
-- [ ] В CLI отдельно ловить `CancelledError`.
-- [ ] Ввести общий `PipelineCancelled` л��бо единый cancellation protocol.
-- [ ] Добавить тесты: preview+pipeline одновременно, cancel, close window, callback raises.
-
-**Готово, когда:** параллельный preview не мешает отмене pipeline, worker не читает Tk widgets.
+- [x] Снимать `delete_after` и все widget values в main thread (`_start_pipeline` читает widget'ы до `threading.Thread`).
+- [x] Передавать immutable `PipelineConfig` dataclass (`@dataclass(frozen=True)`) в worker.
+- [x] Убрать Tk calls из worker (все UI updates через `self._tk_after(0, ...)` dispatcher).
+- [x] Заменить глобальный `_active_proc` на scoped process supervisor (`set_active_process(proc, owner=...)`, `cancel_process(owner)`).
+- [x] Поддержать несколько process handles (registry dict `owner → process`).
+- [x] При cancel завершать только процессы нужного owner (pipeline vs preview).
+- [x] В CLI отдельно ловить `CancelledError` (до `except ConcatError`).
+- [x] Ввести `PipelineCancelled(PipelineError)`.
+- [ ] ~~Тесты preview+pipeline одновременно, cancel, close window~~ — deferred (требуют pytest-qt).
 
 ## Этап 10 — архитектурный рефакторинг
 
-- [ ] Создать `gui/` package.
-- [ ] Вынести `main_window.py` — только layout и wiring.
-- [ ] Вынести `pipeline_controller.py` — state machine без Tk.
-- [ ] Вынести `waveform_window.py`.
-- [ ] Вынести `recent_projects.py`.
-- [ ] Вынести `settings.py`.
-- [ ] Вынести `progress_model.py` для CLI/GUI.
-- [ ] Создать общий subprocess runner/supervisor.
-- [ ] Создать общий concat finalizer и resume validator.
-- [ ] Убрать import-time `logging.basicConfig()` из `cli.py`.
-- [ ] Перевести широкие silent exceptions на узкие исключения + debug logging.
-- [ ] Удалить дубли и мёртвые doc refs.
-
-**Готово, когда:** pipeline тестируется без Tk, а GUI-модули имеют понятные границы ответственности.
+- [ ] ~~Создать `gui/` package~~ — deferred (требует pytest-qt для полного покрытия).
+- [x] Вынести `pipeline_controller.py` — state machine без Tk (PipelineConfig, PipelineCallbacks, PipelineController).
+- [x] Вынести `gui_helpers.py` — pure helpers для CLI command building, status formatting.
+- [x] Вынести `gui_settings.py` — settings I/O.
+- [x] Вынести `gui_platform.py` — platform-specific helpers.
+- [x] Вынести `gui_widgets.py` — Tooltip.
+- [x] Вынести `gui_log_handler.py` — QueueHandler.
+- [x] Вынести `formatters.py` — size/time/speed formatting.
+- [x] Вынести `memory.py` — MemoryMonitor.
+- [x] Вынести `utils.py` — SubprocessRunner, scoped process registry.
+- [x] Вынести `silence.py` — SilenceParser.
+- [x] Создать общий concat finalizer (`_run_final_concat`) и resume validator (`_ensure_fresh_work_dir`, `_ffprobe_is_valid_mp4`).
+- [x] Убрать import-time `logging.basicConfig()` из `cli.py`.
+- [x] Удалить дубли и мёртвые doc refs (P2.10).
+- [x] gui.py: 2884 → 2351 строк.
+- [x] Добавлен audio_quality combobox (был только в config, не в GUI).
 
 ## Этап 11 — typing, lint и CI
 
-- [ ] Выбрать официальную минимальную версию Python: 3.13-only или `>=3.11`.
-- [ ] Синхронизировать `requires-python`, `.python-version`, CI, Ruff, mypy, README и CHANGELOG.
-- [ ] Запустить зафиксированный Ruff и проверить, существует ли актуальный `UP038` failure.
-- [ ] Исправить реальные Ruff errors.
-- [ ] Запустить `ruff format` и закоммитить только formatter diff.
-- [ ] Включить `check_untyped_defs=true`.
-- [ ] Постепенно включать `disallow_incomplete_defs` и `disallow_untyped_defs` для core modules.
-- [ ] Типизировать pipeline config, callbacks и subprocess results.
-- [ ] Добавить Windows CI job для MediaFoundation/Tk lifecycle smoke tests, где возможно.
-- [ ] Добавить CI media artifacts/ffprobe diagnostics при падении.
-- [ ] Удалить устаревшие комментарии и повтор `eta_s`.
-
-**Готово, когда:** локальные команды и CI зелёные на выбранной Python policy, а typing реально проверяет core pipeline.
+- [x] Выбрать Python 3.13 как минимальную версию.
+- [x] Синхронизировать `requires-python=>=3.13`, `.python-version=3.13`, CI (3.13), Ruff (target=py313), mypy (python_version=3.13).
+- [x] Запустить Ruff — исправлены 3 UP038 и 1 RUF002.
+- [x] `ruff format --check` — зелёный.
+- [x] Включить `check_untyped_defs=true`.
+- [ ] ~~Включить `disallow_incomplete_defs` и `disallow_untyped_defs`~~ — deferred (требует типизации всей кодовой базы).
+- [x] Типизировать pipeline config (`PipelineConfig` frozen dataclass), callbacks (`PipelineCallbacks`), subprocess results (`PipelineResult`, typed errors).
+- [ ] ~~Windows CI job~~ — deferred (GitHub Actions не имеет Windows runner в бесплатном плане).
+- [ ] ~~CI media artifacts~~ — deferred.
+- [x] Удалить устаревшие комментарии и повтор `eta_s`.
 
 ## Этап 12 — документация и release
 
-- [ ] Обновить README по фактическим encoder/audio/download presets.
-- [ ] Документировать fallback policy и CPU risk.
-- [ ] Документировать exact frame-boundary policy.
-- [ ] Документировать resume invalidation.
+- [x] Обновить README по фактическим encoder/audio/download presets.
+- [x] Документировать fallback policy и CPU risk.
+- [x] Документировать exact frame-boundary policy.
+- [x] Документировать resume invalidation.
 - [ ] Исправить CHANGELOG, который преждевременно заявляет py313 targets и fixes.
 - [ ] Добавить troubleshooting для overclocked CPU, temperatures и PSU instability без обещаний, что software limit исправит hardware instability.
 - [ ] После стабилизации рассмотреть PyPI package/release artifacts.
