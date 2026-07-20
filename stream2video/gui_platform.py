@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -82,3 +83,53 @@ def open_in_file_manager(path: Path) -> None:
         subprocess.Popen(["open", str(path)])
     else:
         subprocess.Popen(["xdg-open", str(path)])
+
+
+# Target window size for the GUI on a typical desktop. Exported so
+# tests can pin the constants and the GUI can import them without
+# duplicating the values.
+_DEFAULT_WINDOW_W = 1080
+_DEFAULT_WINDOW_H = 680
+# Margins reserved around the window so it doesn't butt up against
+# the screen edges or the taskbar / Dock.
+_SCREEN_MARGIN_W = 40
+_SCREEN_MARGIN_H = 60
+
+
+def fit_to_screen(sw: int, sh: int) -> tuple[int, int]:
+    """Return the default window size (w, h) clamped to the screen.
+
+    Targets 1080x680 on a typical desktop; shrinks to (sw-40) x (sh-60)
+    on smaller displays. The ``max(1, ...)`` floor guards against
+    negative/zero values from absurdly small screens (e.g., a remote
+    session at 200x150) where ``sw - 40`` could otherwise go negative.
+    """
+    return (
+        max(1, min(_DEFAULT_WINDOW_W, sw - _SCREEN_MARGIN_W)),
+        max(1, min(_DEFAULT_WINDOW_H, sh - _SCREEN_MARGIN_H)),
+    )
+
+
+def is_previewable_input(raw: str) -> bool:
+    """True iff ``raw`` points at a readable local file (not a URL).
+
+    Used by the GUI's "Waveform" button enable/disable logic. Mirrors
+    the guards in ``_render_waveform_preview`` so the button reflects
+    the actual preconditions (no file, URL, or non-existent path = no
+    preview). Pure: no Tk, no side effects — takes the raw input
+    string, returns True/False.
+
+    Uses the same strict ``^https?://`` check as
+    ``download._validate_url`` so a local filename containing ``://``
+    (rare but legal on some filesystems) isn't misclassified as a URL
+    and silently disabled.
+    """
+    if not raw:
+        return False
+    # URLs aren't previewable (they need a download first).
+    if re.match(r"^https?://", raw, re.IGNORECASE):
+        return False
+    try:
+        return Path(raw).is_file()
+    except (OSError, ValueError):
+        return False
