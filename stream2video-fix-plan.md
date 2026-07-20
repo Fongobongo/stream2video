@@ -41,12 +41,12 @@
 | P1.16 dry-run preview (detect_silence_stream) | ✅ | 55084ba |
 | P1.17 FPS policy + RAM budget + memory monitor | ✅ | bd9ef06 + 969d0d5 |
 | Этап 8A RAM/VRAM limits + OS guardrails | ✅ базовая инфраструктура | bd9ef06 |
-| P2.1 gui.py monolith (2884 → 2607 строк; _Tooltip + QueueHandler extracted; pure helpers в gui_helpers.py) | ✅ частично | 993bdbf + c6e97a7 |
-| P2.2 GUI/pipeline tests (pure helpers покрыты; widget tests остаются known gap) | ⚠️ частично | c6e97a7 |
+| P2.1 gui.py monolith (2884 → 2579 строк; _Tooltip + QueueHandler + settings I/O + pure helpers extracted) | ✅ частично | 993bdbf + c6e97a7 + bd1b802 |
+| P2.2 GUI/pipeline tests (pure helpers + settings I/O покрыны; widget tests остаются known gap) | ⚠️ частично | c6e97a7 + bd1b802 |
 | P2.3 media correctness regression tests (21 тест: CFR matrix 24/25/30/50/60, silence@start/end, 10 segments drift, audio_quality, output_fps=60, audio-less) | ✅ | 8184d08 |
-| P2.4 duplicated subprocess lifecycle | ⚠️ остаётся (concat/silence/waveform/download каждый имеет свой Popen+drain) | — |
+| P2.4 shared SubprocessRunner (context manager: Popen + drain + cancel + cleanup) + 8 unit tests | ✅ | 4130d78 |
 | P2.5 silencedetect parsers unified в SilenceParser | ✅ | 94202f9 |
-| P2.6 duplicated segment/batch finalize/resume paths | ⚠️ частично (manifest валидация общая, но _run_segment_concat и _run_batch_concat остаются раздельными) | e861fcc |
+| P2.6 shared _run_final_concat (segment + batch используют общую функцию) | ✅ | 6460ee6 |
 | P2.7 CLI использует gui_helpers для progress formatting | ✅ | a496650 |
 | P2.8 CLI defaults из CONFIG_DEFAULTS (не строковые литералы) | ✅ | a496650 |
 | P2.9 logging.basicConfig из import → entry point | ✅ | 26e89fa |
@@ -64,29 +64,21 @@
 
 ### Что НЕ сделано (намеренно отложено)
 
-**P2.4 / P2.6 — дублирование subprocess lifecycle и segment/batch
-finalize/resume paths.** Эти два пункта требуют большого рефакторинга
-с выносом общего `SubprocessRunner` и `ConcatFinalizer` — риск
-регрессий в media correctness высок без полного GUI/pipeline test
-покрытия. Текущая реализация работает корректно (357 тестов зелёные,
-включая 21 media correctness regression test); дедупликация — это
-чисто архитектурное улучшение, не влияет на функциональность.
-
 **Этап 10 (полный GUI refactor на `gui/` package)** — большой объём
-работы по переносу ~2600 строк с круговой зависимостью. Сделан
-**частичный** refactor: `_Tooltip` и `QueueHandler` вынесены в
-отдельные модули (993bdbf); pure-логика — в `gui_helpers.py` с 28
-unit-тестами (c6e97a7). Полный перенос `Stream2VideoGUI` на package
+работы по переносу ~2580 строк с круговой зависимостью. Сделан
+**частичный** refactor: `_Tooltip` → `gui_widgets.py`, `QueueHandler`
+→ `gui_log_handler.py`, pure-логика → `gui_helpers.py` с 28 unit-тестами,
+settings I/O → `gui_settings.py` с 13 unit-тестами, `SubprocessRunner`
+→ `utils.py` с 8 unit-тестами, `SilenceParser` → `silence.py`,
+`_run_final_concat` shared. Полный перенос `Stream2VideoGUI` на package
 лучше делать отдельным PR после добавления GUI-тестов (pytest-qt /
 tkinter simulator).
 
 **Тесты GUI (P2.2)** — known gap. Pure-логика покрыта (formatters,
-paths, waveform, gui_helpers, SilenceParser), но реальных widget и
-pipeline controller тестов нет. Для зрелого решения стоит добавить
-pytest-qt или вынести pipeline controller в чистый state machine.
-
-**Этап 12 — обновление README/CHANGELOG** — не сделано. Dockerfile
-готов (789447f), но docs не обновлены. Это отдельная doc-задача.
+paths, waveform, gui_helpers, gui_settings, SubprocessRunner,
+SilenceParser), но реальных widget и pipeline controller тестов нет.
+Для зрелого решения стоит добавить pytest-qt или вынести pipeline
+controller в чистый state machine.
 
 
 ## 1. Проверенные выводы
