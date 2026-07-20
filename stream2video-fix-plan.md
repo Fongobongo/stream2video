@@ -41,8 +41,8 @@
 | P1.16 dry-run preview (detect_silence_stream) | ✅ | 55084ba |
 | P1.17 FPS policy + RAM budget + memory monitor | ✅ | bd9ef06 + 969d0d5 |
 | Этап 8A RAM/VRAM limits + OS guardrails | ✅ базовая инфраструктура | bd9ef06 |
-| P2.1 gui.py monolith (2884 → 2528 строк; _Tooltip + QueueHandler + settings I/O + pure helpers + platform helpers + completion summary extracted) | ✅ частично | 993bdbf + c6e97a7 + bd1b802 + b0be872 |
-| P2.2 GUI/pipeline tests (pure helpers + settings I/O + SubprocessRunner + SilenceParser + 9 GUI widget smoke tests; pipeline controller state machine tests остаются known gap) | ⚠️ частично | c6e97a7 + bd1b802 + 1c7a11a |
+| P2.1 gui.py monolith (2884 → 2514 строк; 7 модулей extracted: gui_widgets, gui_log_handler, gui_helpers, gui_settings, gui_platform, pipeline_controller skeleton, SubprocessRunner в utils) | ✅ частично | 993bdbf + c6e97a7 + bd1b802 + b0be872 + f4b62dd + 3c74e0c |
+| P2.2 GUI/pipeline tests (pure helpers + settings I/O + SubprocessRunner + SilenceParser + 9 GUI widget smoke tests + pipeline config validation; run() state machine tests остаются known gap) | ⚠️ частично | c6e97a7 + bd1b802 + 1c7a11a + 3c74e0c |
 | P2.3 media correctness regression tests (21 тест: CFR matrix 24/25/30/50/60, silence@start/end, 10 segments drift, audio_quality, output_fps=60, audio-less) | ✅ | 8184d08 |
 | P2.4 shared SubprocessRunner (context manager: Popen + drain + cancel + cleanup) + 8 unit tests | ✅ | 4130d78 |
 | P2.5 silencedetect parsers unified в SilenceParser | ✅ | 94202f9 |
