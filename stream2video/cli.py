@@ -385,6 +385,53 @@ def main(
         "Default 2048 (2 GB). Raise on memory-constrained laptops. If not "
         "passed, the config file's `memory_reserve_mb` key is used.",
     ),
+    segment_encode_timeout: int = typer.Option(
+        CONFIG_DEFAULTS["segment_encode_timeout"],
+        "--segment-timeout",
+        help="Per-segment encode timeout in seconds (default 600 = 10 min). "
+        "Raise for very long segments or slow hardware. If not passed, "
+        "the config file's `segment_encode_timeout` key is used.",
+    ),
+    final_concat_timeout: int = typer.Option(
+        CONFIG_DEFAULTS["final_concat_timeout"],
+        "--final-concat-timeout",
+        help="Final concat-demuxer timeout in seconds (default 86400 = 24 h). "
+        "Absolute ceiling on the final concat pass. If not passed, the "
+        "config file's `final_concat_timeout` key is used.",
+    ),
+    silence_timeout: int = typer.Option(
+        CONFIG_DEFAULTS["silence_timeout"],
+        "--silence-timeout",
+        help="Silence detection ceiling in seconds (default 36000 = 10 h). "
+        "If not passed, the config file's `silence_timeout` key is used.",
+    ),
+    stall_kill_timeout: int = typer.Option(
+        CONFIG_DEFAULTS["stall_kill_timeout"],
+        "--stall-timeout",
+        help="No-progress kill timeout in seconds (default 300 = 5 min). "
+        "ffmpeg is killed if no progress line arrives within this window. "
+        "If not passed, the config file's `stall_kill_timeout` key is used.",
+    ),
+    waveform_timeout: int = typer.Option(
+        CONFIG_DEFAULTS["waveform_timeout"],
+        "--waveform-timeout",
+        help="Waveform preview decode timeout in seconds (default 300 = 5 min). "
+        "If not passed, the config file's `waveform_timeout` key is used.",
+    ),
+    batch_chunk_size: int = typer.Option(
+        CONFIG_DEFAULTS["batch_chunk_size"],
+        "--batch-chunk-size",
+        help="Number of keep-segments per batch filter invocation (default 40). "
+        "Scaled down dynamically for large segment counts. If not passed, "
+        "the config file's `batch_chunk_size` key is used.",
+    ),
+    min_part_bytes: int = typer.Option(
+        CONFIG_DEFAULTS["min_part_bytes"],
+        "--min-part-bytes",
+        help="Minimum bytes for a resumed part to be considered valid "
+        "(default 1024). Smaller files are re-encoded. If not passed, the "
+        "config file's `min_part_bytes` key is used.",
+    ),
 ):
     """
     Compress stream recording by removing silence segments.
@@ -756,6 +803,7 @@ def main(
                         progress_callback=silence_progress,
                         cancel_callback=cancel_cb,
                         resume_cache_path=resume_cache_path,
+                        timeout=silence_timeout,
                     )
                     save_silence_cache(video_path, silence_segments, output_dir, config)
                     # Detection succeeded → the final cache is the
@@ -809,6 +857,12 @@ def main(
                     memory_limit_mb=resolved_memory_limit_mb,
                     memory_reserve_mb=resolved_memory_reserve_mb,
                     x264_low_memory=resolved_x264_low_memory,
+                    segment_encode_timeout=segment_encode_timeout,
+                    final_concat_timeout=final_concat_timeout,
+                    stall_kill_timeout=stall_kill_timeout,
+                    stall_warning_timeout=config.get("stall_warning_timeout", 120),
+                    batch_chunk_size=batch_chunk_size,
+                    min_part_bytes=min_part_bytes,
                 )
 
                 progress.update(

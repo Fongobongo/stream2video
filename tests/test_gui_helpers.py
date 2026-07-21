@@ -171,6 +171,50 @@ class TestBuildCliCommand:
         assert "--memory-limit-mb 4096" in cmd
         assert "--memory-reserve-mb 1024" in cmd
 
+    def test_phase_timeout_flags_omitted_at_defaults(self):
+        # P3.4: all phase-timeout flags default to their historical
+        # values; when nothing is customised, the copied command stays
+        # compact (no --segment-timeout 600 etc. noise).
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+        )
+        assert "--segment-timeout" not in cmd
+        assert "--final-concat-timeout" not in cmd
+        assert "--silence-timeout" not in cmd
+        assert "--stall-timeout" not in cmd
+        assert "--waveform-timeout" not in cmd
+        assert "--batch-chunk-size" not in cmd
+        assert "--min-part-bytes" not in cmd
+
+    def test_phase_timeout_flags_appended_when_non_default(self):
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="batch",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+            segment_encode_timeout=1200,
+            final_concat_timeout=172800,
+            silence_timeout=72000,
+            stall_kill_timeout=600,
+            waveform_timeout=900,
+            batch_chunk_size=20,
+            min_part_bytes=2048,
+        )
+        assert "--segment-timeout 1200" in cmd
+        assert "--final-concat-timeout 172800" in cmd
+        assert "--silence-timeout 72000" in cmd
+        assert "--stall-timeout 600" in cmd
+        assert "--waveform-timeout 900" in cmd
+        assert "--batch-chunk-size 20" in cmd
+        assert "--min-part-bytes 2048" in cmd
+
 
 class TestTruncateStatus:
     def test_short_string_unchanged(self):

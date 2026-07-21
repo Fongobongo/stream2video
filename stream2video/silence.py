@@ -205,6 +205,7 @@ def detect_silence(
     cancel_callback: Callable[[], bool] | None = None,
     on_segment: Callable[[list[SilenceSegment]], None] | None = None,
     resume_cache_path: Path | None = None,
+    timeout: int | None = None,
 ) -> list[SilenceSegment]:
     """
     Detect silence segments using ffmpeg silencedetect filter.
@@ -278,6 +279,9 @@ def detect_silence(
     if not -3 <= margin <= 5:
         raise ValueError(f"Margin must be in range [-3, 5], got {margin}")
 
+    # P3.4: timeout override from config. None = use module-level fallback.
+    effective_timeout = timeout if timeout is not None else _SILENCE_TIMEOUT
+
     current_config = {
         "threshold": threshold,
         "min_silence": min_silence,
@@ -333,9 +337,10 @@ def detect_silence(
                 resume_from=resume_from,
                 resume_save_path=resume_cache_path,
                 resume_save_config=current_config,
+                timeout=effective_timeout,
             )
         else:
-            _extract_audio_wav(video_path, wav_path, cancel_callback)
+            _extract_audio_wav(video_path, wav_path, cancel_callback, timeout=effective_timeout)
             # The WAV was just (re-)extracted — no prior work to resume
             # from, even if `initial_segments` was set above (it came
             # from an old run whose state is no longer in sync with the
@@ -349,6 +354,7 @@ def detect_silence(
                 None,
                 cancel_callback,
                 "WAV",
+                timeout=effective_timeout,
             )
             # Sample-verify must NOT use the user-facing progress_callback:
             # it runs for a fixed _SAMPLE_VERIFY_DURATION window and would
@@ -365,6 +371,7 @@ def detect_silence(
                 cancel_callback,
                 "video (sample)",
                 duration_limit=_SAMPLE_VERIFY_DURATION,
+                timeout=effective_timeout,
             )
             segments_D_sample = [s for s in segments_D if s.start < _SAMPLE_VERIFY_DURATION]
             if _sample_segments_match(
@@ -398,6 +405,7 @@ def detect_silence(
                     resume_from=resume_from,
                     resume_save_path=resume_cache_path,
                     resume_save_config=current_config,
+                    timeout=effective_timeout,
                 )
     else:
         segments = _run_silencedetect(
@@ -413,6 +421,7 @@ def detect_silence(
             resume_from=resume_from,
             resume_save_path=resume_cache_path,
             resume_save_config=current_config,
+            timeout=effective_timeout,
         )
 
     segments = apply_margin(segments, margin, duration)
@@ -429,6 +438,7 @@ def detect_silence_stream(
     min_silence: float,
     *,
     on_segment: Callable[[list[SilenceSegment]], None] | None = None,
+    timeout: int = _SILENCE_TIMEOUT,
 ) -> list[SilenceSegment]:
     """Run ffmpeg silencedetect on ``input_path`` directly — no WAV file.
 
@@ -504,7 +514,7 @@ def detect_silence_stream(
             line = raw.decode("utf-8", errors="replace")
             parser.feed(line)
 
-        proc.wait(timeout=_SILENCE_TIMEOUT)
+        proc.wait(timeout=timeout)
         if proc.returncode != 0:
             raise SilenceDetectionError(f"ffmpeg silencedetect failed (rc={proc.returncode})")
         # ``detect_silence_stream`` is a preview-only helper that
@@ -538,6 +548,7 @@ def _run_silencedetect(
     resume_from: float | None = None,
     resume_save_path: Path | None = None,
     resume_save_config: dict | None = None,
+    timeout: int = _SILENCE_TIMEOUT,
 ) -> list[SilenceSegment]:
     """Run ffmpeg silencedetect on `input_path` and return parsed segments.
 
@@ -761,7 +772,7 @@ def _run_silencedetect(
             if cancelled.is_set():
                 raise SilenceCancelledError("silence detection cancelled")
 
-            process.wait(timeout=_SILENCE_TIMEOUT)
+            process.wait(timeout=timeout)
             wait_for_drain()
             drain_done = True
 
@@ -833,6 +844,7 @@ def _extract_audio_wav(
     video_path: Path,
     wav_path: Path,
     cancel_callback: Callable[[], bool] | None = None,
+    timeout: int = _SILENCE_TIMEOUT,
 ) -> None:
     """Extract audio from `video_path` to a 16kHz mono PCM WAV at `wav_path`.
 
@@ -888,7 +900,7 @@ def _extract_audio_wav(
         with cancel_monitor(process, cancel_callback) as cancelled:
             if cancelled.is_set():
                 raise SilenceCancelledError("audio extraction cancelled")
-            process.wait(timeout=_SILENCE_TIMEOUT)
+            process.wait(timeout=timeout)
             if cancelled.is_set():
                 raise SilenceCancelledError("audio extraction cancelled")
             wait_for_drain()

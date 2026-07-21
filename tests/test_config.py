@@ -253,6 +253,95 @@ class TestSaveUserDefaults:
         loaded = load_user_defaults()
         assert loaded == original
 
+
+class TestPipelinePhaseTimeouts:
+    """P3.4: pipeline phase timeouts + tunables exposed via CONFIG_DEFAULTS.
+
+    These were previously module-level constants in concat.py / silence.py
+    / waveform.py; the fix-plan's P3.4 task moved them into the shared config
+    so the CLI / GUI can override without code edits.
+    """
+
+    def test_phase_timeout_keys_present(self):
+        for key in (
+            "segment_encode_timeout",
+            "final_concat_timeout",
+            "silence_timeout",
+            "stall_kill_timeout",
+            "stall_warning_timeout",
+            "waveform_timeout",
+            "batch_chunk_size",
+            "min_part_bytes",
+        ):
+            assert key in CONFIG_DEFAULTS, f"missing P3.4 key {key!r}"
+
+    def test_phase_timeout_defaults_match_historical_values(self):
+        # Defaults must match the historical module-level constants so
+        # existing behaviour is unchanged when the user doesn't override.
+        assert CONFIG_DEFAULTS["segment_encode_timeout"] == 600
+        assert CONFIG_DEFAULTS["final_concat_timeout"] == 86400
+        assert CONFIG_DEFAULTS["silence_timeout"] == 36000
+        assert CONFIG_DEFAULTS["stall_kill_timeout"] == 300
+        assert CONFIG_DEFAULTS["stall_warning_timeout"] == 120
+        assert CONFIG_DEFAULTS["waveform_timeout"] == 300
+        assert CONFIG_DEFAULTS["batch_chunk_size"] == 40
+        assert CONFIG_DEFAULTS["min_part_bytes"] == 1024
+
+    def test_phase_timeouts_have_ranges(self):
+        # Without a range a typo (e.g. 0 = instant timeout) would be
+        # silently accepted. Each timeout has a lower bound > 0.
+        for key in (
+            "segment_encode_timeout",
+            "final_concat_timeout",
+            "silence_timeout",
+            "stall_kill_timeout",
+            "stall_warning_timeout",
+            "waveform_timeout",
+            "batch_chunk_size",
+            "min_part_bytes",
+        ):
+            assert key in CONFIG_RANGES, f"missing CONFIG_RANGES entry for {key!r}"
+
+    def test_phase_timeouts_in_user_default_keys(self):
+        # If a key isn't in USER_DEFAULT_KEYS the GUI's "Save current as
+        # defaults" silently drops it — users can't persist overrides.
+        for key in (
+            "segment_encode_timeout",
+            "final_concat_timeout",
+            "silence_timeout",
+            "stall_kill_timeout",
+            "stall_warning_timeout",
+            "waveform_timeout",
+            "batch_chunk_size",
+            "min_part_bytes",
+        ):
+            assert key in USER_DEFAULT_KEYS, f"{key!r} not persistable as user default"
+
+    def test_phase_timeout_coerce_rejects_garbage(self):
+        # Type guard: a string where an int is expected must return None
+        # so load_user_defaults() drops the bad entry instead of crashing
+        # a later int arithmetic call.
+        for key in (
+            "segment_encode_timeout",
+            "silence_timeout",
+            "waveform_timeout",
+            "batch_chunk_size",
+            "min_part_bytes",
+        ):
+            assert coerce_typed_value(key, "not a number") is None
+            assert coerce_typed_value(key, True) is None
+            assert coerce_typed_value(key, None) is None
+
+    def test_phase_timeout_coerce_accepts_int(self):
+        for key in (
+            "segment_encode_timeout",
+            "silence_timeout",
+            "waveform_timeout",
+            "batch_chunk_size",
+            "min_part_bytes",
+        ):
+            assert coerce_typed_value(key, 1234) == 1234
+
     def test_atomic_write_no_leftover_tmp(self, tmp_path, monkeypatch):
         fake = tmp_path / "user_defaults.json"
         monkeypatch.setattr("stream2video.config.user_defaults_path", lambda: fake)

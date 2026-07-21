@@ -55,6 +55,25 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     "download_timeout": 28800,  # 8h
     "connect_timeout": 300,  # 5 min pre-first-byte
     "no_progress_timeout": 1800,  # 30 min mid-download stall
+    # Pipeline phase timeouts (P3.4). Exposed via CLI flags
+    # (--segment-timeout / --final-concat-timeout / --silence-timeout
+    # / --stall-timeout) and plumbed through PipelineConfig; module-
+    # level constants in concat.py / silence.py remain as fallbacks
+    # for direct callers that don't pass config-derived values.
+    "segment_encode_timeout": 600,  # 10 min per segment encode
+    "final_concat_timeout": 86400,  # 24h absolute ceiling on final concat
+    "silence_timeout": 36000,  # 10h silence detection ceiling
+    "stall_kill_timeout": 300,  # 5 min no-progress -> kill ffmpeg
+    "stall_warning_timeout": 120,  # 2 min no-progress -> warn
+    # Waveform preview decode timeout (P3.4). Bounds the ffmpeg
+    # invocation that reads peaks for the popup.
+    "waveform_timeout": 300,  # 5 min
+    # Batch chunk size (P3.4). Number of keep-segments per batch
+    # filter invocation; scaled down dynamically for large counts.
+    "batch_chunk_size": 40,
+    # Minimum bytes for a resumed part file to be considered valid
+    # (P3.4). Smaller files are treated as corrupt and re-encoded.
+    "min_part_bytes": 1024,
     "force": False,
     "delete_after": False,
     "per_video_dir": True,
@@ -67,6 +86,18 @@ CONFIG_RANGES = {
     "threshold": (-60, -5),
     "min_silence": (0.1, 60),
     "margin": (-3, 5),
+    # Pipeline phase timeouts (P3.4). Lower bound 1s rejects typos /
+    # accidental zero; upper bound 7 days accommodates pathological
+    # long-running encodes without making the watchdog effectively
+    # disabled.
+    "segment_encode_timeout": (1, 604800),
+    "final_concat_timeout": (1, 604800),
+    "silence_timeout": (1, 604800),
+    "stall_kill_timeout": (10, 3600),
+    "stall_warning_timeout": (5, 1800),
+    "waveform_timeout": (10, 3600),
+    "batch_chunk_size": (1, 500),
+    "min_part_bytes": (1, 10485760),
 }
 
 VALID_METHODS: list[str] = ["segment", "batch"]
@@ -128,6 +159,15 @@ USER_DEFAULT_KEYS: list[str] = [
     "download_timeout",
     "connect_timeout",
     "no_progress_timeout",
+    # Pipeline phase timeouts + tuning (P3.4)
+    "segment_encode_timeout",
+    "final_concat_timeout",
+    "silence_timeout",
+    "stall_kill_timeout",
+    "stall_warning_timeout",
+    "waveform_timeout",
+    "batch_chunk_size",
+    "min_part_bytes",
     "force",
     "delete_after",
     "per_video_dir",

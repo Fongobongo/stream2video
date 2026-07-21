@@ -45,6 +45,13 @@ def build_cli_command(
     x264_low_memory: bool = False,
     memory_limit_mb: str | int = "auto",
     memory_reserve_mb: int = 2048,
+    segment_encode_timeout: int = 600,
+    final_concat_timeout: int = 86400,
+    silence_timeout: int = 36000,
+    stall_kill_timeout: int = 300,
+    waveform_timeout: int = 300,
+    batch_chunk_size: int = 40,
+    min_part_bytes: int = 1024,
     force: bool = False,
     delete_after: bool = False,
     config_path: Path | None = None,
@@ -98,6 +105,22 @@ def build_cli_command(
         parts.extend(["--memory-limit-mb", str(memory_limit_mb)])
     if memory_reserve_mb != 2048:
         parts.extend(["--memory-reserve-mb", str(memory_reserve_mb)])
+    # P3.4: phase timeouts. Only appended when non-default so the
+    # copied command stays readable when the user hasn't customised.
+    if segment_encode_timeout != 600:
+        parts.extend(["--segment-timeout", str(segment_encode_timeout)])
+    if final_concat_timeout != 86400:
+        parts.extend(["--final-concat-timeout", str(final_concat_timeout)])
+    if silence_timeout != 36000:
+        parts.extend(["--silence-timeout", str(silence_timeout)])
+    if stall_kill_timeout != 300:
+        parts.extend(["--stall-timeout", str(stall_kill_timeout)])
+    if waveform_timeout != 300:
+        parts.extend(["--waveform-timeout", str(waveform_timeout)])
+    if batch_chunk_size != 40:
+        parts.extend(["--batch-chunk-size", str(batch_chunk_size)])
+    if min_part_bytes != 1024:
+        parts.extend(["--min-part-bytes", str(min_part_bytes)])
     if force:
         parts.append("-f")
     if delete_after:
