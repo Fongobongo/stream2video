@@ -367,3 +367,116 @@ class TestProgressParsing:
             for p in received:
                 assert p.downloaded_bytes is not None
                 assert p.total_bytes is not None
+
+
+class TestProgressParsingEdgeCases:
+    """Coverage for the download test matrix — zero/unknown fields that
+    yt-dlp emits during connection ramp-up, DNS failure, and stalls."""
+
+    def test_zero_speed_at_start(self):
+        # yt-dlp emits speed=0 before the first chunk lands. The parser
+        # must surface 0.0 (not None) so the UI can distinguish "starting"
+        # from "unknown speed".
+        prog = _parse_progress_line("s2v_progress|0|1000|1000|0|0")
+        assert prog is not None
+        assert prog.speed == 0.0
+        assert prog.eta == 0.0
+
+    def test_unknown_total_throughout(self):
+        # A live stream or chunked transfer with no Content-Length leaves
+        # both total_bytes and total_bytes_estimate as NA for the whole
+        # download. The UI must tolerate this and show an indeterminate
+        # bar (caller checks ``total_bytes is None``).
+        for downloaded in ("100", "500", "1000"):
+            prog = _parse_progress_line(f"s2v_progress|{downloaded}|NA|NA|100|5")
+            assert prog is not None
+            assert prog.total_bytes is None
+            assert prog.downloaded_bytes == float(downloaded)
+
+    def test_eta_na_with_known_speed(self):
+        # When yt-dlp knows the speed but can't estimate ETA (e.g. the
+        # total is unknown so ETA is undefined), speed is surfaced but
+        # eta is None so the UI shows "calculating..." rather than 0.
+        prog = _parse_progress_line("s2v_progress|500|NA|NA|100|NA")
+        assert prog is not None
+        assert prog.speed == 100.0
+        assert prog.eta is None
+
+    def test_downloaded_bytes_zero_is_valid(self):
+        # A literal 0 must not be confused with None / falsy — the
+        # parser returns 0.0 so the UI can show "0%" rather than "?%".
+        prog = _parse_progress_line("s2v_progress|0|1000|1000|0|10")
+        assert prog is not None
+        assert prog.downloaded_bytes == 0.0
+
+
+class TestNetworkErrorClassification:
+    """Coverage for the download test matrix — yt-dlp stderr from network
+    failures (offline / DNS / timeout / retry / stalled) must map to a
+    DownloadError subclass or the generic DownloadError, never silently
+    pass through.
+
+    These are unit tests on the classifier; full subprocess-level
+    coverage requires real yt-dlp sources and is deferred to the
+    integration test matrix (see fix-plan §4 Download).
+    """
+
+    def test_offline_is_download_error(self):
+        # yt-dlp emits "ConnectionError" / "unable to connect" when the
+        # network is down. _classify_error currently maps this to the
+        # generic DownloadError (not a specific subclass) — the test
+        # pins that behaviour so a future refactor doesn't accidentally
+        # drop the error entirely.
+        for marker in (
+            "ERROR: unable to connect to network",
+            "ConnectionError: [Errno 101] Network is unreachable",
+            "ERROR: Failed to extract any data",
+        ):
+            err = _classify_error(marker)
+            assert isinstance(err, DownloadError), f"{marker!r} not classified as DownloadError"
+
+    def test_dns_failure_is_download_error(self):
+        # DNS failures surface as "Name or service not known" / "Temporary
+        # failure in name resolution".
+        for marker in (
+            "ERROR: [Errno -2] Name or service not known",
+            "socket.gaierror: [Errno -2] Temporary failure in name resolution",
+            "ERROR: unable to resolve host",
+        ):
+            err = _classify_error(marker)
+            assert isinstance(err, DownloadError)
+
+    def test_timeout_is_download_error(self):
+        # yt-dlp emits "Read timed out" / "Connection timed out" on
+        # network timeouts.
+        for marker in (
+            "ERROR: Read timed out",
+            "socket.timeout: The read operation timed out",
+            "ERROR: Connection timed out",
+        ):
+            err = _classify_error(marker)
+            assert isinstance(err, DownloadError)
+
+    def test_retry_exhausted_is_download_error(self):
+        # yt-dlp retries up to 10 times before giving up; the final
+        # stderr mentions "giving up" / "max retries".
+        for marker in (
+            "ERROR: giving up after 10 retries",
+            "ERROR: Downloaded 0 bytes",
+            "ERROR: unable to download video",
+        ):
+            err = _classify_error(marker)
+            assert isinstance(err, DownloadError)
+
+    def test_network_error_does_not_match_unavailable(self):
+        # A network error must NOT be misclassified as
+        # VideoNotAvailableError — that would mislead the user into
+        # thinking the video is gone when it's just their connection.
+        err = _classify_error("ERROR: Connection timed out")
+        assert not isinstance(err, VideoNotAvailableError)
+
+    def test_network_error_does_not_match_disk_full(self):
+        # Likewise, a network error must not be misclassified as
+        # DiskSpaceError.
+        err = _classify_error("ERROR: unable to connect to network")
+        assert not isinstance(err, DiskSpaceError)

@@ -1595,6 +1595,14 @@ class Stream2VideoGUI(ctk.CTk):
             download_timeout=self.config.get("download_timeout", 28800),
             connect_timeout=self.config.get("connect_timeout", 300),
             no_progress_timeout=self.config.get("no_progress_timeout", 1800),
+            segment_encode_timeout=self.config.get("segment_encode_timeout", 600),
+            final_concat_timeout=self.config.get("final_concat_timeout", 86400),
+            silence_timeout=self.config.get("silence_timeout", 36000),
+            stall_kill_timeout=self.config.get("stall_kill_timeout", 300),
+            stall_warning_timeout=self.config.get("stall_warning_timeout", 120),
+            waveform_timeout=self.config.get("waveform_timeout", 300),
+            batch_chunk_size=self.config.get("batch_chunk_size", 40),
+            min_part_bytes=self.config.get("min_part_bytes", 1024),
         )
 
         # Download progress callback — maps yt-dlp's progress to the
@@ -2044,7 +2052,11 @@ class Stream2VideoGUI(ctk.CTk):
                 # renders (overlay, zoom/pan, live poller) can use
                 # the same data without re-reading.
                 self._tk_after(0, lambda: self._safe_status_set("Loading..."))
-                peaks, duration = read_peaks_from_stream(in_path, target_buckets=800)
+                peaks, duration = read_peaks_from_stream(
+                    in_path,
+                    target_buckets=800,
+                    timeout=self.config.get("waveform_timeout", 300),
+                )
                 if token != self._waveform_render_token:
                     return
                 if not peaks or duration <= 0:
@@ -2566,6 +2578,13 @@ class Stream2VideoGUI(ctk.CTk):
             x264_low_memory=x264_low_memory,
             memory_limit_mb=memory_limit_mb,
             memory_reserve_mb=memory_reserve_mb,
+            segment_encode_timeout=self.config.get("segment_encode_timeout", 600),
+            final_concat_timeout=self.config.get("final_concat_timeout", 86400),
+            silence_timeout=self.config.get("silence_timeout", 36000),
+            stall_kill_timeout=self.config.get("stall_kill_timeout", 300),
+            waveform_timeout=self.config.get("waveform_timeout", 300),
+            batch_chunk_size=self.config.get("batch_chunk_size", 40),
+            min_part_bytes=self.config.get("min_part_bytes", 1024),
             config_path=config_path,
         )
         self.clipboard_clear()

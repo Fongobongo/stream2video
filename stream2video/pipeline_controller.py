@@ -127,6 +127,18 @@ class PipelineConfig:
     download_timeout: int
     connect_timeout: int
     no_progress_timeout: int
+    # Pipeline phase timeouts + tuning (P3.4). Plumbed into
+    # detect_silence / cut_and_concat / read_peaks_from_stream; module-
+    # level constants in concat.py / silence.py / waveform.py remain
+    # as fallbacks for direct callers that don't pass config values.
+    segment_encode_timeout: int = 600
+    final_concat_timeout: int = 86400
+    silence_timeout: int = 36000
+    stall_kill_timeout: int = 300
+    stall_warning_timeout: int = 120
+    waveform_timeout: int = 300
+    batch_chunk_size: int = 40
+    min_part_bytes: int = 1024
 
 
 @dataclass(frozen=True)
@@ -453,6 +465,7 @@ class PipelineController:
             cancel_callback=lambda: self.cancel_event.is_set(),
             on_segment=self.on_live_segment,
             resume_cache_path=resume_cache_path,
+            timeout=self.cfg.silence_timeout,
         )
         save_silence_cache(video_path, silence_segments, output_dir, config)
         try:
@@ -526,6 +539,12 @@ class PipelineController:
             memory_limit_mb=self.cfg.memory_limit_mb,
             memory_reserve_mb=self.cfg.memory_reserve_mb,
             x264_low_memory=self.cfg.x264_low_memory,
+            segment_encode_timeout=self.cfg.segment_encode_timeout,
+            final_concat_timeout=self.cfg.final_concat_timeout,
+            stall_kill_timeout=self.cfg.stall_kill_timeout,
+            stall_warning_timeout=self.cfg.stall_warning_timeout,
+            batch_chunk_size=self.cfg.batch_chunk_size,
+            min_part_bytes=self.cfg.min_part_bytes,
         )
 
         self._output_path = None

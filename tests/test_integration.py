@@ -11,7 +11,12 @@ from stream2video.concat import (
     ENCODER_OPTS,
     CancelledError,
     ConcatError,
+    _build_manifest,
+    _ffprobe_is_valid_mp4,
+    _manifest_path,
     _run_ffmpeg,
+    _source_identity,
+    _validate_manifest,
     _with_libx264_fallback,
     cut_and_concat,
     encoder_opts,
@@ -634,3 +639,232 @@ class TestEncoderThreadsPosition:
     def test_low_memory_omitted_by_default(self):
         opts = encoder_opts("libx264", "medium")
         assert "-x264-params" not in opts
+
+
+class TestResumeManifestValidation:
+    """P3.4 / fix-plan §4 Resume/failure: manifest mismatch scenarios.
+
+    These cover the resume-failure matrix items that don't need a real
+    ffmpeg encode — manifest validation is pure dict comparison and can
+    be unit-tested without subprocess. The crash-mid-encode scenarios
+    (segment / batch) require a fake subprocess and are deferred to
+    the integration test matrix.
+    """
+
+    def _build_base_manifest(
+        self, video_path: Path, keep_segments: list[tuple[float, float]]
+    ) -> dict:
+        return _build_manifest(
+            video_path=video_path,
+            keep_segments=keep_segments,
+            method="segment",
+            encoder="libx264",
+            vcodec="libx264",
+            vcodec_opts=["-preset", "medium"],
+            video_quality="medium",
+            audio_quality="medium",
+            x264_preset="medium",
+            encoder_threads="auto",
+        )
+
+    def test_matching_manifest_is_valid(self, tmp_path: Path):
+        # Baseline: a manifest written by the current run validates True.
+        # Without this, all the mismatch tests below are meaningless.
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"video data")
+        keep = [(0.0, 2.0), (4.0, 6.0)]
+        current = self._build_base_manifest(video, keep)
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        from stream2video.concat import _write_manifest
+
+        _write_manifest(work_dir, current)
+        assert _validate_manifest(work_dir, current) is True
+
+    def test_encoder_change_after_crash_invalidates(self, tmp_path: Path):
+        # Crash mid-encode, user switches encoder h264_mf → libx264.
+        # Old segments (h264_mf-encoded) must NOT be reused by the
+        # libx264 retry — manifest mismatch on `encoder` catches it.
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"video data")
+        keep = [(0.0, 2.0)]
+        old = self._build_base_manifest(video, keep)
+        old["encoder"] = "h264_mf"
+        old["resolved_encoder"] = "h264_mf"
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        from stream2video.concat import _write_manifest
+
+        _write_manifest(work_dir, old)
+        current = self._build_base_manifest(video, keep)
+        assert _validate_manifest(work_dir, current) is False
+
+    def test_quality_change_after_crash_invalidates(self, tmp_path: Path):
+        # User changes video_quality medium → high after a crash. Old
+        # segments encoded at medium bitrate must not be reused.
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"video data")
+        keep = [(0.0, 2.0)]
+        old = self._build_base_manifest(video, keep)
+        old["video_quality"] = "low"
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        from stream2video.concat import _write_manifest
+
+        _write_manifest(work_dir, old)
+        current = self._build_base_manifest(video, keep)
+        assert _validate_manifest(work_dir, current) is False
+
+    def test_source_swap_same_filename_invalidates(self, tmp_path: Path):
+        # User replaces src.mp4 with a different file (same name, different
+        # content / size / mtime). The keep_segments boundaries are now
+        # meaningless against the new content — source identity check
+        # (path/size/mtime_ns) catches the swap.
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"original content")
+        keep = [(0.0, 2.0)]
+        old = self._build_base_manifest(video, keep)
+        # Simulate the user replacing the file: mtime changes when the
+        # filesystem rewrites it, and size may change too.
+        video.write_bytes(b"replacement content - different size")
+        # Force a newer mtime so the identity check fires even on
+        # filesystems with coarse mtime resolution.
+        import os
+        import time
+
+        os.utime(video, (time.time() + 10, time.time() + 10))
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        from stream2video.concat import _write_manifest
+
+        _write_manifest(work_dir, old)
+        current = self._build_base_manifest(video, keep)
+        assert _validate_manifest(work_dir, current) is False
+
+    def test_keep_segments_change_invalidates(self, tmp_path: Path):
+        # User adjusts threshold/min_silence/margin after a crash → the
+        # keep_segments list changes. Old segments encoded for the old
+        # boundaries don't align with the new ones.
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"video data")
+        old_keep = [(0.0, 2.0), (4.0, 6.0)]
+        old = self._build_base_manifest(video, old_keep)
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        from stream2video.concat import _write_manifest
+
+        _write_manifest(work_dir, old)
+        new_keep = [(0.0, 3.0), (5.0, 6.0)]
+        current = self._build_base_manifest(video, new_keep)
+        assert _validate_manifest(work_dir, current) is False
+
+    def test_pipeline_version_change_invalidates(self, tmp_path: Path):
+        # After a stream2video upgrade, the on-disk manifest was written
+        # by an older pipeline version. New version may use different
+        # encoder opts / segment boundaries → must re-encode from scratch.
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"video data")
+        keep = [(0.0, 2.0)]
+        old = self._build_base_manifest(video, keep)
+        old["pipeline_version"] = "0.1"  # older version
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        from stream2video.concat import _write_manifest
+
+        _write_manifest(work_dir, old)
+        current = self._build_base_manifest(video, keep)
+        assert _validate_manifest(work_dir, current) is False
+
+    def test_missing_manifest_is_invalid(self, tmp_path: Path):
+        # Work dir exists but no _manifest.json (crash before manifest
+        # was written, or pre-manifest system). Must be treated as
+        # stale so segments aren't blindly reused.
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"video data")
+        keep = [(0.0, 2.0)]
+        current = self._build_base_manifest(video, keep)
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        # No _write_manifest call — dir is empty.
+        assert _validate_manifest(work_dir, current) is False
+
+    def test_corrupt_manifest_is_invalid(self, tmp_path: Path):
+        # _manifest.json exists but is corrupt JSON (e.g. crash mid-write
+        # truncated it). _load_manifest returns None → treated as stale.
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"video data")
+        keep = [(0.0, 2.0)]
+        current = self._build_base_manifest(video, keep)
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        # Write garbage to the manifest path.
+        _manifest_path(work_dir).write_text("{ this is not valid json")
+        assert _validate_manifest(work_dir, current) is False
+
+
+class TestSourceIdentity:
+    """_source_identity captures the signals used to detect a swapped
+    source file. Pinned so a future refactor doesn't silently drop one
+    of the fields _validate_manifest compares against."""
+
+    def test_captures_path_size_mtime(self, tmp_path: Path):
+        video = tmp_path / "clip.mp4"
+        video.write_bytes(b"x" * 1234)
+        ident = _source_identity(video)
+        assert "path" in ident
+        assert "size" in ident
+        assert "mtime_ns" in ident
+        assert ident["size"] == 1234
+        # mtime_ns matches the filesystem stat (so a re-stat of the same
+        # file produces the same identity, but a rewrite changes it).
+        import os
+
+        assert ident["mtime_ns"] == os.stat(video).st_mtime_ns
+
+    def test_different_files_have_different_identity(self, tmp_path: Path):
+        # Two distinct files must produce distinct identities so a
+        # keep-segment list built against file A doesn't get reused
+        # when file B is at the same path.
+        video = tmp_path / "clip.mp4"
+        video.write_bytes(b"content A")
+        ident_a = _source_identity(video)
+        video.write_bytes(b"content B is longer than A")
+        ident_b = _source_identity(video)
+        assert ident_a != ident_b
+
+
+class TestFfprobeIsValidMp4:
+    """_ffprobe_is_valid_mp4 — corrupt/missing-moov detection (fix-plan §4
+    Resume/failure: corrupt/missing-moov temp file).
+
+    Skipped when ffprobe isn't on PATH so the suite still runs in
+    environments without ffmpeg installed.
+    """
+
+    def _have_ffprobe(self) -> bool:
+        import shutil
+
+        return shutil.which("ffprobe") is not None
+
+    def test_missing_file_is_invalid(self, tmp_path: Path):
+        # Non-existent path → False (ffprobe can't open it).
+        assert _ffprobe_is_valid_mp4(tmp_path / "does_not_exist.mp4") is False
+
+    def test_truncated_file_is_invalid(self, tmp_path: Path):
+        # A few random bytes are not a valid MP4 — ffprobe fails to
+        # parse the moov atom and returns non-zero. This is the
+        # crash-mid-encode scenario: ffmpeg was killed before flushing
+        # the moov atom, leaving a truncated .mp4 on disk.
+        if not self._have_ffprobe():
+            pytest.skip("ffprobe not available")
+        corrupt = tmp_path / "truncated.mp4"
+        corrupt.write_bytes(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00")
+        assert _ffprobe_is_valid_mp4(corrupt) is False
+
+    def test_random_bytes_is_invalid(self, tmp_path: Path):
+        # Pure noise — no MP4 structure at all.
+        if not self._have_ffprobe():
+            pytest.skip("ffprobe not available")
+        corrupt = tmp_path / "noise.mp4"
+        corrupt.write_bytes(b"this is definitely not an mp4 file")
+        assert _ffprobe_is_valid_mp4(corrupt) is False

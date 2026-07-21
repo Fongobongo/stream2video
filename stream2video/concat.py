@@ -109,14 +109,9 @@ _SEGMENT_ENCODE_TIMEOUT = 600
 _STDERR_TRUNCATE = 1000
 _STALL_WARNING = 120
 _STALL_KILL = 300
-# Extra seconds to let the AAC encoder flush its lookahead buffer per
-# segment. Used ONLY when the encoder actually needs it; current
-# single-`-t` segment path does NOT (both streams are bounded by `-t`
-# at the same instant), so `_AUDIO_PAD` is retained as a documented
-# constant for the fallback-pad filters but not added to any segment's
-# output duration — see P0.4 in the fix plan.
-_HYBRID_SEEK_OFFSET = 0.5
-_AUDIO_PAD = 0.1  # extra seconds to let AAC encoder flush its lookahead buffer
+# Minimum size (bytes) for a resumed part to be considered valid.
+# Exposed via CONFIG_DEFAULTS (``min_part_bytes``).
+_MIN_PART_BYTES = 1024
 
 
 def _audio_bitrate() -> str:
@@ -191,6 +186,12 @@ def cut_and_concat(
     memory_limit_mb: str | int = "auto",
     memory_reserve_mb: int = 2048,
     x264_low_memory: bool = False,
+    segment_encode_timeout: int = _SEGMENT_ENCODE_TIMEOUT,
+    final_concat_timeout: int = _FINAL_CONCAT_TIMEOUT,
+    stall_kill_timeout: int = _STALL_KILL,
+    stall_warning_timeout: int = _STALL_WARNING,
+    batch_chunk_size: int = _BATCH_CHUNK_SIZE,
+    min_part_bytes: int = _MIN_PART_BYTES,
 ) -> Path:
     if not video_path.exists():
         raise ConcatError(f"Input video not found: {video_path}")
@@ -244,6 +245,12 @@ def cut_and_concat(
         source_has_audio=source_has_audio,
         output_fps=output_fps,
         x264_low_memory=x264_low_memory,
+        segment_encode_timeout=segment_encode_timeout,
+        final_concat_timeout=final_concat_timeout,
+        stall_kill=stall_kill_timeout,
+        stall_warning=stall_warning_timeout,
+        batch_chunk_size=batch_chunk_size,
+        min_part_bytes=min_part_bytes,
     )
 
     return output_path
@@ -596,6 +603,8 @@ def _run_ffmpeg(
     cancel_callback: Callable[[], bool] | None = None,
     track_progress: bool = True,
     memory_monitor: "MemoryMonitor | None" = None,
+    stall_kill: int = _STALL_KILL,
+    stall_warning: int = _STALL_WARNING,
 ) -> None:
     """Run an ffmpeg command. With track_progress=True (default), parses ffmpeg's
     -progress stream from stdout and invokes progress_callback(us). With False,
@@ -656,7 +665,7 @@ def _run_ffmpeg(
             if process.poll() is not None:
                 return
             elapsed = time.monotonic() - last_progress_time
-            if elapsed > _STALL_KILL:
+            if elapsed > stall_kill:
                 logger.error(
                     f"{label}: stall watchdog firing — no progress for "
                     f"{int(elapsed)}s, killing process"
@@ -691,13 +700,13 @@ def _run_ffmpeg(
                             except (ValueError, IndexError):
                                 pass
                     elapsed_since_progress = time.monotonic() - last_progress_time
-                    if elapsed_since_progress > _STALL_KILL:
+                    if elapsed_since_progress > stall_kill:
                         process.kill()
                         raise FFmpegError(
                             f"{label} stalled — no progress for {int(elapsed_since_progress)}s, "
                             "possible resource exhaustion"
                         )
-                    elif elapsed_since_progress > _STALL_WARNING:
+                    elif elapsed_since_progress > stall_warning:
                         logger.warning(
                             f"{label}: no progress for {int(elapsed_since_progress)}s — waiting..."
                         )
@@ -999,6 +1008,9 @@ def _run_final_concat(
     progress_callback: Callable[[float], None] | None,
     cancel_callback: Callable[[], bool] | None,
     label: str,
+    timeout: int = _FINAL_CONCAT_TIMEOUT,
+    stall_kill: int = _STALL_KILL,
+    stall_warning: int = _STALL_WARNING,
 ) -> None:
     """Build ``concat.txt`` and run the final concat-demuxer pass.
 
@@ -1045,9 +1057,11 @@ def _run_final_concat(
             str(output_path),
         ],
         progress_callback=_concat_prog,
-        timeout=_FINAL_CONCAT_TIMEOUT,
+        timeout=timeout,
         label=label,
         cancel_callback=cancel_callback,
+        stall_kill=stall_kill,
+        stall_warning=stall_warning,
     )
 
 
@@ -1066,6 +1080,11 @@ def _run_segment_concat(
     encoder_threads: str | int = "auto",
     source_has_audio: bool = True,
     output_fps: str = "source",
+    segment_encode_timeout: int = _SEGMENT_ENCODE_TIMEOUT,
+    final_concat_timeout: int = _FINAL_CONCAT_TIMEOUT,
+    stall_kill: int = _STALL_KILL,
+    stall_warning: int = _STALL_WARNING,
+    min_part_bytes: int = _MIN_PART_BYTES,
 ):
     """Encode each segment, join with concat demuxer.
 
@@ -1118,7 +1137,7 @@ def _run_segment_concat(
             # corrupt the final concat in the middle.
             if (
                 seg_path.exists()
-                and seg_path.stat().st_size >= _MIN_PART_BYTES
+                and seg_path.stat().st_size >= min_part_bytes
                 and _ffprobe_is_valid_mp4(seg_path)
             ):
                 skipped += 1
@@ -1222,9 +1241,11 @@ def _run_segment_concat(
                     str(seg_path),
                 ],
                 progress_callback=_seg_prog,
-                timeout=_SEGMENT_ENCODE_TIMEOUT,
+                timeout=segment_encode_timeout,
                 label=f"segment {i} encode",
                 cancel_callback=cancel_callback,
+                stall_kill=stall_kill,
+                stall_warning=stall_warning,
             )
 
             encoded_keep += dur
@@ -1246,6 +1267,9 @@ def _run_segment_concat(
             progress_callback=progress_callback,
             cancel_callback=cancel_callback,
             label="segment concat",
+            timeout=final_concat_timeout,
+            stall_kill=stall_kill,
+            stall_warning=stall_warning,
         )
         logger.info(f"Successfully created output: {output_path}")
 
@@ -1276,6 +1300,12 @@ def _run_with_fallback(
     source_has_audio: bool = True,
     output_fps: str = "source",
     x264_low_memory: bool = False,
+    segment_encode_timeout: int = _SEGMENT_ENCODE_TIMEOUT,
+    final_concat_timeout: int = _FINAL_CONCAT_TIMEOUT,
+    stall_kill: int = _STALL_KILL,
+    stall_warning: int = _STALL_WARNING,
+    batch_chunk_size: int = _BATCH_CHUNK_SIZE,
+    min_part_bytes: int = _MIN_PART_BYTES,
 ):
     """Run segment or batch concat with the primary encoder; fall back to libx264 on failure.
 
@@ -1294,10 +1324,8 @@ def _run_with_fallback(
     respects a low-CPU intent.
     """
     if method == "segment":
-        inner = _run_segment_concat
         work_suffix = "_segments"
     elif method == "batch":
-        inner = _run_batch_concat
         work_suffix = "_batch"
     else:
         raise ConcatError(
@@ -1314,22 +1342,51 @@ def _run_with_fallback(
             shutil.rmtree(work_dir, ignore_errors=True)
 
     def _try(enc: str, enc_opts: list[str]):
-        inner(
-            video_path,
-            keep_segments,
-            output_path,
-            enc,
-            enc_opts,
-            progress_callback,
-            cancel_callback,
-            encoder=enc,
-            video_quality=video_quality,
-            audio_quality=audio_quality,
-            x264_preset=x264_preset,
-            encoder_threads=encoder_threads,
-            source_has_audio=source_has_audio,
-            output_fps=output_fps,
-        )
+        if method == "segment":
+            _run_segment_concat(
+                video_path,
+                keep_segments,
+                output_path,
+                enc,
+                enc_opts,
+                progress_callback,
+                cancel_callback,
+                encoder=enc,
+                video_quality=video_quality,
+                audio_quality=audio_quality,
+                x264_preset=x264_preset,
+                encoder_threads=encoder_threads,
+                source_has_audio=source_has_audio,
+                output_fps=output_fps,
+                segment_encode_timeout=segment_encode_timeout,
+                final_concat_timeout=final_concat_timeout,
+                stall_kill=stall_kill,
+                stall_warning=stall_warning,
+                min_part_bytes=min_part_bytes,
+            )
+        else:
+            _run_batch_concat(
+                video_path,
+                keep_segments,
+                output_path,
+                enc,
+                enc_opts,
+                progress_callback,
+                cancel_callback,
+                encoder=enc,
+                video_quality=video_quality,
+                audio_quality=audio_quality,
+                x264_preset=x264_preset,
+                encoder_threads=encoder_threads,
+                source_has_audio=source_has_audio,
+                output_fps=output_fps,
+                segment_encode_timeout=segment_encode_timeout,
+                final_concat_timeout=final_concat_timeout,
+                stall_kill=stall_kill,
+                stall_warning=stall_warning,
+                batch_chunk_size=batch_chunk_size,
+                min_part_bytes=min_part_bytes,
+            )
 
     _with_libx264_fallback(
         primary_codec,
@@ -1362,6 +1419,12 @@ def _run_batch_concat(
     encoder_threads: str | int = "auto",
     source_has_audio: bool = True,
     output_fps: str = "source",
+    segment_encode_timeout: int = _SEGMENT_ENCODE_TIMEOUT,
+    final_concat_timeout: int = _FINAL_CONCAT_TIMEOUT,
+    stall_kill: int = _STALL_KILL,
+    stall_warning: int = _STALL_WARNING,
+    batch_chunk_size: int = _BATCH_CHUNK_SIZE,
+    min_part_bytes: int = _MIN_PART_BYTES,
 ):
     """Process chunks sequentially: each chunk → temp file, then concat.
 
@@ -1383,12 +1446,12 @@ def _run_batch_concat(
     # RAM, scale up for small files to keep chunks productive.
     n_segs = len(keep_segments)
     if n_segs > 200:
-        chunk_size = max(_BATCH_CHUNK_MIN, _BATCH_CHUNK_SIZE * 200 // n_segs)
+        chunk_size = max(_BATCH_CHUNK_MIN, batch_chunk_size * 200 // n_segs)
     elif n_segs > 100 and total_duration > 3600:
-        chunk_size = max(_BATCH_CHUNK_MIN, _BATCH_CHUNK_SIZE * 100 // n_segs)
+        chunk_size = max(_BATCH_CHUNK_MIN, batch_chunk_size * 100 // n_segs)
     else:
-        chunk_size = _BATCH_CHUNK_SIZE
-    chunk_size = max(_BATCH_CHUNK_MIN, min(chunk_size, _BATCH_CHUNK_SIZE))
+        chunk_size = batch_chunk_size
+    chunk_size = max(_BATCH_CHUNK_MIN, min(chunk_size, batch_chunk_size))
     chunks = [keep_segments[i : i + chunk_size] for i in range(0, n_segs, chunk_size)]
     n_chunks = len(chunks)
     logger.info(
@@ -1427,7 +1490,7 @@ def _run_batch_concat(
             # corrupt chunk in the middle of the file.
             if (
                 chunk_path.exists()
-                and chunk_path.stat().st_size >= _MIN_PART_BYTES
+                and chunk_path.stat().st_size >= min_part_bytes
                 and _ffprobe_is_valid_mp4(chunk_path)
             ):
                 skipped += 1
@@ -1599,9 +1662,11 @@ def _run_batch_concat(
                         str(chunk_path),
                     ],
                     progress_callback=_chunk_prog,
-                    timeout=_SEGMENT_ENCODE_TIMEOUT,
+                    timeout=segment_encode_timeout,
                     label=f"batch chunk {ci}/{n_chunks}",
                     cancel_callback=cancel_callback,
+                    stall_kill=stall_kill,
+                    stall_warning=stall_warning,
                 )
             finally:
                 Path(script_path).unlink(missing_ok=True)
@@ -1626,6 +1691,9 @@ def _run_batch_concat(
             progress_callback=progress_callback,
             cancel_callback=cancel_callback,
             label="batch concat",
+            timeout=final_concat_timeout,
+            stall_kill=stall_kill,
+            stall_warning=stall_warning,
         )
         logger.info(f"batch: successfully created {output_path}")
 

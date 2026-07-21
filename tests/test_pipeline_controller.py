@@ -104,6 +104,14 @@ class TestPipelineConfig:
             "connect_timeout",
             "no_progress_timeout",
             "x264_low_memory",
+            "segment_encode_timeout",
+            "final_concat_timeout",
+            "silence_timeout",
+            "stall_kill_timeout",
+            "stall_warning_timeout",
+            "waveform_timeout",
+            "batch_chunk_size",
+            "min_part_bytes",
         }
         assert set(cfg.__dataclass_fields__.keys()) == expected
 
@@ -426,3 +434,67 @@ class TestPipelineControllerRun:
                 pytest.raises(PipelineCancelled),
             ):
                 controller.run()
+
+
+class TestPipelineControllerTkIsolation:
+    """Fix-plan §4 GUI/threading: "Ни одного Tk call из worker thread".
+
+    PipelineController is the worker-thread surface — if it imported
+    Tkinter (or customtkinter), the worker would be able to call widgets
+    directly, which is unsafe (Tk widgets are main-thread-only). The
+    architectural guard is enforced by static import analysis: the
+    module must not import tkinter / customtkinter / PIL.
+
+    A real event-loop test (preview concurrent with pipeline, popup
+    close during decode, etc.) requires pytest-qt and is deferred —
+    this static check is the cheap regression net that catches a
+    careless ``from tkinter import messagebox`` added during a refactor.
+    """
+
+    def test_pipeline_controller_does_not_import_tk(self):
+        import importlib
+        import sys
+
+        # Drop any cached copy so we get a fresh import that records
+        # which modules it pulls in.
+        mods_before = set(sys.modules.keys())
+        try:
+            importlib.import_module("stream2video.pipeline_controller")
+        finally:
+            pass
+        mods_after = set(sys.modules.keys())
+        new_mods = mods_after - mods_before
+        # Must not pull in tkinter / customtkinter / PIL. The controller
+        # is pure orchestration; callbacks dispatch to Tk via the
+        # GUI's bound methods (which use self._tk_after on the main loop).
+        forbidden = {"tkinter", "customtkinter", "PIL", "PIL.Image"}
+        leaked = forbidden & new_mods
+        assert not leaked, (
+            f"pipeline_controller pulled Tk deps into sys.modules: {leaked}. "
+            f"The worker thread must not be able to call Tk widgets directly."
+        )
+
+    def test_pipeline_controller_source_has_no_tk_references(self):
+        # Static source check: scan pipeline_controller.py for direct
+        # references to tkinter / customtkinter / messagebox. A stray
+        # ``import tkinter`` (even if unused) is a smell that the module
+        # is gaining UI coupling.
+        from pathlib import Path
+
+        source = (
+            Path(__file__).parent.parent / "stream2video" / "pipeline_controller.py"
+        ).read_text(encoding="utf-8")
+        forbidden_tokens = (
+            "import tkinter",
+            "from tkinter",
+            "import customtkinter",
+            "from customtkinter",
+            "messagebox",
+            ".after(",
+            "tkinter.",
+        )
+        leaked = [t for t in forbidden_tokens if t in source]
+        assert not leaked, (
+            f"pipeline_controller.py contains Tk references: {leaked}. "
+            f"Move the UI coupling into the GUI layer."
+        )

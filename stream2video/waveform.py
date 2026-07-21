@@ -61,6 +61,7 @@ _WAVEFORM_TIMEOUT = 300  # seconds
 def read_peaks_from_stream(
     input_path: Path,
     target_buckets: int,
+    timeout: int = _WAVEFORM_TIMEOUT,
 ) -> tuple[list[float], float]:
     """Stream audio from ``input_path`` via ffmpeg and return (peaks, duration).
 
@@ -163,7 +164,7 @@ def read_peaks_from_stream(
         return [], 0.0
     proc.stdout.close()
     try:
-        proc.wait(timeout=_WAVEFORM_TIMEOUT)
+        proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
