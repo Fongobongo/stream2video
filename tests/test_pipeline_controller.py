@@ -435,6 +435,129 @@ class TestPipelineControllerRun:
             ):
                 controller.run()
 
+    def test_cancel_then_restart_resumes_via_cache(self, tmp_path: Path):
+        """Fix-plan section 4 Resume/failure: "Cancel и повторный запуск CLI/GUI".
+
+        When the user cancels mid-detection and then re-runs, the second
+        run must pick up the cached silence segments from the first run
+        (via ``load_silence_cache``) instead of re-detecting from scratch.
+
+        The cache write happens inside ``detect_silence`` itself; here
+        we verify the controller's wiring: the first run is cancelled
+        AFTER the cache was written (simulating a Ctrl+C after the
+        silence phase completed but before concat started), and the
+        second run loads the cache instead of calling detect_silence
+        again.
+        """
+        cfg = _valid_config(output_dir=tmp_path, input_raw=str(tmp_path / "src.mp4"))
+        cb, _ = self._make_callbacks()
+        cancel = __import__("threading").Event()
+        controller = PipelineController(cfg=cfg, cb=cb, cancel_event=cancel)
+
+        fake_video = tmp_path / "src.mp4"
+        fake_video.write_text("dummy")
+
+        def fake_download(url, out_dir, **kwargs):
+            from stream2video.download import DownloadResult
+
+            return DownloadResult(path=fake_video, is_downloaded=False)
+
+        # Track detect_silence / load_silence_cache invocations across
+        # both runs. The first run calls detect_silence (cancelled after);
+        # the second run must call load_silence_cache and NOT detect_silence.
+        detect_calls: list[int] = []
+        load_calls: list[int] = []
+
+        def fake_detect_silence(*args, **kwargs):
+            detect_calls.append(1)
+            return [MagicMock(start=0.0, end=1.0)]
+
+        def fake_load_silence_cache(*args, **kwargs):
+            load_calls.append(1)
+            # Second run: return the cached segments so detect_silence
+            # is never called.
+            return [MagicMock(start=0.0, end=1.0)]
+
+        # First run: cancel AFTER silence detection completes (simulated
+        # by having detect_silence return successfully) but BEFORE concat.
+        def fake_cut_and_concat_cancel(*args, **kwargs):
+            cancel.set()
+            raise PipelineCancelled("cancelled before concat")
+
+        with (
+            patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+            patch("stream2video.pipeline_controller.get_video_duration", return_value=10.0),
+            patch(
+                "stream2video.pipeline_controller.apply_per_video_dir",
+                return_value=(tmp_path, fake_video),
+            ),
+            patch(
+                "stream2video.pipeline_controller.detect_silence", side_effect=fake_detect_silence
+            ),
+            patch("stream2video.pipeline_controller.save_silence_cache"),
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=None),
+            patch(
+                "stream2video.pipeline_controller.generate_keep_segments",
+                return_value=[(0.0, 1.0)],
+            ),
+            patch.object(Path, "stat", return_value=MagicMock(st_size=100, st_mtime=1000.0)),
+            patch(
+                "stream2video.pipeline_controller.cut_and_concat",
+                side_effect=fake_cut_and_concat_cancel,
+            ),
+            pytest.raises(PipelineCancelled),
+        ):
+            controller.run()
+
+        # First run: detect_silence called once, load_silence_cache
+        # returned None (no cache existed).
+        assert len(detect_calls) == 1, "first run should call detect_silence"
+        assert len(load_calls) == 0, "first run has no cache to load"
+
+        # Second run: new controller, same config (force=False so cache
+        # is consulted). load_silence_cache now returns the cached list,
+        # so detect_silence must NOT be called.
+        cancel2 = __import__("threading").Event()
+        controller2 = PipelineController(cfg=cfg, cb=cb, cancel_event=cancel2)
+
+        def fake_cut_and_concat_success(*args, **kwargs):
+            return tmp_path / "out.mp4"
+
+        with (
+            patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+            patch("stream2video.pipeline_controller.get_video_duration", return_value=10.0),
+            patch(
+                "stream2video.pipeline_controller.apply_per_video_dir",
+                return_value=(tmp_path, fake_video),
+            ),
+            patch(
+                "stream2video.pipeline_controller.detect_silence", side_effect=fake_detect_silence
+            ),
+            patch("stream2video.pipeline_controller.save_silence_cache"),
+            patch(
+                "stream2video.pipeline_controller.load_silence_cache",
+                side_effect=fake_load_silence_cache,
+            ),
+            patch(
+                "stream2video.pipeline_controller.generate_keep_segments",
+                return_value=[(0.0, 1.0)],
+            ),
+            patch.object(Path, "stat", return_value=MagicMock(st_size=100, st_mtime=1000.0)),
+            patch(
+                "stream2video.pipeline_controller.cut_and_concat",
+                side_effect=fake_cut_and_concat_success,
+            ),
+        ):
+            result = controller2.run()
+
+        # Second run: cache hit → detect_silence NOT called again.
+        assert len(load_calls) == 1, "second run should load cached silence"
+        assert len(detect_calls) == 1, (
+            "second run must NOT re-detect silence when cache exists "
+            f"(detect_calls={len(detect_calls)})"
+        )
+        assert isinstance(result, PipelineResult)
+
 
 class TestPipelineControllerTkIsolation:
     """Fix-plan §4 GUI/threading: "Ни одного Tk call из worker thread".
