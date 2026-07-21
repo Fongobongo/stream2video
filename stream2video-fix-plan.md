@@ -23,7 +23,7 @@
 - Добавлен `x264_low_memory` option (CLI flag, config key, GUI checkbox) with reduced rc-lookahead/ref/bframes
 - Добавлен memory reserve check before silence and concat phases in PipelineController
 - Добавлен dynamic _BATCH_CHUNK_SIZE scaling for large segment counts
-- 480 unit/integration/media-correctness тестов проходят зелёными (3 skipped — platform-specific)
+- 487 unit/integration/media-correctness тестов проходят зелёными (3 skipped — platform-specific)
 
 | Пункт | Статус | Коммит |
 | --- | --- | --- |
@@ -81,6 +81,9 @@
 | Crash mid-segment / mid-batch recovery tests (corrupt seg/chunk below min_part_bytes or failing ffprobe → re-encoded, not reused) | ✅ | (current) |
 | Download cancel during merge test (yt-dlp merge phase killed, subprocess not orphaned) | ✅ | (current) |
 | GUI _pipeline_worker widget-read guard (AST analysis: worker не читает self.combo_*/self.entry_*/self.chk_* напрямую — P1.10 static enforcement) | ✅ | (current) |
+| PipelineController cancel + restart (resume cache end-to-end: 1st run cancelled after silence → 2nd run loads cache, skips detect_silence) | ✅ | (current) |
+| Stall watchdog integration test (hung ffmpeg killed after stall_kill seconds — P1.5 regression net, real subprocess) | ✅ | (current) |
+| Toolkit smoke test на Windows (_tk_after dispatches to main thread; PipelineCallbacks surfaces invoke without raising; cancel_event cross-thread settable) | ✅ | (current) |
 
 ### Что НЕ сделано (намеренно отложено)
 

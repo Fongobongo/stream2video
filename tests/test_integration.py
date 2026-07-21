@@ -280,6 +280,58 @@ class TestFfmpegInvocation:
         elapsed = time.monotonic() - start
         assert elapsed < 5.0, f"Cancel took {elapsed:.1f}s, expected <5s"
 
+    def test_run_ffmpeg_stall_watchdog_kills_on_no_progress(self):
+        """Fix-plan P1.5 / section 4: "Stall detector не срабатывает при
+        полном молчании ffmpeg".
+
+        When ffmpeg produces no ``out_time_us=`` progress line for longer
+        than ``stall_kill`` seconds, the stall watchdog (a daemon thread
+        separate from the readline loop) must kill the process and raise
+        ``FFmpegError``. This is the regression for the original bug where
+        a fully-hung ffmpeg blocked the readline loop indefinitely.
+
+        Uses a real subprocess (``python -c "time.sleep(30)"``) that
+        never emits progress; ``stall_kill`` is set to a tiny value so
+        the test runs in seconds, not minutes.
+        """
+        import subprocess
+        import time
+
+        from stream2video.concat import FFmpegError
+
+        real_popen = subprocess.Popen
+
+        def fake_popen(cmd, **kwargs):
+            return real_popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        start = time.monotonic()
+        with (
+            patch("stream2video.concat.subprocess.Popen", side_effect=fake_popen),
+            pytest.raises(FFmpegError),
+        ):
+            _run_ffmpeg(
+                [sys.executable, "-c", "pass"],
+                progress_callback=lambda us: None,
+                timeout=60,
+                label="hung",
+                # Tight stall window so the test runs in seconds. The
+                # default 300s would make this test impractically slow.
+                stall_kill=2,
+                stall_warning=1,
+            )
+        elapsed = time.monotonic() - start
+        # Watchdog fires after stall_kill (2s) + the poll interval (~0.5s).
+        # Allow generous slack for slow CI but well under the 30s sleep.
+        assert elapsed < 10.0, f"Stall watchdog took {elapsed:.1f}s, expected <10s"
+        assert elapsed >= 2.0, (
+            f"Stall watchdog fired too early ({elapsed:.1f}s) — it should wait "
+            f"at least stall_kill=2s before killing."
+        )
+
 
 class TestSegmentModeProgressStreaming:
     """Regression: with 0 silence segments the whole video is ONE keep segment.
