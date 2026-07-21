@@ -498,3 +498,57 @@ class TestPipelineControllerTkIsolation:
             f"pipeline_controller.py contains Tk references: {leaked}. "
             f"Move the UI coupling into the GUI layer."
         )
+
+    def test_pipeline_worker_does_not_read_widgets_directly(self):
+        """Fix-plan P1.10: ``_pipeline_worker`` runs on a background
+        thread; reading Tk widgets (``self.combo_*``, ``self.entry_*``,
+        ``self.chk_*``, ``self.spin_*``) from there is unsafe because
+        Tk widgets are main-thread-only. The GUI snapshots widget
+        values in ``_start_pipeline`` (main thread) and passes them as
+        args; the worker reads only these local copies + ``self.config``
+        (a plain dict snapshot, safe to read from any thread).
+
+        This test parses gui.py's AST and walks the body of
+        ``_pipeline_worker`` looking for ``self.<widget_attr>`` reads.
+        A regression here means a future edit added a widget read
+        directly in the worker instead of plumbing it through args.
+        """
+        import ast
+        from pathlib import Path
+
+        source = (Path(__file__).parent.parent / "stream2video" / "gui.py").read_text(
+            encoding="utf-8"
+        )
+        tree = ast.parse(source)
+
+        # Widget attribute prefixes the GUI uses. A read of any
+        # ``self.<prefix>_*`` inside _pipeline_worker is a violation.
+        widget_prefixes = ("combo_", "entry_", "chk_", "spin_", "btn_")
+
+        def _is_widget_read(node: ast.Attribute) -> bool:
+            # ``self.combo_encoder`` etc. — attribute access on self.
+            if not isinstance(node.value, ast.Name):
+                return False
+            if node.value.id != "self":
+                return False
+            return any(node.attr.startswith(p) for p in widget_prefixes)
+
+        # Find _pipeline_worker method definition.
+        worker_fn: ast.FunctionDef | None = None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "_pipeline_worker":
+                worker_fn = node
+                break
+        assert worker_fn is not None, "_pipeline_worker method not found in gui.py"
+
+        violations: list[str] = []
+        for node in ast.walk(worker_fn):
+            if isinstance(node, ast.Attribute) and _is_widget_read(node):
+                violations.append(
+                    f"line {node.lineno}: self.{node.attr} (widget read in worker thread)"
+                )
+        assert not violations, (
+            "_pipeline_worker reads Tk widgets directly from the worker "
+            "thread (P1.10 violation). Snapshot the value in _start_pipeline "
+            "(main thread) and pass it as a positional arg:\n  " + "\n  ".join(violations)
+        )

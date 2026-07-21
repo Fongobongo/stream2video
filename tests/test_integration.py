@@ -868,3 +868,237 @@ class TestFfprobeIsValidMp4:
         corrupt = tmp_path / "noise.mp4"
         corrupt.write_bytes(b"this is definitely not an mp4 file")
         assert _ffprobe_is_valid_mp4(corrupt) is False
+
+
+class TestSegmentResumeSkipCrashArtifact:
+    """Fix-plan section 4 Resume/failure: crash mid-segment.
+
+    When ffmpeg crashes mid-encode (e.g. power failure, OOM kill), it
+    leaves a truncated MP4 without a moov atom on disk. On the next run,
+    ``_run_segment_concat`` must detect the corrupt file via
+    ``_ffprobe_is_valid_mp4`` and re-encode it, instead of blindly
+    reusing it (which would corrupt the final concat at that segment
+    boundary).
+
+    This test mocks ``_run_ffmpeg`` / ``_ffprobe_is_valid_mp4`` /
+    ``_run_final_concat`` / ``_ensure_fresh_work_dir`` so it runs
+    without a real ffmpeg binary; the assertions verify the skip
+    decision and re-encode invocation, not the encoded output.
+    """
+
+    def test_corrupt_segment_is_re_encoded_not_skipped(self, tmp_path: Path):
+        """A segment that exists on disk but fails ffprobe must be
+        re-encoded, not skipped. A valid segment must be skipped."""
+        from unittest.mock import patch
+
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"fake video data")
+        output = tmp_path / "out.mp4"
+        keep = [(0.0, 2.0), (2.0, 4.0)]
+
+        seg_dir = tmp_path / f"_{output.stem}_segments"
+        seg_dir.mkdir()
+        # seg_000000: truncated (crash artifact — ffprobe will fail).
+        # Must be >= min_part_bytes (1024) so the size check passes and
+        # the ffprobe check fires (otherwise it's re-encoded purely on
+        # size, which doesn't test the ffprobe path).
+        (seg_dir / "seg_000000.mp4").write_bytes(b"\x00" * 2048)
+        # seg_000001: valid-looking (ffprobe will pass)
+        (seg_dir / "seg_000001.mp4").write_bytes(b"\x00" * 2048)
+
+        encode_calls: list[str] = []
+
+        def fake_run_ffmpeg(cmd, *args, **kwargs):
+            # The output path is the last positional arg in the ffmpeg
+            # command (after all -i / -filter / -c:v flags). Input
+            # paths sit after ``-i`` and must not be counted as encodes.
+            out = str(cmd[-1])
+            if out.endswith(".mp4") and ("seg_" in out or "chunk_" in out):
+                encode_calls.append(out)
+                Path(out).write_bytes(b"re-encoded valid mp4")
+            return None
+
+        def fake_ffprobe(path):
+            # First segment is corrupt (crash artifact), second is valid.
+            return Path(path).name != "seg_000000.mp4"
+
+        with (
+            patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
+            patch("stream2video.concat._ffprobe_is_valid_mp4", side_effect=fake_ffprobe),
+            patch("stream2video.concat._run_final_concat"),
+            patch("stream2video.concat._ensure_fresh_work_dir"),
+        ):
+            from stream2video.concat import _run_segment_concat
+
+            _run_segment_concat(
+                video,
+                keep,
+                output,
+                "libx264",
+                ["-preset", "medium"],
+                None,  # progress_callback
+                None,  # cancel_callback
+            )
+
+        # The corrupt segment (seg_000000) was re-encoded via _run_ffmpeg.
+        assert len(encode_calls) == 1, (
+            f"Expected 1 re-encode call (for the corrupt segment), "
+            f"got {len(encode_calls)}: {encode_calls}"
+        )
+        assert "seg_000000.mp4" in encode_calls[0]
+
+    def test_all_valid_segments_are_skipped(self, tmp_path: Path):
+        """When all segments are valid (ffprobe passes), none are
+        re-encoded — the resume-skip logic short-circuits all of them."""
+        from unittest.mock import patch
+
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"fake video data")
+        output = tmp_path / "out.mp4"
+        keep = [(0.0, 2.0), (2.0, 4.0)]
+
+        seg_dir = tmp_path / f"_{output.stem}_segments"
+        seg_dir.mkdir()
+        for i in range(2):
+            # Must be >= min_part_bytes (1024) so the size check passes.
+            (seg_dir / f"seg_{i:06d}.mp4").write_bytes(b"\x00" * 2048)
+
+        encode_calls: list[str] = []
+
+        def fake_run_ffmpeg(cmd, *args, **kwargs):
+            out = str(cmd[-1])
+            if out.endswith(".mp4") and ("seg_" in out or "chunk_" in out):
+                encode_calls.append(out)
+                Path(out).write_bytes(b"re-encoded valid mp4")
+            return None
+
+        with (
+            patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
+            patch("stream2video.concat._ffprobe_is_valid_mp4", return_value=True),
+            patch("stream2video.concat._run_final_concat"),
+            patch("stream2video.concat._ensure_fresh_work_dir"),
+        ):
+            from stream2video.concat import _run_segment_concat
+
+            _run_segment_concat(
+                video,
+                keep,
+                output,
+                "libx264",
+                ["-preset", "medium"],
+                None,
+                None,
+            )
+
+        assert encode_calls == [], (
+            f"All segments were valid — none should be re-encoded, "
+            f"but _run_ffmpeg was called for: {encode_calls}"
+        )
+
+    def test_small_file_below_threshold_is_re_encoded(self, tmp_path: Path):
+        """A segment file smaller than ``min_part_bytes`` (default 1024)
+        is treated as a crash artifact and re-encoded, even if ffprobe
+        would have passed (the file is too small to be a valid encode)."""
+        from unittest.mock import patch
+
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"fake video data")
+        output = tmp_path / "out.mp4"
+        keep = [(0.0, 2.0)]
+
+        seg_dir = tmp_path / f"_{output.stem}_segments"
+        seg_dir.mkdir()
+        # Write a tiny file (10 bytes, well below the 1024 threshold)
+        (seg_dir / "seg_000000.mp4").write_bytes(b"tiny")
+
+        encode_calls: list[str] = []
+
+        def fake_run_ffmpeg(cmd, *args, **kwargs):
+            out = str(cmd[-1])
+            if out.endswith(".mp4") and ("seg_" in out or "chunk_" in out):
+                encode_calls.append(out)
+                Path(out).write_bytes(b"re-encoded valid mp4")
+            return None
+
+        with (
+            patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
+            patch("stream2video.concat._ffprobe_is_valid_mp4", return_value=True),
+            patch("stream2video.concat._run_final_concat"),
+            patch("stream2video.concat._ensure_fresh_work_dir"),
+        ):
+            from stream2video.concat import _run_segment_concat
+
+            _run_segment_concat(
+                video,
+                keep,
+                output,
+                "libx264",
+                ["-preset", "medium"],
+                None,
+                None,
+            )
+
+        # The tiny file was below min_part_bytes → re-encoded despite
+        # ffprobe returning True (the size check fires before ffprobe).
+        assert len(encode_calls) == 1, (
+            f"Expected 1 re-encode (file below min_part_bytes), got {len(encode_calls)}"
+        )
+
+
+class TestBatchResumeSkipCrashArtifact:
+    """Fix-plan section 4 Resume/failure: crash mid-batch.
+
+    Same scenario as TestSegmentResumeSkipCrashArtifact but for the
+    batch path: a truncated chunk file (crash artifact) must be
+    re-encoded, not reused.
+    """
+
+    def test_corrupt_chunk_is_re_encoded(self, tmp_path: Path):
+        from unittest.mock import patch
+
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"fake video data")
+        output = tmp_path / "out.mp4"
+        keep = [(0.0, 2.0), (2.0, 4.0)]
+
+        batch_dir = tmp_path / f"_{output.stem}_batch"
+        batch_dir.mkdir()
+        # chunk_0000: truncated (crash artifact). Must be >= min_part_bytes.
+        (batch_dir / "chunk_0000.mp4").write_bytes(b"\x00" * 2048)
+        # chunk_0001: valid
+        (batch_dir / "chunk_0001.mp4").write_bytes(b"\x00" * 2048)
+
+        encode_calls: list[str] = []
+
+        def fake_run_ffmpeg(cmd, *args, **kwargs):
+            out = str(cmd[-1])
+            if out.endswith(".mp4") and ("seg_" in out or "chunk_" in out):
+                encode_calls.append(out)
+                Path(out).write_bytes(b"re-encoded valid mp4")
+            return None
+
+        def fake_ffprobe(path):
+            return Path(path).name != "chunk_0000.mp4"
+
+        with (
+            patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
+            patch("stream2video.concat._ffprobe_is_valid_mp4", side_effect=fake_ffprobe),
+            patch("stream2video.concat._run_final_concat"),
+            patch("stream2video.concat._ensure_fresh_work_dir"),
+        ):
+            from stream2video.concat import _run_batch_concat
+
+            _run_batch_concat(
+                video,
+                keep,
+                output,
+                "libx264",
+                ["-preset", "medium"],
+                None,
+                None,
+            )
+
+        assert len(encode_calls) == 1, (
+            f"Expected 1 re-encode (corrupt chunk), got {len(encode_calls)}: {encode_calls}"
+        )
+        assert "chunk_0000.mp4" in encode_calls[0]

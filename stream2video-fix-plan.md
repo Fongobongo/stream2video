@@ -23,7 +23,7 @@
 - Добавлен `x264_low_memory` option (CLI flag, config key, GUI checkbox) with reduced rc-lookahead/ref/bframes
 - Добавлен memory reserve check before silence and concat phases in PipelineController
 - Добавлен dynamic _BATCH_CHUNK_SIZE scaling for large segment counts
-- 473 unit/integration/media-correctness тестов проходят зелёными (3 skipped — platform-specific)
+- 480 unit/integration/media-correctness тестов проходят зелёными (3 skipped — platform-specific)
 
 | Пункт | Статус | Коммит |
 | --- | --- | --- |
@@ -78,6 +78,9 @@
 | Download test matrix (zero/unknown speed, unknown total, network error classification: offline/DNS/timeout/retry/stalled) | ✅ | (current) |
 | Resume failure tests (encoder change, quality change, source swap same filename, keep_segments change, pipeline_version change, missing/corrupt manifest, corrupt/truncated moov) | ✅ | (current) |
 | GUI Tk-isolation guard (pipeline_controller.py не импортирует tkinter/customtkinter/PIL — static analysis) | ✅ | (current) |
+| Crash mid-segment / mid-batch recovery tests (corrupt seg/chunk below min_part_bytes or failing ffprobe → re-encoded, not reused) | ✅ | (current) |
+| Download cancel during merge test (yt-dlp merge phase killed, subprocess not orphaned) | ✅ | (current) |
+| GUI _pipeline_worker widget-read guard (AST analysis: worker не читает self.combo_*/self.entry_*/self.chk_* напрямую — P1.10 static enforcement) | ✅ | (current) |
 
 ### Что НЕ сделано (намеренно отложено)
 

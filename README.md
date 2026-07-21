@@ -86,6 +86,13 @@ stream2video /path/to/video.mp4
 | `--download-timeout` | `28800` | Absolute ceiling for the whole download in seconds (8h, sized for big VODs). Ignored for local files. |
 | `--connect-timeout` | `300` | Seconds to wait for the first progress event (DNS+TLS+handshake+first byte) before killing yt-dlp with a clear timeout error. Increase on very slow / satellite links. |
 | `--no-progress-timeout` | `1800` | Seconds of silence mid-download before killing yt-dlp (stalled connection watchdog). Increase for very slow / unstable links where mid-download pauses are normal. |
+| `--segment-timeout` | `600` | Per-segment encode timeout in seconds (10 min). Raise for very long segments or slow hardware. |
+| `--final-concat-timeout` | `86400` | Final concat-demuxer timeout in seconds (24h, absolute ceiling on the final pass). |
+| `--silence-timeout` | `36000` | Silence detection ceiling in seconds (10h). |
+| `--stall-timeout` | `300` | No-progress kill timeout in seconds (5 min). ffmpeg is killed if no progress line arrives within this window. |
+| `--waveform-timeout` | `300` | Waveform preview decode timeout in seconds (5 min). |
+| `--batch-chunk-size` | `40` | Number of keep-segments per batch filter invocation. Scaled down dynamically for large segment counts. |
+| `--min-part-bytes` | `1024` | Minimum bytes for a resumed part to be considered valid. Smaller files are re-encoded. |
 | `-f, --force` | — | Re-detect silence, ignore cache |
 | `-c, --config` | — | YAML config file |
 | `--delete-after` | — | Delete downloaded source after successful compression |
@@ -135,6 +142,14 @@ margin: 0.15
 | `download_timeout` | positive int | `28800` | Absolute ceiling for the whole download in seconds (8h, sized for big VODs). |
 | `connect_timeout` | positive int | `300` | Seconds to wait for the first progress event before killing yt-dlp. |
 | `no_progress_timeout` | positive int | `1800` | Seconds of silence mid-download before killing yt-dlp (stalled connection watchdog). |
+| `segment_encode_timeout` | positive int (1-604800) | `600` | Per-segment encode timeout in seconds (10 min). Raise for very long segments or slow hardware. |
+| `final_concat_timeout` | positive int (1-604800) | `86400` | Final concat-demuxer timeout in seconds (24h ceiling). |
+| `silence_timeout` | positive int (1-604800) | `36000` | Silence detection ceiling in seconds (10h). |
+| `stall_kill_timeout` | positive int (10-3600) | `300` | No-progress kill timeout in seconds. ffmpeg is killed if no progress line arrives within this window. |
+| `stall_warning_timeout` | positive int (5-1800) | `120` | No-progress warning threshold in seconds. A warning is logged but ffmpeg is not killed yet. |
+| `waveform_timeout` | positive int (10-3600) | `300` | Waveform preview decode timeout in seconds (5 min). |
+| `batch_chunk_size` | positive int (1-500) | `40` | Number of keep-segments per batch filter invocation. Scaled down dynamically for large segment counts. |
+| `min_part_bytes` | positive int (1-10485760) | `1024` | Minimum bytes for a resumed part to be considered valid. Smaller files are re-encoded. |
 | `per_video_dir` | bool | `true` | When true, all artifacts (downloaded source, WAV, JSON, log, compressed, temp dirs) are collected into `{output_dir}/{stem}/` instead of living in the base `output_dir`. Local source files are never moved/copied — they stay where you put them. |
 
 ## Project directory
