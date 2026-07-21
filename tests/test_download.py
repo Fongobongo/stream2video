@@ -480,3 +480,111 @@ class TestNetworkErrorClassification:
         # DiskSpaceError.
         err = _classify_error("ERROR: unable to connect to network")
         assert not isinstance(err, DiskSpaceError)
+
+
+class TestDownloadCancelDuringMerge:
+    """Fix-plan section 4 Download: "Cancel во время download и merge".
+
+    yt-dlp's merge phase (combining bestvideo+bestaudio into a single
+    MP4) runs AFTER the download completes but BEFORE the final file
+    appears at the expected path. A cancel during this window must
+    kill the yt-dlp process and raise ``DownloadCancelledError``,
+    not silently leave a half-merged .part file on disk.
+
+    The existing ``test_cancel_callback_aborts`` covers the download
+    phase; this test covers the merge phase by using a fake subprocess
+    that emits progress lines (download done) and then sleeps (simulating
+    ffmpeg merge invoked by yt-dlp).
+    """
+
+    def test_cancel_during_merge_kills_process(self):
+        import subprocess
+        import time
+
+        _real_popen = subprocess.Popen
+        cancel_flag = [False]
+
+        def cancel_cb():
+            return cancel_flag[0]
+
+        def fake_popen(cmd, **kwargs):
+            # Spawn a child that emits progress lines (download phase
+            # done) and then hangs — simulating the ffmpeg merge step
+            # yt-dlp invokes for bestvideo+bestaudio downloads.
+            proc = _real_popen(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import sys, time\n"
+                        "sys.stdout.write('s2v_progress|1000|1000|NA|100|0\\n')\n"
+                        "sys.stdout.flush()\n"
+                        "time.sleep(30)\n"
+                    ),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+            )
+            # Wait for the progress line to be written so the download
+            # phase registers as complete, then fire cancel — this is
+            # the merge window (process still alive, no final file).
+            time.sleep(0.2)
+            cancel_flag[0] = True
+            return proc
+
+        with (
+            TemporaryDirectory() as tmp,
+            patch("stream2video.download.subprocess.Popen", side_effect=fake_popen),
+            pytest.raises(DownloadCancelledError, match="cancelled"),
+        ):
+            download(
+                "https://example.com/v",
+                Path(tmp),
+                cancel_callback=cancel_cb,
+            )
+
+    def test_cancel_kills_subprocess_not_orphaned(self):
+        """When cancel fires, the yt-dlp subprocess must be killed (not
+        orphaned). A leaked process would keep writing to stdout/err
+        after download() returned, corrupting subsequent runs."""
+        import subprocess
+        import time
+
+        _real_popen = subprocess.Popen
+        killed: list[bool] = []
+
+        def fake_popen(cmd, **kwargs):
+            proc = _real_popen(
+                [
+                    sys.executable,
+                    "-c",
+                    "import time; time.sleep(30)",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            # Wrap .kill so we can observe whether it's invoked.
+            original_kill = proc.kill
+
+            def tracked_kill():
+                killed.append(True)
+                return original_kill()
+
+            proc.kill = tracked_kill  # type: ignore[method-assign]
+            time.sleep(0.2)
+            return proc
+
+        with (
+            TemporaryDirectory() as tmp,
+            patch("stream2video.download.subprocess.Popen", side_effect=fake_popen),
+            pytest.raises(DownloadCancelledError),
+        ):
+            download(
+                "https://example.com/v",
+                Path(tmp),
+                cancel_callback=lambda: True,
+            )
+        assert killed, "subprocess.kill() was not called — process would be orphaned"
