@@ -106,3 +106,22 @@ exclude = [
     "_portable/",
     "stream2video.egg-info/",
 ]
+
+# Mixin classes (Этап 10) access cross-mixin attributes on ``self`` that
+# mypy can't see without the full composite class. The Protocol pattern
+# (inheriting from a Protocol) breaks CTk's runtime MRO, so we suppress
+# attr-defined errors on the mixin modules instead. The composite class
+# (gui.py) is fully checked — it inherits from every mixin and CTk.
+[[tool.mypy.overrides]]
+module = [
+    "stream2video.gui_dialogs",
+    "stream2video.gui_encoder_panel",
+    "stream2video.gui_file_info",
+    "stream2video.gui_lifecycle",
+    "stream2video.gui_main_window_build",
+    "stream2video.gui_progress_ui",
+    "stream2video.gui_recent_projects",
+    "stream2video.gui_sliders",
+    "stream2video.gui_waveform",
+]
+disable_error_code = ["attr-defined", "misc"]
