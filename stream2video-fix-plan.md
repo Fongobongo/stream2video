@@ -88,17 +88,37 @@
 ### Что НЕ сделано (намеренно отложено)
 
 **Этап 10 (полный GUI refactor на `gui/` package)** — большой объём
-работы по переносу ~2350 строк. Сделан **частичный** refactor:
+работы по переносу ~2350 строк. Сделан **incremental** refactor:
 `_Tooltip` → `gui_widgets.py`, `QueueHandler` → `gui_log_handler.py`,
 pure-логика → `gui_helpers.py` (32 теста), settings I/O →
 `gui_settings.py` (13 тестов), platform helpers → `gui_platform.py`
 (15 тестов), `SubprocessRunner` → `utils.py` (8 тестов),
 `SilenceParser` → `silence.py`, `_run_final_concat` shared,
 `PipelineController.run()` extracted and wired to GUI (19 тестов).
-9 GUI widget smoke tests. gui.py: 2884 → 2397 строк (-487, -16.9%).
+9 GUI widget smoke tests. gui.py: 2884 → 2597 строк (-287, -10%).
+Добавлен `audio_quality` combobox (был только в config, не в GUI).
+
+**Дополнительно извлеченные pure/stateful модули (incremental,
+21 июля 2026):**
+- `waveform_view_math.py` — pure zoom/pan/render-size math (21 тест)
+- `encoder_test.py` — `EncoderTester` class + `EncoderTestCallbacks`
+  Protocol (9 тестов)
+- `tk_dispatch.py` — `TkDispatcher` + `LogQueuePoller` + logging
+  setup (9 тестов)
+- `settings_io.py` — pure snapshot helpers + CLI config YAML write
+  (15 тестов)
+- `pipeline_worker.py` — `PipelineWorker` class +
+  `PipelineGuiCallbacks` Protocol + 4 callback factories (17 тестов)
+- `waveform_popup.py` — `LiveSegmentsStore` thread-safe dict +
+  lock + shallow-copy semantics (12 тестов)
+- `slider_widgets.py` — pure `parse_slider_entry_value` /
+  `format_slider_entry_value` / `sync_slider_entries` (20 тестов)
+
 Полный перенос `Stream2VideoGUI` на package лучше делать отдельным PR
-после добавления pytest-qt. Добавлен `audio_quality` combobox (был
-только в config, не в GUI).
+после добавления pytest-qt — на этом этапе все self-contained pure
+и stateful helpers извлечены, оставшиеся ~2600 строк в gui.py — это
+виджет-конструкция, event handlers, widget-binding glue и popup
+state machine, которые требуют pytest-qt для покрытия.
 
 **Тесты GUI (P2.2)** — near-complete. Pure-логика покрыта (formatters,
 paths, waveform, gui_helpers, gui_settings, gui_platform,

@@ -9,14 +9,11 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from tkinter import Event, StringVar, TclError, filedialog, messagebox
+from tkinter import Event, StringVar, filedialog, messagebox
 from typing import Any, ClassVar
 
 import customtkinter as ctk
 
-from stream2video.concat import (
-    check_encoder,
-)
 from stream2video.config import (
     CONFIG_DEFAULTS,
     VALID_DOWNLOAD_QUALITIES,
@@ -29,13 +26,14 @@ from stream2video.config import (
     settings_path,
     user_defaults_path,
 )
-from stream2video.download import (
-    DownloadProgress,
+from stream2video.encoder_test import (
+    ENCODER_DESCRIPTIONS,
+    EncoderTester,
+    get_encoder_description,
 )
 from stream2video.formatters import (
     fmt_clock_time,
     fmt_size,
-    fmt_speed,
     fmt_time,
     fmt_total_label,
     fmt_zoom_text,
@@ -48,7 +46,6 @@ from stream2video.gui_helpers import (
     should_update_status,
     truncate_status,
 )
-from stream2video.gui_log_handler import QueueHandler
 from stream2video.gui_platform import (
     dir_size_mb,
     fit_to_screen,
@@ -64,6 +61,15 @@ from stream2video.paths import (
     prune_recent_projects,
     truncate_recent_name,
 )
+from stream2video.pipeline_worker import (
+    PipelineWorker,
+    PipelineWorkerParams,
+)
+from stream2video.settings_io import (
+    build_save_settings_snapshot,
+    build_user_defaults_snapshot,
+    write_cli_config_yaml,
+)
 from stream2video.silence import (
     SilenceDetectionError,
     SilenceSegment,
@@ -71,12 +77,24 @@ from stream2video.silence import (
     detect_silence_stream,
     load_silence_cache,
 )
+from stream2video.slider_widgets import (
+    format_slider_entry_value,
+    parse_slider_entry_value,
+    sync_slider_entries,
+)
+from stream2video.tk_dispatch import LogQueuePoller, TkDispatcher
 from stream2video.utils import cancel_process, get_active_process, get_video_duration
 from stream2video.waveform import (
     DB_AXIS_WIDTH,
     read_peaks_from_stream,
     render_waveform_image,
     slice_peaks_by_time,
+)
+from stream2video.waveform_popup import LiveSegmentsStore
+from stream2video.waveform_view_math import (
+    compute_pan_view,
+    compute_render_size,
+    compute_zoom_view,
 )
 
 logger = logging.getLogger("stream2video.gui")
@@ -102,7 +120,14 @@ class Stream2VideoGUI(ctk.CTk):
 
         self.running = False
         self._cancel_event = threading.Event()
-        self._test_running = False
+        # ``EncoderTester`` worker (see ``stream2video.encoder_test``). Held
+        # on ``__init__`` so repeated "Test encoder" clicks share state —
+        # the worker's ``test()`` is single-flight; a second request while
+        # the first is running is logged and dropped. Built lazily because
+        # ``EncoderTester`` needs the adapter, and the adapter needs the
+        # GUI's ``btn_test_encoders`` (built in ``_build_ui``, which runs
+        # after this ``__init__``).
+        self._encoder_tester: EncoderTester | None = None
         # Waveform popup state. Widgets (lbl_wave_image, lbl_wave_status)
         # are None until the user opens the popup; the render method
         # no-ops gracefully in that case.
@@ -119,10 +144,11 @@ class Stream2VideoGUI(ctk.CTk):
         # Updated by the pipeline worker's on_segment callback as new
         # segments are detected; read by the waveform popup's poller for
         # near-real-time overlays. Cleared on GUI exit (process end).
-        # Lock protects concurrent updates from the pipeline's stderr
-        # drain thread and reads from the popup's poller thread.
-        self._live_segments: dict[Path, list[SilenceSegment]] = {}
-        self._live_segments_lock = threading.Lock()
+        # Extracted to :class:`stream2video.waveform_popup.LiveSegmentsStore`
+        # so the lock + dict + shallow-copy semantics are unit-tested
+        # in isolation (the lock matters: producer = pipeline's stderr
+        # drain thread, consumer = popup's poller thread).
+        self._live_segments_store = LiveSegmentsStore()
         # Waveform view state — populated by the renderer when peaks
         # arrive, modified by the zoom/pan controls. Cleared when the
         # popup closes (see `_on_waveform_close`).
@@ -191,7 +217,23 @@ class Stream2VideoGUI(ctk.CTk):
         # at ~60 Hz, which is wasteful and can fall behind the cursor.
         self._waveform_threshold_after_id: str | None = None
         self.config = effective_defaults()
+        # ``TkDispatcher`` + ``LogQueuePoller`` extracted to
+        # ``tk_dispatch`` so the cross-thread scheduling semantics and
+        # the queue→textbox poller are unit-testable without the GUI
+        # main loop. The poller owns ``log_queue`` (workers call
+        # ``self._log`` which delegates); the dispatcher wraps
+        # ``self.after`` so worker callbacks queued against a destroyed
+        # root are swallowed instead of crashing the worker thread.
+        self._dispatcher = TkDispatcher(self)
         self.log_queue: queue.Queue = queue.Queue()
+        # ``LogQueuePoller`` needs the textbox widget (built in
+        # ``_build_ui`` below); created with a placeholder None and
+        # rebound after ``_build_ui`` runs. The poller's ``poll`` no-ops
+        # while textbox is None because the first ``configure`` call
+        # would AttributeError — instead it returns early. This lets
+        # ``_build_ui`` order naturally (poller schedule starts only
+        # after ``_build_ui`` finishes).
+        self._log_poller: LogQueuePoller | None = None
         self._output_path: Path | None = None
         self._download_path: Path | None = None
         self._last_status_update: float = 0.0
@@ -224,8 +266,17 @@ class Stream2VideoGUI(ctk.CTk):
             self.geometry(f"{win_w}x{win_h}")
 
         self._build_ui()
-        self._setup_logging()
-        self.after(100, self._poll_log_queue)
+        # Wire the log queue → textbox poller once ``txt_log`` exists.
+        # The poller drives both ``_log`` (worker thread push) and the
+        # 100 ms self-rescheduling drain loop, so worker threads can
+        # safely log without touching the widget directly.
+        self._log_poller = LogQueuePoller(
+            textbox=self.txt_log,
+            dispatcher=self._dispatcher,
+            log_queue=self.log_queue,
+        )
+        self._log_poller.setup_logging()
+        self.after(100, self._log_poller.poll)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _wave_window_alive(self) -> bool:
@@ -824,32 +875,22 @@ class Stream2VideoGUI(ctk.CTk):
         """Image size to use for the next render, derived from the
         current popup window size.
 
-        The popup is laid out in three rows: status (~30 px), zoom/pan
-        controls (~30 px), and the image row (expanding). A small
-        vertical reservation is taken off the window height to leave
-        room for the two fixed rows plus the image row's own pady;
-        horizontal padx is subtracted from the width. A 800x200
-        fallback is used when the window has not been laid out yet
-        (e.g., first render immediately after the popup is created).
+        Delegates the size math to ``waveform_view_math.compute_render_size``
+        so the constant trade-offs (reserved regions, minimum render
+        widths, fallback for not-yet-laid-out windows) can be unit-
+        tested without driving the Tk main loop. This method is now a
+        tiny adapter that pulls the current popup's pixel size (or
+        ``None`` if the popup is gone) and forwards it.
         """
-        fallback = (800, 200)
         if not self._wave_window_alive():
-            return fallback
+            return compute_render_size(None, None)
         # _wave_window_alive() above guarantees self._wave_window is set,
         # but mypy can't follow the helper's return type — narrow locally
         # so the .winfo_width/height() below don't union-attr.
         assert self._wave_window is not None
-        win_w = self._wave_window.winfo_width()
-        win_h = self._wave_window.winfo_height()
-        if win_w < 100 or win_h < 100:
-            return fallback
-        # Status row + controls row + inter-row spacing + image pady
-        # (2 top + 8 bottom) ≈ 80 px; padx is 8 on each side.
-        reserved_h = 80
-        reserved_w = 16
-        w = max(200, win_w - reserved_w)
-        h = max(80, win_h - reserved_h)
-        return (w, h)
+        return compute_render_size(
+            self._wave_window.winfo_width(), self._wave_window.winfo_height()
+        )
 
     def _schedule_waveform_threshold_re_render(self) -> None:
         """Schedule a debounced re-render of the waveform popup so the
@@ -1129,7 +1170,7 @@ class Stream2VideoGUI(ctk.CTk):
         anchored on the cursor's last known position (or view center
         if the cursor hasn't been over the image yet). Clamps the new
         view to [0, duration]."""
-        new_start, new_end = self._compute_zoom_view(
+        new_start, new_end = compute_zoom_view(
             self._waveform_duration,
             self._waveform_view_start,
             self._waveform_view_end,
@@ -1146,7 +1187,7 @@ class Stream2VideoGUI(ctk.CTk):
     def _waveform_pan(self, frac: float):
         """Pan the view by `frac` of the current view duration
         (positive = right, negative = left). Clamps to [0, duration]."""
-        new_start, new_end = self._compute_pan_view(
+        new_start, new_end = compute_pan_view(
             self._waveform_duration,
             self._waveform_view_start,
             self._waveform_view_end,
@@ -1158,56 +1199,11 @@ class Stream2VideoGUI(ctk.CTk):
         self._waveform_view_end = new_end
         self._apply_view()
 
-    @staticmethod
-    def _compute_zoom_view(
-        duration: float,
-        view_start: float,
-        view_end: float,
-        cursor_frac: float,
-        cursor_known: bool,
-        factor: float,
-    ) -> tuple[float, float]:
-        """Pure view math: zoom by ``factor`` (< 1 in, > 1 out) anchored
-        on the cursor or view center. Returns ``(new_start, new_end)``
-        clamped to ``[0, duration]`` with ``new_duration`` in
-        ``[0.5, duration]``. Identity (no change) if the requested
-        factor would not change the duration.
-        """
-        if duration <= 0:
-            return (0.0, 0.0)
-        view_duration = view_end - view_start
-        new_duration = view_duration * factor
-        new_duration = max(0.5, min(duration, new_duration))
-        if new_duration == view_duration:
-            return (view_start, view_end)
-        if cursor_known:
-            anchor = view_start + cursor_frac * view_duration
-        else:
-            anchor = (view_start + view_end) / 2.0
-        new_start = anchor - cursor_frac * new_duration
-        new_start = max(0.0, min(duration - new_duration, new_start))
-        return (new_start, new_start + new_duration)
-
-    @staticmethod
-    def _compute_pan_view(
-        duration: float,
-        view_start: float,
-        view_end: float,
-        frac: float,
-    ) -> tuple[float, float]:
-        """Pure view math: shift view by ``frac * view_duration``
-        (positive = right, negative = left). Returns ``(new_start,
-        new_end)`` clamped to ``[0, duration]``. Identity if the
-        current view is the full timeline (no room to pan)."""
-        if duration <= 0:
-            return (0.0, 0.0)
-        view_duration = view_end - view_start
-        if view_duration >= duration:
-            return (view_start, view_end)
-        shift = view_duration * frac
-        new_start = view_start + shift
-        new_start = max(0.0, min(duration - view_duration, new_start))
-        return (new_start, new_start + view_duration)
+    # ``_compute_zoom_view`` and ``_compute_pan_view`` (previously static
+    # methods on Stream2VideoGUI) were extracted to
+    # ``waveform_view_math.compute_zoom_view`` / ``compute_pan_view`` as
+    # pure module-level functions; they're imported above. The bodies are
+    # gone — see that module for the implementations and unit tests.
 
     def _waveform_pan_left(self):
         self._waveform_pan(-0.25)
@@ -1297,7 +1293,7 @@ class Stream2VideoGUI(ctk.CTk):
 
         def on_change(v, k=key, ev=entry_val):
             ev.delete(0, "end")
-            ev.insert(0, f"{float(v):.1f}")
+            ev.insert(0, format_slider_entry_value(float(v)))
             self.config[k] = round(float(v), 1)
             # The threshold drives a line in the waveform preview; re-render
             # via a debounced timer so a slider drag does not pile up
@@ -1308,19 +1304,23 @@ class Stream2VideoGUI(ctk.CTk):
                 self._schedule_waveform_threshold_re_render()
 
         def on_entry_confirm(event=None, sv=slider, mn=min_v, mx=max_v, k=key):
-            try:
-                val = float(entry_val.get().replace(",", "."))
-                val = max(mn, min(mx, val))
-                val = round(val, 1)
-                sv.set(val)
-                self.config[k] = val
+            # Pure parse handled in slider_widgets; the closure just
+            # applies the result to the slider + entry + config and
+            # re-renders the waveform when threshold changes.
+            raw = entry_val.get()
+            val = parse_slider_entry_value(raw, mn, mx)
+            if val is None:
+                # Revert entry to the slider's current value (the
+                # legacy behavior on parse failure).
                 entry_val.delete(0, "end")
-                entry_val.insert(0, f"{val:.1f}")
-                if k == "threshold":
-                    self._schedule_waveform_threshold_re_render()
-            except ValueError:
-                entry_val.delete(0, "end")
-                entry_val.insert(0, f"{sv.get():.1f}")
+                entry_val.insert(0, format_slider_entry_value(float(sv.get())))
+                return
+            sv.set(val)
+            self.config[k] = val
+            entry_val.delete(0, "end")
+            entry_val.insert(0, format_slider_entry_value(val))
+            if k == "threshold":
+                self._schedule_waveform_threshold_re_render()
 
         entry_val.bind("<Return>", on_entry_confirm)
         entry_val.bind("<FocusOut>", on_entry_confirm)
@@ -1329,18 +1329,22 @@ class Stream2VideoGUI(ctk.CTk):
     def _reset_default(self, default: float, slider, entry, key: str):
         slider.set(default)
         entry.delete(0, "end")
-        entry.insert(0, f"{default:.1f}")
+        entry.insert(0, format_slider_entry_value(default))
         self.config[key] = default
 
     def _sync_slider_entries(self):
+        # Build the entries dict the pure
+        # :func:`stream2video.slider_widgets.sync_slider_entries` expects,
+        # keyed by the slider panel's three keys. The GUI owns the
+        # widget reads; the helper owns the parse + round.
+        entries: dict[str, str] = {}
         for key in ("threshold", "min_silence", "margin"):
             slider = getattr(self, f"_slider_{key}", None)
             if slider and hasattr(slider, "_entry_val"):
-                try:
-                    val = float(slider._entry_val.get().replace(",", "."))
-                    self.config[key] = round(val, 1)
-                except ValueError:
-                    pass
+                entries[key] = slider._entry_val.get()
+        updates = sync_slider_entries(entries)
+        for key, val in updates.items():
+            self.config[key] = val
 
     # ── Dialogs & Events ─────────────────────────────────────────
 
@@ -1386,43 +1390,25 @@ class Stream2VideoGUI(ctk.CTk):
         ctk.set_appearance_mode(choice)
         self.config["theme"] = choice
 
-    ENCODER_DESCRIPTIONS: ClassVar[dict[str, str]] = {
-        "h264_nvenc": "NVIDIA NVENC (GTX 1000+, RTX)",
-        "h264_amf": "AMD AMF (RX 400+, Ryzen APU)",
-        "h264_mf": "Media Foundation (any GPU, Windows only)",
-        "libx264": "CPU software encode (most compatible)",
-    }
+    ENCODER_DESCRIPTIONS: ClassVar[dict[str, str]] = ENCODER_DESCRIPTIONS
 
     def _on_encoder_change(self, choice):
         self.config["encoder"] = choice
-        desc = self.ENCODER_DESCRIPTIONS.get(choice, "")
-        self.lbl_encoder_desc.configure(text=desc)
+        self.lbl_encoder_desc.configure(text=get_encoder_description(choice))
 
     def _test_encoders(self):
+        # The actual smoke-test threading is handled by
+        # :class:`stream2video.encoder_test.EncoderTester` so the worker
+        # thread and its error mapping can be unit-tested without
+        # driving the Tk main loop. This method is the tiny adapter:
+        # lazily build the tester (if first run) bound to a small
+        # callbacks adapter (_EncoderTesterAdapter) that funnels log
+        # lines and button-state changes back to this GUI through the
+        # main-thread dispatcher, then forward the current encoder.
         enc = self.combo_encoder.get()
-        if self._test_running:
-            self._log("Test already running")
-            return
-        self._test_running = True
-        self._log(f"Testing encoder: {enc} ...")
-        self.btn_test_encoders.configure(state="disabled", text="Testing...")
-
-        def _run():
-            try:
-                ok = check_encoder(enc)
-                self._tk_after(0, lambda: self._log(f"  {enc}: {'[OK]' if ok else 'NO'}"))
-            except FileNotFoundError:
-                self._tk_after(0, lambda: self._log(f"  {enc}: ffmpeg not found in PATH"))
-            except Exception as e:
-                self._tk_after(0, lambda e=e: self._log(f"  {enc}: ERROR ({e})"))
-                logger.exception("Encoder test crashed")
-            finally:
-                self._test_running = False
-                self.after(
-                    0, lambda: self.btn_test_encoders.configure(state="normal", text="Test encoder")
-                )
-
-        threading.Thread(target=_run, daemon=True).start()
+        if self._encoder_tester is None:
+            self._encoder_tester = EncoderTester(_EncoderTesterAdapter(self))
+        self._encoder_tester.test(enc)
 
     def _update_file_info(self, path: Path):
         if not path.exists():
@@ -1544,34 +1530,24 @@ class Stream2VideoGUI(ctk.CTk):
         per_video_dir: bool = False,
         delete_after: bool = False,
     ):
-        """Worker thread: delegates to PipelineController.run().
+        """Worker thread: delegates to :class:`stream2video.pipeline_worker.PipelineWorker`
+        which owns the PipelineController orchestration, the callback
+        wiring, and the ``Pipeline*Error`` → status mapping. This
+        method's job is now just:
 
-        The orchestration (download → silence → cut+concat) lives in
-        :class:`stream2video.pipeline_controller.PipelineController` so
-        it can be unit-tested without Tk. This method's job is to:
-          1. Build PipelineConfig from the widget snapshot (P1.10).
-          2. Build PipelineCallbacks whose callables dispatch to the
-             Tk main loop via ``self._tk_after``.
-          3. Wire the on_live_segment callback for the waveform popup.
-          4. Call ``controller.run()`` and map errors to status lines.
-          5. Handle the success summary / popup + cleanup.
+          1. Wrap the GUI in a tiny adapter (``_PipelineGuiCallbacksAdapter``)
+             that implements the :class:`PipelineGuiCallbacks` Protocol
+             the worker expects. Every adapter method funnels back
+             through ``self._tk_after`` so the worker never touches a
+             widget directly (P1.10).
+          2. Build the immutable ``PipelineWorkerParams`` snapshot from
+             the already-snapshoted widget values.
+          3. Stamp ``self._pipeline_start`` (the GUI tracks wall-clock
+             elapsed for the progress bar) and clear the per-run path
+             slots the worker mutates.
+          4. Forward to ``PipelineWorker.run(params)``.
         """
-        from stream2video.pipeline_controller import (
-            PipelineCallbacks,
-            PipelineCancelled,
-            PipelineConcatError,
-            PipelineConfig,
-            PipelineController,
-            PipelineDownloadError,
-            PipelineSilenceError,
-            PipelineUnexpectedError,
-        )
-
-        # Build the immutable config snapshot. All widget reads happen
-        # HERE in the main thread (the caller _start_pipeline already
-        # snapshoted the widgets into args); the worker only reads these
-        # local copies. See P1.10 in the fix plan.
-        cfg = PipelineConfig(
+        params = PipelineWorkerParams(
             input_raw=input_raw,
             output_dir=output_dir,
             method=method,
@@ -1579,147 +1555,20 @@ class Stream2VideoGUI(ctk.CTk):
             video_quality=video_quality,
             audio_quality=audio_quality,
             download_quality=download_quality,
-            software_fallback=self.config.get("software_fallback", "ask"),
-            x264_preset=self.config.get("x264_preset", "medium"),
-            encoder_threads=self.config.get("encoder_threads", "auto"),
-            output_fps=self.config.get("output_fps", "source"),
             force=force,
-            delete_after=delete_after,
             per_video_dir=per_video_dir,
-            threshold=float(self.config["threshold"]),
-            min_silence=float(self.config["min_silence"]),
-            margin=float(self.config["margin"]),
-            memory_limit_mb=self.config.get("memory_limit_mb", "auto"),
-            memory_reserve_mb=self.config.get("memory_reserve_mb", 2048),
-            x264_low_memory=self.config.get("x264_low_memory", False),
-            download_timeout=self.config.get("download_timeout", 28800),
-            connect_timeout=self.config.get("connect_timeout", 300),
-            no_progress_timeout=self.config.get("no_progress_timeout", 1800),
-            segment_encode_timeout=self.config.get("segment_encode_timeout", 600),
-            final_concat_timeout=self.config.get("final_concat_timeout", 86400),
-            silence_timeout=self.config.get("silence_timeout", 36000),
-            stall_kill_timeout=self.config.get("stall_kill_timeout", 300),
-            stall_warning_timeout=self.config.get("stall_warning_timeout", 120),
-            waveform_timeout=self.config.get("waveform_timeout", 300),
-            batch_chunk_size=self.config.get("batch_chunk_size", 40),
-            min_part_bytes=self.config.get("min_part_bytes", 1024),
+            delete_after=delete_after,
         )
-
-        # Download progress callback — maps yt-dlp's progress to the
-        # overall bar (0..5%) and formats the status string with
-        # percent + size + speed + ETA. Runs from yt-dlp's stdout drain
-        # thread; all UI writes dispatch to Tk via self._tk_after.
-        download_start = time.monotonic()
-
-        def _on_download_progress(p: DownloadProgress) -> None:
-            elapsed = time.monotonic() - download_start
-            if p.total_bytes and p.total_bytes > 0:
-                frac = min(1.0, (p.downloaded_bytes or 0.0) / p.total_bytes)
-                self._ui_progress(0.05 * frac)
-            else:
-                self._ui_progress(min(0.04, 0.005 * elapsed))
-            pct = 100.0 * (p.downloaded_bytes or 0.0) / p.total_bytes if p.total_bytes else 0.0
-            self._ui_status(
-                f"Step 1/3: Downloading {pct:.0f}% "
-                f"({fmt_size(int(p.downloaded_bytes or 0))}/{fmt_size(int(p.total_bytes or 0))}) "
-                f"at {fmt_speed(p.speed)} ETA {fmt_time(p.eta) if p.eta else '?'}",
-                force=True,
-            )
-            self._ui_overall(elapsed, p.eta or 0.0, True)
-
-        # Live-segment callback for the waveform popup.
-        def _on_live_segment(seg_list: list[SilenceSegment]) -> None:
-            with self._live_segments_lock:
-                self._live_segments[video_path_ref[0]] = list(seg_list)
-
-        # Mid-pipeline hook: after download resolves the output dir,
-        # update recent projects + file info panel + output label.
-        video_path_ref: list[Path] = [Path()]  # filled by on_output_resolved
-
-        def _on_output_resolved(out_dir: Path, vpath: Path, is_dl: bool) -> None:
-            video_path_ref[0] = vpath
-            self._add_to_recent_projects(out_dir)
-            self._ui_update_output(out_dir)
-            self._ui_update_file_info(vpath)
-            self._log(f"Project directory: {out_dir}")
-            self.after(
-                0,
-                lambda: self.lbl_encoder.configure(text=f"Encoder: {encoder} ({video_quality})"),
-            )
-
-        # Pipeline-complete callback: build summary + show popup.
-        def _on_pipeline_complete(summary: dict) -> None:
-            from stream2video.gui_helpers import build_completion_summary
-
-            result = build_completion_summary(
-                src_size_bytes=summary["src_size_bytes"],
-                src_duration=summary["src_duration"],
-                dst_size_bytes=summary["dst_size_bytes"],
-                dst_duration=summary["keep_duration"],
-                pipeline_seconds=summary["pipeline_seconds"],
-                output_path=summary["output_path"],
-            )
-            self._ui_status(result["status"], force=True)
-            for line in result["log_lines"]:
-                self._log(line)
-            self._tk_after(0, lambda: self.lbl_overall.configure(text=""))
-            self._ui_total(summary["pipeline_seconds"])
-            self._tk_after(0, lambda: messagebox.showinfo("Complete", result["popup"]))
-
-        cb = PipelineCallbacks(
-            on_progress=self._ui_progress,
-            on_status=self._ui_status,
-            on_log=self._log,
-            on_info=self._ui_info,
-            on_overall=self._ui_overall,
-            on_total=self._ui_total,
-            on_download_progress=_on_download_progress,
-            on_pipeline_complete=_on_pipeline_complete,
-        )
-
-        controller = PipelineController(
-            cfg=cfg,
-            cb=cb,
-            cancel_event=self._cancel_event,
-            on_live_segment=_on_live_segment,
-            on_output_resolved=_on_output_resolved,
-        )
-
+        worker = PipelineWorker(_PipelineGuiCallbacksAdapter(self), self.config)
         self._pipeline_start = time.monotonic()
         try:
-            controller.run()
-            # On success, clean up live segments and delete source if
-            # requested. The controller's _finish already handled the
-            # completion callback; we just do the GUI-specific cleanup.
-            if video_path_ref[0]:
-                with self._live_segments_lock:
-                    self._live_segments.pop(video_path_ref[0], None)
-            if delete_after and controller._download_path is not None:
-                try:
-                    controller._download_path.unlink()
-                    self._log(f"Deleted source: {controller._download_path}")
-                except OSError as e:
-                    self._log(f"[WARN] Could not delete source: {e}")
-        except PipelineCancelled:
-            self._log("Pipeline cancelled")
-            self._ui_status("Cancelled", force=True)
-        except PipelineDownloadError as e:
-            self._log(f"[ERROR] Download failed: {e}")
-            self._ui_status(f"Failed: {e}", force=True)
-        except PipelineSilenceError as e:
-            self._log(f"[ERROR] Silence detection failed: {e}")
-            self._ui_status(f"Failed: {e}", force=True)
-        except PipelineConcatError as e:
-            self._log(f"[ERROR] {e}")
-            self._ui_status(f"Failed: {e}", force=True)
-        except PipelineUnexpectedError as e:
-            self._log(f"[ERROR] Unexpected: {e}")
-            logger.exception("Pipeline error")
-            self._ui_status(f"Error: {e}", force=True)
+            worker.run(params)
         finally:
+            # Per-run slots the worker doesn't own — cleared here so a
+            # stale path doesn't leak into the next pipeline run or
+            # the on-close cleanup path.
             self._output_path = None
             self._download_path = None
-            self._tk_after(0, lambda: self._set_running(False))
 
     # ── Recent Projects ───────────────────────────────────────────
 
@@ -1879,19 +1728,16 @@ class Stream2VideoGUI(ctk.CTk):
 
     def _tk_after(self, ms: int, func: Callable[..., Any]) -> None:
         """Schedule ``func`` on the Tk main loop, swallowing ``TclError``
-        if the window has been destroyed. Worker threads call UI helpers
-        (``_ui_progress``, ``_ui_status``, ``_download_cb``'s helpers…)
-        while a pipeline is running; if the user closes the window mid-run
-        the queued callbacks would otherwise raise ``TclError`` against a
-        destroyed root and propagate up the worker thread, surfacing only
-        as an uncaught-exception log line. Treat "window gone" as a quiet
-        no-op so the cancel/cleanup path runs cleanly.
+        if the window has been destroyed.
+
+        Thin forward to :class:`stream2video.tk_dispatch.TkDispatcher`
+        so the swallow-on-destroyed-root behaviour is unit-tested in
+        isolation. Worker threads call this for every UI update; without
+        the swallow a window closed mid-run would surface an uncaught
+        ``TclError`` from the queued callback and leave a confusing
+        logger traceback.
         """
-        try:
-            self.after(ms, func)
-        except TclError:
-            # Root destroyed — drop the queued update.
-            pass
+        self._dispatcher.schedule(ms, func)
 
     def _ui_progress(self, value: float):
         self._tk_after(0, lambda: self.progress.set(max(0.0, min(1.0, value))))
@@ -1949,34 +1795,19 @@ class Stream2VideoGUI(ctk.CTk):
         self._tk_after(0, lambda p=path: self.lbl_output.configure(text=f"Output: {p}"))
 
     def _log(self, message: str):
-        timestamp = time.strftime("%H:%M:%S")
-        self.log_queue.put(f"[{timestamp}] {message}")
+        # Thin forward to :class:`stream2video.tk_dispatch.LogQueuePoller`
+        # so the timestamp formatting + queue push are unit-tested in
+        # isolation. Safe to call from any thread (``queue.Queue.put``
+        # is the lock).
+        if self._log_poller is not None:
+            self._log_poller.log(message)
 
-    def _poll_log_queue(self):
-        """Periodically drain the log queue into the textbox."""
-        try:
-            while True:
-                try:
-                    msg = self.log_queue.get_nowait()
-                except queue.Empty:
-                    break
-                self.txt_log.configure(state="normal")
-                self.txt_log.insert("end", msg + "\n")
-                self.txt_log.see("end")
-                self.txt_log.configure(state="disabled")
-        except TclError:
-            # The textbox (or the root window) has been destroyed.
-            # Rescheduling would just re-raise forever; stop the poller
-            # quietly so close cleans up.
-            return
-        except Exception as e:
-            logger.exception("Log queue poller crashed: %s", e)
-        self.after(100, self._poll_log_queue)
-
-    def _setup_logging(self):
-        handler = QueueHandler(self.log_queue)
-        handler.setFormatter(logging.Formatter("%(message)s"))
-        logging.getLogger("stream2video").addHandler(handler)
+    # ``_poll_log_queue`` and ``_setup_logging`` (the 100 ms self-
+    # rescheduling drain loop and the QueueHandler wiring onto the
+    # ``stream2video`` logger) were extracted to
+    # :class:`stream2video.tk_dispatch.LogQueuePoller`. Their bodies
+    # are gone — see ``tk_dispatch.py`` for the implementations and
+    # unit tests. The GUI wires the poller from ``__init__``.
 
     # ── Waveform tab ────────────────────────────────────────────
 
@@ -2204,19 +2035,16 @@ class Stream2VideoGUI(ctk.CTk):
         threading.Thread(target=_run, daemon=True).start()
 
     def _take_live_snapshot(self, video_path: Path) -> list[SilenceSegment] | None:
-        """Return a copy of the current live segments for `video_path`,
-        or None if the pipeline has never published state for it
-        (popup opened before detect started, or for a different video).
+        """Thin forward to :meth:`LiveSegmentsStore.take_snapshot`.
 
-        The list copy happens inside the lock — a contributor swapping a
-        future in-place mutation (e.g. `.extend(...)`) would otherwise
-        race the iteration here. Reads under lock are cheap (single dict
-        lookup + shallow copy) so this is preferable to a free-standing
-        copy after the lock release.
+        Returns ``None`` if the pipeline has never published state for
+        the path (popup opened before detect started, or for a different
+        video); an empty list ``[]`` means detection has run and detected
+        nothing yet. The distinction lets the renderer fall back to the
+        disk cache instead of pretending "no silence" and overlaying an
+        empty list.")
         """
-        with self._live_segments_lock:
-            segs = self._live_segments.get(video_path)
-            return list(segs) if segs is not None else None
+        return self._live_segments_store.take_snapshot(video_path)
 
     def _apply_view(self, segments: list[SilenceSegment] | None = None):
         """Render the waveform for the current view (view_start → view_end)
@@ -2415,19 +2243,26 @@ class Stream2VideoGUI(ctk.CTk):
         return settings_path()
 
     def _save_settings(self):
-        self.config["input_path"] = self.entry_input.get().strip()
-        self.config["output_dir"] = self.entry_output.get().strip()
-        self.config["method"] = self.combo_method.get()
-        self.config["encoder"] = self.combo_encoder.get()
-        self.config["video_quality"] = self.combo_video_quality.get()
-        self.config["audio_quality"] = self.combo_audio_quality.get()
-        self.config["download_quality"] = self.combo_download_quality.get()
-        self.config["force"] = bool(self.chk_force.get())
-        self.config["delete_after"] = bool(self.chk_delete.get())
-        self.config["per_video_dir"] = bool(self.chk_per_video_dir.get())
-        self.config["x264_low_memory"] = bool(self.chk_x264_low_memory.get())
-        self.config["theme"] = self.combo_theme.get()
-        self.config["window_geometry"] = self.geometry()
+        # Read widgets in the main thread (Tk reads are unsafe from
+        # worker threads); forward the snapshot through the pure
+        # :func:`stream2video.settings_io.build_save_settings_snapshot`
+        # so the field list / key order is unit-tested in isolation.
+        widgets = {
+            "input_path": self.entry_input.get().strip(),
+            "output_dir": self.entry_output.get().strip(),
+            "method": self.combo_method.get(),
+            "encoder": self.combo_encoder.get(),
+            "video_quality": self.combo_video_quality.get(),
+            "audio_quality": self.combo_audio_quality.get(),
+            "download_quality": self.combo_download_quality.get(),
+            "force": bool(self.chk_force.get()),
+            "delete_after": bool(self.chk_delete.get()),
+            "per_video_dir": bool(self.chk_per_video_dir.get()),
+            "x264_low_memory": bool(self.chk_x264_low_memory.get()),
+            "theme": self.combo_theme.get(),
+            "window_geometry": self.geometry(),
+        }
+        self.config.update(build_save_settings_snapshot(widgets))
         # P2.6 / Этап 10: JSON write delegated to gui_settings so the
         # serialisation is unit-testable without a Tk main loop.
         try:
@@ -2474,7 +2309,7 @@ class Stream2VideoGUI(ctk.CTk):
                 ev = getattr(slider, "_entry_val", None)
                 if ev:
                     ev.delete(0, "end")
-                    ev.insert(0, f"{val:.1f}")
+                    ev.insert(0, format_slider_entry_value(val))
         self.lbl_output.configure(text="Output: —")
         self.lbl_file.configure(text="File: —")
         self.lbl_size.configure(text="Size: —")
@@ -2508,7 +2343,11 @@ class Stream2VideoGUI(ctk.CTk):
             self._sync_slider_entries()
         except Exception:
             pass
-        snapshot = {
+        # Read widgets into the snapshot dict shape the pure helpers
+        # (``settings_io.build_user_defaults_snapshot``) consume. The
+        # GUI owns the actual widget reads; settings_io owns the field
+        # list / key ordering so a unit test can pin them.
+        widgets = {
             "threshold": float(self.config["threshold"]),
             "min_silence": float(self.config["min_silence"]),
             "margin": float(self.config["margin"]),
@@ -2523,6 +2362,7 @@ class Stream2VideoGUI(ctk.CTk):
             "x264_low_memory": bool(self.chk_x264_low_memory.get()),
             "theme": self.combo_theme.get(),
         }
+        snapshot = build_user_defaults_snapshot(widgets)
         try:
             save_user_defaults(snapshot)
         except Exception as e:
@@ -2546,20 +2386,20 @@ class Stream2VideoGUI(ctk.CTk):
         memory_reserve_mb = self.config.get("memory_reserve_mb", 2048)
 
         out_path = Path(out_raw).expanduser()
-        config_path = None
-        try:
-            out_path.mkdir(parents=True, exist_ok=True)
-            config_path = (out_path / "stream2video_cli_config.yaml").resolve()
-            config_yaml = (
-                f"threshold: {self.config['threshold']}\n"
-                f"min_silence: {self.config['min_silence']}\n"
-                f"margin: {self.config['margin']}\n"
-            )
-            with open(config_path, "w", encoding="utf-8") as f:
-                f.write(config_yaml)
-        except Exception as e:
-            self._log(f"[WARN] Could not write CLI config: {e}")
-            config_path = None
+        # Pure file write delegated to
+        # :func:`stream2video.settings_io.write_cli_config_yaml`
+        # so the YAML shape is unit-tested in isolation. Returns
+        # ``None`` if the directory doesn't exist / can't be created
+        # — the GUI logs the warning and continues without the
+        # ``--config`` flag (the command still runs with CLI defaults).
+        config_path = write_cli_config_yaml(
+            out_path,
+            float(self.config["threshold"]),
+            float(self.config["min_silence"]),
+            float(self.config["margin"]),
+        )
+        if config_path is None:
+            self._log("[WARN] Could not write CLI config (out_dir not writable)")
 
         # ``build_cli_command`` is a pure helper extracted from gui.py
         # so the CLI command shape can be unit-tested without
@@ -2628,6 +2468,129 @@ class Stream2VideoGUI(ctk.CTk):
 def main():
     app = Stream2VideoGUI()
     app.mainloop()
+
+
+class _EncoderTesterAdapter:
+    """Adapter that exposes the GUI's encoder-test surface to
+    :class:`stream2video.encoder_test.EncoderTester`.
+
+    The GUI can't be passed to ``EncoderTester`` directly because the
+    GUI class is defined far below this module's import time and the
+    extractor (encoder_test.py) has no Tk dependency. So the GUI
+    builds a tiny adapter object implementing the four callbacks
+    defined in ``EncoderTestCallbacks``: log, schedule_on_main,
+    schedule_after, set_test_button_state. All four forward to the
+    GUI's main-thread dispatcher (``_tk_after`` / ``after``) so no
+    widget is touched by the worker thread.
+    """
+
+    def __init__(self, gui: "Stream2VideoGUI"):
+        self._gui = gui
+
+    def log(self, message: str) -> None:
+        self._gui._log(message)
+
+    def schedule_on_main(self, ms: int, func: Callable[..., Any]) -> None:
+        # ``_tk_after`` swallows ``TclError`` if the root is destroyed
+        # mid-test — exactly what the legacy code did.
+        self._gui._tk_after(ms, func)
+
+    def schedule_after(self, ms: int, func: Callable[..., Any]) -> None:
+        # ``self.after`` is not used cross-thread here because the
+        # caller (EncoderTester) always invokes this from the worker
+        # thread's ``finally`` block; ``_tk_after`` is the cross-thread
+        # safe variant. Use it instead of ``self.after`` to keep the
+        # pattern consistent (and avoid ``TclError`` races during
+        # window close mid-test).
+        self._gui._tk_after(ms, func)
+
+    def set_test_button_state(self, *, running: bool) -> None:
+        # Restore / disable the button — read from the GUI's
+        # ``btn_test_encoders`` widget (created in _build_ui) so the
+        # adapter doesn't need to know the button's text / state
+        # constants.
+        try:
+            btn = self._gui.btn_test_encoders
+        except AttributeError:
+            return
+        btn.configure(
+            state=("disabled" if running else "normal"),
+            text=("Testing..." if running else "Test encoder"),
+        )
+
+
+class _PipelineGuiCallbacksAdapter:
+    """Adapter exposing the GUI's pipeline-run surface to
+    :class:`stream2video.pipeline_worker.PipelineWorker`.
+
+    The GUI can't be passed to the worker directly (it's the fat class
+    at the bottom of this module; we want the worker module to depend
+    only on a thin Protocol callable surface). So the GUI hands the
+    worker a tiny adapter object that funnels every call back through
+    the GUI's main-thread dispatcher (``_tk_after``) — the worker never
+    touches a widget directly (P1.10).
+
+    ``cancel_event`` is just the GUI's own ``self._cancel_event`` — the
+    worker reads it directly so the existing ``_cancel_pipeline`` path
+    keeps working without going through a dispatcher.
+    """
+
+    def __init__(self, gui: "Stream2VideoGUI"):
+        self._gui = gui
+        # Protocol-expected settable attribute; expose the GUI's event
+        # so the worker (and the controller it instantiates) can poll
+        # it without going through a dispatcher.
+        self.cancel_event = gui._cancel_event
+
+    def log(self, message: str) -> None:
+        self._gui._log(message)
+
+    def ui_progress(self, value: float) -> None:
+        self._gui._ui_progress(value)
+
+    def ui_status(self, text: str, *, force: bool = False) -> None:
+        self._gui._ui_status(text, force=force)
+
+    def ui_info(self, text: str) -> None:
+        self._gui._ui_info(text)
+
+    def ui_overall(
+        self, phase_elapsed: float, phase_remaining: float | None, more_phases: bool
+    ) -> None:
+        self._gui._ui_overall(phase_elapsed, phase_remaining, more_phases)
+
+    def ui_total(self, total_elapsed: float) -> None:
+        self._gui._ui_total(total_elapsed)
+
+    def ui_update_output(self, out_dir: Path) -> None:
+        self._gui._ui_update_output(out_dir)
+
+    def ui_update_file_info(self, path: Path) -> None:
+        self._gui._ui_update_file_info(path)
+
+    def add_to_recent_projects(self, project_path: Path) -> None:
+        self._gui._add_to_recent_projects(project_path)
+
+    def set_encoder_label(self, encoder: str, video_quality: str) -> None:
+        self._gui._tk_after(
+            0,
+            lambda: self._gui.lbl_encoder.configure(text=f"Encoder: {encoder} ({video_quality})"),
+        )
+
+    def clear_overall_label(self) -> None:
+        self._gui._tk_after(0, lambda: self._gui.lbl_overall.configure(text=""))
+
+    def show_complete_popup(self, text: str) -> None:
+        self._gui._tk_after(0, lambda: messagebox.showinfo("Complete", text))
+
+    def set_running(self, running: bool) -> None:
+        self._gui._tk_after(0, lambda: self._gui._set_running(running))
+
+    def set_live_segments(self, video_path: Path, segments: list[SilenceSegment]) -> None:
+        self._gui._live_segments_store.set(video_path, segments)
+
+    def pop_live_segments(self, video_path: Path) -> list[SilenceSegment] | None:
+        return self._gui._live_segments_store.pop(video_path)
 
 
 if __name__ == "__main__":
