@@ -24,6 +24,8 @@ dependencies = [
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
+    "pytest-qt>=4.0.0",
+    "pytest-timeout>=2.0.0",
     "ruff>=0.5.0",
     "mypy>=1.10.0",
     "types-PyYAML>=6.0.0",
@@ -34,6 +36,15 @@ dev = [
 gui = [
     "customtkinter>=5.2.0",
     "Pillow>=10.0.0",
+]
+# GUI event-loop tests (test_gui_qt.py) need a Qt binding for pytest-qt's
+# headless display auto-detection. PySide6 is the lightest Qt6 binding.
+# pytest-qt itself is in [dev] already; this extra is for CI environments
+# that want to run the Qt-driven tests without installing the full Qt SDK.
+gui-test = [
+    "PySide6>=6.5.0",
+    "pytest-qt>=4.0.0",
+    "pytest-timeout>=2.0.0",
 ]
 # Memory monitoring (P1.17): optional psutil dependency. When installed,
 # ``stream2video.memory.MemoryMonitor`` actively tracks the ffmpeg/yt-dlp
@@ -55,6 +66,8 @@ include = ["stream2video*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+timeout = 30
+timeout_method = "thread"
 
 [tool.ruff]
 target-version = "py313"
