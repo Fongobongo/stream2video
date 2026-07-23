@@ -265,7 +265,8 @@ def main(
         CONFIG_DEFAULTS["method"],
         "--method",
         "-m",
-        help="Concat method: 'segment' (fast, ~1.5h) or 'batch' (select/aselect filter, ~6-7h). "
+        help="Concat method: 'segment' (fast, ~1.5h), 'batch' (select/aselect filter, ~6-7h), "
+        "or 'cut_then_encode' (best quality, one encode pass after lossless cut). "
         "If not passed, the config file's `method` key is used.",
     ),
     encoder: str = typer.Option(

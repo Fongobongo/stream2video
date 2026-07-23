@@ -68,7 +68,7 @@ class TestValidLists:
         assert set(VALID_ENCODERS) == set(ENCODER_OPTS.keys())
 
     def test_valid_methods_content(self):
-        assert set(VALID_METHODS) == {"segment", "batch"}
+        assert set(VALID_METHODS) == {"segment", "batch", "cut_then_encode"}
 
     def test_valid_themes_content(self):
         assert set(VALID_THEMES) == {"dark", "light", "system"}
