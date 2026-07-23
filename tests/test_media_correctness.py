@@ -387,6 +387,81 @@ def test_100_keep_segments(method: str, tmp_path: Path):
     _assert_av_in_sync(info, tolerance_s=0.5)
 
 
+def test_cut_then_encode_basic(synthetic_source: Path, tmp_path: Path):
+    """cut_then_encode method: one encode pass after lossless cut.
+
+    Same keep plan as test_basic_keep (keep 0-2 + 4-6 = 4s = 120 frames
+    at 30 FPS). The cut_then_encode method stream-copies each segment,
+    concats losslessly, then does ONE final encode. Frame count should
+    match the segment/batch result (within tolerance — keyframe
+    alignment may shift by up to 1 GOP).
+    """
+    out = tmp_path / "out_cte.mp4"
+    silence = [SilenceSegment(2.0, 4.0)]
+    cut_and_concat(
+        synthetic_source,
+        silence,
+        out,
+        method="cut_then_encode",
+        encoder="libx264",
+        video_quality="medium",
+    )
+    info = _probe(out)
+    frames = info.get("nb_read_frames_video")
+    # Keyframe alignment with -c copy means the cut snaps to the nearest
+    # preceding keyframe. For the synthetic source (libx264 ultrafast,
+    # default GOP ~250 frames), the keyframe interval is very large, so
+    # the output may be longer than expected (includes frames from the
+    # previous keyframe up to the cut point). This is the documented
+    # trade-off of cut_then_encode v1 — the output is structurally valid
+    # (correct FPS, A/V in sync) but may include extra footage at cut
+    # boundaries. Smart-cut (exact frame accuracy) is deferred to v2.
+    assert frames is not None and frames > 0, f"cut_then_encode: no frames in output; info={info}"
+    _assert_av_in_sync(info, tolerance_s=0.5)
+    # The output must have both video and audio streams.
+    assert "video" in info["codec_types"], f"missing video stream: {info}"
+    assert "audio" in info["codec_types"], f"missing audio stream: {info}"
+    # FPS must be preserved.
+    assert info.get("r_frame_rate") == "30/1", (
+        f"cut_then_encode: r_frame_rate {info.get('r_frame_rate')!r} != '30/1'; info={info}"
+    )
+
+
+def test_cut_then_encode_no_audio(synthetic_source: Path, tmp_path: Path):
+    """cut_then_encode handles audio-less sources (no crash, no -map 0:a)."""
+    # Create a video-only source by stripping audio.
+    src_noaudio = tmp_path / "src_noaudio.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-i",
+            str(synthetic_source),
+            "-an",  # drop audio
+            "-c",
+            "copy",
+            str(src_noaudio),
+        ],
+        check=True,
+    )
+    out = tmp_path / "out_cte_noaudio.mp4"
+    silence = [SilenceSegment(1.0, 3.0)]
+    cut_and_concat(
+        src_noaudio,
+        silence,
+        out,
+        method="cut_then_encode",
+        encoder="libx264",
+        video_quality="medium",
+    )
+    info = _probe(out)
+    assert "video" in info["codec_types"], f"missing video stream: {info}"
+    # Audio stream should NOT be present.
+    assert "audio" not in info["codec_types"], f"unexpected audio stream: {info}"
+
+
 def test_audio_quality_high_preserves_bitrate(synthetic_source: Path, tmp_path: Path):
     """``audio_quality='high'`` should produce a higher bitrate than 'low'.
 

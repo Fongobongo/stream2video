@@ -56,7 +56,7 @@ class EncoderUnavailableError(ConcatError):
 
     Distinct from ``FFmpegError`` so the CLI can craft a "select a different
     encoder / check the driver" message instead of a generic "ffmpeg failed"
-    one — the encoder wasn't even tried, so its stderr wouldn't be helpful.
+    one -- the encoder wasn't even tried, so its stderr wouldn't be helpful.
     """
 
 
@@ -84,7 +84,7 @@ def _quote_concat_path(p: str) -> str:
 _VIDEO_BITRATE = "7000k"
 # Audio bitrate presets. ``medium`` keeps the historical 128k so default
 # output is unchanged on upgrade. ``high``/``low`` give the user a real
-# choice so a 192k/256k/320k source is no longer silently downgraded —
+# choice so a 192k/256k/320k source is no longer silently downgraded --
 # see P0.3 in the fix plan. Set at encode time only; the value is read
 # through ``_audio_bitrate()`` so runtime override is a single knob.
 _AUDIO_BITRATE = "128k"
@@ -94,7 +94,7 @@ _AUDIO_BITRATES: dict[str, str] = {
     "low": "128k",
 }
 # Sample rate / channel policy. ``-ar 48000 -ac 2`` historically
-# normalised everything to stereo 48 kHz AAC — the source was never
+# normalised everything to stereo 48 kHz AAC -- the source was never
 # preserved, but output was at least consistent across segments. Keep
 # that explicit conversion so the audio path is documented, but route
 # it through ``_audio_opts()`` so an explicit "preserve source" preset
@@ -139,7 +139,7 @@ def _audio_opts() -> list[str]:
 
 # Audio quality preset for the current pipeline run. Thread-safe enough
 # for this codebase's sequential pipeline (one encode at a time,
-# cancellation-checked) — set once per ``cut_and_concat`` invocation.
+# cancellation-checked) -- set once per ``cut_and_concat`` invocation.
 _audio_quality: str = "medium"
 
 
@@ -227,7 +227,7 @@ def cut_and_concat(
     # on a video-only input). See P1.14 in the fix plan.
     source_has_audio = has_audio_stream(video_path)
     if not source_has_audio:
-        logger.info(f"Source {video_path.name} has no audio stream — encoding video-only")
+        logger.info(f"Source {video_path.name} has no audio stream -- encoding video-only")
 
     _run_with_fallback(
         video_path,
@@ -275,7 +275,7 @@ def generate_keep_segments(
         end = min(float(duration), float(s.end))
         if end <= start:
             continue
-        # Only warn on a meaningful clamp — sub-microsecond FP drift
+        # Only warn on a meaningful clamp -- sub-microsecond FP drift
         # between source timestamps and the probed duration would
         # otherwise fire a noisy warning on every segment of the second
         # pass.
@@ -338,7 +338,7 @@ def encoder_opts(
     or a positive int. For libx264 the flag goes AFTER the encoder in the
     constructed command (``-c:v libx264 ... -threads N``) so it applies to
     the encoder, not to the decoder (a ``-threads`` before ``-i`` would
-    bound the decoder's thread pool instead — different effect).
+    bound the decoder's thread pool instead -- different effect).
 
     ``x264_low_memory`` (libx264 only): when True, appends
     ``-x264-params rc-lookahead=10:ref=1:bframes=0`` to reduce the
@@ -392,7 +392,7 @@ def encoder_opts(
             "18",
             *threads_opt,
         ]
-    # libx264 — CRF-driven, bitrate is ignored. ``-preset`` controls the
+    # libx264 -- CRF-driven, bitrate is ignored. ``-preset`` controls the
     # speed/size trade-off AND the CPU load (slower presets do more
     # lookahead/motion search). ``-threads`` caps the encoder's parallel
     # frame evaluations so an 8-core machine doesn't saturate to 100% on
@@ -423,7 +423,7 @@ def _threads_opt(encoder_threads: str | int) -> list[str]:
 def _fps_filter_chain(output_fps: str) -> str:
     """Return the ffmpeg filter chain fragment that enforces ``output_fps``.
 
-    ``source`` (default) returns an empty string — the encoder receives
+    ``source`` (default) returns an empty string -- the encoder receives
     the original PTS without any fps filter, so a 30 FPS source comes
     out at 30 FPS without frame duplication. This is the historical
     behaviour preserved by the trim+concat rewrite.
@@ -462,7 +462,7 @@ def check_encoder(name: str) -> bool:
     """Smoke test: verify the encoder works by encoding 1 frame. Cached per process.
 
     Previously ``libx264`` returned ``True`` without actually invoking
-    ffmpeg — that hid cases where the build's libx264 was broken or
+    ffmpeg -- that hid cases where the build's libx264 was broken or
     missing (e.g. a stripped-down distro build, or ffmpeg linked with
     GPL-removed codecs). We now run the same 1-frame lavfi smoke test
     for every encoder; the cache keeps it free for the test-encoder
@@ -501,13 +501,13 @@ def check_encoder(name: str) -> bool:
             return False
         ok = r.returncode == 0
         if not ok and name == "libx264":
-            # libx264 is the safety net — if it's gone, the user needs to
+            # libx264 is the safety net -- if it's gone, the user needs to
             # reinstall ffmpeg with x264 support, not be told to "pick
             # a different encoder".
             logger.error(
                 f"libx264 smoke test FAILED (rc={r.returncode}); "
                 f"stderr: {r.stderr[:300]!r}. Your ffmpeg build is missing the "
-                f"x264 library — reinstall ffmpeg (e.g. `winget install "
+                f"x264 library -- reinstall ffmpeg (e.g. `winget install "
                 f"Gyan.FFmpeg` on Windows) or install a build with libx264 support."
             )
         _encoder_check_cache[name] = ok
@@ -528,9 +528,9 @@ def get_video_encoder(
     If ``preferred`` is available, return it. If not (smoke test fails),
     consult ``software_fallback``:
 
-      * ``enabled`` — return libx264 (legacy silent-fallback behaviour).
-      * ``disabled`` — raise EncoderUnavailableError immediately.
-      * ``ask`` (default) — call ``on_unavailable`` if provided; the
+      * ``enabled`` -- return libx264 (legacy silent-fallback behaviour).
+      * ``disabled`` -- raise EncoderUnavailableError immediately.
+      * ``ask`` (default) -- call ``on_unavailable`` if provided; the
         callback returns True to allow libx264 fallback, False to
         raise. With ``on_unavailable=None``, ``ask`` behaves as
         ``disabled`` so a pipeline run can't silently switch to a
@@ -538,7 +538,7 @@ def get_video_encoder(
 
     ``x264_preset`` and ``encoder_threads`` are forwarded to
     :func:`encoder_opts` so the resolved options match the user's
-    settings (also on a fallback retry — the fallback call site keeps
+    settings (also on a fallback retry -- the fallback call site keeps
     the same values). ``x264_low_memory`` reduces x264 frame buffer
     usage (see ``encoder_opts`` for details).
     """
@@ -564,7 +564,7 @@ def get_video_encoder(
             x264_low_memory=x264_low_memory,
         )
 
-    # HW encoder unavailable — apply fallback policy.
+    # HW encoder unavailable -- apply fallback policy.
     if software_fallback == "enabled":
         logger.warning(f"{preferred} not available, falling back to libx264")
         return "libx264", encoder_opts(
@@ -593,7 +593,7 @@ def get_video_encoder(
         raise EncoderUnavailableError(f"{preferred} not available; user declined libx264 fallback")
     # software_fallback == "disabled"
     raise EncoderUnavailableError(
-        f"{preferred} not available; software_fallback='disabled' — refusing libx264"
+        f"{preferred} not available; software_fallback='disabled' -- refusing libx264"
     )
 
 
@@ -610,7 +610,7 @@ def _run_ffmpeg(
 ) -> None:
     """Run an ffmpeg command. With track_progress=True (default), parses ffmpeg's
     -progress stream from stdout and invokes progress_callback(us). With False,
-    stdout is discarded — use for per-segment encodes where the segment index
+    stdout is discarded -- use for per-segment encodes where the segment index
     already implies progress.
 
     Polls cancel_callback every CANCEL_POLL_INTERVAL seconds during the final
@@ -654,7 +654,7 @@ def _run_ffmpeg(
 
     # P1.5: stall watchdog. The ``track_progress=True`` branch checks
     # ``elapsed_since_progress`` inside its readline loop, but readline
-    # blocks until ffmpeg emits a line — a fully-hung ffmpeg (deadlock,
+    # blocks until ffmpeg emits a line -- a fully-hung ffmpeg (deadlock,
     # no stdout at all) would never surface as a stall there. This
     # daemon thread polls ``last_progress_time`` independently of
     # stdout availability and kills the process when the stall window
@@ -669,7 +669,7 @@ def _run_ffmpeg(
             elapsed = time.monotonic() - last_progress_time
             if elapsed > stall_kill:
                 logger.error(
-                    f"{label}: stall watchdog firing — no progress for "
+                    f"{label}: stall watchdog firing -- no progress for "
                     f"{int(elapsed)}s, killing process"
                 )
                 try:
@@ -697,7 +697,7 @@ def _run_ffmpeg(
                     try:
                         raw_line = line_queue.get(timeout=CANCEL_POLL_INTERVAL)
                     except queue.Empty:
-                        # No new line — check cancel + stall.
+                        # No new line -- check cancel + stall.
                         if cancel_callback and cancel_callback():
                             process.kill()
                             raise CancelledError(f"{label} cancelled") from None
@@ -707,16 +707,16 @@ def _run_ffmpeg(
                         if elapsed_since_progress > stall_kill:
                             process.kill()
                             raise FFmpegError(
-                                f"{label} stalled — no progress for {int(elapsed_since_progress)}s, "
+                                f"{label} stalled -- no progress for {int(elapsed_since_progress)}s, "
                                 "possible resource exhaustion"
                             ) from None
                         elif elapsed_since_progress > stall_warning:
                             logger.warning(
-                                f"{label}: no progress for {int(elapsed_since_progress)}s — waiting..."
+                                f"{label}: no progress for {int(elapsed_since_progress)}s -- waiting..."
                             )
                         continue
                     if raw_line is None:
-                        break  # EOF — pipe closed
+                        break  # EOF -- pipe closed
                     if cancel_callback and cancel_callback():
                         process.kill()
                         raise CancelledError(f"{label} cancelled")
@@ -735,12 +735,12 @@ def _run_ffmpeg(
                     if elapsed_since_progress > stall_kill:
                         process.kill()
                         raise FFmpegError(
-                            f"{label} stalled — no progress for {int(elapsed_since_progress)}s, "
+                            f"{label} stalled -- no progress for {int(elapsed_since_progress)}s, "
                             "possible resource exhaustion"
                         )
                     elif elapsed_since_progress > stall_warning:
                         logger.warning(
-                            f"{label}: no progress for {int(elapsed_since_progress)}s — waiting..."
+                            f"{label}: no progress for {int(elapsed_since_progress)}s -- waiting..."
                         )
 
             if cancelled.is_set():
@@ -767,7 +767,7 @@ def _run_ffmpeg(
             if memory_monitor.peak_rss_mb > 0:
                 logger.info(
                     f"{label}: peak RSS {memory_monitor.peak_rss_mb:.0f}MB"
-                    + (" (HARD limit hit — task cancelled)" if memory_monitor.hard_exceeded else "")
+                    + (" (HARD limit hit -- task cancelled)" if memory_monitor.hard_exceeded else "")
                 )
         if not drain_done:
             wait_for_drain()
@@ -810,7 +810,7 @@ def _wait_with_cancel(
 # working dir so old artifacts from an incompatible run cannot be reused.
 #
 # Source identity is (path, size, mtime_ns). A full hash is intentionally
-# avoided — for a 6h stream that's an extra O(filesize) read. (path,
+# avoided -- for a 6h stream that's an extra O(filesize) read. (path,
 # size, mtime_ns) is enough to detect: file moved/replaced, file edited
 # in place (size and mtime change), file re-encoded (size and mtime
 # change). For adversarial cases (size+mtime preserved by external
@@ -819,7 +819,7 @@ def _wait_with_cancel(
 PIPELINE_VERSION = 3  # bump when the on-disk segment/chunk format changes
 
 # Minimum chunk/segment size to consider valid for resume. A 1-byte file
-# is missing the moov atom (or never had one written) — reuse would
+# is missing the moov atom (or never had one written) -- reuse would
 # corrupt the final concat in the middle.
 _MIN_PART_BYTES = 1024
 
@@ -832,7 +832,7 @@ def _source_identity(video_path: Path) -> dict:
     """Snapshot (path, size, mtime_ns) so resume detects source changes.
 
     Uses the absolute path so renaming the file (same content) doesn't
-    silently reuse segments encoded against a different filename — the
+    silently reuse segments encoded against a different filename -- the
     concat list references segments by their position in the run, so a
     path rename invalidates the work dir deliberately.
     """
@@ -948,7 +948,7 @@ def _validate_manifest(
                 f"stored={stored.get(key)!r} current={current.get(key)!r}"
             )
             return False
-    # Source identity (path/size/mtime) — strict equality.
+    # Source identity (path/size/mtime) -- strict equality.
     stored_src = stored.get("source") or {}
     current_src = current.get("source") or {}
     for key in ("path", "size", "mtime_ns"):
@@ -958,7 +958,7 @@ def _validate_manifest(
                 f"stored={stored_src.get(key)!r} current={current_src.get(key)!r}"
             )
             return False
-    # Keep segments must match exactly — different cut points = different
+    # Keep segments must match exactly -- different cut points = different
     # output. Stored segments were written by json.dump (lists of lists);
     # compare as tuples for float safety.
     stored_segs = stored.get("keep_segments") or []
@@ -981,7 +981,7 @@ def _ensure_fresh_work_dir(
 ) -> None:
     """Validate ``work_dir`` against ``current_manifest``; wipe if stale.
 
-    The wipe is destructive — it removes the entire work dir including
+    The wipe is destructive -- it removes the entire work dir including
     partial segments. Call this BEFORE the resume-skip loop in
     ``_run_segment_concat`` / ``_run_batch_concat`` so the per-file
     checks see only artifacts that belong to the current run.
@@ -1056,7 +1056,7 @@ def _run_final_concat(
 
     The progress callback maps ffmpeg's ``out_time_us`` (which reflects
     output time across the whole concat, not per-segment) to the last
-    10% of the overall progress bar — both call sites reserve 0..0.9
+    10% of the overall progress bar -- both call sites reserve 0..0.9
     for the per-segment encodes and 0.9..1.0 for this final concat.
     """
     list_path = work_dir / "concat.txt"
@@ -1193,7 +1193,7 @@ def _run_segment_concat(
             # The current approach:
             #   1. Input-side `-ss {start}` performs the seek. ffmpeg's
             #      MP4 demuxer decodes from the preceding keyframe and
-            #      drops frames until `start` automatically — this is
+            #      drops frames until `start` automatically -- this is
             #      frame-accurate on modern ffmpeg builds (verified with
             #      ffmpeg 8.1.1 on a GOP=30 source at a sub-keyframe
             #      cut: a 1.5s keep returned exactly 1.500s/45 frames).
@@ -1214,7 +1214,7 @@ def _run_segment_concat(
             # is a no-op here and is omitted for clarity.
 
             def _seg_prog(us: int, _dur: float = dur, _encoded_keep: float = encoded_keep) -> None:
-                # ffmpeg -progress reports `out_time_us` — the position within
+                # ffmpeg -progress reports `out_time_us` -- the position within
                 # this segment's output, NOT the original video. Map it to
                 # absolute progress across the whole video so the GUI/CLI
                 # bar moves smoothly even when a single segment takes an
@@ -1289,7 +1289,7 @@ def _run_segment_concat(
                 f"segment: resumed {skipped}/{n_segs} already encoded, encoded {n_segs - skipped}"
             )
 
-        # Final concat demuxer pass — shared with _run_batch_concat (P2.6).
+        # Final concat demuxer pass -- shared with _run_batch_concat (P2.6).
         part_paths = [seg_dir / f"seg_{i:06d}.mp4" for i in range(n_segs)]
         _run_final_concat(
             seg_dir,
@@ -1311,6 +1311,220 @@ def _run_segment_concat(
     except Exception:
         # On failure: keep segments for resume
         logger.info(f"Segments kept in {seg_dir} for resume on next run")
+        raise
+
+
+def _run_cut_then_encode(
+    video_path: Path,
+    keep_segments: list[tuple[float, float]],
+    output_path: Path,
+    vcodec: str,
+    vcodec_opts: list[str],
+    progress_callback: Callable[[float], None] | None = None,
+    cancel_callback: Callable[[], bool] | None = None,
+    encoder: str = "libx264",
+    video_quality: str = "medium",
+    audio_quality: str = "medium",
+    x264_preset: str = "medium",
+    encoder_threads: str | int = "auto",
+    source_has_audio: bool = True,
+    output_fps: str = "source",
+    segment_encode_timeout: int = _SEGMENT_ENCODE_TIMEOUT,
+    final_concat_timeout: int = _FINAL_CONCAT_TIMEOUT,
+    stall_kill: int = _STALL_KILL,
+    stall_warning: int = _STALL_WARNING,
+    min_part_bytes: int = _MIN_PART_BYTES,
+) -> None:
+    """Cut lossless segments, concat losslessly, then do ONE final encode.
+
+    Unlike ``_run_segment_concat`` (N encode passes + 1 lossless join)
+    and ``_run_batch_concat`` (M chunk encodes + 1 lossless join), this
+    method does:
+
+      1. **Cut pass**: stream-copy each keep segment to a raw MKV
+         (``-c copy`` -- no re-encode). Fast, lossless, low RAM.
+      2. **Lossless concat**: join all raw segments into a single
+         intermediate MKV via the concat demuxer (``-c copy``).
+      3. **One final encode**: re-encode the intermediate with the
+         chosen codec + quality. This is the *only* encode pass.
+
+    The main win is **quality**: a single encode pass means no
+    generation loss at segment boundaries, one continuous GOP, and one
+    AAC audio encode (no per-segment priming drift). The trade-off is
+    **disk space**: the raw intermediate can be ~1.5x the source size
+    (the sum of keep segments' bytes at the source's original bitrate).
+
+    Cut accuracy: ``-c copy`` snaps to the nearest preceding keyframe.
+    For silence removal this is usually fine (cut points are in silent
+    regions). Smart-cut (exact frame accuracy) is deferred to v2.
+
+    Resume: same manifest + ffprobe validation as the other methods.
+    Work dir: ``_<stem>_cut`` (distinct from ``_segments`` / ``_batch``
+    so manifests don't collide).
+    """
+    n_segs = len(keep_segments)
+    total_duration = sum(e - s for s, e in keep_segments)
+    if total_duration <= 0:
+        raise ConcatError("No video content to keep (total duration is zero)")
+
+    cut_dir = output_path.parent / f"_{output_path.stem}_cut"
+    raw_concat_path = cut_dir / "raw_concat.mkv"
+
+    # Resume manifest (P0.6): same structure as the other methods so
+    # a mismatch in source / encoder / keep_segments / pipeline_version
+    # wipes the work dir.
+    manifest = _build_manifest(
+        video_path,
+        keep_segments,
+        "cut_then_encode",
+        encoder,
+        vcodec,
+        vcodec_opts,
+        video_quality,
+        audio_quality,
+        x264_preset,
+        encoder_threads,
+    )
+    _ensure_fresh_work_dir(cut_dir, manifest)
+    cut_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # ── Phase 1: Cut pass (stream-copy each segment to MKV) ──
+        # Progress: 0.0 .. 0.4 (cut is fast, so a small slice of the bar).
+        cut_progress_base = 0.0
+        cut_progress_span = 0.4
+
+        for i, (start, end) in enumerate(keep_segments):
+            if cancel_callback and cancel_callback():
+                raise CancelledError("cut_then_encode cancelled")
+            dur = end - start
+            cut_path = cut_dir / f"cut_{i:06d}.mkv"
+
+            # Resume skip: if the file exists, is large enough, and
+            # passes ffprobe validation, reuse it.
+            if (
+                cut_path.exists()
+                and cut_path.stat().st_size >= min_part_bytes
+                and _ffprobe_is_valid_mp4(cut_path)
+            ):
+                logger.debug(f"cut_then_encode: reusing cut_{i:06d}.mkv")
+                continue
+
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-ss",
+                str(start),
+                "-i",
+                str(video_path),
+                "-t",
+                str(dur),
+                "-map",
+                "0:v:0",
+            ]
+            if source_has_audio:
+                cmd.extend(["-map", "0:a:0?"])
+            cmd.extend(
+                [
+                    "-c",
+                    "copy",
+                    "-avoid_negative_ts",
+                    "make_zero",
+                    str(cut_path),
+                ]
+            )
+            subprocess.run(cmd, check=True, capture_output=True)
+            if progress_callback:
+                progress_callback(cut_progress_base + (i + 1) / n_segs * cut_progress_span)
+
+        # ── Phase 2: Lossless concat (concat demuxer → raw_concat.mkv) ──
+        # Progress: 0.4 .. 0.5 (fast stream-copy join).
+        part_paths = [cut_dir / f"cut_{i:06d}.mkv" for i in range(n_segs)]
+
+        # Reuse _run_final_concat but point it at raw_concat.mkv instead
+        # of the final output. The progress span for this step is small
+        # (0.4..0.5) because it's a stream copy.
+        if not raw_concat_path.exists() or not _ffprobe_is_valid_mp4(raw_concat_path):
+            _run_final_concat(
+                cut_dir,
+                raw_concat_path,
+                part_paths,
+                total_duration=total_duration,
+                progress_callback=(
+                    (lambda f: progress_callback(0.4 + f * 0.1)) if progress_callback else None
+                ),
+                cancel_callback=cancel_callback,
+                label="cut_then_encode concat",
+                timeout=final_concat_timeout,
+                stall_kill=stall_kill,
+                stall_warning=stall_warning,
+            )
+
+        # ── Phase 3: One final encode ──
+        # Progress: 0.5 .. 1.0 (this is the heavy step).
+        encode_fps_filter: list[str] = []
+        if output_fps != "source":
+            encode_fps_filter = ["-vf", f"fps={output_fps}"]
+
+        audio_encode_opts: list[str] = []
+        if source_has_audio:
+            audio_bitrate = _AUDIO_BITRATES.get(audio_quality, "192k")
+            audio_encode_opts = [
+                "-map",
+                "0:a:0?",
+                "-c:a",
+                "aac",
+                "-b:a",
+                audio_bitrate,
+                "-ar",
+                "48000",
+                "-ac",
+                "2",
+            ]
+
+        encode_progress_base = 0.5
+        encode_progress_span = 0.5
+
+        def _encode_prog(us: int) -> None:
+            if progress_callback and total_duration > 0:
+                frac = min(us / 1_000_000 / total_duration, 1.0)
+                progress_callback(encode_progress_base + frac * encode_progress_span)
+
+        _run_ffmpeg(
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-i",
+                str(raw_concat_path),
+                "-map",
+                "0:v:0",
+                *encode_fps_filter,
+                "-c:v",
+                vcodec,
+                *vcodec_opts,
+                *audio_encode_opts,
+                "-movflags",
+                "+faststart",
+                str(output_path),
+            ],
+            progress_callback=_encode_prog,
+            timeout=final_concat_timeout,
+            label="cut_then_encode final encode",
+            cancel_callback=cancel_callback,
+            stall_kill=stall_kill,
+            stall_warning=stall_warning,
+        )
+        logger.info(f"Successfully created output (cut_then_encode): {output_path}")
+
+        # Cleanup on success
+        shutil.rmtree(cut_dir, ignore_errors=True)
+
+    except Exception:
+        logger.info(f"Cut intermediates kept in {cut_dir} for resume on next run")
         raise
 
 
@@ -1342,7 +1556,7 @@ def _run_with_fallback(
     """Run segment or batch concat with the primary encoder; fall back to libx264 on failure.
 
     On encoder fallback the per-method working directory (``_<stem>_segments``
-    or ``_<stem>_batch``) is wiped — the chunks written by the failing
+    or ``_<stem>_batch``) is wiped -- the chunks written by the failing
     encoder may be corrupt (e.g. h264_mf produces MP4s without a moov atom
     on some Windows builds) and the resume-skip check in the inner method
     would otherwise reuse them on the libx264 retry.
@@ -1359,6 +1573,8 @@ def _run_with_fallback(
         work_suffix = "_segments"
     elif method == "batch":
         work_suffix = "_batch"
+    elif method == "cut_then_encode":
+        work_suffix = "_cut"
     else:
         raise ConcatError(
             f"Unknown method: {method!r} (use {' or '.join(repr(m) for m in VALID_METHODS)})"
@@ -1376,6 +1592,28 @@ def _run_with_fallback(
     def _try(enc: str, enc_opts: list[str]) -> None:
         if method == "segment":
             _run_segment_concat(
+                video_path,
+                keep_segments,
+                output_path,
+                enc,
+                enc_opts,
+                progress_callback,
+                cancel_callback,
+                encoder=enc,
+                video_quality=video_quality,
+                audio_quality=audio_quality,
+                x264_preset=x264_preset,
+                encoder_threads=encoder_threads,
+                source_has_audio=source_has_audio,
+                output_fps=output_fps,
+                segment_encode_timeout=segment_encode_timeout,
+                final_concat_timeout=final_concat_timeout,
+                stall_kill=stall_kill,
+                stall_warning=stall_warning,
+                min_part_bytes=min_part_bytes,
+            )
+        elif method == "cut_then_encode":
+            _run_cut_then_encode(
                 video_path,
                 keep_segments,
                 output_path,
@@ -1462,7 +1700,7 @@ def _run_batch_concat(
 
     Previous approach built one giant filter graph with all chunks, causing
     ffmpeg to decode the entire video for every select/aselect filter in
-    parallel — O(chunks * filesize) RAM.  This version processes one chunk
+    parallel -- O(chunks * filesize) RAM.  This version processes one chunk
     at a time so ffmpeg only holds ~1 chunk worth of decoded frames.
 
     Supports resume: already-encoded chunks are skipped on re-run. Resume
@@ -1535,7 +1773,7 @@ def _run_batch_concat(
             chunk_end = chunk[-1][1]
             # P1.4: windowed decode. Previously each chunk read the
             # entire source from t=0 even though only [chunk_start,
-            # chunk_end] was relevant — on a 6h stream with 100 chunks
+            # chunk_end] was relevant -- on a 6h stream with 100 chunks
             # that's 600h of wasted decode. Coarse-seek ffmpeg to the
             # first keep segment's start with input-side ``-ss`` (fast
             # keyframe seek) and cap with ``-t`` so the demuxer stops
@@ -1550,27 +1788,27 @@ def _run_batch_concat(
             seek_to = max(0.0, chunk_start - _CHUNK_SEEK_MARGIN)
             chunk_dur = chunk_end - seek_to
 
-            # Frame-accurate, gapless chunk filter — ``trim`` per keep
+            # Frame-accurate, gapless chunk filter -- ``trim`` per keep
             # segment + ``concat`` filter glue.
             #
             # The earlier pipeline used a single ``select='between(...)+...``
             # over the whole chunk followed by ``setpts=N/FRAME_RATE/TB``.
             # Two problems with that formulation:
             #   1. ``FRAME_RATE`` is the source's nominal frame-rate
-            #      constant; on VFR sources (and even some CFR ones —
+            #      constant; on VFR sources (and even some CFR ones --
             #      verified on a 30 FPS testsrc input) it disagrees
             #      with actual cadence and comes out as 25 FPS,
             #      dropping ~18-31 frames per 6s.
             #   2. ``setpts=PTS-STARTPTS`` (a tempting alternative that
             #      also keeps "real" timestamps) does NOT close the gap
-            #      in PTS created by ``select`` — the second kept range
+            #      in PTS created by ``select`` -- the second kept range
             #      still carries its original absolute PTS (3.0..5.0)
             #      after subtracting the first kept frame's PTS (0),
             #      so container duration reports 5.03s even though only
             #      122 frames were emitted. The result is a VFR-style
             #      timeline where the player sees a 1-second freeze.
             #
-            # The fix uses the ``concat`` filter on ``trim``-ed pieces —
+            # The fix uses the ``concat`` filter on ``trim``-ed pieces --
             # the explicit concat operation is what actually closes the
             # gap and renumbers PTS so the chunk is gapless CFR. This
             # mirrors the segment path's "encode each piece, concat
@@ -1578,7 +1816,7 @@ def _run_batch_concat(
             #
             # Verified on a 6s/30FPS testsrc source with keep=[(0,2),(3,5)]:
             # the trim+concat graph produces duration=4.000s, frames=120,
-            # r_frame_rate=30/1 — frame-exact. ``select``+``setpts=N/FR/TB``
+            # r_frame_rate=30/1 -- frame-exact. ``select``+``setpts=N/FR/TB``
             # produced 4.07s/122 frames (acceptable); the previous
             # ``setpts=PTS-STARTPTS`` produced 5.03s/122 (BROKEN).
             #
@@ -1594,7 +1832,7 @@ def _run_batch_concat(
                 # above made ffmpeg start at ``seek_to``, so PTS in the
                 # filter graph are still absolute (thanks to ``-copyts``)
                 # and the trim endpoints match the source timeline
-                # directly — no offset arithmetic needed.
+                # directly -- no offset arithmetic needed.
                 #
                 # P1.17: when ``output_fps != "source"``, splice an
                 # ``fps=<target>`` filter AFTER ``setpts=PTS-STARTPTS``
@@ -1603,7 +1841,7 @@ def _run_batch_concat(
                 # drops frames to match the CFR target.
                 v_chains.append(f"[0:v]trim={s}:{e},setpts=PTS-STARTPTS{fps_suffix}[v{idx}]")
                 # Audio chain is only built when the source actually has
-                # an audio stream — otherwise ``[0:a]atrim=...`` would
+                # an audio stream -- otherwise ``[0:a]atrim=...`` would
                 # reference a non-existent input pad and ffmpeg would
                 # fail mid-graph. The concat filter's ``a=1`` flag is
                 # similarly dropped for audio-less sources so the output
@@ -1643,7 +1881,7 @@ def _run_batch_concat(
                         # so dividing it by `total_duration` overruns the
                         # `base + span` ceiling well before the chunk
                         # finishes. Convert to a per-chunk fraction first,
-                        # then scale to absolute progress — same trick as
+                        # then scale to absolute progress -- same trick as
                         # `_seg_prog` in `_run_segment_concat`.
                         frac = min(us / 1_000_000 / chunk_dur, 1.0) if chunk_dur > 0 else 1.0
                         progress_callback(min(base + frac * span, 0.9))
@@ -1679,7 +1917,7 @@ def _run_batch_concat(
                         # (and the graph therefore produced [outa]).
                         # Without this guard a video-only source would
                         # fail with "Stream map '[outa]' matches no
-                        # stream" — see P1.14.
+                        # stream" -- see P1.14.
                         *(
                             [
                                 "-map",
@@ -1715,7 +1953,7 @@ def _run_batch_concat(
                 f"batch: resumed {skipped}/{n_chunks} already encoded, encoded {n_chunks - skipped}"
             )
 
-        # Final concat demuxer pass — shared with _run_segment_concat (P2.6).
+        # Final concat demuxer pass -- shared with _run_segment_concat (P2.6).
         part_paths = [batch_dir / f"chunk_{ci:04d}.mp4" for ci in range(n_chunks)]
         _run_final_concat(
             batch_dir,
@@ -1758,10 +1996,10 @@ def _with_libx264_fallback(
 
     Behaviour on ``primary_codec`` failure depends on ``software_fallback``:
 
-      * ``enabled`` — retry with libx264 (legacy silent-fallback behaviour).
-      * ``disabled`` — re-raise the original exception immediately so the
+      * ``enabled`` -- retry with libx264 (legacy silent-fallback behaviour).
+      * ``disabled`` -- re-raise the original exception immediately so the
         user gets the real encoder's error.
-      * ``ask`` (default) — call ``fallback_consent``; if it returns True
+      * ``ask`` (default) -- call ``fallback_consent``; if it returns True
         retry with libx264, otherwise re-raise. When ``fallback_consent``
         is None the policy re-raises so an unattended run cannot silently
         switch to a CPU-heavy encoder.
@@ -1789,7 +2027,7 @@ def _with_libx264_fallback(
         except exc_types as e:
             if enc == "libx264":
                 raise
-            # Non-libx264 encoder failed — apply fallback policy.
+            # Non-libx264 encoder failed -- apply fallback policy.
             if software_fallback == "disabled":
                 raise
             if software_fallback == "ask" and (fallback_consent is None or not fallback_consent()):

@@ -100,7 +100,7 @@ CONFIG_RANGES = {
     "min_part_bytes": (1, 10485760),
 }
 
-VALID_METHODS: list[str] = ["segment", "batch"]
+VALID_METHODS: list[str] = ["segment", "batch", "cut_then_encode"]
 
 VALID_ENCODERS: list[str] = ["h264_nvenc", "h264_amf", "h264_mf", "libx264"]
 

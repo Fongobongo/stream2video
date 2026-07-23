@@ -202,7 +202,9 @@ class MainWindowBuildMixin:
         self.combo_method.grid(row=0, column=1, sticky="w", padx=(0, 5))
         _Tooltip(
             self.combo_method,
-            "Segment: faster, ~1.5h, encodes each segment then joins.\nBatch: frame-exact, ~6-7h, uses select/aselect filter.",
+            "Segment: faster, ~1.5h, encodes each segment then joins.\n"
+            "Batch: frame-exact, ~6-7h, uses select/aselect filter.\n"
+            "Cut-then-encode: best quality, one encode pass after lossless cut.",
         )
 
         ctk.CTkLabel(opt_frame, text="Encoder:").grid(row=1, column=0, sticky="w", padx=(0, 5))

@@ -608,8 +608,10 @@ def validate_pipeline_config(cfg: PipelineConfig) -> list[str]:
     errors: list[str] = []
     if not cfg.input_raw.strip():
         errors.append("Input is empty — provide a URL or local file path.")
-    if cfg.method not in ("segment", "batch"):
-        errors.append(f"Unknown method {cfg.method!r} (use 'segment' or 'batch').")
+    if cfg.method not in ("segment", "batch", "cut_then_encode"):
+        errors.append(
+            f"Unknown method {cfg.method!r} (use 'segment', 'batch', or 'cut_then_encode')."
+        )
     if cfg.encoder not in ("h264_nvenc", "h264_amf", "h264_mf", "libx264"):
         errors.append(f"Unknown encoder {cfg.encoder!r}.")
     if cfg.video_quality not in ("high", "medium", "low"):

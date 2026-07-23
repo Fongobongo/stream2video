@@ -130,7 +130,7 @@ mapping) выполнено через pytest-qt.
 **Прочие отложенные пункты из детальных чеклистов:**
 - `-fps_mode` не добавлен (заменён `fps=` filter — функциональный эквивалент)
 - CPU limit percent / Low CPU preset — сложная функция, требующая бенчмарков
-- Один encode после нарезки — архитектурное изменение, deferred
+- ~~Один encode после нарезки — архитектурное изменение, deferred~~ ✅ выполнено (method `cut_then_encode`: lossless cut -c copy → concat demuxer → один final encode; лучшее качество через один encode pass)
 - ~~Спектральный/сигнальный smoke-test — требует аудиоанализа~~ ✅ выполнено (numpy FFT, 6 тестов)
 - Windows Job Object — advanced OS feature, deferred
 - ~~Чтение через queue/select вместо readline — deferred~~ ✅ выполнено (`read_lines_queue` в utils.py, применено в concat.py + silence.py)
