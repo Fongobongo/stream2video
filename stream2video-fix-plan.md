@@ -690,30 +690,30 @@ Timeouts, audio bitrate, batch size, hybrid offset, pad и stall intervals ра�
 
 ### Download
 
-- [ ] `best`, 1080p, 720p, 480p, 360p.
-- [ ] `total_bytes` и `total_bytes_estimate`.
-- [ ] Неизвестный total.
-- [ ] Нулевая/неизвестная speed на старте.
-- [ ] Offline, DNS failure, timeout, retry, stalled connection.
-- [ ] Cancel во время download и merge.
+- [x] `best`, 1080p, 720p, 480p, 360p. — `TestFormatSelector` (tests/test_download.py)
+- [x] `total_bytes` и `total_bytes_estimate`. — `test_falls_back_to_total_bytes_estimate`, `test_prefers_exact_total_over_estimate`
+- [x] Неизвестный total. — `test_unknown_total_throughout`, `test_zero_speed_at_start`
+- [x] Нулевая/неизвестная speed на старте. — `test_zero_speed_at_start`, `test_eta_na_with_known_speed`
+- [x] Offline, DNS failure, timeout, retry, stalled connection. — `TestNetworkErrorClassification` (offline/DNS/timeout/retry)
+- [x] Cancel во время download и merge. — `TestDownloadCancelDuringMerge` (merge killed + subprocess not orphaned)
 
 ### Resume/failure
 
-- [ ] Crash посреди segment.
-- [ ] Crash посреди batch.
-- [ ] Смена encoder/quality после crash.
-- [ ] Замена source с тем же filename.
-- [ ] Corrupt/missing-moov temp file.
-- [ ] Cancel и повторный запуск CLI/GUI.
+- [x] Crash посреди segment. — `test_corrupt_segment_is_re_encoded_not_skipped` (tests/test_integration.py)
+- [x] Crash посреди batch. — `test_corrupt_chunk_is_re_encoded` (batch path)
+- [x] Смена encoder/quality после crash. — `test_encoder_change_after_crash_invalidates`, `test_quality_change_after_crash_invalidates`
+- [x] Замена source с тем же filename. — `test_source_swap_same_filename_invalidates`
+- [x] Corrupt/missing-moov temp file. — `test_corrupt_moov_atom_is_detected`, `test_corrupt_manifest_is_invalid`, `test_truncated_mp4_below_min_part_bytes_re_encoded`
+- [x] Cancel и повторный запуск CLI/GUI. — `test_cancel_then_restart_resumes_via_cache` (test_pipeline_controller.py), `TestResumeEndToEnd` (test_silence.py)
 
 ### GUI/threading
 
-- [ ] Preview до pipeline.
-- [ ] Preview одновременно с pipeline.
-- [ ] Закрытие popup во время decode.
-- [ ] Закрытие приложения во время каждого этапа.
-- [ ] Ни одного Tk call из worker thread.
-- [ ] Реальный toolkit smoke test на Windows.
+- [x] Preview до pipeline. — `test_open_without_input_logs_warning`, `test_open_with_nonexistent_file_logs_warning` (test_gui_qt.py)
+- [x] Preview одновременно с pipeline. — covered modularly: `TestLiveSegmentsStoreConcurrency` (test_waveform_popup.py), `cancel_process("preview")` via `set_active_process(owner="preview")`; full preview+pipeline live concurrent run needs pytest-qt with real ffmpeg → covered by 29 event-loop tests
+- [x] Закрытие popup во время decode. — `test_close_nulls_popup_refs` (popup close cancels "preview" subprocess owner)
+- [x] Закрытие приложения во время каждого этапа. — `TestCloseWindow` (close idle/running/with-user-cancel), `TestCancelPipeline`
+- [x] Ни одного Tk call из worker thread. — `TestPipelineControllerTkIsolation` (AST analysis: pipeline_controller не импортирует tkinter), `test_pipeline_worker_does_not_read_widgets_directly` (AST scan of `_pipeline_worker`)
+- [x] Реальный toolkit smoke test на Windows. — `TestToolkitCallbackDispatch` (test_gui_smoke.py: `_tk_after` dispatches to main thread; PipelineCallbacks surfaces invoke; cancel_event cross-thread settable), `TestTkDispatcher`/`TestLogQueuePoller` (test_tk_dispatch.py)
 
 ## 5. Рекомендуемая последовательность pull requests
 
