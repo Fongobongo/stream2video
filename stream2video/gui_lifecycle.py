@@ -13,6 +13,7 @@ import logging
 import subprocess
 from pathlib import Path
 from tkinter import messagebox
+from typing import Any
 
 import customtkinter as ctk
 
@@ -111,7 +112,7 @@ class LifecycleMixin:
         self._log("Settings restored to defaults")
 
     @staticmethod
-    def _set_checkbox(checkbox, value: bool) -> None:
+    def _set_checkbox(checkbox: Any, value: bool) -> None:
         """Set a CTkCheckBox to True/False (deselect/select)."""
         if value:
             checkbox.select()

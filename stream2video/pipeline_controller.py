@@ -436,7 +436,7 @@ class PipelineController:
         silence_start = time.monotonic()
         controller = self
 
-        def silence_prog(f: float):
+        def silence_prog(f: float) -> None:
             elapsed = time.monotonic() - silence_start
             if f > 0.01:
                 remaining = elapsed / f - elapsed
@@ -503,7 +503,7 @@ class PipelineController:
         cut_start = time.monotonic()
         controller = self
 
-        def concat_prog(f: float):
+        def concat_prog(f: float) -> None:
             elapsed = time.monotonic() - cut_start
             if f > 0.01:
                 remaining = elapsed / f - elapsed

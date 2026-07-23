@@ -45,11 +45,14 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from stream2video.download import DownloadProgress
 from stream2video.formatters import fmt_size, fmt_speed, fmt_time
 from stream2video.silence import SilenceSegment
+
+if TYPE_CHECKING:
+    from stream2video.pipeline_controller import PipelineConfig
 
 logger = logging.getLogger("stream2video.pipeline_worker")
 
@@ -129,7 +132,9 @@ class PipelineGuiCallbacks(Protocol):
     cancel_event: threading.Event
 
 
-def build_pipeline_config_from_snapshot(params: PipelineWorkerParams, config: dict[str, Any]):
+def build_pipeline_config_from_snapshot(
+    params: PipelineWorkerParams, config: dict[str, Any]
+) -> PipelineConfig:
     """Factory: build a :class:`stream2video.pipeline_controller.PipelineConfig`
     from the GUI's config dict + the widget-snapshot params.
 

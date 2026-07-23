@@ -396,7 +396,7 @@ def download(
     last_progress_time: list[float | None] = [None]
     start_time = time.monotonic()
 
-    def _drain_stdout():
+    def _drain_stdout() -> None:
         # ``process.stdout`` is non-None here (we set stdout=PIPE in
         # Popen), but mypy can't prove it. Assert once so the for-loop
         # below sees a concrete IO[Any] instead of IO[Any] | None.
@@ -419,7 +419,7 @@ def download(
                 continue
             stdout_lines.append(text)
 
-    def _drain_stderr():
+    def _drain_stderr() -> None:
         stderr = process.stderr
         if stderr is None:
             return

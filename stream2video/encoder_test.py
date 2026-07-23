@@ -118,7 +118,7 @@ class EncoderTester:
         # completion matches the actual lifecycle.
         self._cb.set_test_button_state(running=True)
 
-        def _run():
+        def _run() -> None:
             from stream2video.concat import check_encoder
 
             try:

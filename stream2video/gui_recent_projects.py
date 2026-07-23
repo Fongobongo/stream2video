@@ -96,7 +96,7 @@ class RecentProjectsMixin:
         )
         self._tk_after(0, self._render_recent_projects)
 
-        def _persist():
+        def _persist() -> None:
             try:
                 self._save_settings()
             except Exception as e:

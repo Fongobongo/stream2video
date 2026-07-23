@@ -19,6 +19,7 @@ import math
 import threading
 from pathlib import Path
 from tkinter import Event
+from typing import Any
 
 import customtkinter as ctk
 
@@ -224,10 +225,25 @@ class WaveformMixin:
         ).pack(side="left", padx=1)
 
         # Image area (row 2, weight=1).
-        win.grid_rowconfigure(2, weight=1)
+        win.grid_rowconfigure(2, weight=3)
         win.grid_columnconfigure(0, weight=1)
         self.lbl_wave_image = ctk.CTkLabel(win, text="", anchor="nw")
-        self.lbl_wave_image.grid(row=2, column=0, sticky="nsew", padx=8, pady=(2, 8))
+        self.lbl_wave_image.grid(row=2, column=0, sticky="nsew", padx=8, pady=(2, 2))
+
+        # Cut/Keep intervals list (row 3, weight=1). A small scrollable
+        # textbox showing the time ranges that will be kept / cut.
+        # Updated in ``_apply_view`` alongside the image render so it
+        # stays in sync with the current view + segments.
+        win.grid_rowconfigure(3, weight=1)
+        self._waveform_intervals_text = ctk.CTkTextbox(
+            win,
+            height=80,
+            wrap="word",
+            state="disabled",
+            font=("Courier", 11),
+            fg_color=("gray92", "gray12"),
+        )
+        self._waveform_intervals_text.grid(row=3, column=0, sticky="nsew", padx=8, pady=(0, 8))
         # Floating tooltip showing time + dB at the cursor over the plot.
         # Created up-front, parked with place_forget() until motion.
         self._waveform_tooltip = ctk.CTkLabel(
@@ -287,6 +303,7 @@ class WaveformMixin:
         self._waveform_slider = None
         self._waveform_zoom_label = None
         self._waveform_tooltip = None
+        self._waveform_intervals_text = None
         self._waveform_image_width = 0
         self._waveform_last_render_w = None
         self._waveform_last_render_h = None
@@ -306,7 +323,7 @@ class WaveformMixin:
         # close. Uses the scoped "preview" owner (P1.11 / utils.py).
         cancel_process("preview", timeout=5.0)
 
-    def _on_waveform_window_configure(self, event) -> None:
+    def _on_waveform_window_configure(self, event: Any) -> None:
         """Re-render the waveform when the popup is resized.
 
         Tk fires <Configure> for every pixel of drag-resize, so the
@@ -373,7 +390,7 @@ class WaveformMixin:
 
     # ── Waveform cursor + zoom/pan handlers ────────────────────
 
-    def _on_waveform_motion(self, event) -> None:
+    def _on_waveform_motion(self, event: Any) -> None:
         """Track the cursor's horizontal position over the image."""
         if self.lbl_wave_image is None:
             return
@@ -396,7 +413,7 @@ class WaveformMixin:
         self._hide_waveform_tooltip()
         self._waveform_tooltip_after_id = self.after_idle(self._show_waveform_tooltip_on_idle)
 
-    def _on_waveform_leave(self, _event) -> None:
+    def _on_waveform_leave(self, _event: Any) -> None:
         """Forget the cursor position when it leaves the image so
         subsequent zoom falls back to the view center."""
         self._waveform_cursor_known = False
@@ -424,7 +441,7 @@ class WaveformMixin:
             return
         self._update_waveform_tooltip(event)
 
-    def _update_waveform_tooltip(self, event) -> None:
+    def _update_waveform_tooltip(self, event: Any) -> None:
         """Show a tooltip with time + dB at the cursor's plot position."""
         if (
             self._waveform_tooltip is None
@@ -477,7 +494,7 @@ class WaveformMixin:
         except Exception:
             pass
 
-    def _on_waveform_wheel(self, event) -> None:
+    def _on_waveform_wheel(self, event: Any) -> None:
         """Mouse wheel over the waveform: zoom by default, pan with Ctrl."""
         ctrl = bool(event.state & 0x4)  # ControlMask bit
         if event.num == 4:
@@ -501,7 +518,7 @@ class WaveformMixin:
             else:
                 self._waveform_zoom_by(1.25)
 
-    def _on_waveform_drag_start(self, event) -> None:
+    def _on_waveform_drag_start(self, event: Any) -> None:
         """Begin a left-click drag: record the press position and the
         current view bounds so the motion handler can compute the
         new view anchored on the press (not incrementally)."""
@@ -514,7 +531,7 @@ class WaveformMixin:
         self._waveform_drag_view_start = self._waveform_view_start
         self._waveform_drag_view_end = self._waveform_view_end
 
-    def _on_waveform_drag_motion(self, event) -> None:
+    def _on_waveform_drag_motion(self, event: Any) -> None:
         """Pan the view as the user drags. Dragging the cursor right
         shifts the visible window *earlier* in time (the content moves
         right under the cursor — like grabbing the waveform)."""
@@ -543,7 +560,7 @@ class WaveformMixin:
         self._waveform_view_end = new_end
         self._apply_view()
 
-    def _on_waveform_drag_end(self, _event) -> None:
+    def _on_waveform_drag_end(self, _event: Any) -> None:
         """Release the drag. A click without movement is a no-op."""
         self._waveform_dragging = False
 
@@ -696,7 +713,7 @@ class WaveformMixin:
         self._safe_status_set("Loading...")
         self._log("Waveform preview: loading audio from source video...")
 
-        def _run():
+        def _run() -> None:
             try:
                 # Phase 1: read peaks directly from ffmpeg pipe (no WAV).
                 self._tk_after(0, lambda: self._safe_status_set("Loading..."))
@@ -894,6 +911,65 @@ class WaveformMixin:
 
         self.lbl_wave_status.configure(text=title)
         self._update_waveform_controls()
+        self._update_intervals_list(view_segments, segments, view_start, view_end)
+
+    def _update_intervals_list(
+        self,
+        view_segments: list[SilenceSegment],
+        all_segments: list[SilenceSegment],
+        view_start: float,
+        view_end: float,
+    ) -> None:
+        """Update the cut/keep intervals textbox.
+
+        Shows a compact list of silence (cut) segments in the current
+        view, with keep intervals derived between them. Format::
+
+            CUT  0.05 - 0.25s  (0.20s)
+            KEEP 0.25 - 0.35s  (0.10s)
+            CUT  0.35 - 0.55s  (0.20s)
+            ...
+
+        Only the visible segments (those overlapping the current view)
+        are listed — keeps the list readable when zoomed in.
+        """
+        widget = getattr(self, "_waveform_intervals_text", None)
+        if widget is None:
+            return
+        if not view_segments:
+            widget.configure(state="normal")
+            widget.delete("1.0", "end")
+            widget.insert("1.0", "(no silence segments in view)")
+            widget.configure(state="disabled")
+            return
+
+        lines: list[str] = []
+        prev_end = view_start
+        for seg in view_segments:
+            # Keep interval before this silence (if non-trivial).
+            if seg.start > prev_end + 0.01:
+                keep_dur = seg.start - prev_end
+                lines.append(f"  KEEP {prev_end:7.2f} - {seg.start:7.2f}s  ({keep_dur:.2f}s)")
+            cut_dur = seg.end - seg.start
+            lines.append(f"  CUT  {seg.start:7.2f} - {seg.end:7.2f}s  ({cut_dur:.2f}s)")
+            prev_end = seg.end
+        # Trailing keep after the last silence.
+        if prev_end < view_end - 0.01:
+            keep_dur = view_end - prev_end
+            lines.append(f"  KEEP {prev_end:7.2f} - {view_end:7.2f}s  ({keep_dur:.2f}s)")
+
+        # Header: total counts (view + all).
+        header = (
+            f"  {len(view_segments)} silences in view"
+            f"  |  {len(all_segments)} total"
+            f"  |  view {view_start:.1f}s-{view_end:.1f}s\n"
+        )
+        text = header + "\n".join(lines)
+
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        widget.insert("1.0", text)
+        widget.configure(state="disabled")
 
     def _poll_live_segments(
         self,

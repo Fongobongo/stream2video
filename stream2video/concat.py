@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import queue
 import shutil
 import subprocess
 import tempfile
@@ -10,7 +11,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from stream2video.config import (
     VALID_ENCODERS,
@@ -28,6 +29,7 @@ from stream2video.utils import (
     get_video_duration,
     has_audio_stream,
     no_window_kwargs,
+    read_lines_queue,
     set_active_process,
 )
 
@@ -660,7 +662,7 @@ def _run_ffmpeg(
     # a fast path (it kills ASAP after a stalled line arrives).
     stall_stop = threading.Event()
 
-    def _stall_watchdog():
+    def _stall_watchdog() -> None:
         while not stall_stop.wait(CANCEL_POLL_INTERVAL):
             if process.poll() is not None:
                 return
@@ -684,7 +686,37 @@ def _run_ffmpeg(
             if track_progress:
                 stdout_pipe = process.stdout
                 assert stdout_pipe is not None
-                for raw_line in iter(stdout_pipe.readline, b""):
+                # P1.5: use a queue-based reader so the consumer loop
+                # can check cancel / stall between reads without
+                # blocking on readline(). A hung ffmpeg that stops
+                # emitting stdout would block readline() forever;
+                # the queue + get(timeout=...) lets the inline stall
+                # check run even when no new lines arrive.
+                line_queue, _reader_thread = read_lines_queue(stdout_pipe)
+                while True:
+                    try:
+                        raw_line = line_queue.get(timeout=CANCEL_POLL_INTERVAL)
+                    except queue.Empty:
+                        # No new line — check cancel + stall.
+                        if cancel_callback and cancel_callback():
+                            process.kill()
+                            raise CancelledError(f"{label} cancelled") from None
+                        if cancelled.is_set():
+                            raise CancelledError(f"{label} cancelled") from None
+                        elapsed_since_progress = time.monotonic() - last_progress_time
+                        if elapsed_since_progress > stall_kill:
+                            process.kill()
+                            raise FFmpegError(
+                                f"{label} stalled — no progress for {int(elapsed_since_progress)}s, "
+                                "possible resource exhaustion"
+                            ) from None
+                        elif elapsed_since_progress > stall_warning:
+                            logger.warning(
+                                f"{label}: no progress for {int(elapsed_since_progress)}s — waiting..."
+                            )
+                        continue
+                    if raw_line is None:
+                        break  # EOF — pipe closed
                     if cancel_callback and cancel_callback():
                         process.kill()
                         raise CancelledError(f"{label} cancelled")
@@ -1032,7 +1064,7 @@ def _run_final_concat(
         for part in part_paths:
             lf.write(f"file {_quote_concat_path(part.name)}\n")
 
-    def _concat_prog(us: int):
+    def _concat_prog(us: int) -> None:
         if progress_callback and total_duration > 0:
             progress_callback(min(us / 1_000_000 / total_duration * 0.1, 0.1) + 0.9)
 
@@ -1085,7 +1117,7 @@ def _run_segment_concat(
     stall_kill: int = _STALL_KILL,
     stall_warning: int = _STALL_WARNING,
     min_part_bytes: int = _MIN_PART_BYTES,
-):
+) -> None:
     """Encode each segment, join with concat demuxer.
 
     Segments are stored in a dedicated subdirectory.  If a previous run was
@@ -1181,7 +1213,7 @@ def _run_segment_concat(
             # already normalised to start at 0, so a `setpts=PTS-STARTPTS`
             # is a no-op here and is omitted for clarity.
 
-            def _seg_prog(us: int, _dur=dur, _encoded_keep=encoded_keep):
+            def _seg_prog(us: int, _dur: float = dur, _encoded_keep: float = encoded_keep) -> None:
                 # ffmpeg -progress reports `out_time_us` — the position within
                 # this segment's output, NOT the original video. Map it to
                 # absolute progress across the whole video so the GUI/CLI
@@ -1306,7 +1338,7 @@ def _run_with_fallback(
     stall_warning: int = _STALL_WARNING,
     batch_chunk_size: int = _BATCH_CHUNK_SIZE,
     min_part_bytes: int = _MIN_PART_BYTES,
-):
+) -> None:
     """Run segment or batch concat with the primary encoder; fall back to libx264 on failure.
 
     On encoder fallback the per-method working directory (``_<stem>_segments``
@@ -1334,14 +1366,14 @@ def _run_with_fallback(
 
     work_dir = output_path.parent / f"_{output_path.stem}{work_suffix}"
 
-    def _cleanup(failed_enc: str):
+    def _cleanup(failed_enc: str) -> None:
         if work_dir.exists():
             logger.info(
                 f"Removing partial {work_suffix[1:]} dir from failed {failed_enc} encode: {work_dir}"
             )
             shutil.rmtree(work_dir, ignore_errors=True)
 
-    def _try(enc: str, enc_opts: list[str]):
+    def _try(enc: str, enc_opts: list[str]) -> None:
         if method == "segment":
             _run_segment_concat(
                 video_path,
@@ -1425,7 +1457,7 @@ def _run_batch_concat(
     stall_warning: int = _STALL_WARNING,
     batch_chunk_size: int = _BATCH_CHUNK_SIZE,
     min_part_bytes: int = _MIN_PART_BYTES,
-):
+) -> None:
     """Process chunks sequentially: each chunk → temp file, then concat.
 
     Previous approach built one giant filter graph with all chunks, causing
@@ -1599,7 +1631,9 @@ def _run_batch_concat(
 
             try:
 
-                def _chunk_prog(us: int, _chunk=chunk, _encoded_duration=encoded_duration):
+                def _chunk_prog(
+                    us: int, _chunk: Any = chunk, _encoded_duration: float = encoded_duration
+                ) -> None:
                     chunk_dur = sum(e - s for s, e in _chunk)
                     if progress_callback and total_duration > 0:
                         base = _encoded_duration / total_duration
@@ -1719,7 +1753,7 @@ def _with_libx264_fallback(
     x264_preset: str = "medium",
     encoder_threads: str | int = "auto",
     x264_low_memory: bool = False,
-):
+) -> None:
     """Run ``try_fn(primary_codec, primary_opts)``; on failure, retry once with libx264.
 
     Behaviour on ``primary_codec`` failure depends on ``software_fallback``:

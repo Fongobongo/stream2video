@@ -19,6 +19,8 @@ Future candidates (kept in ``gui.py`` until they get a clean extraction):
 
 from __future__ import annotations
 
+from typing import Any
+
 import customtkinter as ctk
 
 
@@ -34,7 +36,7 @@ class Tooltip:
     _SHOW_DELAY_MS = 400
     _HIDE_DELAY_MS = 200
 
-    def __init__(self, widget, text: str):
+    def __init__(self, widget: Any, text: str) -> None:
         self.widget = widget
         self.text = text
         self._tip: ctk.CTkToplevel | None = None
@@ -42,21 +44,21 @@ class Tooltip:
         widget.bind("<Enter>", self._schedule_show, add="+")
         widget.bind("<Leave>", self._schedule_hide, add="+")
 
-    def _schedule_show(self, event=None):
+    def _schedule_show(self, event: Any = None) -> None:
         self._cancel_scheduled()
         self._after_id = self.widget.after(self._SHOW_DELAY_MS, self._show)
 
-    def _schedule_hide(self, event=None):
+    def _schedule_hide(self, event: Any = None) -> None:
         self._cancel_scheduled()
         if self._tip:
             self.widget.after(self._HIDE_DELAY_MS, self._hide)
 
-    def _cancel_scheduled(self):
+    def _cancel_scheduled(self) -> None:
         if self._after_id:
             self.widget.after_cancel(self._after_id)
             self._after_id = None
 
-    def _show(self, event=None):
+    def _show(self, event: Any = None) -> None:
         self._after_id = None
         if self._tip or not self.text:
             return
@@ -79,7 +81,7 @@ class Tooltip:
         tw.bind("<Enter>", self._cancel_scheduled, add="+")
         tw.bind("<Leave>", self._schedule_hide, add="+")
 
-    def _hide(self, event=None):
+    def _hide(self, event: Any = None) -> None:
         tw = self._tip
         self._tip = None
         if tw:
