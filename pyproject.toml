@@ -30,6 +30,7 @@ dev = [
     "mypy>=1.10.0",
     "types-PyYAML>=6.0.0",
     "psutil>=5.9.0",
+    "numpy>=1.26.0",
     "stream2video[gui]",
     "stream2video[monitor]",
 ]
@@ -107,8 +108,8 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 no_implicit_optional = true
 check_untyped_defs = true
-disallow_incomplete_defs = false
-disallow_untyped_defs = false
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
 warn_return_any = false
 pretty = true
 show_error_codes = true

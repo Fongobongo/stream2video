@@ -37,7 +37,7 @@ class QueueHandler(logging.Handler):
         super().__init__()
         self.log_queue = log_queue
 
-    def emit(self, record):
+    def emit(self, record: logging.LogRecord) -> None:
         # ``logging.Handler`` defines ``emit`` as the override point.
         # ``handle_error`` is the parent's safety net for format errors
         # — we don't override it, so a formatter that raises (e.g. a

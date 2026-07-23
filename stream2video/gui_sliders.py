@@ -8,6 +8,8 @@ config dict before a pipeline run / save).
 
 from __future__ import annotations
 
+from typing import Any
+
 import customtkinter as ctk
 
 from stream2video.config import CONFIG_DEFAULTS
@@ -24,7 +26,7 @@ class SlidersMixin:
 
     def _add_slider(
         self,
-        parent,
+        parent: Any,
         label: str,
         key: str,
         min_v: float,
@@ -66,7 +68,7 @@ class SlidersMixin:
         slider._entry_val = entry_val
         setattr(self, f"_slider_{key}", slider)
 
-        def on_change(v, k=key, ev=entry_val):
+        def on_change(v: Any, k: str = key, ev: Any = entry_val) -> None:
             ev.delete(0, "end")
             ev.insert(0, format_slider_entry_value(float(v)))
             self.config[k] = round(float(v), 1)
@@ -78,7 +80,9 @@ class SlidersMixin:
             if k == "threshold":
                 self._schedule_waveform_threshold_re_render()
 
-        def on_entry_confirm(event=None, sv=slider, mn=min_v, mx=max_v, k=key):
+        def on_entry_confirm(
+            event: Any = None, sv: Any = slider, mn: float = min_v, mx: float = max_v, k: str = key
+        ) -> None:
             # Pure parse handled in slider_widgets; the closure just
             # applies the result to the slider + entry + config and
             # re-renders the waveform when threshold changes.
@@ -101,7 +105,7 @@ class SlidersMixin:
         entry_val.bind("<FocusOut>", on_entry_confirm)
         slider.configure(command=on_change)
 
-    def _reset_default(self, default: float, slider, entry, key: str) -> None:
+    def _reset_default(self, default: float, slider: Any, entry: Any, key: str) -> None:
         slider.set(default)
         entry.delete(0, "end")
         entry.insert(0, format_slider_entry_value(default))

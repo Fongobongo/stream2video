@@ -22,6 +22,8 @@ user put it, but WAV / JSON / compressed / log / temp dirs all go into
 the per-video subdir.
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 
 # Max length of the displayed name in a Recent Projects row. Long
@@ -103,7 +105,7 @@ def move_into_project(file_path: Path, project_dir: Path) -> Path:
 
 def add_recent_project(
     recent: list[str],
-    project_path,
+    project_path: str | Path,
     max_keep: int = 5,
 ) -> list[str]:
     """Return a new list with ``project_path`` at the front.

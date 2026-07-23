@@ -92,7 +92,7 @@ def _make_sigint_cancel() -> tuple[threading.Event, Callable[[], bool]]:
     """
     event = threading.Event()
 
-    def _handler(signum, frame):
+    def _handler(signum: Any, frame: Any) -> None:
         event.set()
 
     signal.signal(signal.SIGINT, _handler)
@@ -123,7 +123,7 @@ def _make_file_handler(path: Path) -> logging.FileHandler:
     return fh
 
 
-def _check_ffmpeg():
+def _check_ffmpeg() -> None:
     """Warn if ffmpeg or ffprobe is missing."""
     for tool in ("ffmpeg", "ffprobe"):
         if not shutil.which(tool):
@@ -432,7 +432,7 @@ def main(
         "(default 1024). Smaller files are re-encoded. If not passed, the "
         "config file's `min_part_bytes` key is used.",
     ),
-):
+) -> None:
     """
     Compress stream recording by removing silence segments.
 
@@ -773,7 +773,7 @@ def main(
 
                 if silence_segments is None:
 
-                    def silence_progress(f: float):
+                    def silence_progress(f: float) -> None:
                         progress.update(task2, completed=min(f * 100, 100))
 
                     # Resume cache: the CLI now wires the same resume
@@ -835,7 +835,7 @@ def main(
                 total=100,
             )
 
-            def update_progress(fraction: float):
+            def update_progress(fraction: float) -> None:
                 progress.update(task3, completed=min(fraction * 100, 100))
 
             try:

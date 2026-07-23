@@ -1,13 +1,14 @@
 """Shared utility functions."""
 
 import logging
+import queue
 import subprocess
 import sys
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import IO
+from typing import IO, Any
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +36,7 @@ def cancel_monitor(
 
     if cancel_callback is not None:
 
-        def _monitor():
+        def _monitor() -> None:
             try:
                 while not cancelled.wait(CANCEL_POLL_INTERVAL):
                     if process.poll() is not None:
@@ -175,7 +176,7 @@ def drain_stderr_lines(
     """
     stop_event = threading.Event()
 
-    def _run():
+    def _run() -> None:
         try:
             for raw in iter(pipe.readline, b""):
                 # In text mode (Popen with text=True) ``raw`` is already
@@ -203,6 +204,60 @@ def drain_stderr_lines(
         stop_event.wait(timeout=timeout)
 
     return _wait_for_drain
+
+
+def read_lines_queue(pipe: IO[bytes]) -> tuple[queue.Queue[bytes | None], threading.Thread]:
+    """Spawn a daemon thread that reads lines from ``pipe`` into a queue.
+
+    Unlike ``drain_stderr_lines`` (which appends to a shared list and
+    can't be interrupted from the consumer side), this returns a
+    ``queue.Queue`` the consumer can poll with a timeout. The consumer
+    loop can check cancel events / stall timeouts between reads without
+    blocking on ``readline()`` — which is the P1.5 stall-detection
+    gap: a hung ffmpeg that stops emitting stdout blocks ``readline()``
+    forever, preventing the inline stall check from running.
+
+    The producer thread reads with ``readline()`` (blocking per-line,
+    but on its own thread). When the pipe closes (subprocess exits),
+    the producer puts ``None`` as a sentinel and terminates.
+
+    Returns ``(q, thread)``. The consumer reads from ``q`` with
+    ``q.get(timeout=...)``; ``None`` means EOF.
+
+    Typical usage::
+
+        q, reader = read_lines_queue(process.stdout)
+        while True:
+            try:
+                raw = q.get(timeout=CANCEL_POLL_INTERVAL)
+            except queue.Empty:
+                # Check cancel / stall here — no blocking readline.
+                if cancel_callback():
+                    process.kill()
+                    raise CancelledError()
+                continue
+            if raw is None:
+                break  # EOF
+            line = raw.decode("utf-8", errors="replace").strip()
+            ...
+
+    The thread is daemon, so it won't block process exit even if the
+    pipe is never closed (the process was killed).
+    """
+    q: queue.Queue[bytes | None] = queue.Queue()
+
+    def _reader() -> None:
+        try:
+            for raw in iter(pipe.readline, b""):
+                q.put(raw)
+        except (OSError, ValueError):
+            pass
+        finally:
+            q.put(None)
+
+    thread = threading.Thread(target=_reader, daemon=True, name="stdout_reader")
+    thread.start()
+    return q, thread
 
 
 _active_proc: subprocess.Popen | None = None
@@ -393,7 +448,7 @@ class SubprocessRunner:
             )
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         # Drain stderr in case the caller raised before reaching its
         # own wait_for_drain() call — without this the drain thread
         # would outlive the context and leak the pipe read.

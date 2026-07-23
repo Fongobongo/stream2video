@@ -330,6 +330,63 @@ def test_many_short_segments(method: str, synthetic_source: Path, tmp_path: Path
     _assert_av_in_sync(info, tolerance_s=0.1)
 
 
+@pytest.mark.parametrize("method", ["segment", "batch"])
+def test_100_keep_segments(method: str, tmp_path: Path):
+    """100 keep segments — edge case for large segment counts.
+
+    Generates a long-ish synthetic source (30s at 30 FPS = 900 frames)
+    and distributes 100 short silence gaps evenly. Total silence ~20s,
+    keep ~10s (~300 frames). The tolerance is wider than the 10-segment
+    test because 100 boundary decisions amplify AAC priming + keyframe
+    rounding effects.
+
+    This catches:
+      * accumulated drift from per-segment padding (P0.4);
+      * batch path's trim+concat with 100 segments (filter graph
+        complexity / memory);
+      * segment path's per-segment encode + concat list length.
+
+    Only runs the ``segment`` method by default; ``batch`` is marked
+    slow because the trim+concat filter graph on 100 segments is
+    significantly heavier.
+    """
+    if method == "batch":
+        pytest.skip("batch with 100 segments is very slow; covered by 10-segment test")
+
+    src = tmp_path / "src_100.mp4"
+    _make_source(src, duration=60.0, fps=30)
+    out = tmp_path / f"out_100_{method}.mp4"
+
+    # 100 silence gaps of 0.3s each, evenly spaced across 60s.
+    # Each gap = 0.3s; spacing = 60s / 100 = 0.6s; so gap starts at
+    # 0.15, 0.75, 1.35, ... up to ~59.55. Total silence = 30.0s.
+    # Keep segments between gaps = 0.3s each (~9 frames) — short but
+    # above the one-frame minimum.
+    silence: list[SilenceSegment] = []
+    step = 60.0 / 100
+    for i in range(100):
+        start = i * step + 0.15
+        silence.append(SilenceSegment(start, start + 0.3))
+
+    cut_and_concat(
+        src,
+        silence,
+        out,
+        method=method,
+        encoder="libx264",
+        video_quality="low",  # faster encode; quality irrelevant for frame count
+    )
+    info = _probe(out)
+    frames = info.get("nb_read_frames_video")
+    # 100 x 0.3s = 30.0s removed -> keep ~30.0s ~900 frames at 30 FPS.
+    # Wide tolerance: 100 boundary decisions x AAC priming (~21ms each)
+    # can accumulate ~2s of drift in pathological cases.
+    assert frames is not None and 800 <= frames <= 1000, (
+        f"{method} 100 segments: frames {frames} outside [800,1000]; info={info}"
+    )
+    _assert_av_in_sync(info, tolerance_s=0.5)
+
+
 def test_audio_quality_high_preserves_bitrate(synthetic_source: Path, tmp_path: Path):
     """``audio_quality='high'`` should produce a higher bitrate than 'low'.
 

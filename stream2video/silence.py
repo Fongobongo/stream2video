@@ -20,6 +20,7 @@ sample-verify mismatch.
 import json
 import logging
 import os
+import queue
 import re
 import subprocess
 import tempfile
@@ -29,9 +30,11 @@ from pathlib import Path
 
 from stream2video.config import CONFIG_DEFAULTS
 from stream2video.utils import (
+    CANCEL_POLL_INTERVAL,
     cancel_monitor,
     drain_stderr_lines,
     no_window_kwargs,
+    read_lines_queue,
     set_active_process,
 )
 from stream2video.utils import (
@@ -57,7 +60,7 @@ class SilenceSegment:
         self.end = end
         self.duration = max(0.0, end - start)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"SilenceSegment({self.start:.2f}s - {self.end:.2f}s, duration={self.duration:.2f}s)"
 
 
@@ -745,7 +748,22 @@ def _run_silencedetect(
 
     try:
         with cancel_monitor(process, cancel_callback) as cancelled:
-            for raw_line in iter(stdout_pipe.readline, b""):
+            # P1.5: use queue-based reader so cancel checks run between
+            # reads without blocking on readline().
+            line_queue, _reader_thread = read_lines_queue(stdout_pipe)
+            while True:
+                try:
+                    raw_line = line_queue.get(timeout=CANCEL_POLL_INTERVAL)
+                except queue.Empty:
+                    # No new line — check cancel inline.
+                    if cancel_callback is not None and cancel_callback():
+                        process.kill()
+                        raise SilenceCancelledError("silence detection cancelled") from None
+                    if cancelled.is_set():
+                        raise SilenceCancelledError("silence detection cancelled") from None
+                    continue
+                if raw_line is None:
+                    break  # EOF
                 # Direct cancel poll: the cancel_monitor thread also
                 # kills the process on cancel, but on a silent pipe (no
                 # progress lines, short video, or `-t` reached without
@@ -1100,7 +1118,7 @@ def save_silence_cache(
     segments: list[SilenceSegment],
     output_dir: Path,
     config: dict,
-):
+) -> None:
     cache_path = _get_cache_path(video_path, output_dir)
     _save_cache(cache_path, video_path, segments, config)
     logger.info(f"Silence cache saved to {cache_path}")

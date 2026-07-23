@@ -123,19 +123,21 @@ state machine, которые требуют pytest-qt для покрытия.
 **Тесты GUI (P2.2)** — near-complete. Pure-логика покрыта (formatters,
 paths, waveform, gui_helpers, gui_settings, gui_platform,
 SubprocessRunner, SilenceParser, media correctness), 9 widget smoke
-tests, 19 pipeline controller orchestration tests. Полное event-loop
-покрытие требует pytest-qt (отдельный PR).
+tests, 19 pipeline controller orchestration tests, 29 event-loop tests
+(pytest-qt). Полное покрытие event-loop переходов (cancel/close/error
+mapping) выполнено через pytest-qt.
 
 **Прочие отложенные пункты из детальных чеклистов:**
 - `-fps_mode` не добавлен (заменён `fps=` filter — функциональный эквивалент)
 - CPU limit percent / Low CPU preset — сложная функция, требующая бенчмарков
 - Один encode после нарезки — архитектурное изменение, deferred
-- Спектральный/сигнальный smoke-test — требует аудиоанализа
+- ~~Спектральный/сигнальный smoke-test — требует аудиоанализа~~ ✅ выполнено (numpy FFT, 6 тестов)
 - Windows Job Object — advanced OS feature, deferred
-- Чтение через queue/select вместо readline — deferred (stall watchdog работает отдельным тредом)
-- Тест 100 keep segments — deferred (10 segments test покрывает boundary)
-- Текстовый список cut/keep интервалов в waveform — UX improvement, deferred
+- ~~Чтение через queue/select вместо readline — deferred~~ ✅ выполнено (`read_lines_queue` в utils.py, применено в concat.py + silence.py)
+- ~~Тест 100 keep segments — deferred~~ ✅ выполнено (60s source, 100 gaps по 0.3s)
+- ~~Текстовый список cut/keep интервалов в waveform — UX improvement, deferred~~ ✅ выполнено (CTkTextbox в popup, обновляется в `_apply_view`)
 - Полный memory stress test на 4-32 GB — требует CI matrix
+- ~~`disallow_untyped_defs` / `disallow_incomplete_defs` в mypy~~ ✅ выполнено (все функции типизированы, 0 mypy ошибок)
 
 **P3.4 централизация жёстких констант в `CONFIG_DEFAULTS`** — ✅ выполнено.
 Добавлены config keys: `segment_encode_timeout`, `final_concat_timeout`,
@@ -626,11 +628,11 @@ Timeouts, audio bitrate, batch size, hybrid offset, pad и stall intervals ра�
 - [x] При cancel завершать только процессы нужного owner (pipeline vs preview).
 - [x] В CLI отдельно ловить `CancelledError` (до `except ConcatError`).
 - [x] Ввести `PipelineCancelled(PipelineError)`.
-- [ ] ~~Тесты preview+pipeline одновременно, cancel, close window~~ — deferred (требуют pytest-qt).
+- [ ] ~~Тесты preview+pipeline одновременно, cancel, close window~~ — ✅ выполнено (pytest-qt, 29 event-loop тестов).
 
 ## Этап 10 — архитектурный рефакторинг
 
-- [ ] ~~Создать `gui/` package~~ — deferred (требует pytest-qt для полного покрытия).
+- [x] Создать mixin-модули (gui_*.py) — Stream2VideoGUI разбит на 9 mixin-классов через множественное наследование (gui.py 2597→440 строк).
 - [x] Вынести `pipeline_controller.py` — state machine без Tk (PipelineConfig, PipelineCallbacks, PipelineController).
 - [x] Вынести `gui_helpers.py` — pure helpers для CLI command building, status formatting.
 - [x] Вынести `gui_settings.py` — settings I/O.
@@ -639,12 +641,12 @@ Timeouts, audio bitrate, batch size, hybrid offset, pad и stall intervals ра�
 - [x] Вынести `gui_log_handler.py` — QueueHandler.
 - [x] Вынести `formatters.py` — size/time/speed formatting.
 - [x] Вынести `memory.py` — MemoryMonitor.
-- [x] Вынести `utils.py` — SubprocessRunner, scoped process registry.
+- [x] Вынести `utils.py` — SubprocessRunner, scoped process registry, read_lines_queue.
 - [x] Вынести `silence.py` — SilenceParser.
 - [x] Создать общий concat finalizer (`_run_final_concat`) и resume validator (`_ensure_fresh_work_dir`, `_ffprobe_is_valid_mp4`).
 - [x] Убрать import-time `logging.basicConfig()` из `cli.py`.
 - [x] Удалить дубли и мёртвые doc refs (P2.10).
-- [x] gui.py: 2884 → 2397 строк.
+- [x] gui.py: 2884 → 440 строк (9 mixin-модулей + хост).
 - [x] Добавлен audio_quality combobox (был только в config, не в GUI).
 
 ## Этап 11 — typing, lint и CI
@@ -654,7 +656,7 @@ Timeouts, audio bitrate, batch size, hybrid offset, pad и stall intervals ра�
 - [x] Запустить Ruff — исправлены 3 UP038 и 1 RUF002.
 - [x] `ruff format --check` — зелёный.
 - [x] Включить `check_untyped_defs=true`.
-- [ ] ~~Включить `disallow_incomplete_defs` и `disallow_untyped_defs`~~ — deferred (требует типизации всей кодовой базы).
+- [x] Включить `disallow_incomplete_defs=true` и `disallow_untyped_defs=true` — все функции типизированы (0 mypy ошибок).
 - [x] Типизировать pipeline config (`PipelineConfig` frozen dataclass), callbacks (`PipelineCallbacks`), subprocess results (`PipelineResult`, typed errors).
 - [ ] ~~Windows CI job~~ — deferred (GitHub Actions не имеет Windows runner в бесплатном плане).
 - [ ] ~~CI media artifacts~~ — deferred.

@@ -73,7 +73,7 @@ class Stream2VideoGUI(
     init → build → run → close flow.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
 
         self.title("stream2video")
@@ -431,7 +431,7 @@ class _PipelineGuiCallbacksAdapter:
         return self._gui._live_segments_store.pop(video_path)
 
 
-def main():
+def main() -> None:
     app = Stream2VideoGUI()
     app.mainloop()
 
