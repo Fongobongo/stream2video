@@ -98,6 +98,55 @@ def get_video_duration(video_path: Path) -> float | None:
         return None
 
 
+def get_video_start_time(video_path: Path) -> float:
+    """Container-level ``start_time`` in seconds (0 for clean sources).
+
+    Sources captured with tools that add ``-itsoffset`` (OBS streams,
+    mid-file re-muxes) have a non-zero start time — the first frame's
+    PTS is shifted by a few seconds even though the per-frame duration
+    is unchanged. ``ffprobe`` reports this via ``format=start_time``.
+
+    The batch path uses this offset to compensate ``trim`` filter
+    boundaries and ``-ss`` seek position so the pipeline still cuts at
+    the user-visible "source time" 0..N points. A value of 0 means the
+    source starts at t=0 (normal case) and the compensation is a no-op.
+
+    Returns 0.0 when ffprobe cannot determine the start time rather
+    than raising — a failed probe here shouldn't abort the whole
+    encode because the segment path doesn't depend on this value and
+    most sources have start_time=0 anyway.
+    """
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=start_time",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(video_path),
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+            **no_window_kwargs(),
+        )
+        out = result.stdout.strip()
+        return float(out) if out else 0.0
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        ValueError,
+        FileNotFoundError,
+    ) as e:
+        logger.warning(f"Could not determine video start_time for {video_path}: {e}")
+        return 0.0
+
+
 def has_audio_stream(video_path: Path) -> bool:
     """Return True if ``video_path`` has at least one audio stream.
 
