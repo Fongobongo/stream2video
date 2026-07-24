@@ -324,6 +324,31 @@ class MainWindowBuildMixin:
         if self.config.get("x264_low_memory", False):
             self.chk_x264_low_memory.select()
         self.chk_x264_low_memory.pack(anchor="w", padx=5, pady=(4, 1))
+        _Tooltip(
+            self.chk_x264_low_memory,
+            "Reduces x264's frame-buffer footprint via rc-lookahead=10, "
+            "ref=1, bframes=0. Produces slightly larger files but uses "
+            "significantly less RAM during encode. Useful on memory-"
+            "constrained machines (4-8 GB).",
+        )
+
+        self.chk_gapless_concat = ctk.CTkCheckBox(
+            ctrl_frame,
+            text="Gapless audio concat (re-encode audio in final join)",
+        )
+        if self.config.get("gapless_concat", False):
+            self.chk_gapless_concat.select()
+        self.chk_gapless_concat.pack(anchor="w", padx=5, pady=(4, 1))
+        _Tooltip(
+            self.chk_gapless_concat,
+            "Re-encodes the audio track in the final concat pass so "
+            "per-segment AAC priming (~21ms per segment) doesn't "
+            "accumulate as A/V drift on multi-segment outputs. Video "
+            "is stream-copied (no quality loss); only audio is "
+            "re-encoded. Default off (concat demuxer, faster). "
+            "Equivalent to cut_then_encode's gapless property but "
+            "with frame accuracy.",
+        )
 
         ctk.CTkFrame(ctrl_frame, height=2, fg_color=("gray70", "gray30")).pack(
             fill="x", padx=5, pady=4

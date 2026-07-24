@@ -48,6 +48,19 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     # (4-8 GB RAM) where a long libx264 encode would otherwise push the
     # process into swap.
     "x264_low_memory": False,
+    # Gapless concat (AAC priming fix). When True, the segment path's
+    # final join uses the ``concat`` filter (re-encode) instead of the
+    # concat demuxer (stream copy). The concat demuxer preserves per-
+    # segment AAC priming (~21ms per segment at 48kHz), which
+    # accumulates as A/V drift on multi-segment outputs — 10 segments
+    # drift ~170ms. The concat filter re-encodes through a single PCM
+    # pipeline so priming is added only once (not per-segment), giving
+    # gapless output at the cost of one extra audio encode pass.
+    # ``cut_then_encode`` already achieves this (one encode pass total),
+    # but it sacrifices frame accuracy (-c copy snaps to keyframes);
+    # ``gapless_concat`` keeps frame accuracy AND gapless audio. Default
+    # False preserves the historical behaviour (concat demuxer, faster).
+    "gapless_concat": False,
     # Download watchdog timeouts (P1.6). Absolute ceiling + two-stage
     # watchdog so a stalled connection doesn't wait the full ceiling.
     # Exposed via --download-timeout / --connect-timeout /
@@ -237,6 +250,7 @@ USER_DEFAULT_KEYS: list[str] = [
     "memory_limit_mb",
     "memory_reserve_mb",
     "x264_low_memory",
+    "gapless_concat",
     "download_timeout",
     "connect_timeout",
     "no_progress_timeout",

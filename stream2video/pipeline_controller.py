@@ -129,6 +129,12 @@ class PipelineConfig:
     memory_limit_mb: str | int
     memory_reserve_mb: int
     x264_low_memory: bool
+    # Gapless concat (AAC priming fix). When True, the segment path's
+    # final join uses the ``concat`` filter (re-encode) instead of the
+    # concat demuxer (stream copy) so per-segment AAC priming doesn't
+    # accumulate as A/V drift on multi-segment outputs. Default False
+    # preserves the historical behaviour (concat demuxer, faster).
+    gapless_concat: bool
     download_timeout: int
     connect_timeout: int
     no_progress_timeout: int
@@ -565,6 +571,7 @@ class PipelineController:
             memory_limit_mb=self.cfg.memory_limit_mb,
             memory_reserve_mb=self.cfg.memory_reserve_mb,
             x264_low_memory=self.cfg.x264_low_memory,
+            gapless_concat=self.cfg.gapless_concat,
             segment_encode_timeout=self.cfg.segment_encode_timeout,
             final_concat_timeout=self.cfg.final_concat_timeout,
             stall_kill_timeout=self.cfg.stall_kill_timeout,

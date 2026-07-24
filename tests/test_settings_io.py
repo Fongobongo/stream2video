@@ -96,6 +96,7 @@ class TestBuildSaveSettingsSnapshot:
             "delete_after": False,
             "per_video_dir": True,
             "x264_low_memory": False,
+            "gapless_concat": True,
             "theme": "dark",
             "window_geometry": "1000x600+10+20",
         }
@@ -136,6 +137,7 @@ class TestBuildUserDefaultsSnapshot:
             "delete_after": True,
             "per_video_dir": False,
             "x264_low_memory": True,
+            "gapless_concat": False,
             "theme": "light",
         }
         snapshot = build_user_defaults_snapshot(widgets)

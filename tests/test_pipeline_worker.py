@@ -133,6 +133,7 @@ class TestBuildPipelineConfigFromSnapshot:
         assert cfg.memory_limit_mb == "auto"
         assert cfg.memory_reserve_mb == 2048
         assert cfg.x264_low_memory is False
+        assert cfg.gapless_concat is False
         # Timeout / batch size / min-part defaults
         assert cfg.download_timeout == 28800
         assert cfg.connect_timeout == 300
@@ -163,6 +164,7 @@ class TestBuildPipelineConfigFromSnapshot:
                 "memory_limit_mb": 1024,
                 "batch_chunk_size": 10,
                 "output_format": "mp3",
+                "gapless_concat": True,
             },
         )
         assert cfg.software_fallback == "disabled"
@@ -171,6 +173,7 @@ class TestBuildPipelineConfigFromSnapshot:
         assert cfg.memory_limit_mb == 1024
         assert cfg.batch_chunk_size == 10
         assert cfg.output_format == "mp3"
+        assert cfg.gapless_concat is True
 
 
 class TestBuildDownloadProgressCallback:
