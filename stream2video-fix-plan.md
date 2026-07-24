@@ -479,10 +479,10 @@ Timeouts, audio bitrate, batch size, hybrid offset, pad и stall intervals ра�
 - [x] Добавить GUI combobox и tooltip.
 - [x] Передавать audio options в segment, batch и fallback paths.
 - [x] Сохранять sample rate / channel layout — документирован conversion в 48kHz stereo; preserve будет отдельным PR.
-- [ ] Исследовать один encode после общей нарезки — deferred (архитектурное изменение).
+- [x] Исследовать один encode после общей нарезки — ✅ выполнено (method `cut_then_encode`: lossless cut `-c copy` → concat demuxer → один final encode; лучшее качество через один encode pass; см. `_run_cut_then_encode` в concat.py:1647, тесты `test_cut_then_encode_basic` / `test_cut_then_encode_no_audio`).
 - [ ] Проверить AAC priming/gapless metadata — deferred (требует аудиоанализа).
 - [x] Добавить тест: output bitrate — `test_audio_quality_high_preserves_bitrate` проверяет high > low.
-- [ ] Добавить спектральный/сигнальный smoke-test — deferred (требует инструментов аудиоанализа).
+- [x] Добавить спектральный/сигнальный smoke-test — ✅ выполнено (`TestSpectralAudio` в tests/test_spectral_audio.py: numpy FFT, 6 тестов: dominant frequency preserved, RMS level, spectral leakage, tone frequency shift, multi-segment integrity, noise floor).
 
 ## Этап 3 — безопасный encoder fallback и libx264
 
