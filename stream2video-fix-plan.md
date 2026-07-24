@@ -84,6 +84,7 @@
 | PipelineController cancel + restart (resume cache end-to-end: 1st run cancelled after silence → 2nd run loads cache, skips detect_silence) | ✅ | (current) |
 | Stall watchdog integration test (hung ffmpeg killed after stall_kill seconds — P1.5 regression net, real subprocess) | ✅ | (current) |
 | Toolkit smoke test на Windows (_tk_after dispatches to main thread; PipelineCallbacks surfaces invoke without raising; cancel_event cross-thread settable) | ✅ | (current) |
+| Non-AAC input codecs (Opus/MP3 in mkv) + channel layout (mono/5.1) + non-zero PTS regression tests; batch-path bug fix (start_time compensation for `-copyts` + `trim`/`atrim`) | ✅ | (current) |
 
 ### Что НЕ сделано (намеренно отложено)
 
@@ -679,14 +680,14 @@ Timeouts, audio bitrate, batch size, hybrid offset, pad и stall intervals ра�
 
 - [x] CFR: 24/25/29.97/30/50/60 FPS. — `test_cfr_fps_preserved`, `test_29_97_fps_preserved`, `test_output_fps_60_doubles_frames`
 - [x] VFR. — `test_vfr_source_preserved`
-- [ ] ~~AAC, Opus и MP3 input audio~~ — deferred (requires multi-format synthetic sources; AAC tested, Opus/MP3 need ffmpeg encoder)
-- [ ] ~~Mono/stereo/5.1~~ — deferred (requires multi-channel synthetic sources)
+- [x] ~~AAC, Opus и MP3 input audio~~ — ✅ выполнено (test_non_aac_input_audio_normalized_to_aac: libopus + libmp3lame в mkv, segment+batch, 4 теста)
+- [x] ~~Mono/stereo/5.1~~ — ✅ выполнено (test_channel_layout_normalised_to_stereo: mono/stereo/5.1, segment+batch, 6 тестов)
 - [x] Без audio stream. — `test_audio_less_source_produces_video_only`
 - [x] Несколько audio streams. — `test_multiple_audio_streams`
 - [ ] ~~Сегменты короче 0.5 с и длиннее 1 часа~~ — deferred (edge-case test beyond media correctness scope)
 - [x] 0, 1, 2, 40, 41 и 100 silence segments. — `test_many_short_segments` (10 segs), `test_keep_two_segments_4s_120_frames` (1), `test_silence_at_start`/`_end` (2), 100 deferred
 - [x] Silence в начале, середине и до EOF. — `test_silence_at_start`, `test_silence_at_end`, core reproduction test
-- [ ] ~~Broken/non-zero timestamps~~ — deferred (requires synthetic timestamp-manipulated sources)
+- [x] ~~Broken/non-zero timestamps~~ — ✅ выполнено (test_non_zero_start_pts_normalised_to_zero + test_shifted_pts_long_offset_survives: source с `-itsoffset 5.0/30.0`, segment+batch, 3 теста; найденный баг batch path исправлен — компенсация `start_time` для `-copyts` + `trim`/`atrim`)
 
 ### Download
 

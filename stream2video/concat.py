@@ -27,6 +27,7 @@ from stream2video.utils import (
     cancel_monitor,
     drain_stderr_lines,
     get_video_duration,
+    get_video_start_time,
     has_audio_stream,
     no_window_kwargs,
     read_lines_queue,
@@ -767,7 +768,11 @@ def _run_ffmpeg(
             if memory_monitor.peak_rss_mb > 0:
                 logger.info(
                     f"{label}: peak RSS {memory_monitor.peak_rss_mb:.0f}MB"
-                    + (" (HARD limit hit -- task cancelled)" if memory_monitor.hard_exceeded else "")
+                    + (
+                        " (HARD limit hit -- task cancelled)"
+                        if memory_monitor.hard_exceeded
+                        else ""
+                    )
                 )
         if not drain_done:
             wait_for_drain()
@@ -1744,6 +1749,38 @@ def _run_batch_concat(
     )
     _ensure_fresh_work_dir(batch_dir, manifest)
 
+    # PTS shift compensation (fix-plan §4: "Broken/non-zero timestamps").
+    #
+    # Sources captured with ``-itsoffset`` (OBS streams, mid-file
+    # re-muxes) have a non-zero container ``start_time`` — the first
+    # frame's PTS is shifted by a few seconds even though the per-frame
+    # duration is unchanged. The batch path's ``-copyts`` preserves
+    # these shifted PTS into the filter graph, so an absolute-time
+    # ``trim={s}:{e}`` filter (where ``s``/``e`` are user-visible
+    # source-time coordinates 0..N) would never match any frame on a
+    # shifted source — every frame's PTS is ``start_time`` above the
+    # trim window, so the chunk encodes 0 frames. Empirically verified:
+    # a 6s testsrc source with ``-itsoffset 5.0`` and trim=2.0:4.0
+    # produced 0 frames.
+    #
+    # The input-side ``-ss`` is interpreted by ffmpeg's MP4/MOV demuxer
+    # in *file position* (source-time) terms, NOT in container-PST
+    # terms — so a ``-ss 6.5`` on a source whose first frame has PTS=5
+    # finds nothing (the demuxer thinks the file ends at duration+0
+    # rather than duration+start_time). The two compensations therefore
+    # move in opposite directions:
+    #   * seek_to is shifted DOWN by ``start_time`` (file-position seek);
+    #   * trim endpoints are shifted UP by ``start_time`` (PTS-space).
+    # For a clean source (start_time=0) both shifts are zero, so the
+    # historical behaviour is preserved exactly. Probed once before the
+    # chunk loop so it doesn't add an ffprobe call per chunk.
+    start_time = get_video_start_time(video_path)
+    if start_time < -0.1:
+        # Negative start_time (DTS-based capture artifacts) is handled
+        # by ffmpeg's ``-avoid_negative_ts`` at the muxer level; treat
+        # it as zero here so we don't overcompensate a non-issue.
+        start_time = 0.0
+
     try:
         encoded_duration = 0.0
         skipped = 0
@@ -1784,8 +1821,14 @@ def _run_batch_concat(
             # ``-copyts`` and our absolute-time ``trim`` filters would
             # never match). A small keyframe-safety margin is added so
             # the seek doesn't drop a frame at the chunk's left edge.
+            #
+            # PTS compensation: on sources with a non-zero
+            # ``start_time`` the seek value is decremented (see the
+            # long comment above ``get_video_start_time``) while the
+            # ``trim`` endpoints below are incremented by the same
+            # amount. Both compensations are no-ops when start_time=0.
             _CHUNK_SEEK_MARGIN = 0.5
-            seek_to = max(0.0, chunk_start - _CHUNK_SEEK_MARGIN)
+            seek_to = max(0.0, chunk_start - _CHUNK_SEEK_MARGIN - start_time)
             chunk_dur = chunk_end - seek_to
 
             # Frame-accurate, gapless chunk filter -- ``trim`` per keep
@@ -1828,18 +1871,26 @@ def _run_batch_concat(
             a_chains = []
             fps_suffix = _fps_filter_chain(output_fps)
             for idx, (s, e) in enumerate(chunk):
-                # ``s``/``e`` are absolute source timestamps; the seek
-                # above made ffmpeg start at ``seek_to``, so PTS in the
-                # filter graph are still absolute (thanks to ``-copyts``)
-                # and the trim endpoints match the source timeline
-                # directly -- no offset arithmetic needed.
+                # ``s``/``e`` are absolute source timestamps (user-visible
+                # 0..N). The seek above made ffmpeg start at ``seek_to``
+                # in file-position terms; with ``-copyts`` the PTS in the
+                # filter graph are still the input's *container* PTS,
+                # which on a shifted source starts at ``start_time`` and
+                # runs to ``start_time + duration``. The trim filter
+                # matches PTS values, so its endpoints must be moved up
+                # by ``start_time`` to land in the right place on the
+                # shifted PTS timeline. For start_time=0 this is
+                # identical to the historical absolute-source-time path.
                 #
                 # P1.17: when ``output_fps != "source"``, splice an
                 # ``fps=<target>`` filter AFTER ``setpts=PTS-STARTPTS``
                 # so the new PTS cadence is the source's, not the
                 # synthetic ``N/FRAME_RATE`` one. ``fps`` duplicates or
                 # drops frames to match the CFR target.
-                v_chains.append(f"[0:v]trim={s}:{e},setpts=PTS-STARTPTS{fps_suffix}[v{idx}]")
+                v_chains.append(
+                    f"[0:v]trim={s + start_time}:{e + start_time},"
+                    f"setpts=PTS-STARTPTS{fps_suffix}[v{idx}]"
+                )
                 # Audio chain is only built when the source actually has
                 # an audio stream -- otherwise ``[0:a]atrim=...`` would
                 # reference a non-existent input pad and ffmpeg would
@@ -1847,7 +1898,9 @@ def _run_batch_concat(
                 # similarly dropped for audio-less sources so the output
                 # is video-only. See P1.14 in the fix plan.
                 if source_has_audio:
-                    a_chains.append(f"[0:a]atrim={s}:{e},asetpts=PTS-STARTPTS[a{idx}]")
+                    a_chains.append(
+                        f"[0:a]atrim={s + start_time}:{e + start_time},asetpts=PTS-STARTPTS[a{idx}]"
+                    )
             n = len(chunk)
             if source_has_audio:
                 concat_inputs = "".join(f"[v{i}][a{i}]" for i in range(n))

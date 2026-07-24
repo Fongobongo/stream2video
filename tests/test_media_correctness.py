@@ -173,6 +173,64 @@ def _assert_av_in_sync(info: dict, *, tolerance_s: float = 0.05) -> None:
     )
 
 
+def _probe_audio_codec(path: Path) -> dict:
+    """Return audio codec name and channel layout for ``path``.
+
+    Used by tests that verify the pipeline normalises non-AAC input
+    codecs (Opus/MP3) and channel layouts (mono/5.1) into the
+    configured output format (AAC stereo by default).
+    """
+    out = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=codec_name,channel_layout,channels",
+            "-of",
+            "json",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    data = json.loads(out)
+    streams = data.get("streams") or []
+    if not streams:
+        return {"codec_name": None, "channel_layout": None, "channels": None}
+    s = streams[0]
+    return {
+        "codec_name": s.get("codec_name"),
+        "channel_layout": s.get("channel_layout"),
+        "channels": int(s["channels"]) if s.get("channels") is not None else None,
+    }
+
+
+def _have_encoder(codec: str) -> bool:
+    """Return True when ``ffmpeg -encoders`` lists ``codec`` as available."""
+    out = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-encoders"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    for line in out.splitlines():
+        # codec lines look like "A....D libopus            libopus Opus (codec opus)"
+        if len(line) > 8 and line[1:8].strip() and codec in line.split()[1:3][:1]:
+            return True
+    return False
+
+
+def _require_encoders(*codecs: str) -> None:
+    """Skip the calling test when any of ``codecs`` is missing."""
+    missing = [c for c in codecs if not _have_encoder(c)]
+    if missing:
+        pytest.skip(f"ffmpeg missing required encoder(s): {', '.join(missing)}")
+
+
 @pytest.fixture
 def synthetic_source(tmp_path: Path) -> Path:
     """6s / 30 FPS / AAC 192k source — the original reproduction case."""
@@ -740,3 +798,390 @@ def test_multiple_audio_streams(tmp_path: Path):
     assert frames is not None and abs(frames - 120) <= 1, (
         f"multi-audio: frames {frames} != 120; info={out_info}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Non-AAC input codecs (fix-plan §4: "AAC, Opus и MP3 input audio").
+#
+# The pipeline historically normalised every input to AAC stereo via
+# ``-c:a aac -ar 48000 -ac 2`` (see ``_audio_opts()`` in concat.py).
+# These tests verify that an Opus or MP3 audio track is decoded and
+# re-encoded to AAC without introducing frame loss / A-V desync that
+# would slip through a pure-AAC test matrix.
+# ---------------------------------------------------------------------------
+
+
+def _make_source_with_audio_codec(
+    out: Path,
+    *,
+    duration: float = 6.0,
+    fps: int = 30,
+    audio_codec: str,
+    audio_bitrate: str = "192k",
+    container: str = "mkv",
+) -> None:
+    """Generate a source whose audio uses an arbitrary codec/container.
+
+    ``audio_codec`` is the ffmpeg encoder name (e.g. ``libopus``,
+    ``libmp3lame``, ``aac``). ``container`` selects the muxer via the
+    file extension; most non-MP4 codecs (Opus/MP3/PCM) require a
+    Matroska or similar flexible container because the MP4 muxer
+    either rejects them or inserts edit-list gaps that would confuse
+    the test.
+    """
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"testsrc=duration={duration}:size=320x240:rate={fps}",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=440:duration={duration}:sample_rate=48000",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            audio_codec,
+            "-b:a",
+            audio_bitrate,
+            "-ac",
+            "2",
+            "-shortest",
+            str(out),
+        ],
+        check=True,
+    )
+
+
+@pytest.mark.parametrize("method", ["segment", "batch"])
+@pytest.mark.parametrize(
+    "audio_codec,container",
+    [
+        ("libopus", "mkv"),
+        ("libmp3lame", "mkv"),
+    ],
+)
+def test_non_aac_input_audio_normalized_to_aac(
+    method: str, audio_codec: str, container: str, tmp_path: Path
+):
+    """Opus/MP3 audio input is decoded and re-encoded to AAC stereo.
+
+    The output's audio stream must be AAC regardless of the input
+    codec because the pipeline always encodes through ``-c:a aac``
+    (see concat.py:_audio_opts). A/V sync and frame count are also
+    asserted so a regression that swapped the audio stream order or
+    dropped a channel wouldn't pass silently.
+
+    Both codecs are muxed into a Matroska (mkv) container because the
+    raw ``mp3`` muxer is audio-only (it strips the video stream) and
+    the MP4 muxer rejects the opus-to-MP4 combination on older ffmpeg
+    builds. Matroska accepts both codecs alongside H.264 video.
+    """
+    _require_encoders(audio_codec)
+    src = tmp_path / f"src_{audio_codec}.{container}"
+    _make_source_with_audio_codec(src, duration=6.0, fps=30, audio_codec=audio_codec)
+
+    # Sanity: the source really uses the requested audio codec.
+    src_audio = _probe_audio_codec(src)
+    assert src_audio["codec_name"] is not None, f"source has no audio stream: {src_audio}"
+
+    out = tmp_path / f"out_{method}_{audio_codec}.mp4"
+    silence = [SilenceSegment(2.0, 4.0)]
+    cut_and_concat(
+        src,
+        silence,
+        out,
+        method=method,
+        encoder="libx264",
+        video_quality="medium",
+        audio_quality="high",
+    )
+    info = _probe(out)
+    # Frame accuracy must be preserved for non-AAC input too.
+    frames = info.get("nb_read_frames_video")
+    assert frames is not None and abs(frames - 120) <= 1, (
+        f"{audio_codec}/{method}: frames {frames} != 120; info={info}"
+    )
+    _assert_av_in_sync(info)
+    out_audio = _probe_audio_codec(out)
+    assert out_audio["codec_name"] == "aac", (
+        f"{audio_codec} input: output audio codec {out_audio['codec_name']!r} != 'aac'"
+    )
+    assert out_audio["channel_layout"] == "stereo", (
+        f"{audio_codec} input: output channel_layout {out_audio['channel_layout']!r} != 'stereo'"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Channel layout normalisation (fix-plan §4: "Mono/stereo/5.1").
+#
+# ``-ac 2`` forces the output to stereo regardless of the input layout,
+# so mono and 5.1 inputs must be up/down-mixed by the AAC encoder.
+# These tests guard against:
+#   * a future change that drops ``-ac 2`` (silent channel-count bug);
+#   * ffmpeg mis-routing the channel layout through a 5.1 HDMI path;
+#   * an audio-less edge case where ``-ac`` is added without ``-map``.
+# ---------------------------------------------------------------------------
+
+
+def _make_source_with_channel_layout(
+    out: Path, *, duration: float = 6.0, fps: int = 30, channel_layout: str
+) -> None:
+    """Generate a source with the requested audio channel layout.
+
+    Uses ``-channel_layout`` so ffmpeg's lavfi sine generator produces
+    the right channel count (mono=1, stereo=2, 5.1=6). All sources
+    use AAC audio so the test isolates the channel-layout variable.
+    """
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"testsrc=duration={duration}:size=320x240:rate={fps}",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=440:duration={duration}:sample_rate=48000",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-channel_layout",
+            channel_layout,
+            "-shortest",
+            str(out),
+        ],
+        check=True,
+    )
+
+
+@pytest.mark.parametrize("method", ["segment", "batch"])
+@pytest.mark.parametrize("channel_layout", ["mono", "stereo", "5.1"])
+def test_channel_layout_normalised_to_stereo(method: str, channel_layout: str, tmp_path: Path):
+    """Mono / 5.1 inputs are down/up-mixed to AAC stereo on output.
+
+    ``-ac 2`` in ``_audio_opts()`` is the documented contract; this
+    test catches a future change that either drops the option (so mono
+    stays mono, surprising users who expect stereo) or removes the
+    up-front ``-map 0:a:0?`` routing.
+    """
+    src = tmp_path / f"src_{channel_layout.replace('.', '')}.mp4"
+    _make_source_with_channel_layout(src, channel_layout=channel_layout)
+
+    src_audio = _probe_audio_codec(src)
+    # Sanity: source really has the requested layout.
+    assert src_audio["channel_layout"] is not None, f"source has no channel_layout: {src_audio}"
+
+    out = tmp_path / f"out_{method}_{channel_layout.replace('.', '')}.mp4"
+    silence = [SilenceSegment(2.0, 4.0)]
+    cut_and_concat(
+        src,
+        silence,
+        out,
+        method=method,
+        encoder="libx264",
+        video_quality="medium",
+    )
+    info = _probe(out)
+    out_audio = _probe_audio_codec(out)
+    assert out_audio["channel_layout"] == "stereo", (
+        f"{channel_layout} input: output channel_layout {out_audio['channel_layout']!r} != 'stereo'"
+    )
+    frames = info.get("nb_read_frames_video")
+    assert frames is not None and abs(frames - 120) <= 1, (
+        f"{channel_layout}/{method}: frames {frames} != 120; info={info}"
+    )
+    _assert_av_in_sync(info)
+
+
+# ---------------------------------------------------------------------------
+# Non-zero / shifted start PTS (fix-plan §4: "Broken/non-zero timestamps").
+#
+# Sources captured by OBS with ``-output_ts_offset`` or re-muxed from a
+# mid-file cut may have non-zero start PTS. The pipeline must normalise
+# the output so it starts at t=0 (otherwise downstream players hang or
+# report a phantom black frame at the head). These tests verify:
+#   * start_time is 0 (within one frame);
+#   * frame count and A/V sync are still correct;
+#   * the segment path handles the shifted PTS through the input-side
+#     ``-ss`` seek without dropping the first keep segment.
+# ---------------------------------------------------------------------------
+
+
+def _make_shifted_pts_source(out: Path, *, ts_offset: float = 5.0) -> None:
+    """Generate a source whose PTS starts at ``ts_offset`` seconds.
+
+    ``-itsoffset`` shifts input timestamps as if the capture started
+    at ``ts_offset`` seconds — this mimics OBS / ffmpeg live captures
+    that begin recording some seconds after the encoder's internal
+    clock started, so the muxer's ``start_time`` is non-zero but the
+    container's duration is preserved (unlike ``-output_ts_offset``
+    with a negative value, which actually truncates the file).
+    """
+    raw = out.with_suffix(".raw.mp4")
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=6:size=320x240:rate=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=6:sample_rate=48000",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-ac",
+            "2",
+            "-shortest",
+            str(raw),
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-itsoffset",
+            f"{ts_offset}",
+            "-i",
+            str(raw),
+            "-c",
+            "copy",
+            str(out),
+        ],
+        check=True,
+    )
+
+
+def _probe_start_time(path: Path) -> float | None:
+    """Container-level ``start_time`` (seconds) as reported by ffprobe."""
+    out = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=start_time",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    return float(out) if out else None
+
+
+@pytest.mark.parametrize("method", ["segment", "batch"])
+def test_non_zero_start_pts_normalised_to_zero(method: str, tmp_path: Path):
+    """Source with a non-zero start PTS produces output starting at t=0.
+
+    With ``-output_ts_offset 5.0`` the demuxer reports
+    ``start_time≈4.98s``. Without ``setpts=PTS-STARTPTS`` normalisation
+    (or with ``-copyts`` left enabled), the output would inherit the
+    shifted start and confuse downstream players. These tests assert
+    the pipeline produces a clean output whose container
+    ``start_time`` is within one frame of 0.
+    """
+    src = tmp_path / "src_shifted.mp4"
+    _make_shifted_pts_source(src, ts_offset=5.0)
+
+    # Sanity: the source really has a non-zero start.
+    src_start = _probe_start_time(src)
+    assert src_start is not None and src_start > 1.0, (
+        f"source start_time {src_start} should be > 1s"
+    )
+
+    out = tmp_path / f"out_shifted_{method}.mp4"
+    silence = [SilenceSegment(2.0, 4.0)]
+    cut_and_concat(
+        src,
+        silence,
+        out,
+        method=method,
+        encoder="libx264",
+        video_quality="medium",
+    )
+    info = _probe(out)
+    # Output must start at ~0 — one frame's worth of jitter is fine.
+    out_start = _probe_start_time(out)
+    assert out_start is not None and abs(out_start) <= 0.1, (
+        f"{method}: output start_time {out_start}s should be ~0; info={info}"
+    )
+    frames = info.get("nb_read_frames_video")
+    assert frames is not None and abs(frames - 120) <= 1, (
+        f"{method}: shifted-PTS frames {frames} != 120; info={info}"
+    )
+    _assert_av_in_sync(info)
+
+
+def test_shifted_pts_long_offset_survives(tmp_path: Path):
+    """Source with a large PTS shift (30s) is still cut accurately.
+
+    Some OBS / capture tools record with ``-itsoffset`` set to dozens
+    of seconds (e.g. when the encoder's clock was started long before
+    the actual recording began). This is the regression net for the
+    historical ``setpts=N/FRAME_RATE/TB`` bug whose behaviour changed
+    unpredictably on shifted-PTS sources — the segment path's
+    input-side ``-ss`` seek must locate the keep intervals in source
+    time, not in shifted container time, otherwise the output loses
+    the first keep segment entirely.
+    """
+    src = tmp_path / "src_shifted30.mp4"
+    _make_shifted_pts_source(src, ts_offset=30.0)
+
+    # Sanity: source really has a large non-zero start.
+    src_start = _probe_start_time(src)
+    assert src_start is not None and src_start > 10.0, (
+        f"source start_time {src_start} should be > 10s"
+    )
+
+    out = tmp_path / "out_shifted30.mp4"
+    silence = [SilenceSegment(2.0, 4.0)]
+    cut_and_concat(src, silence, out, method="segment", encoder="libx264", video_quality="medium")
+    info = _probe(out)
+    out_start = _probe_start_time(out)
+    assert out_start is not None and abs(out_start) <= 0.1, (
+        f"30s-shift: output start_time {out_start}s should be ~0; info={info}"
+    )
+    frames = info.get("nb_read_frames_video")
+    assert frames is not None and abs(frames - 120) <= 1, (
+        f"30s-shift: frames {frames} != 120; info={info}"
+    )
+    _assert_av_in_sync(info)

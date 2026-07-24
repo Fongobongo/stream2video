@@ -13,6 +13,7 @@ from stream2video.utils import (
     cancel_monitor,
     get_active_process,
     get_video_duration,
+    get_video_start_time,
     set_active_process,
 )
 
@@ -137,6 +138,23 @@ class TestGetVideoDuration:
         f.write_text("hello")
         result = get_video_duration(f)
         assert result is None
+
+
+class TestGetVideoStartTime:
+    """get_video_start_time — ffprobe wrapper used by the batch path
+    to compensate ``-copyts`` + ``-ss`` for non-zero PTS sources."""
+
+    def test_missing_file_returns_zero(self, tmp_path: Path):
+        # Nonexistent file: ffprobe fails — returns 0.0 (the safe
+        # default, so a failed probe can't abort the whole encode).
+        result = get_video_start_time(tmp_path / "does_not_exist.mp4")
+        assert result == 0.0
+
+    def test_non_video_returns_zero(self, tmp_path: Path):
+        # Random text file: ffprobe reports no format-level start_time.
+        f = tmp_path / "not_a_video.txt"
+        f.write_text("hello")
+        assert get_video_start_time(f) == 0.0
 
 
 class TestActiveProcess:
