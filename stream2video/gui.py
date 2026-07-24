@@ -227,6 +227,12 @@ class Stream2VideoGUI(
         video_quality = self.combo_video_quality.get()
         audio_quality = self.combo_audio_quality.get()
         download_quality = self.combo_download_quality.get()
+        # Sync combo selections into self.config so build_pipeline_config
+        # (which reads from the config dict, not from PipelineWorkerParams)
+        # picks up the current value. output_format drives the output file
+        # extension and the audio-extract short-circuit in cut_and_concat,
+        # so a stale self.config value would produce the wrong output.
+        self.config["output_format"] = self.combo_output_format.get()
         force = bool(self.chk_force.get())
         per_video_dir = bool(self.chk_per_video_dir.get())
         delete_after = bool(self.chk_delete.get())
@@ -237,6 +243,7 @@ class Stream2VideoGUI(
             f"Starting pipeline: input={input_raw}, output_dir={output_dir}, "
             f"method={method}, encoder={encoder}, "
             f"video_quality={video_quality}, download_quality={download_quality}, "
+            f"output_format={self.config['output_format']}, "
             f"force={force}, "
             f"threshold={self.config['threshold']}, "
             f"min_silence={self.config['min_silence']}, "

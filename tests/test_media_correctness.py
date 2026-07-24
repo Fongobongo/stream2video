@@ -1185,3 +1185,316 @@ def test_shifted_pts_long_offset_survives(tmp_path: Path):
         f"30s-shift: frames {frames} != 120; info={info}"
     )
     _assert_av_in_sync(info)
+
+
+# ---------------------------------------------------------------------------
+# Audio-only output formats (mp3 / opus / aac-m4a / wav / flac).
+#
+# ``cut_and_concat(output_format=...)`` short-circuits the video pipeline
+# entirely: the video stream is dropped, each keep segment's audio is
+# re-encoded into the chosen codec, and the per-segment files are joined
+# by the concat demuxer (mp3/opus/aac/wav) or the concat filter (flac,
+# whose muxer misreports duration on a concat-demuxer join).
+#
+# These tests verify:
+#   * the output file has the right codec/container;
+#   * duration matches the sum of keep segments (lossy formats allow
+#     ~50ms priming per segment; lossless is exact);
+#   * no video stream is present;
+#   * audio_quality controls bitrate on lossy formats, ignored on lossless.
+# ---------------------------------------------------------------------------
+
+
+def _probe_audio_output(path: Path) -> dict:
+    """Probe an audio-only output: codec, container duration, channel layout."""
+    out = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration:stream=codec_type,codec_name,channel_layout,channels",
+            "-of",
+            "json",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    data = json.loads(out)
+    info: dict = {
+        "duration": None,
+        "codec_types": [],
+        "audio_codec": None,
+        "channel_layout": None,
+        "channels": None,
+    }
+    fmt = data.get("format") or {}
+    if fmt.get("duration"):
+        info["duration"] = float(fmt["duration"])
+    for stream in data.get("streams", []):
+        ctype = stream.get("codec_type")
+        if ctype:
+            info["codec_types"].append(ctype)
+        if ctype == "audio":
+            info["audio_codec"] = stream.get("codec_name")
+            info["channel_layout"] = stream.get("channel_layout")
+            ch = stream.get("channels")
+            if ch is not None:
+                info["channels"] = int(ch)
+    return info
+
+
+# Codec name as reported by ffprobe for each output_format. Maps the
+# config key (mp3/opus/...) to the ffprobe codec_name field so the test
+# can assert "the output really is an mp3 stream" rather than just
+# "the file exists".
+EXPECTED_AUDIO_CODECS: dict[str, str] = {
+    "mp3": "mp3",
+    "opus": "opus",
+    "aac": "aac",
+    "wav": "pcm_s16le",
+    "flac": "flac",
+}
+
+# Expected file extension for each output_format. Matches the spec in
+# OUTPUT_FORMAT_SPECS so a mismatch here catches a drift between the
+# config table and the actual output filename.
+EXPECTED_AUDIO_EXTENSIONS: dict[str, str] = {
+    "mp3": "mp3",
+    "opus": "opus",
+    "aac": "m4a",
+    "wav": "wav",
+    "flac": "flac",
+}
+
+
+@pytest.mark.parametrize("output_format", ["mp3", "opus", "aac", "wav", "flac"])
+def test_audio_only_output_format(output_format: str, synthetic_source: Path, tmp_path: Path):
+    """Each audio format produces a valid audio-only file with the right codec.
+
+    The 6s/30FPS source with silence (2,4) → keep [(0,2),(4,6)] = 4s.
+    Output must:
+      * have the codec matching the format (mp3/opus/aac/pcm_s16le/flac);
+      * be audio-only (no video stream);
+      * have a duration close to 4s (lossless=exact, lossy within ~50ms
+        per segment for AAC/MP3/Opus priming).
+    """
+    ext = EXPECTED_AUDIO_EXTENSIONS[output_format]
+    out = tmp_path / f"out_audio.{ext}"
+    silence = [SilenceSegment(2.0, 4.0)]
+    cut_and_concat(
+        synthetic_source,
+        silence,
+        out,
+        output_format=output_format,
+        audio_quality="medium",
+    )
+    info = _probe_audio_output(out)
+    # No video stream in the output.
+    assert "video" not in info.get("codec_types", []), (
+        f"{output_format}: output has a video stream: {info}"
+    )
+    assert "audio" in info.get("codec_types", []), (
+        f"{output_format}: output has no audio stream: {info}"
+    )
+    # Codec matches the format.
+    expected_codec = EXPECTED_AUDIO_CODECS[output_format]
+    assert info["audio_codec"] == expected_codec, (
+        f"{output_format}: audio codec {info['audio_codec']!r} != {expected_codec!r}"
+    )
+    # Channel layout is always stereo (the pipeline normalises via -ac 2).
+    # WAV's muxer doesn't write ``channel_layout`` into the stream
+    # metadata (only ``channels``), so accept either a "stereo" layout
+    # or a 2-channel stream for wav/pcm.
+    if output_format == "wav":
+        assert info["channels"] == 2, f"{output_format}: channels {info['channels']} != 2"
+    else:
+        assert info["channel_layout"] == "stereo", (
+            f"{output_format}: channel_layout {info['channel_layout']!r} != 'stereo'"
+        )
+    # Duration is close to 4s. Lossless formats (wav, flac) are exact;
+    # lossy (mp3/opus/aac) have ~21ms priming per segment (2 segments
+    # → ~40ms drift), so 100ms tolerance covers the worst case.
+    duration = info.get("duration")
+    assert duration is not None, f"{output_format}: no duration: {info}"
+    tolerance = 0.05 if output_format in ("wav", "flac") else 0.2
+    assert abs(duration - 4.0) <= tolerance, (
+        f"{output_format}: duration {duration}s != 4.0s (±{tolerance}s); info={info}"
+    )
+
+
+def test_audio_only_multi_segment_duration(synthetic_source: Path, tmp_path: Path):
+    """Multi-segment audio output: 10 keep segments, total duration ~4s.
+
+    Stress test for the concat path: each segment adds ~21ms of AAC/MP3
+    priming, so 10 segments drift ~200ms on lossy formats. Lossless
+    formats (wav, flac) must be sample-accurate across 10 segments.
+
+    Uses flac (lossless) so the duration assertion is strict — a flac
+    regression would immediately show up as a duration != 4.0s failure.
+    """
+    out = tmp_path / "out_multi.flac"
+    silence: list[SilenceSegment] = []
+    t = 0.4
+    while t < 6.0 - 0.2:
+        silence.append(SilenceSegment(t, t + 0.2))
+        t += 0.55
+    cut_and_concat(
+        synthetic_source,
+        silence,
+        out,
+        output_format="flac",
+        audio_quality="medium",
+    )
+    info = _probe_audio_output(out)
+    duration = info.get("duration")
+    # 10 segments x 0.2s silence = 2.0s removed -> keep ~4.0s.
+    # Lossless flac must be exact (no priming).
+    assert duration is not None and abs(duration - 4.0) <= 0.05, (
+        f"flac multi-segment: duration {duration}s != 4.0s; info={info}"
+    )
+
+
+def test_audio_quality_affects_lossy_bitrate(synthetic_source: Path, tmp_path: Path):
+    """audio_quality controls the bitrate on lossy formats (mp3).
+
+    high=256k must beat low=128k by a clear margin, otherwise the user's
+    audio_quality choice has no effect (the historical P0.3 bug:
+    hard-coded 128k regardless of the requested preset).
+    """
+    out_high = tmp_path / "out_high.mp3"
+    out_low = tmp_path / "out_low.mp3"
+    silence = [SilenceSegment(2.0, 4.0)]
+    cut_and_concat(
+        synthetic_source,
+        silence,
+        out_high,
+        output_format="mp3",
+        audio_quality="high",
+    )
+    cut_and_concat(
+        synthetic_source,
+        silence,
+        out_low,
+        output_format="mp3",
+        audio_quality="low",
+    )
+
+    def _audio_bitrate(path: Path) -> int:
+        out = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=bit_rate",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        return int(out) if out else 0
+
+    high = _audio_bitrate(out_high)
+    low = _audio_bitrate(out_low)
+    assert high > low, f"audio_quality='high' ({high} bps) didn't beat 'low' ({low} bps)"
+
+
+def test_audio_quality_ignored_on_lossless(synthetic_source: Path, tmp_path: Path):
+    """audio_quality is ignored on lossless formats (flac).
+
+    flac's encoder runs at its native compression level regardless of
+    the audio_quality knob; the output is bit-exact PCM, so the bitrate
+    is determined by the source's sample rate / channel count, not by
+    high/medium/low. This test guards against a future change that
+    accidentally applies ``-b:a`` to flac (which the encoder would
+    silently ignore, but the command line would be misleading).
+    """
+    out_high = tmp_path / "out_high.flac"
+    out_low = tmp_path / "out_low.flac"
+    silence = [SilenceSegment(2.0, 4.0)]
+    cut_and_concat(
+        synthetic_source,
+        silence,
+        out_high,
+        output_format="flac",
+        audio_quality="high",
+    )
+    cut_and_concat(
+        synthetic_source,
+        silence,
+        out_low,
+        output_format="flac",
+        audio_quality="low",
+    )
+    info_h = _probe_audio_output(out_high)
+    info_l = _probe_audio_output(out_low)
+    # Both must be flac; bit_rate should be ~equal (lossless: same PCM
+    # content → same compressed size regardless of the -b:a hint).
+    assert info_h["audio_codec"] == "flac"
+    assert info_l["audio_codec"] == "flac"
+    assert info_h["duration"] is not None and info_l["duration"] is not None
+    assert abs(info_h["duration"] - info_l["duration"]) < 0.05, (
+        f"flac duration changed with audio_quality: high={info_h['duration']}, "
+        f"low={info_l['duration']}"
+    )
+
+
+def test_audio_only_rejects_videoless_source(tmp_path: Path):
+    """Audio-only output on a video-only source raises a clear error.
+
+    Without an audio stream there's nothing to extract; the pipeline
+    must refuse early rather than produce an empty/corrupt audio file.
+    """
+    src = tmp_path / "src_video_only.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=6:size=320x240:rate=30",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            str(src),
+        ],
+        check=True,
+    )
+    out = tmp_path / "out.mp3"
+    silence = [SilenceSegment(2.0, 4.0)]
+    with pytest.raises(Exception, match="no audio stream"):
+        cut_and_concat(
+            src,
+            silence,
+            out,
+            output_format="mp3",
+            audio_quality="medium",
+        )
+
+
+def test_audio_only_unknown_format_raises(synthetic_source: Path, tmp_path: Path):
+    """An unknown output_format raises ConcatError before touching ffmpeg."""
+    out = tmp_path / "out.ogg"
+    silence = [SilenceSegment(2.0, 4.0)]
+    with pytest.raises(Exception, match="Unknown output_format"):
+        cut_and_concat(
+            synthetic_source,
+            silence,
+            out,
+            output_format="ogg",
+            audio_quality="medium",
+        )

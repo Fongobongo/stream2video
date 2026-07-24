@@ -162,6 +162,7 @@ def build_pipeline_config_from_snapshot(
         x264_preset=config.get("x264_preset", "medium"),
         encoder_threads=config.get("encoder_threads", "auto"),
         output_fps=config.get("output_fps", "source"),
+        output_format=config.get("output_format", "video"),
         force=params.force,
         delete_after=params.delete_after,
         per_video_dir=params.per_video_dir,

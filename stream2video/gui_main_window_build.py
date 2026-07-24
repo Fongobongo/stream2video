@@ -17,6 +17,7 @@ from stream2video.config import (
     VALID_DOWNLOAD_QUALITIES,
     VALID_ENCODERS,
     VALID_METHODS,
+    VALID_OUTPUT_FORMATS,
     VALID_QUALITIES,
     VALID_THEMES,
 )
@@ -275,6 +276,24 @@ class MainWindowBuildMixin:
         _Tooltip(
             self.combo_download_quality,
             "Max resolution to download from Twitch/YouTube.\nbest — highest available (default)\n1080p / 720p / 480p / 360p — cap height\nIgnored for local files.",
+        )
+
+        # Output format — container/codec choice. ``video`` (default)
+        # preserves the historical H.264 + AAC MP4 behaviour; the
+        # audio-only values (mp3/opus/aac/wav/flac) drop the video
+        # stream entirely and produce a standalone audio file whose
+        # codec matches the format's conventional choice.
+        ctk.CTkLabel(opt_frame, text="Output format:").grid(
+            row=6, column=0, sticky="w", padx=(0, 5)
+        )
+        self.combo_output_format = ctk.CTkComboBox(
+            opt_frame, values=VALID_OUTPUT_FORMATS, state="readonly", width=120
+        )
+        self.combo_output_format.set(self.config.get("output_format", "video"))
+        self.combo_output_format.grid(row=6, column=1, sticky="w", padx=(0, 5))
+        _Tooltip(
+            self.combo_output_format,
+            "Output container/codec.\nvideo — H.264 + AAC MP4 (default)\nmp3 / opus / aac(m4a) — lossy audio only\nwav / flac — lossless audio only\nAudio-only outputs drop the video stream.",
         )
 
         opt_frame.grid_columnconfigure(1, weight=0)

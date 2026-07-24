@@ -54,6 +54,7 @@ class LifecycleMixin:
             "video_quality": self.combo_video_quality.get(),
             "audio_quality": self.combo_audio_quality.get(),
             "download_quality": self.combo_download_quality.get(),
+            "output_format": self.combo_output_format.get(),
             "force": bool(self.chk_force.get()),
             "delete_after": bool(self.chk_delete.get()),
             "per_video_dir": bool(self.chk_per_video_dir.get()),
@@ -85,6 +86,7 @@ class LifecycleMixin:
         self.combo_video_quality.set(self.config["video_quality"])
         self.combo_audio_quality.set(self.config.get("audio_quality", "medium"))
         self.combo_download_quality.set(self.config["download_quality"])
+        self.combo_output_format.set(self.config.get("output_format", "video"))
         self._set_checkbox(self.chk_force, self.config["force"])
         self._set_checkbox(self.chk_delete, self.config["delete_after"])
         self._set_checkbox(self.chk_per_video_dir, self.config["per_video_dir"])
@@ -139,6 +141,7 @@ class LifecycleMixin:
             "video_quality": self.combo_video_quality.get(),
             "audio_quality": self.combo_audio_quality.get(),
             "download_quality": self.combo_download_quality.get(),
+            "output_format": self.combo_output_format.get(),
             "force": bool(self.chk_force.get()),
             "delete_after": bool(self.chk_delete.get()),
             "per_video_dir": bool(self.chk_per_video_dir.get()),
@@ -186,6 +189,7 @@ class LifecycleMixin:
             video_quality=video_quality,
             audio_quality=audio_quality,
             download_quality=download_quality,
+            output_format=self.combo_output_format.get(),
             force=force,
             delete_after=delete_after,
             x264_low_memory=x264_low_memory,

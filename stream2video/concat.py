@@ -14,8 +14,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from stream2video.config import (
+    OUTPUT_FORMAT_SPECS,
     VALID_ENCODERS,
     VALID_METHODS,
+    VALID_OUTPUT_FORMATS,
     VALID_OUTPUT_FPS,
     VALID_QUALITIES,
     VALID_SOFTWARE_FALLBACKS,
@@ -186,6 +188,7 @@ def cut_and_concat(
     encoder_threads: str | int = "auto",
     fallback_consent: Callable[[], bool] | None = None,
     output_fps: str = "source",
+    output_format: str = "video",
     memory_limit_mb: str | int = "auto",
     memory_reserve_mb: int = 2048,
     x264_low_memory: bool = False,
@@ -199,6 +202,12 @@ def cut_and_concat(
     if not video_path.exists():
         raise ConcatError(f"Input video not found: {video_path}")
 
+    if output_format not in VALID_OUTPUT_FORMATS:
+        raise ConcatError(
+            f"Unknown output_format {output_format!r} "
+            f"(use {' or '.join(repr(f) for f in VALID_OUTPUT_FORMATS)})"
+        )
+
     keep_segments = generate_keep_segments(video_path, silence_segments)
 
     if not keep_segments:
@@ -207,6 +216,38 @@ def cut_and_concat(
     logger.info(
         f"Keeping {len(keep_segments)} segments, removing {len(silence_segments)} silence segments"
     )
+
+    # Audio-only output path: short-circuit the video pipeline entirely.
+    # The segment/batch/cut_then_encode paths are video-oriented (they
+    # spend GPU/CPU on H.264 encoding); for an audio-only output the
+    # video stream is dropped and the per-segment encode is a cheap
+    # audio re-encode. The user's ``encoder`` / ``video_quality`` /
+    # ``output_fps`` / ``x264_*`` choices are irrelevant here, so the
+    # video encoder isn't even probed. See OUTPUT_FORMAT_SPECS in
+    # config.py for the codec/container mapping.
+    if output_format != "video":
+        source_has_audio = has_audio_stream(video_path)
+        if not source_has_audio:
+            raise ConcatError(
+                f"Source {video_path.name} has no audio stream -- cannot "
+                f"produce {output_format} output"
+            )
+        _set_audio_quality(audio_quality)
+        _run_audio_extract(
+            video_path,
+            keep_segments,
+            output_path,
+            output_format,
+            progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
+            audio_quality=audio_quality,
+            segment_encode_timeout=segment_encode_timeout,
+            final_concat_timeout=final_concat_timeout,
+            stall_kill=stall_kill_timeout,
+            stall_warning=stall_warning_timeout,
+            min_part_bytes=min_part_bytes,
+        )
+        return output_path
 
     vcodec, vcodec_opts = get_video_encoder(
         encoder,
@@ -1100,6 +1141,290 @@ def _run_final_concat(
         stall_kill=stall_kill,
         stall_warning=stall_warning,
     )
+
+
+def _run_audio_concat_filter(
+    output_path: Path,
+    part_paths: list[Path],
+    *,
+    codec: str,
+    extra_opts: list[str],
+    total_duration: float,
+    progress_callback: Callable[[float], None] | None = None,
+    cancel_callback: Callable[[], bool] | None = None,
+    timeout: int = _FINAL_CONCAT_TIMEOUT,
+    stall_kill: int = _STALL_KILL,
+    stall_warning: int = _STALL_WARNING,
+) -> None:
+    """Join audio parts via the ``concat`` filter (re-encode path).
+
+    Used for containers whose muxer misreports duration on a concat-
+    demuxer join (notably ``.flac`` — ffmpeg's flac muxer keeps the
+    first segment's duration when stream-copying concat-demuxer input,
+    producing a 2s file from two 2s segments). The concat filter
+    decodes every part into PCM, concatenates the PCM buffers, and
+    re-encodes once — reliable but not free.
+
+    For lossless codecs (flac, wav) the re-encode round-trips
+    bit-exact, so the lossless contract is preserved. Lossy codecs
+    shouldn't reach here (the caller routes them through the concat
+    demuxer instead), but if they did, the re-encode would add one
+    generation of loss — acceptable as a fallback, not as policy.
+    """
+    n = len(part_paths)
+    if n == 0:
+        raise ConcatError("audio concat filter: no parts to join")
+
+    # Build the -i inputs and the [N:a]concat=n=N:v=0:a=1 filter graph.
+    inputs: list[str] = []
+    for p in part_paths:
+        inputs.extend(["-i", str(p)])
+    chain = "".join(f"[{i}:a]" for i in range(n))
+    graph = f"{chain}concat=n={n}:v=0:a=1[outa]"
+
+    def _concat_prog(us: int) -> None:
+        if progress_callback and total_duration > 0:
+            progress_callback(min(us / 1_000_000 / total_duration * 0.1, 0.1) + 0.9)
+
+    _run_ffmpeg(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-progress",
+            "pipe:1",
+            *inputs,
+            "-filter_complex",
+            graph,
+            "-map",
+            "[outa]",
+            "-c:a",
+            codec,
+            *_audio_opts(),
+            *extra_opts,
+            str(output_path),
+        ],
+        progress_callback=_concat_prog,
+        timeout=timeout,
+        label="audio concat filter",
+        cancel_callback=cancel_callback,
+        stall_kill=stall_kill,
+        stall_warning=stall_warning,
+    )
+
+
+def _run_audio_extract(
+    video_path: Path,
+    keep_segments: list[tuple[float, float]],
+    output_path: Path,
+    output_format: str,
+    progress_callback: Callable[[float], None] | None = None,
+    cancel_callback: Callable[[], bool] | None = None,
+    audio_quality: str = "medium",
+    segment_encode_timeout: int = _SEGMENT_ENCODE_TIMEOUT,
+    final_concat_timeout: int = _FINAL_CONCAT_TIMEOUT,
+    stall_kill: int = _STALL_KILL,
+    stall_warning: int = _STALL_WARNING,
+    min_part_bytes: int = _MIN_PART_BYTES,
+) -> None:
+    """Extract audio-only output (mp3/opus/aac/wav/flac) from keep segments.
+
+    The video stream is dropped entirely. Each keep segment is decoded
+    via input-side ``-ss`` / ``-t`` (frame-accurate, same approach as
+    ``_run_segment_concat``) and re-encoded into the chosen audio
+    codec; the per-segment files are joined by the concat demuxer
+    (lossless stream-copy join, no second encode pass).
+
+    Resume: same manifest mechanism as the other paths — a mismatch in
+    source / codec / quality / keep_segments wipes the work dir; each
+    part file is ffprobe-validated so a partial crash artifact isn't
+    reused.
+
+    The per-segment encode is the *only* lossy step (for mp3/opus/aac);
+    the concat demuxer join is lossless. AAC priming (~21 ms per
+    segment) accumulates slightly across segments, mirroring the
+    segment path's documented behaviour. For lossless formats (wav,
+    flac) the priming is zero and the output is sample-accurate.
+
+    ``audio_quality`` controls the bitrate for lossy formats via
+    ``_audio_bitrate()`` (high=256k, medium=192k, low=128k); wav/flac
+    ignore it.
+    """
+    spec = OUTPUT_FORMAT_SPECS.get(output_format)
+    if spec is None:
+        # Should be unreachable: cut_and_concat validates output_format
+        # before dispatching here. Kept as a defensive guard so a future
+        # caller that bypasses cut_and_concat gets a clear error.
+        raise ConcatError(f"Unknown output_format {output_format!r}")
+    codec = spec["codec"]
+    ext = spec["ext"]
+    lossless = bool(spec["lossless"])
+    extra_opts: list[str] = list(spec["extra_opts"])
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    total_duration = sum(e - s for s, e in keep_segments)
+    n_segs = len(keep_segments)
+    logger.info(
+        f"audio_extract ({output_format}): {n_segs} segments, "
+        f"{total_duration:.1f}s output, codec={codec}"
+    )
+
+    work_dir = output_path.parent / f"_{output_path.stem}_audio_{ext}"
+    manifest = _build_manifest(
+        video_path,
+        keep_segments,
+        "audio_extract",
+        output_format,  # encoder slot — the audio "format" identifies the run
+        codec,  # vcodec slot — the actual ffmpeg codec used
+        [],  # vcodec_opts slot — audio has no encoder opts beyond -c:a
+        "n/a",  # video_quality slot — not applicable to audio-only
+        audio_quality,
+        "n/a",  # x264_preset slot
+        "auto",  # encoder_threads slot
+    )
+    _ensure_fresh_work_dir(work_dir, manifest)
+
+    # Bitrate knob: only meaningful for lossy codecs. For wav/flac the
+    # encoder ignores -b:a anyway, but we omit it to keep the ffmpeg
+    # command line readable in the log.
+    bitrate_opts: list[str] = []
+    if not lossless:
+        bitrate_opts = ["-b:a", _audio_bitrate()]
+
+    try:
+        encoded_keep = 0.0
+        skipped = 0
+
+        for i, (start, end) in enumerate(keep_segments):
+            if cancel_callback and cancel_callback():
+                raise CancelledError("audio extract cancelled")
+
+            dur = end - start
+            seg_path = work_dir / f"seg_{i:06d}.{ext}"
+
+            # Resume: skip already encoded segments. Same dual check as
+            # _run_segment_concat: minimum size + ffprobe validity.
+            if (
+                seg_path.exists()
+                and seg_path.stat().st_size >= min_part_bytes
+                and _ffprobe_is_valid_mp4(seg_path)
+            ):
+                skipped += 1
+                encoded_keep += dur
+                if progress_callback and total_duration > 0:
+                    progress_callback(min(encoded_keep / total_duration * 0.9, 0.9))
+                continue
+
+            def _seg_prog(
+                us: int,
+                _dur: float = dur,
+                _encoded_keep: float = encoded_keep,
+            ) -> None:
+                # Map ffmpeg's per-segment out_time_us to absolute
+                # progress across the whole output, same trick as the
+                # segment path's _seg_prog. The 0.9 ceiling leaves room
+                # for the final concat pass.
+                if progress_callback and total_duration > 0 and _dur > 0:
+                    seg_frac = min(us / 1_000_000 / _dur, 1.0)
+                    abs_time = _encoded_keep + seg_frac * _dur
+                    progress_callback(min(abs_time / total_duration * 0.9, 0.9))
+
+            _run_ffmpeg(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-progress",
+                    "pipe:1",
+                    "-ss",
+                    f"{start:.3f}",
+                    "-i",
+                    str(video_path),
+                    "-t",
+                    f"{dur:.3f}",
+                    "-map",
+                    "0:a:0",
+                    "-vn",
+                    "-c:a",
+                    codec,
+                    *bitrate_opts,
+                    *_audio_opts(),
+                    *extra_opts,
+                    str(seg_path),
+                ],
+                progress_callback=_seg_prog,
+                timeout=segment_encode_timeout,
+                label=f"audio segment {i} encode",
+                cancel_callback=cancel_callback,
+                stall_kill=stall_kill,
+                stall_warning=stall_warning,
+            )
+
+            encoded_keep += dur
+            if progress_callback and total_duration > 0:
+                progress_callback(min(encoded_keep / total_duration * 0.9, 0.9))
+
+        if skipped:
+            logger.info(
+                f"audio_extract: resumed {skipped}/{n_segs} already encoded, "
+                f"encoded {n_segs - skipped}"
+            )
+
+        # Final join pass. Two strategies, picked by container:
+        #
+        #   * **concat demuxer** (mp3 / opus / aac-m4a / wav) — stream-
+        #     copies the per-segment audio into one file, no re-encode,
+        #     so lossy priming isn't re-added. Works because these
+        #     containers' muxers honour the concat demuxer's "concatenate
+        #     packets in order" semantics.
+        #
+        #   * **concat filter** (flac) — re-encodes through a single
+        #     filter graph. The flac muxer misreports duration on a
+        #     concat-demuxer join (it keeps the first segment's
+        #     duration), so the lossless re-encode is the only reliable
+        #     path. For flac the re-encode is lossless (flac → PCM → flac
+        #     round-trips bit-exact), so this doesn't violate the
+        #     "lossless" contract of the format.
+        #
+        # WAV would also work with the concat filter, but the demuxer
+        # path is faster (no re-encode) and verified correct, so WAV
+        # stays on the demuxer path.
+        part_paths = [work_dir / f"seg_{i:06d}.{ext}" for i in range(n_segs)]
+        if ext == "flac":
+            _run_audio_concat_filter(
+                output_path,
+                part_paths,
+                codec=codec,
+                extra_opts=extra_opts,
+                total_duration=total_duration,
+                progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+                timeout=final_concat_timeout,
+                stall_kill=stall_kill,
+                stall_warning=stall_warning,
+            )
+        else:
+            _run_final_concat(
+                work_dir,
+                output_path,
+                part_paths,
+                total_duration=total_duration,
+                progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+                label="audio extract concat",
+                timeout=final_concat_timeout,
+                stall_kill=stall_kill,
+                stall_warning=stall_warning,
+            )
+        logger.info(f"Successfully created audio output: {output_path}")
+
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+    except Exception:
+        logger.info(f"Audio segments kept in {work_dir} for resume on next run")
+        raise
 
 
 def _run_segment_concat(
