@@ -83,6 +83,7 @@ stream2video /path/to/video.mp4
 | `--x264-preset` | `medium` | libx264 preset: `ultrafast`/`superfast`/`veryfast`/`faster`/`fast`/`medium`/`slow`/`slower`. Faster presets reduce CPU load at the cost of file size / quality. Use `ultrafast` or `veryfast` on an unstable / overclocked CPU. |
 | `--encoder-threads` | `auto` | Encoder thread count: `auto` (let ffmpeg pick, usually one per logical core) or a positive int to cap libx264's thread pool. Lowering this reduces peak CPU at the cost of slower encode. |
 | `--output-fps` | `source` | Output FPS policy: `source` (preserve input cadence, no frame duplication) or `24`/`25`/`30`/`50`/`60` (force CFR conversion via `fps` filter; duplicated frames inflate size). |
+| `--output-format` | `video` | Output container/codec: `video` (H.264 + AAC MP4, default) or an audio-only format — `mp3` (libmp3lame), `opus` (libopus), `aac` (m4a), `wav` (PCM 16-bit, lossless), `flac` (lossless). Audio-only outputs drop the video stream entirely; `audio_quality` controls bitrate on lossy formats, ignored on lossless. |
 | `--download-timeout` | `28800` | Absolute ceiling for the whole download in seconds (8h, sized for big VODs). Ignored for local files. |
 | `--connect-timeout` | `300` | Seconds to wait for the first progress event (DNS+TLS+handshake+first byte) before killing yt-dlp with a clear timeout error. Increase on very slow / satellite links. |
 | `--no-progress-timeout` | `1800` | Seconds of silence mid-download before killing yt-dlp (stalled connection watchdog). Increase for very slow / unstable links where mid-download pauses are normal. |
@@ -113,6 +114,9 @@ stream2video video.mp4 -o ./output --method batch
 
 # Custom config
 stream2video video.mp4 --config my_config.yaml
+
+# Extract audio only (mp3; also: opus, aac, wav, flac)
+stream2video video.mp4 --output-format mp3 --audio-quality high
 ```
 
 ## Configuration
@@ -137,6 +141,7 @@ margin: 0.15
 | `x264_preset` | `ultrafast`..`slower` | `medium` | libx264 preset. Faster presets reduce CPU load at the cost of file size / quality. |
 | `encoder_threads` | `auto` or positive int | `auto` | Caps libx264's thread pool. `auto` lets ffmpeg pick (usually one per logical core). |
 | `output_fps` | `source`/`24`/`25`/`30`/`50`/`60` | `source` | Output FPS policy. `source` preserves the input's cadence without duplication; numeric values force CFR conversion via the `fps` filter. |
+| `output_format` | `video`/`mp3`/`opus`/`aac`/`wav`/`flac` | `video` | Output container/codec. `video` produces H.264 + AAC MP4; the audio-only values drop the video stream and produce a standalone audio file (mp3=libmp3lame, opus=libopus, aac=m4a, wav=PCM 16-bit lossless, flac=lossless). `audio_quality` controls bitrate on lossy formats, ignored on lossless. |
 | `memory_limit_mb` | `auto` or non-negative int | `auto` | RAM budget for the encode (soft + hard thresholds). `auto` = 60% of total RAM at run start; `0` disables the budget check (OS reserve still enforced). Requires the `[monitor]` extra (psutil). |
 | `memory_reserve_mb` | positive int | `2048` | Hard floor of available RAM the pipeline never violates — even when the budget hasn't been hit, going below this triggers a cancel so the OS doesn't swap. |
 | `download_timeout` | positive int | `28800` | Absolute ceiling for the whole download in seconds (8h, sized for big VODs). |

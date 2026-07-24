@@ -129,6 +129,7 @@ class TestBuildPipelineConfigFromSnapshot:
         assert cfg.x264_preset == "medium"
         assert cfg.encoder_threads == "auto"
         assert cfg.output_fps == "source"
+        assert cfg.output_format == "video"
         assert cfg.memory_limit_mb == "auto"
         assert cfg.memory_reserve_mb == 2048
         assert cfg.x264_low_memory is False
@@ -161,6 +162,7 @@ class TestBuildPipelineConfigFromSnapshot:
                 "encoder_threads": 4,
                 "memory_limit_mb": 1024,
                 "batch_chunk_size": 10,
+                "output_format": "mp3",
             },
         )
         assert cfg.software_fallback == "disabled"
@@ -168,6 +170,7 @@ class TestBuildPipelineConfigFromSnapshot:
         assert cfg.encoder_threads == 4
         assert cfg.memory_limit_mb == 1024
         assert cfg.batch_chunk_size == 10
+        assert cfg.output_format == "mp3"
 
 
 class TestBuildDownloadProgressCallback:

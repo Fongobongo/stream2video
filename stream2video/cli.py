@@ -28,6 +28,7 @@ from stream2video.config import (
     VALID_DOWNLOAD_QUALITIES,
     VALID_ENCODERS,
     VALID_METHODS,
+    VALID_OUTPUT_FORMATS,
     VALID_QUALITIES,
     VALID_SOFTWARE_FALLBACKS,
     VALID_X264_PRESETS,
@@ -222,6 +223,7 @@ def load_config(config_file: Path | None) -> dict:
         ("download_quality", VALID_DOWNLOAD_QUALITIES),
         ("software_fallback", VALID_SOFTWARE_FALLBACKS),
         ("x264_preset", VALID_X264_PRESETS),
+        ("output_format", VALID_OUTPUT_FORMATS),
     ]
     for key, valid in enum_specs:
         enum_val: Any = config.get(key)
@@ -433,6 +435,15 @@ def main(
         "(default 1024). Smaller files are re-encoded. If not passed, the "
         "config file's `min_part_bytes` key is used.",
     ),
+    output_format: str = typer.Option(
+        CONFIG_DEFAULTS["output_format"],
+        "--output-format",
+        help="Output container/codec: 'video' (default — H.264 + AAC MP4), "
+        "or an audio-only format: 'mp3' (libmp3lame), 'opus' (libopus), "
+        "'aac' (m4a), 'wav' (PCM 16-bit, lossless), 'flac' (lossless). "
+        "Audio-only outputs drop the video stream entirely. If not passed, "
+        "the config file's `output_format` key is used.",
+    ),
 ) -> None:
     """
     Compress stream recording by removing silence segments.
@@ -515,6 +526,32 @@ def main(
             "software_fallback", software_fallback, VALID_SOFTWARE_FALLBACKS
         )
         x264_preset = _resolved_str("x264_preset", x264_preset, VALID_X264_PRESETS)
+        output_format = _resolved_str("output_format", output_format, VALID_OUTPUT_FORMATS)
+
+        # Output filename extension follows the chosen output_format.
+        # ``video`` keeps the historical ``_compressed.mp4`` name; the
+        # audio-only formats use the codec's native extension (mp3, opus,
+        # m4a, wav, flac). The suffix mapping lives in
+        # ``OUTPUT_FORMAT_SPECS`` so the extension and the codec stay in
+        # sync — a future format added there automatically gets the right
+        # filename here.
+        from stream2video.config import OUTPUT_FORMAT_SPECS
+
+        if output_format == "video":
+            output_suffix = "compressed.mp4"
+        else:
+            spec = OUTPUT_FORMAT_SPECS.get(output_format)
+            if spec is None:
+                # Unreachable: _resolved_str already validated against
+                # VALID_OUTPUT_FORMATS. Defensive guard so a future
+                # format added to VALID_OUTPUT_FORMATS but missing from
+                # OUTPUT_FORMAT_SPECS produces a clear error rather than
+                # a confusing ``None`` lookup.
+                console.print(
+                    f"[red]Internal error:[/red] no spec for output_format {output_format!r}"
+                )
+                raise typer.Exit(1)
+            output_suffix = f"compressed.{spec['ext']}"
 
         # ``encoder_threads`` accepts ``"auto"`` or a positive int (see
         # ``config.coerce_typed_value``). The CLI flag arrives as a
@@ -840,7 +877,7 @@ def main(
                 progress.update(task3, completed=min(fraction * 100, 100))
 
             try:
-                output_video = output_dir / f"{video_path.stem}_compressed.mp4"
+                output_video = output_dir / f"{video_path.stem}_{output_suffix}"
 
                 cut_and_concat(
                     video_path,
@@ -855,6 +892,7 @@ def main(
                     software_fallback=software_fallback,
                     x264_preset=x264_preset,
                     encoder_threads=resolved_encoder_threads,
+                    output_format=output_format,
                     memory_limit_mb=resolved_memory_limit_mb,
                     memory_reserve_mb=resolved_memory_reserve_mb,
                     x264_low_memory=resolved_x264_low_memory,

@@ -78,6 +78,20 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     "delete_after": False,
     "per_video_dir": True,
     "output_dir": "",
+    # Output container / codec policy. ``video`` (default) preserves the
+    # historical behaviour: H.264 video + AAC stereo audio muxed into
+    # MP4. The audio-only values produce a standalone audio file (the
+    # video stream is dropped) using the codec that matches the
+    # container's conventional codec choice:
+    #   * ``mp3``  → .mp3 + libmp3lame
+    #   * ``opus`` → .opus + libopus
+    #   * ``aac``  → .m4a + aac (native ffmpeg encoder, AAC-LC)
+    #   * ``wav``  → .wav + pcm_s16le (lossless, 48 kHz / 16-bit)
+    #   * ``flac`` → .flac + flac (lossless, compressed)
+    # ``audio_quality`` controls the bitrate for lossy formats; lossless
+    # formats (wav, flac) ignore it. ``-ar 48000 -ac 2`` is applied
+    # uniformly so a mono or 44.1 kHz source is normalised.
+    "output_format": "video",
     "theme": "dark",
     "recent_projects": [],
 }
@@ -137,6 +151,72 @@ VALID_X264_PRESETS: list[str] = [
 # cadence; the integer values force a CFR conversion.
 VALID_OUTPUT_FPS: list[str] = ["source", "24", "25", "30", "50", "60"]
 
+# Output container/codec policy. ``video`` keeps the historical
+# H.264 + AAC MP4 behaviour; the other values produce standalone
+# audio files (video stream dropped). See CONFIG_DEFAULTS for the
+# codec/container mapping.
+VALID_OUTPUT_FORMATS: list[str] = ["video", "mp3", "opus", "aac", "wav", "flac"]
+
+# Per-format encoder/container spec used by the audio-extract path in
+# concat.py. Keys mirror the entries in ``VALID_OUTPUT_FORMATS``
+# (except ``video``, which doesn't go through the audio path).
+#
+# Each spec carries:
+#   * ``codec``    — ffmpeg encoder name (e.g. ``libmp3lame``);
+#   * ``ext``      — file extension without the dot;
+#   * ``lossless`` — True for wav/flac (``audio_quality`` bitrate is
+#     ignored, encoder runs in its native lossless mode);
+#   * ``extra_opts`` — output-side options appended after ``-c:a``
+#     (e.g. ``-compression_level 5`` for flac). Empty list for codecs
+#     that don't need extra tuning.
+#
+# The bitrate knob (``-b:a``) is added by the audio-extract code path
+# from ``_audio_bitrate()`` so it stays consistent with the existing
+# ``audio_quality`` presets; lossless formats skip it.
+OUTPUT_FORMAT_SPECS: dict[str, dict[str, Any]] = {
+    "mp3": {
+        "codec": "libmp3lame",
+        "ext": "mp3",
+        "lossless": False,
+        "extra_opts": [],
+    },
+    "opus": {
+        "codec": "libopus",
+        "ext": "opus",
+        "lossless": False,
+        # libopus defaults to 48 kHz stereo; the ``-application audio``
+        # hint biases the encoder toward music-quality VBR rather than
+        # voip-low-delay. ``-vbr on`` is the default but kept explicit
+        # so a future ffmpeg build that changes the default doesn't
+        # silently change the output quality.
+        "extra_opts": ["-application", "audio", "-vbr", "on"],
+    },
+    "aac": {
+        "codec": "aac",
+        "ext": "m4a",
+        "lossless": False,
+        # MP4 container requires +faststart for HTTP progressive
+        # playback; without it the moov atom sits at the end and the
+        # browser must download the whole file before playing.
+        "extra_opts": ["-movflags", "+faststart"],
+    },
+    "wav": {
+        "codec": "pcm_s16le",
+        "ext": "wav",
+        "lossless": True,
+        "extra_opts": [],
+    },
+    "flac": {
+        "codec": "flac",
+        "ext": "flac",
+        "lossless": True,
+        # 0=fastest, 12=smallest; 5 is ffmpeg's default and the sweet
+        # spot for music sources (encoding ~2-3x realtime on a modern
+        # CPU, ~50-60% the size of the WAV).
+        "extra_opts": ["-compression_level", "5"],
+    },
+}
+
 # Keys that are user-tunable defaults (exclude per-session state like
 # output_dir / recent_projects / input_path). Used by the GUI's
 # "Save current as defaults" button.
@@ -153,6 +233,7 @@ USER_DEFAULT_KEYS: list[str] = [
     "x264_preset",
     "encoder_threads",
     "output_fps",
+    "output_format",
     "memory_limit_mb",
     "memory_reserve_mb",
     "x264_low_memory",

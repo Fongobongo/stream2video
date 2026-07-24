@@ -85,6 +85,7 @@
 | Stall watchdog integration test (hung ffmpeg killed after stall_kill seconds — P1.5 regression net, real subprocess) | ✅ | (current) |
 | Toolkit smoke test на Windows (_tk_after dispatches to main thread; PipelineCallbacks surfaces invoke without raising; cancel_event cross-thread settable) | ✅ | (current) |
 | Non-AAC input codecs (Opus/MP3 in mkv) + channel layout (mono/5.1) + non-zero PTS regression tests; batch-path bug fix (start_time compensation for `-copyts` + `trim`/`atrim`) | ✅ | (current) |
+| Audio-only output formats (mp3/opus/aac-m4a/wav/flac) via `--output-format` / GUI combobox; new `_run_audio_extract` path + `_run_audio_concat_filter` for flac; `OUTPUT_FORMAT_SPECS` in config.py; 11 media correctness tests | ✅ | (current) |
 
 ### Что НЕ сделано (намеренно отложено)
 

@@ -115,6 +115,11 @@ class PipelineConfig:
     x264_preset: str
     encoder_threads: str | int
     output_fps: str
+    # Output container/codec policy. ``video`` preserves the historical
+    # H.264 + AAC MP4 behaviour; the other values (``mp3`` / ``opus`` /
+    # ``aac`` / ``wav`` / ``flac``) produce a standalone audio file
+    # (video stream dropped). See OUTPUT_FORMAT_SPECS in config.py.
+    output_format: str
     force: bool
     delete_after: bool
     per_video_dir: bool
@@ -494,10 +499,30 @@ class PipelineController:
         self.cb.on_log(
             f"Step 3/3: Cutting & concatenating "
             f"(method={self.cfg.method}, encoder={self.cfg.encoder}, "
-            f"video_quality={self.cfg.video_quality})..."
+            f"video_quality={self.cfg.video_quality}, "
+            f"output_format={self.cfg.output_format})..."
         )
 
-        output_path = output_dir / f"{video_path.stem}_compressed.mp4"
+        # Output filename extension follows the chosen output_format.
+        # ``video`` keeps the historical ``_compressed.mp4`` name; the
+        # audio-only formats use the codec's native extension (mp3, opus,
+        # m4a, wav, flac). Kept in sync with cli.py's suffix resolution
+        # via OUTPUT_FORMAT_SPECS.
+        from stream2video.config import OUTPUT_FORMAT_SPECS
+
+        if self.cfg.output_format == "video":
+            output_suffix = "compressed.mp4"
+        else:
+            spec = OUTPUT_FORMAT_SPECS.get(self.cfg.output_format)
+            if spec is None:
+                # Unreachable: validate_pipeline_config already rejected
+                # an unknown output_format. Defensive guard so a future
+                # caller that bypasses validation gets a clear error.
+                raise PipelineConcatError(
+                    f"Internal error: no spec for output_format {self.cfg.output_format!r}"
+                )
+            output_suffix = f"compressed.{spec['ext']}"
+        output_path = output_dir / f"{video_path.stem}_{output_suffix}"
         self._output_path = output_path
 
         cut_start = time.monotonic()
@@ -536,6 +561,7 @@ class PipelineController:
             x264_preset=self.cfg.x264_preset,
             encoder_threads=self.cfg.encoder_threads,
             output_fps=self.cfg.output_fps,
+            output_format=self.cfg.output_format,
             memory_limit_mb=self.cfg.memory_limit_mb,
             memory_reserve_mb=self.cfg.memory_reserve_mb,
             x264_low_memory=self.cfg.x264_low_memory,
@@ -618,6 +644,11 @@ def validate_pipeline_config(cfg: PipelineConfig) -> list[str]:
         errors.append(f"Unknown video_quality {cfg.video_quality!r}.")
     if cfg.audio_quality not in ("high", "medium", "low"):
         errors.append(f"Unknown audio_quality {cfg.audio_quality!r}.")
+    if cfg.output_format not in ("video", "mp3", "opus", "aac", "wav", "flac"):
+        errors.append(
+            f"Unknown output_format {cfg.output_format!r} "
+            "(use 'video', 'mp3', 'opus', 'aac', 'wav', or 'flac')."
+        )
     if not -60 <= cfg.threshold <= -5:
         errors.append(f"threshold {cfg.threshold} out of range [-60, -5].")
     if not 0.1 <= cfg.min_silence <= 60:

@@ -42,6 +42,7 @@ SAVE_SETTINGS_KEYS: tuple[str, ...] = (
     "video_quality",
     "audio_quality",
     "download_quality",
+    "output_format",
     "force",
     "delete_after",
     "per_video_dir",
@@ -64,6 +65,7 @@ USER_DEFAULTS_KEYS: tuple[str, ...] = (
     "video_quality",
     "audio_quality",
     "download_quality",
+    "output_format",
     "force",
     "delete_after",
     "per_video_dir",
@@ -85,6 +87,7 @@ def build_save_settings_snapshot(widgets: dict[str, Any]) -> dict[str, Any]:
             "video_quality":     str,   # combo_video_quality.get()
             "audio_quality":     str,   # combo_audio_quality.get()
             "download_quality":  str,   # combo_download_quality.get()
+            "output_format":     str,   # combo_output_format.get()
             "force":             bool,  # bool(chk_force.get())
             "delete_after":      bool,  # bool(chk_delete.get())
             "per_video_dir":     bool,  # bool(chk_per_video_dir.get())

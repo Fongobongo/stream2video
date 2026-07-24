@@ -47,6 +47,7 @@ def _valid_config(**overrides) -> PipelineConfig:
         "x264_preset": "medium",
         "encoder_threads": "auto",
         "output_fps": "source",
+        "output_format": "video",
         "force": False,
         "delete_after": False,
         "per_video_dir": True,
@@ -92,6 +93,7 @@ class TestPipelineConfig:
             "x264_preset",
             "encoder_threads",
             "output_fps",
+            "output_format",
             "force",
             "delete_after",
             "per_video_dir",
@@ -171,6 +173,16 @@ class TestValidatePipelineConfig:
         cfg = _valid_config(encoder="vp9")
         errors = validate_pipeline_config(cfg)
         assert any("Unknown encoder" in e for e in errors)
+
+    def test_unknown_output_format(self):
+        cfg = _valid_config(output_format="ogg")
+        errors = validate_pipeline_config(cfg)
+        assert any("Unknown output_format" in e for e in errors)
+
+    @pytest.mark.parametrize("fmt", ["video", "mp3", "opus", "aac", "wav", "flac"])
+    def test_all_output_formats_valid(self, fmt: str):
+        cfg = _valid_config(output_format=fmt)
+        assert validate_pipeline_config(cfg) == []
 
     def test_threshold_out_of_range(self):
         cfg = _valid_config(threshold=-70.0)
