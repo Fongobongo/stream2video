@@ -47,6 +47,7 @@ SAVE_SETTINGS_KEYS: tuple[str, ...] = (
     "delete_after",
     "per_video_dir",
     "x264_low_memory",
+    "gapless_concat",
     "theme",
     "window_geometry",
 )
@@ -70,6 +71,7 @@ USER_DEFAULTS_KEYS: tuple[str, ...] = (
     "delete_after",
     "per_video_dir",
     "x264_low_memory",
+    "gapless_concat",
     "theme",
 )
 
@@ -92,6 +94,7 @@ def build_save_settings_snapshot(widgets: dict[str, Any]) -> dict[str, Any]:
             "delete_after":      bool,  # bool(chk_delete.get())
             "per_video_dir":     bool,  # bool(chk_per_video_dir.get())
             "x264_low_memory":   bool,  # bool(chk_x264_low_memory.get())
+            "gapless_concat":    bool,  # bool(chk_gapless_concat.get())
             "theme":             str,   # combo_theme.get()
             "window_geometry":   str,   # self.geometry()
         }

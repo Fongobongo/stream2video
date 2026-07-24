@@ -192,6 +192,7 @@ def cut_and_concat(
     memory_limit_mb: str | int = "auto",
     memory_reserve_mb: int = 2048,
     x264_low_memory: bool = False,
+    gapless_concat: bool = False,
     segment_encode_timeout: int = _SEGMENT_ENCODE_TIMEOUT,
     final_concat_timeout: int = _FINAL_CONCAT_TIMEOUT,
     stall_kill_timeout: int = _STALL_KILL,
@@ -289,6 +290,7 @@ def cut_and_concat(
         source_has_audio=source_has_audio,
         output_fps=output_fps,
         x264_low_memory=x264_low_memory,
+        gapless_concat=gapless_concat,
         segment_encode_timeout=segment_encode_timeout,
         final_concat_timeout=final_concat_timeout,
         stall_kill=stall_kill_timeout,
@@ -1427,6 +1429,101 @@ def _run_audio_extract(
         raise
 
 
+def _run_gapless_segment_concat(
+    output_path: Path,
+    part_paths: list[Path],
+    vcodec: str,
+    vcodec_opts: list[str],
+    *,
+    audio_quality: str = "medium",
+    total_duration: float,
+    progress_callback: Callable[[float], None] | None = None,
+    cancel_callback: Callable[[], bool] | None = None,
+    timeout: int = _FINAL_CONCAT_TIMEOUT,
+    stall_kill: int = _STALL_KILL,
+    stall_warning: int = _STALL_WARNING,
+) -> None:
+    """Gapless segment join via concat filter (re-encode both streams).
+
+    The concat demuxer stream-copies per-segment AAC, preserving each
+    segment's encoder priming (~21ms at 48kHz) — N segments drift
+    ~21*N ms. The concat filter decodes every segment's audio into PCM,
+    concatenates the PCM buffers, and re-encodes once, so priming is
+    added only once (not per-segment).
+
+    Video is also re-encoded through the concat filter (``v=1:a=1``).
+    This is the trade-off of gapless_concat: the video quality loss is
+    one generation (H.264 → decode → H.264), but the output is truly
+    gapless (no per-segment priming on either stream). For lossless
+    video + gapless audio, use ``cut_then_encode`` instead — it does
+    one encode pass total, but sacrifices frame accuracy (``-c copy``
+    snaps to keyframes).
+
+    The command shape is::
+
+        ffmpeg -i seg_0.mp4 -i seg_1.mp4 ... -i seg_N.mp4 \\
+               -filter_complex "[0:v][0:a][1:v][1:a]...concat=n=N:v=1:a=1[outv][outa]" \\
+               -map "[outv]" -map "[outa]" \\
+               -c:v <vcodec> <vcodec_opts> -c:a aac -b:a <bitrate> \\
+               -ar 48000 -ac 2 -movflags +faststart \\
+               output.mp4
+
+    The ``-filter_complex`` graph interleaves video and audio pads
+    (``[0:v][0:a][1:v][1:a]...``) because the concat filter expects
+    them in that order, not all-videos-then-all-audios.
+    """
+    n = len(part_paths)
+    if n == 0:
+        raise ConcatError("gapless concat: no parts to join")
+
+    _set_audio_quality(audio_quality)
+    inputs: list[str] = []
+    for p in part_paths:
+        inputs.extend(["-i", str(p)])
+    # concat filter expects interleaved [v0][a0][v1][a1]... ordering.
+    chain = "".join(f"[{i}:v][{i}:a]" for i in range(n))
+    graph = f"{chain}concat=n={n}:v=1:a=1[outv][outa]"
+
+    def _concat_prog(us: int) -> None:
+        if progress_callback and total_duration > 0:
+            progress_callback(min(us / 1_000_000 / total_duration * 0.1, 0.1) + 0.9)
+
+    _run_ffmpeg(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-progress",
+            "pipe:1",
+            *inputs,
+            "-filter_complex",
+            graph,
+            "-map",
+            "[outv]",
+            "-map",
+            "[outa]",
+            "-c:v",
+            vcodec,
+            *vcodec_opts,
+            "-c:a",
+            "aac",
+            "-b:a",
+            _audio_bitrate(),
+            *_audio_opts(),
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ],
+        progress_callback=_concat_prog,
+        timeout=timeout,
+        label="gapless segment concat",
+        cancel_callback=cancel_callback,
+        stall_kill=stall_kill,
+        stall_warning=stall_warning,
+    )
+
+
 def _run_segment_concat(
     video_path: Path,
     keep_segments: list[tuple[float, float]],
@@ -1442,13 +1539,14 @@ def _run_segment_concat(
     encoder_threads: str | int = "auto",
     source_has_audio: bool = True,
     output_fps: str = "source",
+    gapless_concat: bool = False,
     segment_encode_timeout: int = _SEGMENT_ENCODE_TIMEOUT,
     final_concat_timeout: int = _FINAL_CONCAT_TIMEOUT,
     stall_kill: int = _STALL_KILL,
     stall_warning: int = _STALL_WARNING,
     min_part_bytes: int = _MIN_PART_BYTES,
 ) -> None:
-    """Encode each segment, join with concat demuxer.
+    """Encode each segment, join with concat demuxer (or concat filter for gapless).
 
     Segments are stored in a dedicated subdirectory.  If a previous run was
     interrupted, already-encoded segments are reused (resume from where it
@@ -1619,20 +1717,56 @@ def _run_segment_concat(
                 f"segment: resumed {skipped}/{n_segs} already encoded, encoded {n_segs - skipped}"
             )
 
-        # Final concat demuxer pass -- shared with _run_batch_concat (P2.6).
+        # Final join. Two strategies, picked by the ``gapless_concat``
+        # flag and whether the source has audio:
+        #
+        #   * **concat demuxer** (default, or audio-less source) —
+        #     stream-copies per-segment video + audio into one file.
+        #     Fast, lossless for video, but preserves per-segment AAC
+        #     priming (~21ms per segment at 48kHz) which accumulates as
+        #     A/V drift on multi-segment outputs (10 segments → ~170ms).
+        #
+        #   * **concat filter** (``gapless_concat=True`` + audio source)
+        #     — re-encodes through a single PCM pipeline so priming is
+        #     added only once (not per-segment), giving gapless audio.
+        #     Both video and audio are re-encoded (the concat filter's
+        #     ``v=1:a=1`` joins both streams). The trade-off is one
+        #     generation of video quality loss (H.264 → decode → H.264);
+        #     for lossless video + gapless audio, use ``cut_then_encode``
+        #     (one encode pass, but sacrifices frame accuracy via
+        #     keyframe snap).
+        #
+        # Audio-less sources always use the demuxer path: there's no
+        # priming to compensate for, so the concat filter would just
+        # add a pointless re-encode of nothing.
         part_paths = [seg_dir / f"seg_{i:06d}.mp4" for i in range(n_segs)]
-        _run_final_concat(
-            seg_dir,
-            output_path,
-            part_paths,
-            total_duration=total_duration,
-            progress_callback=progress_callback,
-            cancel_callback=cancel_callback,
-            label="segment concat",
-            timeout=final_concat_timeout,
-            stall_kill=stall_kill,
-            stall_warning=stall_warning,
-        )
+        if gapless_concat and source_has_audio and n_segs > 1:
+            _run_gapless_segment_concat(
+                output_path,
+                part_paths,
+                vcodec,
+                vcodec_opts,
+                audio_quality=audio_quality,
+                total_duration=total_duration,
+                progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+                timeout=final_concat_timeout,
+                stall_kill=stall_kill,
+                stall_warning=stall_warning,
+            )
+        else:
+            _run_final_concat(
+                seg_dir,
+                output_path,
+                part_paths,
+                total_duration=total_duration,
+                progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+                label="segment concat",
+                timeout=final_concat_timeout,
+                stall_kill=stall_kill,
+                stall_warning=stall_warning,
+            )
         logger.info(f"Successfully created output: {output_path}")
 
         # Cleanup on success
@@ -1876,6 +2010,7 @@ def _run_with_fallback(
     source_has_audio: bool = True,
     output_fps: str = "source",
     x264_low_memory: bool = False,
+    gapless_concat: bool = False,
     segment_encode_timeout: int = _SEGMENT_ENCODE_TIMEOUT,
     final_concat_timeout: int = _FINAL_CONCAT_TIMEOUT,
     stall_kill: int = _STALL_KILL,
@@ -1936,6 +2071,7 @@ def _run_with_fallback(
                 encoder_threads=encoder_threads,
                 source_has_audio=source_has_audio,
                 output_fps=output_fps,
+                gapless_concat=gapless_concat,
                 segment_encode_timeout=segment_encode_timeout,
                 final_concat_timeout=final_concat_timeout,
                 stall_kill=stall_kill,

@@ -86,6 +86,7 @@
 | Toolkit smoke test на Windows (_tk_after dispatches to main thread; PipelineCallbacks surfaces invoke without raising; cancel_event cross-thread settable) | ✅ | (current) |
 | Non-AAC input codecs (Opus/MP3 in mkv) + channel layout (mono/5.1) + non-zero PTS regression tests; batch-path bug fix (start_time compensation for `-copyts` + `trim`/`atrim`) | ✅ | (current) |
 | Audio-only output formats (mp3/opus/aac-m4a/wav/flac) via `--output-format` / GUI combobox; new `_run_audio_extract` path + `_run_audio_concat_filter` for flac; `OUTPUT_FORMAT_SPECS` in config.py; 11 media correctness tests | ✅ | (current) |
+| AAC priming/gapless concat (`--gapless-concat` / GUI checkbox / `gapless_concat` config key); segment path's final join uses concat filter (re-encode) instead of concat demuxer (stream copy) so priming is added once, not per-segment; `_run_gapless_segment_concat` in concat.py; 3 media correctness tests | ✅ | (current) |
 
 ### Что НЕ сделано (намеренно отложено)
 
@@ -480,7 +481,7 @@ Timeouts, audio bitrate, batch size, hybrid offset, pad и stall intervals ра�
 - [x] Передавать audio options в segment, batch и fallback paths.
 - [x] Сохранять sample rate / channel layout — документирован conversion в 48kHz stereo; preserve будет отдельным PR.
 - [x] Исследовать один encode после общей нарезки — ✅ выполнено (method `cut_then_encode`: lossless cut `-c copy` → concat demuxer → один final encode; лучшее качество через один encode pass; см. `_run_cut_then_encode` в concat.py:1647, тесты `test_cut_then_encode_basic` / `test_cut_then_encode_no_audio`).
-- [ ] Проверить AAC priming/gapless metadata — deferred (требует аудиоанализа).
+- [x] Проверить AAC priming/gapless metadata — ✅ выполнено (`gapless_concat` config key / `--gapless-concat` CLI flag / GUI checkbox; segment path's final join uses concat filter (re-encode) instead of concat demuxer (stream copy) when enabled, so per-segment AAC priming (~21ms per segment) is added only once, not per-segment. `_run_gapless_segment_concat` in concat.py. 3 media correctness tests: drift measurement, frame count preservation, single-segment demuxer fallback. Trade-off: video is re-encoded (one generation loss); for lossless video + gapless audio use `cut_then_encode`).
 - [x] Добавить тест: output bitrate — `test_audio_quality_high_preserves_bitrate` проверяет high > low.
 - [x] Добавить спектральный/сигнальный smoke-test — ✅ выполнено (`TestSpectralAudio` в tests/test_spectral_audio.py: numpy FFT, 6 тестов: dominant frequency preserved, RMS level, spectral leakage, tone frequency shift, multi-segment integrity, noise floor).
 

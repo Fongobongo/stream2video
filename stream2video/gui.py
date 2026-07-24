@@ -233,6 +233,7 @@ class Stream2VideoGUI(
         # extension and the audio-extract short-circuit in cut_and_concat,
         # so a stale self.config value would produce the wrong output.
         self.config["output_format"] = self.combo_output_format.get()
+        self.config["gapless_concat"] = bool(self.chk_gapless_concat.get())
         force = bool(self.chk_force.get())
         per_video_dir = bool(self.chk_per_video_dir.get())
         delete_after = bool(self.chk_delete.get())

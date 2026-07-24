@@ -172,6 +172,7 @@ def build_pipeline_config_from_snapshot(
         memory_limit_mb=config.get("memory_limit_mb", "auto"),
         memory_reserve_mb=config.get("memory_reserve_mb", 2048),
         x264_low_memory=config.get("x264_low_memory", False),
+        gapless_concat=config.get("gapless_concat", False),
         download_timeout=config.get("download_timeout", 28800),
         connect_timeout=config.get("connect_timeout", 300),
         no_progress_timeout=config.get("no_progress_timeout", 1800),

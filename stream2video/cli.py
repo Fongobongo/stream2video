@@ -334,6 +334,16 @@ def main(
         "bframes=0. Produces slightly larger files but uses significantly less "
         "RAM during encode. Useful on memory-constrained machines (4-8 GB).",
     ),
+    gapless_concat: bool = typer.Option(
+        False,
+        "--gapless-concat/--no-gapless-concat",
+        help="Re-encode audio in the final concat pass so per-segment AAC "
+        "priming (~21ms per segment) doesn't accumulate as A/V drift on "
+        "multi-segment outputs. Default off (concat demuxer, faster). "
+        "Video is stream-copied; only audio is re-encoded. Equivalent to "
+        "cut_then_encode's gapless property but with frame accuracy "
+        "(cut_then_encode sacrifices it via -c copy keyframe snap).",
+    ),
     delete_after: bool | None = typer.Option(
         None,
         "--delete-after",
@@ -629,6 +639,14 @@ def main(
 
         resolved_x264_low_memory: bool = _resolved_x264_low_memory(x264_low_memory)
 
+        def _resolved_gapless_concat(flag_value: bool) -> bool:
+            src = ctx.get_parameter_source("gapless_concat")
+            if src == ParameterSource.COMMANDLINE:
+                return flag_value
+            return bool(config.get("gapless_concat", False))
+
+        resolved_gapless_concat: bool = _resolved_gapless_concat(gapless_concat)
+
         def _resolved_bool(name: str, flag_value: bool | None) -> bool:
             src = ctx.get_parameter_source(name)
             if src == ParameterSource.COMMANDLINE:
@@ -896,6 +914,7 @@ def main(
                     memory_limit_mb=resolved_memory_limit_mb,
                     memory_reserve_mb=resolved_memory_reserve_mb,
                     x264_low_memory=resolved_x264_low_memory,
+                    gapless_concat=resolved_gapless_concat,
                     segment_encode_timeout=segment_encode_timeout,
                     final_concat_timeout=final_concat_timeout,
                     stall_kill_timeout=stall_kill_timeout,
