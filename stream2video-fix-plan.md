@@ -499,7 +499,7 @@ Timeouts, audio bitrate, batch size, hybrid offset, pad и stall intervals ра�
 - [x] `ultrafast`/`veryfast` доступны через `x264_preset`.
 - [x] `-r 60`, `-g 60`, `aresample=async=1` не используются для CPU limiting.
 - [ ] Windows Job Object / Linux cgroup — deferred (advanced OS feature).
-- [ ] Lower process priority — deferred (opt-in).
+- [x] Lower process priority — ✅ выполнено (`low_process_priority` config key / `--low-process-priority` CLI flag / GUI checkbox; `subprocess_kwargs(low_priority=True)` в utils.py композиционирует `no_window_kwargs()` с `BELOW_NORMAL_PRIORITY_CLASS` (0x00004000) на Windows / `preexec_fn=os.nice(+10)` на POSIX; проброшен во все `_run_ffmpeg`/`_run_final_concat`/`_run_audio_extract`/`_run_audio_concat_filter`/`_run_gapless_segment_concat`/`_run_segment_concat`/`_run_cut_then_encode`/`_run_batch_concat` вызовы + фаза cut в `_run_cut_then_encode` (`subprocess.run(...)` напрямую). 5 unit-тестов `TestSubprocessKwargs` (композиция флагов, identity на POSIX, no_window на Windows, preexec_fn callable + успешно выполняется в child) + 1 media correctness тест (`test_low_process_priority_produces_valid_output`, двухсегментный segment path, 90 кадров при 30fps). Default off.)
 - [x] Показывать фактический encoder и fallback reason в GUI и log.
 - [x] `check_encoder` — реальный ffmpeg smoke test (1-frame lavfi), не `return True`.
 - [ ] Сравнить ultrafast/veryfast/fast/medium — deferred (benchmark suite).

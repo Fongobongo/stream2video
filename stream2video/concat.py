@@ -34,6 +34,7 @@ from stream2video.utils import (
     no_window_kwargs,
     read_lines_queue,
     set_active_process,
+    subprocess_kwargs,
 )
 
 if TYPE_CHECKING:
@@ -193,6 +194,7 @@ def cut_and_concat(
     memory_reserve_mb: int = 2048,
     x264_low_memory: bool = False,
     gapless_concat: bool = False,
+    low_process_priority: bool = False,
     segment_encode_timeout: int = _SEGMENT_ENCODE_TIMEOUT,
     final_concat_timeout: int = _FINAL_CONCAT_TIMEOUT,
     stall_kill_timeout: int = _STALL_KILL,
@@ -247,6 +249,7 @@ def cut_and_concat(
             stall_kill=stall_kill_timeout,
             stall_warning=stall_warning_timeout,
             min_part_bytes=min_part_bytes,
+            low_process_priority=low_process_priority,
         )
         return output_path
 
@@ -291,6 +294,7 @@ def cut_and_concat(
         output_fps=output_fps,
         x264_low_memory=x264_low_memory,
         gapless_concat=gapless_concat,
+        low_process_priority=low_process_priority,
         segment_encode_timeout=segment_encode_timeout,
         final_concat_timeout=final_concat_timeout,
         stall_kill=stall_kill_timeout,
@@ -651,6 +655,7 @@ def _run_ffmpeg(
     memory_monitor: "MemoryMonitor | None" = None,
     stall_kill: int = _STALL_KILL,
     stall_warning: int = _STALL_WARNING,
+    low_process_priority: bool = False,
 ) -> None:
     """Run an ffmpeg command. With track_progress=True (default), parses ffmpeg's
     -progress stream from stdout and invokes progress_callback(us). With False,
@@ -677,7 +682,7 @@ def _run_ffmpeg(
             stdout=stdout_target,
             stderr=subprocess.PIPE,
             bufsize=-1,
-            **no_window_kwargs(),
+            **subprocess_kwargs(low_process_priority),
         )
     except FileNotFoundError as e:
         raise FFmpegError("ffmpeg not found in PATH") from e
@@ -1091,6 +1096,7 @@ def _run_final_concat(
     timeout: int = _FINAL_CONCAT_TIMEOUT,
     stall_kill: int = _STALL_KILL,
     stall_warning: int = _STALL_WARNING,
+    low_process_priority: bool = False,
 ) -> None:
     """Build ``concat.txt`` and run the final concat-demuxer pass.
 
@@ -1142,6 +1148,7 @@ def _run_final_concat(
         cancel_callback=cancel_callback,
         stall_kill=stall_kill,
         stall_warning=stall_warning,
+        low_process_priority=low_process_priority,
     )
 
 
@@ -1157,6 +1164,7 @@ def _run_audio_concat_filter(
     timeout: int = _FINAL_CONCAT_TIMEOUT,
     stall_kill: int = _STALL_KILL,
     stall_warning: int = _STALL_WARNING,
+    low_process_priority: bool = False,
 ) -> None:
     """Join audio parts via the ``concat`` filter (re-encode path).
 
@@ -1213,6 +1221,7 @@ def _run_audio_concat_filter(
         cancel_callback=cancel_callback,
         stall_kill=stall_kill,
         stall_warning=stall_warning,
+        low_process_priority=low_process_priority,
     )
 
 
@@ -1229,6 +1238,7 @@ def _run_audio_extract(
     stall_kill: int = _STALL_KILL,
     stall_warning: int = _STALL_WARNING,
     min_part_bytes: int = _MIN_PART_BYTES,
+    low_process_priority: bool = False,
 ) -> None:
     """Extract audio-only output (mp3/opus/aac/wav/flac) from keep segments.
 
@@ -1362,6 +1372,7 @@ def _run_audio_extract(
                 cancel_callback=cancel_callback,
                 stall_kill=stall_kill,
                 stall_warning=stall_warning,
+                low_process_priority=low_process_priority,
             )
 
             encoded_keep += dur
@@ -1406,6 +1417,7 @@ def _run_audio_extract(
                 timeout=final_concat_timeout,
                 stall_kill=stall_kill,
                 stall_warning=stall_warning,
+                low_process_priority=low_process_priority,
             )
         else:
             _run_final_concat(
@@ -1419,6 +1431,7 @@ def _run_audio_extract(
                 timeout=final_concat_timeout,
                 stall_kill=stall_kill,
                 stall_warning=stall_warning,
+                low_process_priority=low_process_priority,
             )
         logger.info(f"Successfully created audio output: {output_path}")
 
@@ -1442,6 +1455,7 @@ def _run_gapless_segment_concat(
     timeout: int = _FINAL_CONCAT_TIMEOUT,
     stall_kill: int = _STALL_KILL,
     stall_warning: int = _STALL_WARNING,
+    low_process_priority: bool = False,
 ) -> None:
     """Gapless segment join via concat filter (re-encode both streams).
 
@@ -1521,6 +1535,7 @@ def _run_gapless_segment_concat(
         cancel_callback=cancel_callback,
         stall_kill=stall_kill,
         stall_warning=stall_warning,
+        low_process_priority=low_process_priority,
     )
 
 
@@ -1540,6 +1555,7 @@ def _run_segment_concat(
     source_has_audio: bool = True,
     output_fps: str = "source",
     gapless_concat: bool = False,
+    low_process_priority: bool = False,
     segment_encode_timeout: int = _SEGMENT_ENCODE_TIMEOUT,
     final_concat_timeout: int = _FINAL_CONCAT_TIMEOUT,
     stall_kill: int = _STALL_KILL,
@@ -1706,6 +1722,7 @@ def _run_segment_concat(
                 cancel_callback=cancel_callback,
                 stall_kill=stall_kill,
                 stall_warning=stall_warning,
+                low_process_priority=low_process_priority,
             )
 
             encoded_keep += dur
@@ -1753,6 +1770,7 @@ def _run_segment_concat(
                 timeout=final_concat_timeout,
                 stall_kill=stall_kill,
                 stall_warning=stall_warning,
+                low_process_priority=low_process_priority,
             )
         else:
             _run_final_concat(
@@ -1766,6 +1784,7 @@ def _run_segment_concat(
                 timeout=final_concat_timeout,
                 stall_kill=stall_kill,
                 stall_warning=stall_warning,
+                low_process_priority=low_process_priority,
             )
         logger.info(f"Successfully created output: {output_path}")
 
@@ -1798,6 +1817,7 @@ def _run_cut_then_encode(
     stall_kill: int = _STALL_KILL,
     stall_warning: int = _STALL_WARNING,
     min_part_bytes: int = _MIN_PART_BYTES,
+    low_process_priority: bool = False,
 ) -> None:
     """Cut lossless segments, concat losslessly, then do ONE final encode.
 
@@ -1899,7 +1919,12 @@ def _run_cut_then_encode(
                     str(cut_path),
                 ]
             )
-            subprocess.run(cmd, check=True, capture_output=True)
+            subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                **subprocess_kwargs(low_process_priority),
+            )
             if progress_callback:
                 progress_callback(cut_progress_base + (i + 1) / n_segs * cut_progress_span)
 
@@ -1924,6 +1949,7 @@ def _run_cut_then_encode(
                 timeout=final_concat_timeout,
                 stall_kill=stall_kill,
                 stall_warning=stall_warning,
+                low_process_priority=low_process_priority,
             )
 
         # ── Phase 3: One final encode ──
@@ -1981,6 +2007,7 @@ def _run_cut_then_encode(
             cancel_callback=cancel_callback,
             stall_kill=stall_kill,
             stall_warning=stall_warning,
+            low_process_priority=low_process_priority,
         )
         logger.info(f"Successfully created output (cut_then_encode): {output_path}")
 
@@ -2011,6 +2038,7 @@ def _run_with_fallback(
     output_fps: str = "source",
     x264_low_memory: bool = False,
     gapless_concat: bool = False,
+    low_process_priority: bool = False,
     segment_encode_timeout: int = _SEGMENT_ENCODE_TIMEOUT,
     final_concat_timeout: int = _FINAL_CONCAT_TIMEOUT,
     stall_kill: int = _STALL_KILL,
@@ -2072,6 +2100,7 @@ def _run_with_fallback(
                 source_has_audio=source_has_audio,
                 output_fps=output_fps,
                 gapless_concat=gapless_concat,
+                low_process_priority=low_process_priority,
                 segment_encode_timeout=segment_encode_timeout,
                 final_concat_timeout=final_concat_timeout,
                 stall_kill=stall_kill,
@@ -2099,6 +2128,7 @@ def _run_with_fallback(
                 stall_kill=stall_kill,
                 stall_warning=stall_warning,
                 min_part_bytes=min_part_bytes,
+                low_process_priority=low_process_priority,
             )
         else:
             _run_batch_concat(
@@ -2122,6 +2152,7 @@ def _run_with_fallback(
                 stall_warning=stall_warning,
                 batch_chunk_size=batch_chunk_size,
                 min_part_bytes=min_part_bytes,
+                low_process_priority=low_process_priority,
             )
 
     _with_libx264_fallback(
@@ -2161,6 +2192,7 @@ def _run_batch_concat(
     stall_warning: int = _STALL_WARNING,
     batch_chunk_size: int = _BATCH_CHUNK_SIZE,
     min_part_bytes: int = _MIN_PART_BYTES,
+    low_process_priority: bool = False,
 ) -> None:
     """Process chunks sequentially: each chunk → temp file, then concat.
 
@@ -2453,6 +2485,7 @@ def _run_batch_concat(
                     cancel_callback=cancel_callback,
                     stall_kill=stall_kill,
                     stall_warning=stall_warning,
+                    low_process_priority=low_process_priority,
                 )
             finally:
                 Path(script_path).unlink(missing_ok=True)
@@ -2480,6 +2513,7 @@ def _run_batch_concat(
             timeout=final_concat_timeout,
             stall_kill=stall_kill,
             stall_warning=stall_warning,
+            low_process_priority=low_process_priority,
         )
         logger.info(f"batch: successfully created {output_path}")
 

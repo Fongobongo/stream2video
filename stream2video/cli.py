@@ -344,6 +344,15 @@ def main(
         "cut_then_encode's gapless property but with frame accuracy "
         "(cut_then_encode sacrifices it via -c copy keyframe snap).",
     ),
+    low_process_priority: bool = typer.Option(
+        False,
+        "--low-process-priority/--no-low-process-priority",
+        help="Spawn ffmpeg at a lower scheduling priority so a long-running "
+        "encode doesn't starve interactive applications. On Windows: "
+        "BELOW_NORMAL_PRIORITY_CLASS; on Linux/macOS: nice +10. Useful for "
+        "unattended batch processing on shared/desktop machines. Default "
+        "off (normal priority, faster encoding).",
+    ),
     delete_after: bool | None = typer.Option(
         None,
         "--delete-after",
@@ -647,6 +656,14 @@ def main(
 
         resolved_gapless_concat: bool = _resolved_gapless_concat(gapless_concat)
 
+        def _resolved_low_process_priority(flag_value: bool) -> bool:
+            src = ctx.get_parameter_source("low_process_priority")
+            if src == ParameterSource.COMMANDLINE:
+                return flag_value
+            return bool(config.get("low_process_priority", False))
+
+        resolved_low_process_priority: bool = _resolved_low_process_priority(low_process_priority)
+
         def _resolved_bool(name: str, flag_value: bool | None) -> bool:
             src = ctx.get_parameter_source(name)
             if src == ParameterSource.COMMANDLINE:
@@ -915,6 +932,7 @@ def main(
                     memory_reserve_mb=resolved_memory_reserve_mb,
                     x264_low_memory=resolved_x264_low_memory,
                     gapless_concat=resolved_gapless_concat,
+                    low_process_priority=resolved_low_process_priority,
                     segment_encode_timeout=segment_encode_timeout,
                     final_concat_timeout=final_concat_timeout,
                     stall_kill_timeout=stall_kill_timeout,

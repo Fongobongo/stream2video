@@ -401,6 +401,43 @@ def no_window_kwargs() -> dict:
     return {}
 
 
+def subprocess_kwargs(low_priority: bool = False) -> dict:
+    """Return subprocess kwargs for ffmpeg invocations.
+
+    Always suppresses the console window on Windows (see
+    ``no_window_kwargs``). When ``low_priority`` is True, additionally
+    lowers the spawned process's scheduling priority so a long encode
+    doesn't starve interactive applications:
+
+    * Windows: OR ``BELOW_NORMAL_PRIORITY_CLASS`` (0x00004000) into
+      ``creationflags`` (composes with ``CREATE_NO_WINDOW``).
+    * POSIX (Linux/macOS): set ``preexec_fn`` to ``os.nice(10)`` so the
+      child starts at a higher nice level (lower priority).
+
+    ``preexec_fn`` is unreliable in multi-threaded programs and is
+    only used when explicitly requested (opt-in via
+    ``low_process_priority``). Default False preserves the historical
+    behaviour.
+    """
+    kw = no_window_kwargs()
+    if not low_priority:
+        return kw
+    if sys.platform == "win32":
+        flags = kw.get("creationflags", 0)
+        kw["creationflags"] = flags | 0x00004000  # BELOW_NORMAL_PRIORITY_CLASS
+    else:
+        import os
+
+        def _nice_child() -> None:
+            try:
+                os.nice(10)
+            except OSError:
+                pass
+
+        kw["preexec_fn"] = _nice_child
+    return kw
+
+
 # ---------------------------------------------------------------------------
 # Shared subprocess runner (P2.4)
 # ---------------------------------------------------------------------------

@@ -48,6 +48,7 @@ SAVE_SETTINGS_KEYS: tuple[str, ...] = (
     "per_video_dir",
     "x264_low_memory",
     "gapless_concat",
+    "low_process_priority",
     "theme",
     "window_geometry",
 )
@@ -72,6 +73,7 @@ USER_DEFAULTS_KEYS: tuple[str, ...] = (
     "per_video_dir",
     "x264_low_memory",
     "gapless_concat",
+    "low_process_priority",
     "theme",
 )
 
@@ -95,6 +97,7 @@ def build_save_settings_snapshot(widgets: dict[str, Any]) -> dict[str, Any]:
             "per_video_dir":     bool,  # bool(chk_per_video_dir.get())
             "x264_low_memory":   bool,  # bool(chk_x264_low_memory.get())
             "gapless_concat":    bool,  # bool(chk_gapless_concat.get())
+            "low_process_priority": bool,  # bool(chk_low_process_priority.get())
             "theme":             str,   # combo_theme.get()
             "window_geometry":   str,   # self.geometry()
         }

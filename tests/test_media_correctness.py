@@ -1650,3 +1650,39 @@ def test_gapless_concat_single_segment_uses_demuxer(synthetic_source: Path, tmp_
     assert frames is not None and abs(frames - 120) <= 1, (
         f"gapless single-segment: frames {frames} != 120; info={info}"
     )
+
+
+def test_low_process_priority_produces_valid_output(synthetic_source: Path, tmp_path: Path):
+    """low_process_priority=True applies priority flags to the spawned
+    ffmpeg subprocesses without breaking the encode pipeline.
+
+    Verifies that ``subprocess_kwargs(low_priority=True)`` composes
+    safely with ``no_window_kwargs()`` on both Windows (CREATE_NO_WINDOW
+    OR BELOW_NORMAL_PRIORITY_CLASS) and POSIX (preexec_fn=os.nice(+10))
+    across the per-segment encode + final concat join, producing a
+    valid MP4 with the expected frame count. A regression in the
+    kwargs composition would surface as a Popen error or a corrupt
+    output file.
+    """
+    out = tmp_path / "out_low_prio.mp4"
+    silence = [SilenceSegment(1.0, 3.0), SilenceSegment(5.0, 7.0)]
+    cut_and_concat(
+        synthetic_source,
+        silence,
+        out,
+        method="segment",
+        encoder="libx264",
+        video_quality="medium",
+        low_process_priority=True,
+    )
+    info = _probe(out)
+    frames = info.get("nb_read_frames_video")
+    # Source is 6s @ 30fps; with silence segments (1-3, 5-6 clamped from
+    # 5-7) the kept range is 0-1 + 3-5 = 3s ≈ 90 frames. Allow ±2
+    # tolerance for boundary frames.
+    assert frames is not None and abs(frames - 90) <= 2, (
+        f"low_process_priority: frames {frames} != 90; info={info}"
+    )
+    # Sanity check: the output is a valid video + audio MP4.
+    assert "video" in info.get("codec_types", [])
+    assert "audio" in info.get("codec_types", [])

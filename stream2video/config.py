@@ -61,6 +61,13 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     # ``gapless_concat`` keeps frame accuracy AND gapless audio. Default
     # False preserves the historical behaviour (concat demuxer, faster).
     "gapless_concat": False,
+    # Lower ffmpeg scheduling priority (opt-in, P3.x). When True, ffmpeg
+    # subprocesses are spawned at BELOW_NORMAL_PRIORITY_CLASS on Windows
+    # and nice +10 on POSIX so a long-running encode doesn't starve
+    # interactive applications. Useful for unattended batch processing
+    # on shared/desktop machines. Default False preserves the historical
+    # behaviour (normal priority, faster encoding).
+    "low_process_priority": False,
     # Download watchdog timeouts (P1.6). Absolute ceiling + two-stage
     # watchdog so a stalled connection doesn't wait the full ceiling.
     # Exposed via --download-timeout / --connect-timeout /
@@ -251,6 +258,7 @@ USER_DEFAULT_KEYS: list[str] = [
     "memory_reserve_mb",
     "x264_low_memory",
     "gapless_concat",
+    "low_process_priority",
     "download_timeout",
     "connect_timeout",
     "no_progress_timeout",
