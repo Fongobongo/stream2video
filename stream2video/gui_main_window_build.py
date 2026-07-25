@@ -350,6 +350,23 @@ class MainWindowBuildMixin:
             "with frame accuracy.",
         )
 
+        self.chk_low_process_priority = ctk.CTkCheckBox(
+            ctrl_frame,
+            text="Low process priority (ffmpeg runs below-normal)",
+        )
+        if self.config.get("low_process_priority", False):
+            self.chk_low_process_priority.select()
+        self.chk_low_process_priority.pack(anchor="w", padx=5, pady=(4, 1))
+        _Tooltip(
+            self.chk_low_process_priority,
+            "Spawns ffmpeg at a lower scheduling priority so a "
+            "long-running encode doesn't starve interactive "
+            "applications. On Windows: BELOW_NORMAL_PRIORITY_CLASS; "
+            "on Linux/macOS: nice +10. Useful for unattended batch "
+            "processing on shared/desktop machines. Default off "
+            "(normal priority, faster encoding).",
+        )
+
         ctk.CTkFrame(ctrl_frame, height=2, fg_color=("gray70", "gray30")).pack(
             fill="x", padx=5, pady=4
         )

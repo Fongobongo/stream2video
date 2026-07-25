@@ -234,6 +234,7 @@ class Stream2VideoGUI(
         # so a stale self.config value would produce the wrong output.
         self.config["output_format"] = self.combo_output_format.get()
         self.config["gapless_concat"] = bool(self.chk_gapless_concat.get())
+        self.config["low_process_priority"] = bool(self.chk_low_process_priority.get())
         force = bool(self.chk_force.get())
         per_video_dir = bool(self.chk_per_video_dir.get())
         delete_after = bool(self.chk_delete.get())

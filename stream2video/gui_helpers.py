@@ -45,6 +45,7 @@ def build_cli_command(
     output_format: str = "video",
     x264_low_memory: bool = False,
     gapless_concat: bool = False,
+    low_process_priority: bool = False,
     memory_limit_mb: str | int = "auto",
     memory_reserve_mb: int = 2048,
     segment_encode_timeout: int = 600,
@@ -107,6 +108,8 @@ def build_cli_command(
         parts.append("--x264-low-memory")
     if gapless_concat:
         parts.append("--gapless-concat")
+    if low_process_priority:
+        parts.append("--low-process-priority")
     if memory_limit_mb != "auto":
         parts.extend(["--memory-limit-mb", str(memory_limit_mb)])
     if memory_reserve_mb != 2048:

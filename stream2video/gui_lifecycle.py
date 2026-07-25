@@ -60,6 +60,7 @@ class LifecycleMixin:
             "per_video_dir": bool(self.chk_per_video_dir.get()),
             "x264_low_memory": bool(self.chk_x264_low_memory.get()),
             "gapless_concat": bool(self.chk_gapless_concat.get()),
+            "low_process_priority": bool(self.chk_low_process_priority.get()),
             "theme": self.combo_theme.get(),
             "window_geometry": self.geometry(),
         }
@@ -93,6 +94,9 @@ class LifecycleMixin:
         self._set_checkbox(self.chk_per_video_dir, self.config["per_video_dir"])
         self._set_checkbox(self.chk_x264_low_memory, self.config.get("x264_low_memory", False))
         self._set_checkbox(self.chk_gapless_concat, self.config.get("gapless_concat", False))
+        self._set_checkbox(
+            self.chk_low_process_priority, self.config.get("low_process_priority", False)
+        )
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
         win_w, win_h = self._fit_to_screen(sw, sh)
@@ -149,6 +153,7 @@ class LifecycleMixin:
             "per_video_dir": bool(self.chk_per_video_dir.get()),
             "x264_low_memory": bool(self.chk_x264_low_memory.get()),
             "gapless_concat": bool(self.chk_gapless_concat.get()),
+            "low_process_priority": bool(self.chk_low_process_priority.get()),
             "theme": self.combo_theme.get(),
         }
         snapshot = build_user_defaults_snapshot(widgets)
@@ -172,6 +177,7 @@ class LifecycleMixin:
         delete_after = bool(self.chk_delete.get())
         x264_low_memory = bool(self.chk_x264_low_memory.get())
         gapless_concat = bool(self.chk_gapless_concat.get())
+        low_process_priority = bool(self.chk_low_process_priority.get())
         memory_limit_mb = self.config.get("memory_limit_mb", "auto")
         memory_reserve_mb = self.config.get("memory_reserve_mb", 2048)
 
@@ -198,6 +204,7 @@ class LifecycleMixin:
             delete_after=delete_after,
             x264_low_memory=x264_low_memory,
             gapless_concat=gapless_concat,
+            low_process_priority=low_process_priority,
             memory_limit_mb=memory_limit_mb,
             memory_reserve_mb=memory_reserve_mb,
             segment_encode_timeout=self.config.get("segment_encode_timeout", 600),

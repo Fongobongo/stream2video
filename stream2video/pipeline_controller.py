@@ -135,6 +135,11 @@ class PipelineConfig:
     # accumulate as A/V drift on multi-segment outputs. Default False
     # preserves the historical behaviour (concat demuxer, faster).
     gapless_concat: bool
+    # Lower ffmpeg scheduling priority (opt-in, P3.x). When True,
+    # spawned ffmpeg subprocesses use BELOW_NORMAL_PRIORITY_CLASS on
+    # Windows and nice +10 on POSIX so a long encode doesn't starve
+    # interactive applications. See subprocess_kwargs in utils.py.
+    low_process_priority: bool
     download_timeout: int
     connect_timeout: int
     no_progress_timeout: int
@@ -572,6 +577,7 @@ class PipelineController:
             memory_reserve_mb=self.cfg.memory_reserve_mb,
             x264_low_memory=self.cfg.x264_low_memory,
             gapless_concat=self.cfg.gapless_concat,
+            low_process_priority=self.cfg.low_process_priority,
             segment_encode_timeout=self.cfg.segment_encode_timeout,
             final_concat_timeout=self.cfg.final_concat_timeout,
             stall_kill_timeout=self.cfg.stall_kill_timeout,

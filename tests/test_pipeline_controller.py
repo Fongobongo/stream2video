@@ -61,6 +61,7 @@ def _valid_config(**overrides) -> PipelineConfig:
         "no_progress_timeout": 1800,
         "x264_low_memory": False,
         "gapless_concat": False,
+        "low_process_priority": False,
     }
     defaults.update(overrides)
     return PipelineConfig(**defaults)
@@ -108,6 +109,7 @@ class TestPipelineConfig:
             "no_progress_timeout",
             "x264_low_memory",
             "gapless_concat",
+            "low_process_priority",
             "segment_encode_timeout",
             "final_concat_timeout",
             "silence_timeout",
