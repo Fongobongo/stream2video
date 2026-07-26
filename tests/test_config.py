@@ -2,13 +2,19 @@
 
 import json
 
+import pytest
+
 from stream2video.config import (
     CONFIG_DEFAULTS,
     CONFIG_RANGES,
+    DEFAULT_PRESET,
+    PRESET_NAMES,
+    PRESETS,
     USER_DEFAULT_KEYS,
     VALID_ENCODERS,
     VALID_METHODS,
     VALID_THEMES,
+    apply_preset,
     coerce_typed_value,
     effective_defaults,
     load_user_defaults,
@@ -395,3 +401,93 @@ class TestEffectiveDefaults:
         result = effective_defaults()
         assert result["per_video_dir"] == CONFIG_DEFAULTS["per_video_dir"]  # not overridden
         assert result["threshold"] == -25.0
+
+
+class TestApplyPreset:
+    """apply_preset — pure transform that overlays a preset's tunables
+    on top of a config dict. Used by the CLI (`--preset`) and the GUI
+    (combo_preset) to bundle x264_low_memory / memory_limit_mb /
+    batch_chunk_size / low_process_priority into named profiles."""
+
+    def test_balanced_is_identity_on_default_config(self):
+        # ``balanced`` is an empty override dict, so applying it to the
+        # default config returns a shallow copy with no changes.
+        out = apply_preset(dict(CONFIG_DEFAULTS), "balanced")
+        assert out == CONFIG_DEFAULTS
+        assert out is not CONFIG_DEFAULTS  # copy, not alias
+
+    def test_balanced_preserves_user_overrides(self):
+        # User-set values (e.g. x264_low_memory=True) survive a balanced
+        # preset application — balanced never overwrites them.
+        cfg = dict(CONFIG_DEFAULTS)
+        cfg["x264_low_memory"] = True
+        out = apply_preset(cfg, "balanced")
+        assert out["x264_low_memory"] is True
+
+    def test_low_memory_overrides_tunables(self):
+        out = apply_preset(dict(CONFIG_DEFAULTS), "low_memory")
+        assert out["x264_low_memory"] is True
+        assert out["batch_chunk_size"] == 20
+        assert out["low_process_priority"] is True
+
+    def test_maximum_performance_overrides_tunables(self):
+        out = apply_preset(dict(CONFIG_DEFAULTS), "maximum_performance")
+        assert out["x264_low_memory"] is False
+        assert out["memory_limit_mb"] == 0
+        assert out["batch_chunk_size"] == 80
+
+    def test_does_not_touch_pipeline_only_keys(self):
+        # Presets only touch tunables in PRESETS[name]; pipeline-only
+        # keys (method, encoder, *_quality, threshold, timeouts) must
+        # survive verbatim.
+        cfg = dict(CONFIG_DEFAULTS)
+        cfg["method"] = "batch"
+        cfg["encoder"] = "libx264"
+        cfg["video_quality"] = "high"
+        cfg["threshold"] = -45.0
+        out = apply_preset(cfg, "low_memory")
+        assert out["method"] == "batch"
+        assert out["encoder"] == "libx264"
+        assert out["video_quality"] == "high"
+        assert out["threshold"] == -45.0
+
+    def test_does_not_mutate_input(self):
+        cfg = dict(CONFIG_DEFAULTS)
+        cfg_id = id(cfg)
+        cfg_x264 = cfg["x264_low_memory"]
+        out = apply_preset(cfg, "low_memory")
+        # Input dict is untouched (caller may still use it).
+        assert cfg["x264_low_memory"] == cfg_x264
+        assert id(cfg) == cfg_id
+        assert out is not cfg
+        # And the output reflects the preset.
+        assert out["x264_low_memory"] is True
+
+    def test_unknown_preset_raises_value_error(self):
+        cfg = dict(CONFIG_DEFAULTS)
+        with pytest.raises(ValueError, match="Unknown preset"):
+            apply_preset(cfg, "ultra")
+
+    def test_preset_names_match_keys(self):
+        # The exported constant should match the dict keys exactly so
+        # the CLI's --preset help and the GUI's combobox values stay
+        # in sync with PRESETS.
+        assert tuple(PRESETS.keys()) == PRESET_NAMES
+
+    def test_default_preset_is_balanced(self):
+        # The CLI/GUI default MUST be a preset that produces no changes
+        # over CONFIG_DEFAULTS — otherwise a user who never touches the
+        # preset combobox would suddenly get non-default tunables.
+        assert DEFAULT_PRESET == "balanced"
+        assert PRESETS["balanced"] == {}
+
+    def test_all_presets_are_subsets_of_config_defaults_keys(self):
+        # Every tunable a preset overrides must exist in CONFIG_DEFAULTS,
+        # otherwise apply_preset would silently introduce new keys
+        # (which would later be dropped by coerce_typed_value, masking a
+        # typo in PRESETS).
+        for name, overrides in PRESETS.items():
+            for key in overrides:
+                assert key in CONFIG_DEFAULTS, (
+                    f"preset {name!r} overrides {key!r} but it's not in CONFIG_DEFAULTS"
+                )

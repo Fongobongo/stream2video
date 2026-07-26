@@ -14,6 +14,8 @@ from tkinter import StringVar
 import customtkinter as ctk
 
 from stream2video.config import (
+    DEFAULT_PRESET,
+    PRESET_NAMES,
     VALID_DOWNLOAD_QUALITIES,
     VALID_ENCODERS,
     VALID_METHODS,
@@ -316,6 +318,38 @@ class MainWindowBuildMixin:
         if self.config.get("per_video_dir"):
             self.chk_per_video_dir.select()
         self.chk_per_video_dir.pack(anchor="w", padx=5, pady=(4, 1))
+
+        # Resource preset — bundle of tunables (x264_low_memory,
+        # memory_limit_mb, batch_chunk_size, low_process_priority). The
+        # combobox sets a baseline; the individual checkboxes/inputs
+        # below still win on a per-key basis (their last write to
+        # self.config during _collect_gui_state takes precedence over
+        # preset application during _start_pipeline).
+        ctk.CTkLabel(ctrl_frame, text="Resource preset:").pack(anchor="w", padx=5, pady=(4, 1))
+        self.combo_preset = ctk.CTkComboBox(
+            ctrl_frame,
+            values=list(PRESET_NAMES),
+            state="readonly",
+            width=180,
+        )
+        self.combo_preset.set(self.config.get("preset", DEFAULT_PRESET))
+        self.combo_preset.pack(anchor="w", padx=5, pady=(0, 1))
+        _Tooltip(
+            self.combo_preset,
+            "Resource preset — a bundle of tunables (x264_low_memory, "
+            "memory_limit_mb, batch_chunk_size, low_process_priority) "
+            "applied as a baseline before any explicit overrides.\n"
+            "  - low_memory: 4-8 GB machines (x264_low_memory=True, "
+            "batch_chunk_size=20, low_process_priority=True).\n"
+            "  - balanced: historical defaults.\n"
+            "  - maximum_performance: trade RAM for throughput "
+            "(x264_low_memory=False, memory_limit_mb=0, "
+            "batch_chunk_size=80).\n"
+            "Explicit checkboxes below still override the preset on "
+            "a per-key basis — e.g. pick 'low_memory' then uncheck "
+            "'low_process_priority' to keep the other low-memory "
+            "tunables but restore normal scheduling priority.",
+        )
 
         self.chk_x264_low_memory = ctk.CTkCheckBox(
             ctrl_frame,

@@ -618,7 +618,7 @@ Timeouts, audio bitrate, batch size, hybrid offset, pad и stall intervals ра�
 - [ ] Stress tests на 4-32 GB RAM.
 - [ ] 6-8h 4K60 VFR тест.
 - [ ] GUI responsive при hard threshold.
-- [ ] Presets Low memory / Balanced / Maximum performance.
+- [x] Presets Low memory / Balanced / Maximum performance — ✅ выполнено (`PRESETS` dict + `apply_preset(config, preset)`чистая функция в config.py; `low_memory` = `x264_low_memory=True, batch_chunk_size=20, low_process_priority=True`; `balanced` = пустой override (исторические дефолты); `maximum_performance` = `x264_low_memory=False, memory_limit_mb=0, batch_chunk_size=80`. CLI `--preset` (с индивидуальными fallback-resolver'ами — explicit `--flag` выигрывает над preset override на per-key basis), GUI `combo_preset` combobox + tooltip. Проброшен в `config/wIDGET` через `settings_io` (preset как USER_DEFAULTS_KEY + SAVE_SETTINGS_KEY). 9 unit-тестов `TestApplyPreset` (balanced identity, user overrides survive, low_memory / maximum_performance tunables, pipeline-only keys preserved, no-mutation, unknown-preset ValueError, PRESET_NAMES==keys, balanced default, override subsets CONFIG_DEFAULTS keys) + 1 media correctness тест (`test_low_memory_preset_tunables_produce_valid_output`, batch path, 90 кадров при 30fps).)
 - [ ] Low CPU preset.
 
 ## Этап 9 — thread safety и cancellation

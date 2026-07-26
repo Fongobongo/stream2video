@@ -31,7 +31,7 @@ from typing import Any
 
 import customtkinter as ctk
 
-from stream2video.config import effective_defaults
+from stream2video.config import apply_preset, effective_defaults
 from stream2video.gui_dialogs import DialogsMixin
 from stream2video.gui_encoder_panel import EncoderPanelMixin
 from stream2video.gui_file_info import FileInfoMixin
@@ -233,8 +233,19 @@ class Stream2VideoGUI(
         # extension and the audio-extract short-circuit in cut_and_concat,
         # so a stale self.config value would produce the wrong output.
         self.config["output_format"] = self.combo_output_format.get()
+        # Apply resource preset BEFORE individual widget reads override
+        # the preset's per-key values. The preset is a baseline; the
+        # explicit checkboxes below (x264_low_memory, gapless_concat,
+        # low_process_priority) write to self.config AFTER apply_preset,
+        # so they win on a per-key basis (matches the CLI's
+        # --preset-before-flag precedence).
+        preset_name = self.combo_preset.get()
+        if preset_name:
+            self.config = apply_preset(self.config, preset_name)
+        self.config["preset"] = preset_name
         self.config["gapless_concat"] = bool(self.chk_gapless_concat.get())
         self.config["low_process_priority"] = bool(self.chk_low_process_priority.get())
+        self.config["x264_low_memory"] = bool(self.chk_x264_low_memory.get())
         force = bool(self.chk_force.get())
         per_video_dir = bool(self.chk_per_video_dir.get())
         delete_after = bool(self.chk_delete.get())

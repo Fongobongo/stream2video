@@ -74,6 +74,26 @@ class TestUserDefaultsKeys:
 
 class TestBuildSaveSettingsSnapshot:
     def test_returns_dict_with_canonical_keys(self):
+        # Pin SAVE_SETTINGS_KEYS so a future addition is visible here.
+        assert SAVE_SETTINGS_KEYS == (
+            "input_path",
+            "output_dir",
+            "method",
+            "encoder",
+            "video_quality",
+            "audio_quality",
+            "download_quality",
+            "output_format",
+            "force",
+            "delete_after",
+            "per_video_dir",
+            "x264_low_memory",
+            "gapless_concat",
+            "low_process_priority",
+            "preset",
+            "theme",
+            "window_geometry",
+        )
         # Use a sentinel dict so the test catches a missing / extra key
         # in ``SAVE_SETTINGS_KEYS`` (snapshot would KeyError or expand).
         widgets = {key: f"value-{key}" for key in SAVE_SETTINGS_KEYS}
@@ -98,6 +118,7 @@ class TestBuildSaveSettingsSnapshot:
             "x264_low_memory": False,
             "gapless_concat": True,
             "low_process_priority": True,
+            "preset": "low_memory",
             "theme": "dark",
             "window_geometry": "1000x600+10+20",
         }
@@ -106,6 +127,7 @@ class TestBuildSaveSettingsSnapshot:
         assert snapshot["delete_after"] is False
         assert snapshot["per_video_dir"] is True
         assert snapshot["x264_low_memory"] is False
+        assert snapshot["preset"] == "low_memory"
         assert snapshot["theme"] == "dark"
 
     def test_key_order_matches_canonical(self):
@@ -140,12 +162,14 @@ class TestBuildUserDefaultsSnapshot:
             "x264_low_memory": True,
             "gapless_concat": False,
             "low_process_priority": True,
+            "preset": "maximum_performance",
             "theme": "light",
         }
         snapshot = build_user_defaults_snapshot(widgets)
         assert snapshot["threshold"] == -30.0
         assert snapshot["margin"] == 0.5
         assert snapshot["x264_low_memory"] is True
+        assert snapshot["preset"] == "maximum_performance"
 
 
 class TestWriteCliConfigYaml:
