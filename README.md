@@ -315,6 +315,8 @@ Logs: `{output_dir}/stream2video.log`
 ```bash
 pytest -v
 stream2video video.mp4 --log-level DEBUG
+# Benchmark x264 presets (ultrafast vs veryfast vs medium ...) on the pipeline:
+uv run scripts/benchmark_presets.py --presets ultrafast,veryfast,fast,medium --repeat 3
 ```
 
 ## License
