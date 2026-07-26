@@ -439,6 +439,61 @@ def subprocess_kwargs(low_priority: bool = False) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# OOM detection (P3.x). ffmpeg's exit code doesn't directly say "I was
+# killed by the OOM killer" — the Linux kernel sends SIGKILL (the process
+# dies before it can log anything), and on Windows the exit code is 1
+# (generic). The signals we *do* have:
+#
+#   * POSIX: returncode -9 (Python: child killed by SIGKILL) or 137
+#     (shell: 128 + signal 9) — strong indicator of an OOM kill on Linux.
+#   * stderr markers emitted by ffmpeg / libavcodec / libx264 before
+#     they died: "out of memory", "cannot allocate memory", "malloc
+#     failed", "mmap failed", "not enough space", libx264's thread
+#     init failure "Error splitting input into thread: Cannot allocate
+#     memory".
+#
+# ``looks_like_oom`` is a pure heuristic used by concat._run_ffmpeg and
+# silence._run_silencedetect to surface a dedicated FFmpegOutOfMemoryError
+# instead of the generic FFmpegError, so the CLI / GUI can hint the user
+# to lower the memory budget or switch to the Low-memory preset.
+_OOM_STDERR_MARKERS = (
+    "out of memory",
+    "cannot allocate memory",
+    "malloc failed",
+    "mmap failed",
+    "not enough space",
+    "error splitting input into thread",
+)
+
+
+def looks_like_oom(returncode: int | None, stderr_text: str) -> bool:
+    """Heuristic: did ffmpeg die from an OOM condition?
+
+    Pure / no I/O. Returns True on either signal:
+
+    * POSIX SIGKILL (the Linux OOM killer) — ``returncode == -9``
+      (Python convention: negative = killed by signal N) or
+      ``returncode == 137`` (shell convention: 128 + 9).
+    * stderr contains one of the canonical allocator-failure phrases
+      (case-insensitive). Cross-platform — on Windows exit code is 1
+      so stderr is the only signal.
+
+    Conservative: a ``returncode == 0`` (success) with stderr text
+    containing a marker returns False (the markers are warnings, not
+    fatal errors, in that case). ``returncode is None`` (process still
+    running) returns False.
+    """
+    if returncode is None or returncode == 0:
+        return False
+    if returncode in (-9, 137):
+        return True
+    if not stderr_text:
+        return False
+    lower = stderr_text.lower()
+    return any(marker in lower for marker in _OOM_STDERR_MARKERS)
+
+
+# ---------------------------------------------------------------------------
 # Shared subprocess runner (P2.4)
 # ---------------------------------------------------------------------------
 # Popen + stderr drain + cancel_monitor + pipe cleanup was duplicated across

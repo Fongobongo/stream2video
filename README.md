@@ -307,6 +307,7 @@ Logs: `{output_dir}/stream2video.log`
 | Download stalled before first byte | DNS / TLS / handshake hang | `--connect-timeout` (default 300s) kills yt-dlp with a clear error instead of waiting the 8h ceiling |
 | Download stalled mid-stream | Server stopped sending / route dropped | `--no-progress-timeout` (default 1800s) watchdog kills the process |
 | Memory budget exceeded | RSS grew past 95% of `memory_limit_mb` or available RAM dropped below `memory_reserve_mb` | Lower `--video-quality`, switch to `segment` method, lower `--encoder-threads`, or raise `memory_limit_mb` (requires `[monitor]` extra / psutil) |
+| OS OOM kill | ffmpeg was killed by the system OOM killer (POSIX: SIGKILL / rc -9 or 137; cross-platform: stderr "out of memory" / "malloc failed" markers) | Lowers the memory budget: `--preset low_memory`, `--memory-limit-mb <smaller>`, smaller `--batch-chunk-size`. Surfaces as `FFmpegOutOfMemoryError` / `SilenceOutOfMemoryError` with a targeted hint instead of the raw ffmpeg stderr |
 | Encoder failed mid-run | HW encoder crashed (driver, bad input) | Set `software_fallback=enabled` to allow libx264 retry; `disabled` for unattended CI runs that should fail fast |
 | Resume cache mismatch | Source changed, encoder/quality changed, pipeline version bumped | Working dir is wiped automatically and the encode restarts from scratch — no action needed |
 

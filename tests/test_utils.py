@@ -14,6 +14,7 @@ from stream2video.utils import (
     get_active_process,
     get_video_duration,
     get_video_start_time,
+    looks_like_oom,
     set_active_process,
     subprocess_kwargs,
 )
@@ -55,6 +56,97 @@ class TestCancelMonitor:
         finally:
             if proc.poll() is None:
                 proc.kill()
+
+
+class TestLooksLikeOom:
+    """looks_like_oom — heuristic that decides whether an ffmpeg failure
+    was an out-of-memory condition (SIGKILL on POSIX, allocator-failure
+    markers in stderr). Used by concat._run_ffmpeg and the silence
+    detectors to surface a dedicated FFmpegOutOfMemoryError /
+    SilenceOutOfMemoryError with a 'lower the memory budget / use the
+    Low-memory preset' hint instead of dumping the raw ffmpeg stderr."""
+
+    def test_returncode_none_returns_false(self):
+        # Process still running — can't be OOM yet.
+        assert looks_like_oom(None, "out of memory") is False
+
+    def test_returncode_zero_returns_false(self):
+        # Success — stderr markers might be informational warnings,
+        # not a fatal OOM. Conservative: don't classify as OOM.
+        assert looks_like_oom(0, "out of memory") is False
+        assert looks_like_oom(0, "") is False
+
+    def test_sigkill_negative_signal_returns_true(self):
+        # POSIX: Python convention. returncode == -N means the child
+        # was killed by signal N. SIGKILL is 9, so -9 is a strong OOM
+        # indicator (the Linux OOM killer sends SIGKILL).
+        assert looks_like_oom(-9, "") is True
+        assert looks_like_oom(-9, "killed") is True
+
+    def test_sigkill_shell_convention_returns_true(self):
+        # POSIX: shell convention. Bash returns 128 + signal_number.
+        # 137 == 128 + 9 == SIGKILL — same indicator as -9.
+        assert looks_like_oom(137, "") is True
+        assert looks_like_oom(137, "Killed") is True
+
+    def test_non_sigkill_negative_signal_returns_false(self):
+        # SIGSEGV is 11. A segfault isn't OOM — keep this conservative
+        # so the heuristic doesn't overclassify crashes.
+        assert looks_like_oom(-11, "Segfault") is False
+        assert looks_like_oom(139, "") is False  # 128 + 11
+
+    def test_stderr_out_of_memory_marker(self):
+        # libx264's allocator failure: "out of memory"
+        assert looks_like_oom(1, "x264 [error]: out of memory") is True
+        assert looks_like_oom(-9, "ffmpeg: out of memory allocating big buffer") is True
+
+    def test_stderr_cannot_allocate_memory_marker(self):
+        # POSIX malloc failure (errno ENOMEM)
+        assert looks_like_oom(1, "Cannot allocate memory\nmalloc failed") is True
+        assert looks_like_oom(1, "ffmpeg: cannot allocate memory") is True
+
+    def test_stderr_malloc_failed_marker(self):
+        # ffmpeg / libc allocator failures
+        assert looks_like_oom(1, "malloc failed: Application's big!") is True
+
+    def test_stderr_mmap_failed_marker(self):
+        # libx264's frame-buffer mmap failure
+        assert looks_like_oom(1, "mmap failed: Cannot allocate memory") is True
+
+    def test_stderr_not_enough_space_marker(self):
+        # Windows allocator-failure phrasing
+        assert looks_like_oom(1, "not enough space for buffer") is True
+
+    def test_stderr_x264_thread_split_marker(self):
+        # libx264's thread init failure (alloc error during thread fork)
+        assert (
+            looks_like_oom(
+                1,
+                "x264 [error]: Error splitting input into thread: Cannot allocate memory",
+            )
+            is True
+        )
+
+    def test_case_insensitive_match(self):
+        # Markers are matched case-insensitively so a build that emits
+        # "Out Of Memory" (Windows) still classifies.
+        assert looks_like_oom(1, "Out Of Memory allocating 1GB") is True
+        assert looks_like_oom(1, "MALLOC Failed") is True
+
+    def test_no_marker_no_signal_returns_false(self):
+        # Generic non-zero exit with no OOM markers — false.
+        assert looks_like_oom(1, "Conversion failed!") is False
+        assert looks_like_oom(2, "some random error") is False
+        assert looks_like_oom(255, "") is False
+
+    def test_empty_stderr_with_generic_exit_returns_false(self):
+        assert looks_like_oom(1, "") is False
+
+    def test_stderr_truncation_safe(self):
+        # A long stderr doesn't crash the matcher. The marker is found
+        # anywhere in the text.
+        long = "x" * 10000 + " out of memory " + "y" * 10000
+        assert looks_like_oom(1, long) is True
 
     def test_callback_returning_true_kills_process(self):
         """Callback returning True should kill the process and set the event."""

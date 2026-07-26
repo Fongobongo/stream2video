@@ -33,6 +33,7 @@ from stream2video.utils import (
     CANCEL_POLL_INTERVAL,
     cancel_monitor,
     drain_stderr_lines,
+    looks_like_oom,
     no_window_kwargs,
     read_lines_queue,
     set_active_process,
@@ -46,6 +47,15 @@ logger = logging.getLogger(__name__)
 
 class SilenceDetectionError(Exception):
     """Base silence detection error."""
+
+
+class SilenceOutOfMemoryError(SilenceDetectionError):
+    """ffmpeg was killed by the OOM killer / self-aborted on alloc.
+
+    Distinct subclass so the CLI / GUI can hint the user to lower the
+    memory budget or pick the Low-memory preset (see FFmpegOutOfMemoryError
+    in concat.py for the detection heuristic).
+    """
 
 
 class SilenceCancelledError(SilenceDetectionError):
@@ -519,6 +529,11 @@ def detect_silence_stream(
 
         proc.wait(timeout=timeout)
         if proc.returncode != 0:
+            if looks_like_oom(proc.returncode, ""):
+                raise SilenceOutOfMemoryError(
+                    f"ffmpeg silencedetect OOM (rc={proc.returncode}); "
+                    "try --preset low_memory / lowering --memory-limit-mb"
+                )
             raise SilenceDetectionError(f"ffmpeg silencedetect failed (rc={proc.returncode})")
         # ``detect_silence_stream`` is a preview-only helper that
         # doesn't always know the media duration (callers may pass a
@@ -796,6 +811,11 @@ def _run_silencedetect(
 
             if process.returncode != 0:
                 stderr_text = "".join(stderr_lines)
+                if looks_like_oom(process.returncode, stderr_text):
+                    raise SilenceOutOfMemoryError(
+                        f"ffmpeg silencedetect OOM (rc={process.returncode}); "
+                        "try --preset low_memory / lowering --memory-limit-mb"
+                    )
                 error_msg = stderr_text or "Unknown error"
                 raise SilenceDetectionError(f"ffmpeg silencedetect failed: {error_msg}")
 
@@ -926,6 +946,12 @@ def _extract_audio_wav(
 
             if process.returncode != 0:
                 stderr_text = "".join(stderr_lines)
+                if looks_like_oom(process.returncode, stderr_text):
+                    wav_path.unlink(missing_ok=True)
+                    raise SilenceOutOfMemoryError(
+                        f"ffmpeg extract OOM (rc={process.returncode}); "
+                        "try --preset low_memory / lowering --memory-limit-mb"
+                    )
                 error_msg = stderr_text or "Unknown error"
                 wav_path.unlink(missing_ok=True)
                 raise SilenceDetectionError(f"ffmpeg extract failed: {error_msg}")

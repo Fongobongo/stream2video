@@ -612,7 +612,7 @@ Timeouts, audio bitrate, batch size, hybrid offset, pad и stall intervals ра�
 - [ ] Linux cgroup v2 / systemd scope.
 - [ ] `prlimit` / `RLIMIT_AS`.
 - [ ] macOS graceful termination.
-- [ ] OS OOM как отдельная ошибка.
+- [x] OS OOM как отдельная ошибка — ✅ выполнено (`looks_like_oom(returncode, stderr_text)` pure heuristic в utils.py + `FFmpegOutOfMemoryError(FFmpegError)` subclass в concat.py + `SilenceOutOfMemoryError(SilenceDetectionError)` subclass в silence.py. POSIX: `returncode == -9` (Python sigkill) или `137` (shell `128+SIGKILL`) — Linux OOM killer. Cross-platform stderr markers (case-insensitive): "out of memory", "cannot allocate memory", "malloc failed", "mmap failed", "not enough space", libx264 "error splitting input into thread". Распознавание + targeted hint ("try --preset low_memory / lowering --memory-limit-mb") в `_run_ffmpeg` (concat.py) и 3 местах silence.py (detect_silencedetect / detect_silence_stream / _extract_audio_wav). 16 unit-тестов `TestLooksLikeOom`: rc None/0/sigkill (-9 / 137 / -11 / 139 без marker) + 9 stderr-markers + case-insensitive + no-marker-no-signal false + empty stderr false + truncation safe.)
 
 ### Проверки и UX — deferred (требуют CI matrix с разными конфигурациями RAM)
 - [ ] Stress tests на 4-32 GB RAM.

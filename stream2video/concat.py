@@ -31,6 +31,7 @@ from stream2video.utils import (
     get_video_duration,
     get_video_start_time,
     has_audio_stream,
+    looks_like_oom,
     no_window_kwargs,
     read_lines_queue,
     set_active_process,
@@ -49,6 +50,27 @@ class ConcatError(Exception):
 
 class FFmpegError(ConcatError):
     """ffmpeg itself failed (non-zero exit, timeout, stall)."""
+
+
+class FFmpegOutOfMemoryError(FFmpegError):
+    """ffmpeg was killed by the OS OOM killer or self-aborted on alloc.
+
+    Distinct from ``FFmpegError`` so the CLI / GUI can surface a
+    targeted "lower the memory budget / use Low-memory preset" hint
+    instead of dumping a generic ffmpeg stderr snippet.
+
+    Detection (in ``_run_ffmpeg``):
+
+    * POSIX: ``returncode == -9`` (Python convention for "child killed
+      by signal SIGKILL") or ``returncode == 137`` (128 + 9, the shell
+      convention) — the Linux OOM killer sends SIGKILL.
+    * stderr markers (case-insensitive, cross-platform): "out of
+      memory", "cannot allocate memory", "malloc failed", "mmap
+      failed", "not enough space", "Error splitting input into
+      thread: Cannot allocate memory" (libx264's thread init failure).
+      On Windows exit code is 1 (generic) so stderr is the only
+      signal.
+    """
 
 
 class CancelledError(ConcatError):
@@ -801,6 +823,18 @@ def _run_ffmpeg(
             if process.returncode != 0:
                 stderr_text = "".join(stderr_lines)
                 msg = stderr_text[:_STDERR_TRUNCATE] if stderr_text else "unknown error (no stderr)"
+                # P3.x: surface OOM as a dedicated error so the CLI/GUI
+                # can hint the user to lower the memory budget or pick
+                # the Low-memory preset, instead of dumping the raw
+                # stderr. SIGKILL on POSIX (rc -9 / 137) or stderr
+                # allocator-failure markers — see looks_like_oom.
+                if looks_like_oom(process.returncode, stderr_text):
+                    raise FFmpegOutOfMemoryError(
+                        f"{label} ran out of memory "
+                        f"(rc={process.returncode}); "
+                        "try --preset low_memory / lowering "
+                        "--memory-limit-mb / reducing --batch-chunk-size"
+                    )
                 raise FFmpegError(f"{label} failed: {msg}")
 
     except subprocess.TimeoutExpired as e:
