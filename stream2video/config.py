@@ -116,6 +116,72 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     "recent_projects": [],
 }
 
+# ---------------------------------------------------------------------------
+# Resource presets (P3.x). Bundle existing tunables (x264_low_memory,
+# memory_limit_mb, memory_reserve_mb, batch_chunk_size, low_process_priority,
+# encoder_threads) into three named profiles so a user can pick a goal at a
+# glance instead of toggling six flags. ``balanced`` reproduces the
+# historical defaults verbatim; the other two override only the tunables
+# listed below — pipeline-only settings (method, encoder, *_quality,
+# threshold, min_silence, margin, timeouts) always come from the user's
+# existing config and are *never* touched by apply_preset.
+#
+# ``low_memory`` trades speed for stability on 4-8 GB machines:
+#   * x264_low_memory=True → rc-lookahead=10 / ref=1 / bframes=0 (smaller
+#     frame-buffer footprint, slightly larger files).
+#   * batch_chunk_size=20 (was 40) → smaller filter graphs → fewer
+#     decoded frames in RAM per batch invocation.
+#   * low_process_priority=True → ffmpeg doesn't compete with the OS / GUI.
+#
+# ``maximum_performance`` trades RAM for throughput:
+#   * x264_low_memory=False → full x264 defaults (larger frame buffer).
+#   * memory_limit_mb=0 → disables the in-process pre-flight memory budget
+#     (the OS reserve is still honoured). Only safe on machines that
+#     won't swap; otherwise the Low memory preset is more appropriate.
+#   * batch_chunk_size=80 (was 40) → larger batch chunks → fewer filter
+#     invocations → less per-chunk startup overhead on long sources.
+PRESETS: dict[str, dict[str, Any]] = {
+    "low_memory": {
+        "x264_low_memory": True,
+        "batch_chunk_size": 20,
+        "low_process_priority": True,
+    },
+    "balanced": {},
+    "maximum_performance": {
+        "x264_low_memory": False,
+        "memory_limit_mb": 0,
+        "batch_chunk_size": 80,
+    },
+}
+
+PRESET_NAMES = tuple(PRESETS.keys())
+DEFAULT_PRESET = "balanced"
+
+
+def apply_preset(config: dict[str, Any], preset: str) -> dict[str, Any]:
+    """Return a new config dict with the preset's tunables applied.
+
+    Pure: doesn't mutate ``config``. Unknown ``preset`` raises
+    ``ValueError`` so the CLI / GUI can surface the typo. When ``preset``
+    equals ``balanced`` (or any preset with no overrides) the returned
+    dict is a shallow copy of the input — the historical defaults
+    survive verbatim.
+
+    Presets only touch the tunables listed in ``PRESETS[preset]``;
+    anything else the user set is preserved. This means a user can
+    pick "Low memory" and still override, say, ``encoder_threads=4``
+    after applying the preset — the explicit value wins because preset
+    application is a one-shot transform, not a sticky link.
+    """
+    if preset not in PRESETS:
+        raise ValueError(
+            f"Unknown preset {preset!r} (use {' or '.join(repr(p) for p in PRESET_NAMES)})"
+        )
+    out = dict(config)
+    out.update(PRESETS[preset])
+    return out
+
+
 CONFIG_RANGES = {
     "threshold": (-60, -5),
     "min_silence": (0.1, 60),

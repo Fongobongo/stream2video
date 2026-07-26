@@ -25,6 +25,8 @@ from stream2video.concat import CancelledError, ConcatError, cut_and_concat
 from stream2video.config import (
     CONFIG_DEFAULTS,
     CONFIG_RANGES,
+    DEFAULT_PRESET,
+    PRESET_NAMES,
     VALID_DOWNLOAD_QUALITIES,
     VALID_ENCODERS,
     VALID_METHODS,
@@ -32,6 +34,7 @@ from stream2video.config import (
     VALID_QUALITIES,
     VALID_SOFTWARE_FALLBACKS,
     VALID_X264_PRESETS,
+    apply_preset,
 )
 from stream2video.download import (
     DiskSpaceError,
@@ -353,6 +356,23 @@ def main(
         "unattended batch processing on shared/desktop machines. Default "
         "off (normal priority, faster encoding).",
     ),
+    preset: str = typer.Option(
+        DEFAULT_PRESET,
+        "--preset",
+        help=(
+            "Resource preset — bundle of tunables (x264_low_memory, "
+            "memory_limit_mb, batch_chunk_size, low_process_priority). "
+            "'low_memory' trades speed for stability on 4-8 GB machines "
+            "(x264_low_memory=True, batch_chunk_size=20, "
+            "low_process_priority=True). 'balanced' (default) reproduces "
+            "the historical defaults. 'maximum_performance' trades RAM "
+            "for throughput (x264_low_memory=False, memory_limit_mb=0, "
+            "batch_chunk_size=80). The preset is applied first, then any "
+            "explicit --flag overrides win — so `--preset low_memory "
+            "--no-low-process-priority` keeps low_memory's other "
+            "tunables but flips low_process_priority back off."
+        ),
+    ),
     delete_after: bool | None = typer.Option(
         None,
         "--delete-after",
@@ -519,10 +539,37 @@ def main(
         # bad YAML value for any of these cannot sneak through here.
         config = load_config(config_file)
 
+        # Apply the resource preset. The preset bundles tunables
+        # (x264_low_memory, memory_limit_mb, batch_chunk_size,
+        # low_process_priority) into a named profile; each subsequent
+        # ``_resolved_*`` below reads the merged config AND checks
+        # ``ParameterSource.COMMANDLINE``, so an explicit --flag wins
+        # over the preset's override. The preset itself is read via
+        # ParameterSource too — COMMANDLINE --preset wins, otherwise
+        # the YAML key ``preset`` (if present) is used, else
+        # DEFAULT_PRESET.
+        def _resolved_preset(flag_value: str) -> str:
+            src = ctx.get_parameter_source("preset")
+            if src == ParameterSource.COMMANDLINE:
+                value = flag_value
+            else:
+                value = str(config.get("preset", DEFAULT_PRESET))
+            if value not in PRESET_NAMES:
+                console.print(
+                    f"[red]Invalid preset:[/red] {value!r} "
+                    f"(use {' or '.join(repr(p) for p in PRESET_NAMES)})"
+                )
+                raise typer.Exit(1)
+            return value
+
+        resolved_preset = _resolved_preset(preset)
+        config = apply_preset(config, resolved_preset)
+
         # Resolve each CLI flag against the config. A flag that the user
         # passed explicitly (ParameterSource.COMMANDLINE) wins; one that
         # the user left at its default falls back to the config value
-        # (which came from YAML if provided, else CONFIG_DEFAULTS).
+        # (which came from YAML if provided, else CONFIG_DEFAULTS, with
+        # preset overrides already applied above).
         def _resolved_str(name: str, flag_value: str, valid: list[str]) -> str:
             src = ctx.get_parameter_source(name)
             value = flag_value if src == ParameterSource.COMMANDLINE else config[name]
@@ -680,6 +727,19 @@ def main(
         # reads config["per_video_dir"] (e.g. paths.apply_per_video_dir)
         # sees the same value as the CLI path.
         config["per_video_dir"] = per_video_dir_resolved
+
+        def _resolved_int(name: str, flag_value: int) -> int:
+            src = ctx.get_parameter_source(name)
+            if src == ParameterSource.COMMANDLINE:
+                return int(flag_value)
+            # Config already validated in load_config; preset overrides
+            # have been applied above so ``config.get(name)`` reflects
+            # the preset-transformed value.
+            return int(config.get(name, CONFIG_DEFAULTS.get(name, flag_value)))
+
+        # batch_chunk_size is a preset-tunable, so honour the preset
+        # override unless the user passed --batch-chunk-size explicitly.
+        batch_chunk_size = _resolved_int("batch_chunk_size", batch_chunk_size)
 
         progress_columns = [
             TextColumn("[progress.description]{task.description}"),

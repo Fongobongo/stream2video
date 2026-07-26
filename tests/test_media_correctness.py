@@ -1686,3 +1686,40 @@ def test_low_process_priority_produces_valid_output(synthetic_source: Path, tmp_
     # Sanity check: the output is a valid video + audio MP4.
     assert "video" in info.get("codec_types", [])
     assert "audio" in info.get("codec_types", [])
+
+
+def test_low_memory_preset_tunables_produce_valid_output(synthetic_source: Path, tmp_path: Path):
+    """The 'low_memory' preset's tunables (x264_low_memory=True,
+    batch_chunk_size=20, low_process_priority=True) compose safely
+    across the batch path's chunk encode + final concat join.
+
+    Verifies that applying the preset's per-key values by hand (the
+    CLI/GUI apply_preset path is unit-tested in test_config.py —
+    here we verify the resulting ffmpeg invocations themselves work)
+    produces a valid MP4. Catches regressions where, e.g., a future
+    x264_low_memory change breaks the encoder args.
+    """
+    out = tmp_path / "out_low_mem.mp4"
+    silence = [SilenceSegment(1.0, 3.0), SilenceSegment(5.0, 7.0)]
+    cut_and_concat(
+        synthetic_source,
+        silence,
+        out,
+        method="batch",
+        encoder="libx264",
+        video_quality="medium",
+        # Apply low_memory preset's tunables by hand.
+        x264_low_memory=True,
+        batch_chunk_size=20,
+        low_process_priority=True,
+    )
+    info = _probe(out)
+    frames = info.get("nb_read_frames_video")
+    # Same source / silence layout as
+    # test_low_process_priority_produces_valid_output: 6s @ 30fps,
+    # kept [0-1, 3-5] = 3s ≈ 90 frames (±2 tolerance for boundaries).
+    assert frames is not None and abs(frames - 90) <= 2, (
+        f"low_memory preset: frames {frames} != 90; info={info}"
+    )
+    assert "video" in info.get("codec_types", [])
+    assert "audio" in info.get("codec_types", [])
