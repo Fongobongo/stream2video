@@ -174,6 +174,7 @@ def build_pipeline_config_from_snapshot(
         x264_low_memory=config.get("x264_low_memory", False),
         gapless_concat=config.get("gapless_concat", False),
         low_process_priority=config.get("low_process_priority", False),
+        rlimit_as_mb=config.get("rlimit_as_mb", 0),
         download_timeout=config.get("download_timeout", 28800),
         connect_timeout=config.get("connect_timeout", 300),
         no_progress_timeout=config.get("no_progress_timeout", 1800),

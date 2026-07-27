@@ -356,6 +356,21 @@ def main(
         "unattended batch processing on shared/desktop machines. Default "
         "off (normal priority, faster encoding).",
     ),
+    rlimit_as_mb: int = typer.Option(
+        0,
+        "--rlimit-as-mb",
+        help=(
+            "POSIX-only. When >0, cap each spawned ffmpeg subprocess's "
+            "virtual address space to this many MiB via RLIMIT_AS in "
+            "preexec_fn. malloc/mmap return ENOMEM (and ffmpeg bails) "
+            "before the OS swaps or the Linux OOM killer kicks in -- a "
+            "hard, kernel-enforced complement to the in-process "
+            "--memory-limit-mb pre-flight check (which only samples "
+            "RSS between wall-clock polls and can miss a fast spike). "
+            "On Windows this flag is ignored (no portable equivalent "
+            "of RLIMIT_AS). Default 0 disables the cap."
+        ),
+    ),
     preset: str = typer.Option(
         DEFAULT_PRESET,
         "--preset",
@@ -740,6 +755,9 @@ def main(
         # batch_chunk_size is a preset-tunable, so honour the preset
         # override unless the user passed --batch-chunk-size explicitly.
         batch_chunk_size = _resolved_int("batch_chunk_size", batch_chunk_size)
+        # rlimit_as_mb is also a preset-tunable (well, CLI-only, but
+        # the same fallback semantics apply).
+        resolved_rlimit_as_mb: int = _resolved_int("rlimit_as_mb", rlimit_as_mb)
 
         progress_columns = [
             TextColumn("[progress.description]{task.description}"),
@@ -993,6 +1011,7 @@ def main(
                     x264_low_memory=resolved_x264_low_memory,
                     gapless_concat=resolved_gapless_concat,
                     low_process_priority=resolved_low_process_priority,
+                    rlimit_as_mb=resolved_rlimit_as_mb,
                     segment_encode_timeout=segment_encode_timeout,
                     final_concat_timeout=final_concat_timeout,
                     stall_kill_timeout=stall_kill_timeout,

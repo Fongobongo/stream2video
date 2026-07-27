@@ -57,6 +57,96 @@ class TestCancelMonitor:
             if proc.poll() is None:
                 proc.kill()
 
+    def test_rlimit_as_zero_returns_only_no_window_kw(self):
+        """rlimit_as_mb=0 (default) disables the cap, so the
+        returned dict is identical to no_window_kwargs() alone (no
+        preexec_fn added)."""
+        kw = subprocess_kwargs(low_priority=False, rlimit_as_mb=0)
+        if sys.platform == "win32":
+            assert kw == {"creationflags": subprocess.CREATE_NO_WINDOW}
+        else:
+            assert kw == {}
+        assert "preexec_fn" not in kw
+
+    def test_rlimit_as_ignored_on_windows(self):
+        """rlimit_as_mb > 0 has no effect on Windows (no portable
+        RLIMIT_AS equivalent) — only low_priority adds priority flags,
+        leaving the cap in the user's hands via memory_limit_mb."""
+        if sys.platform != "win32":
+            pytest.skip("Windows-only")
+        kw = subprocess_kwargs(low_priority=False, rlimit_as_mb=2048)
+        # Only CREATE_NO_WINDOW; no preexec_fn (preexec_fn is POSIX-only).
+        assert kw == {"creationflags": subprocess.CREATE_NO_WINDOW}
+        assert "preexec_fn" not in kw
+
+    def test_rlimit_as_and_low_priority_compose_on_posix(self):
+        """On POSIX, rlimit_as_mb > 0 + low_priority=True compose
+        into a single preexec_fn (Python only allows one). The child
+        runs os.nice(10) then setrlimit(RLIMIT_AS, (cap, cap))."""
+        if sys.platform == "win32":
+            pytest.skip("POSIX-only")
+        kw = subprocess_kwargs(low_priority=True, rlimit_as_mb=2048)
+        assert callable(kw["preexec_fn"])
+        assert "creationflags" not in kw
+
+    def test_rlimit_as_only_on_posix(self):
+        """rlimit_as_mb > 0 alone (no low_priority) still sets
+        preexec_fn on POSIX so the child is capped."""
+        if sys.platform == "win32":
+            pytest.skip("POSIX-only")
+        kw = subprocess_kwargs(low_priority=False, rlimit_as_mb=2048)
+        assert callable(kw["preexec_fn"])
+        assert "creationflags" not in kw
+
+    def test_rlimit_as_actually_caps_addr_space_on_posix(self):
+        """Smoke test: spawn a child with rlimit_as_mb=2 (2 MiB cap)
+        and have it try to allocate 4 MiB. malloc should return NULL
+        (or raise MemoryError in pure-python) and the child should
+        exit cleanly — the kernel refused the allocation before it
+        could swap."""
+        if sys.platform == "win32":
+            pytest.skip("POSIX-only")
+        # 2 MiB cap. Preexec sets RLIMIT_AS. Pure-Python bytearray
+        # allocation will either raise MemoryError (catchable) or
+        # cause a hard death (segfault on MemoryError in some builds);
+        # the child uses try/except to convert to exit code 0 on
+        # MemoryError (success), 1 on the bytearray actually succeeding
+        # (which would mean the cap isn't enforced).
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "try:\n"
+                "    bytearray(4 * 1024 * 1024)\n"
+                "    import sys; sys.exit(1)\n"
+                "except MemoryError:\n"
+                "    import sys; sys.exit(0)\n",
+            ],
+            **subprocess_kwargs(low_priority=False, rlimit_as_mb=2),
+        )
+        proc.wait()
+        # rc 0 = MemoryError caught (cap enforced).
+        # rc 1 = allocation succeeded (cap NOT enforced -> bug or rlimit not honoured).
+        assert proc.returncode == 0, (
+            f"RLIMIT_AS cap not enforced; rc={proc.returncode} "
+            "(expected 0 = MemoryError caught on a 4MiB allocation)"
+        )
+
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="POSIX-only",
+    )
+    def test_rlimit_as_popen_runs_cleanly_when_cap_is_high(self):
+        """Sanity: a generous rlimit_as (e.g. 512 MiB) is enough for a
+        short-lived python interpreter and the cap doesn't fault the
+        child's startup. Popen succeeds, exit code 0."""
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "print('hi')"],
+            **subprocess_kwargs(low_priority=False, rlimit_as_mb=512),
+        )
+        proc.wait()
+        assert proc.returncode == 0
+
 
 class TestLooksLikeOom:
     """looks_like_oom — heuristic that decides whether an ffmpeg failure

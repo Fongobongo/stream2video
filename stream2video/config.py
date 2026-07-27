@@ -68,6 +68,19 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     # on shared/desktop machines. Default False preserves the historical
     # behaviour (normal priority, faster encoding).
     "low_process_priority": False,
+    # RLIMIT_AS cap for ffmpeg subprocesses (POSIX-only, opt-in, P3.x).
+    # When > 0, every spawned ffmpeg subprocess is forked with
+    # ``resource.setrlimit(RLIMIT_AS, (cap, cap))`` in preexec_fn so
+    # it cannot allocate more than this many MiB of virtual address
+    # space. malloc / mmap return ENOMEM (and ffmpeg bails) before the
+    # OS swaps or the Linux OOM killer kicks in. This is a hard,
+    # kernel-enforced cap complementing the in-process
+    # ``memory_limit_mb`` pre-flight check (which only samples RSS
+    # *between* wall-clock polls and can miss a fast spike). No-op on
+    # Windows (no portable equivalent; ``memory_limit_mb`` remains the
+    # only memory door there). 0 disables the cap (default) and
+    # preserves the historical behaviour.
+    "rlimit_as_mb": 0,
     # Download watchdog timeouts (P1.6). Absolute ceiling + two-stage
     # watchdog so a stalled connection doesn't wait the full ceiling.
     # Exposed via --download-timeout / --connect-timeout /
@@ -325,6 +338,7 @@ USER_DEFAULT_KEYS: list[str] = [
     "x264_low_memory",
     "gapless_concat",
     "low_process_priority",
+    "rlimit_as_mb",
     "download_timeout",
     "connect_timeout",
     "no_progress_timeout",

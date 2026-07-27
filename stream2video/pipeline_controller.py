@@ -140,6 +140,11 @@ class PipelineConfig:
     # Windows and nice +10 on POSIX so a long encode doesn't starve
     # interactive applications. See subprocess_kwargs in utils.py.
     low_process_priority: bool
+    # RLIMIT_AS cap for ffmpeg subprocesses (POSIX-only, opt-in, P3.x).
+    # When > 0, the child is forked with resource.setrlimit(RLIMIT_AS,
+    # (cap, cap)) so it cannot allocate more than this MiB of virtual
+    # address space. No-op on Windows. See subprocess_kwargs in utils.py.
+    rlimit_as_mb: int
     download_timeout: int
     connect_timeout: int
     no_progress_timeout: int
@@ -578,6 +583,7 @@ class PipelineController:
             x264_low_memory=self.cfg.x264_low_memory,
             gapless_concat=self.cfg.gapless_concat,
             low_process_priority=self.cfg.low_process_priority,
+            rlimit_as_mb=self.cfg.rlimit_as_mb,
             segment_encode_timeout=self.cfg.segment_encode_timeout,
             final_concat_timeout=self.cfg.final_concat_timeout,
             stall_kill_timeout=self.cfg.stall_kill_timeout,
