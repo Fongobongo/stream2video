@@ -146,6 +146,12 @@ CONFIG_DEFAULTS: dict[str, Any] = {
 #     decoded frames in RAM per batch invocation.
 #   * low_process_priority=True → ffmpeg doesn't compete with the OS / GUI.
 #
+# ``low_cpu`` minimizes CPU usage for background/unattended encoding:
+#   * x264_preset="ultrafast" → fastest encode, larger files.
+#   * encoder_threads=2 → limits parallel frame processing.
+#   * x264_low_memory=True → further reduces frame-buffer footprint.
+#   * low_process_priority=True → ffmpeg runs at below-normal priority.
+#
 # ``maximum_performance`` trades RAM for throughput:
 #   * x264_low_memory=False → full x264 defaults (larger frame buffer).
 #   * memory_limit_mb=0 → disables the in-process pre-flight memory budget
@@ -157,6 +163,12 @@ PRESETS: dict[str, dict[str, Any]] = {
     "low_memory": {
         "x264_low_memory": True,
         "batch_chunk_size": 20,
+        "low_process_priority": True,
+    },
+    "low_cpu": {
+        "x264_preset": "ultrafast",
+        "encoder_threads": 2,
+        "x264_low_memory": True,
         "low_process_priority": True,
     },
     "balanced": {},
