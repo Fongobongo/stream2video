@@ -63,18 +63,18 @@
 
 **Проблема:** phase 1 (stream-copy сегментов) использует голый `subprocess.run(check=True, capture_output=True)`: нет timeout, нет `set_active_process` (Cancel не убьёт идущий cut), `CalledProcessError` не входит в `exc_types=(ConcatError, OSError)` у `_with_libx264_fallback` и улетает наверх сырым исключением без stderr ffmpeg.
 
-- [ ] Заменить `subprocess.run` на общий раннер:
+- [x] Заменить `subprocess.run` на общий раннер:
   - [ ] вариант A (предпочтительно): прогнать cut-фазу через `_run_ffmpeg(..., track_progress=False)` — таймаут, cancel, stall-watchdog и регистрация процесса «бесплатно»
-  - [ ] вариант B (минимальный): добавить `timeout=` (например, `_SEGMENT_ENCODE_TIMEOUT`), `registered_process(...)`, обернуть `CalledProcessError` в `ConcatError` с усечённым stderr (`_STDERR_TRUNCATE`)
-- [ ] ⚠️ Если выбран вариант A: сначала выполнить пункт 4.1 (в `track_progress=False`-ветке stall-watchdog убьёт процесс через `stall_kill`, т.к. `last_progress_time` не обновляется — для cut-фазы либо отключать watchdog, либо обновлять таймер по факту чтения stderr)
-- [ ] Убедиться, что cancel проверяется и ВО ВРЕМЯ cut-а (не только между сегментами)
-- [ ] Проверить обработку ошибок cut-фазы в `pipeline_controller` / CLI: пользователь должен видеть дружелюбное сообщение `ConcatError` со stderr, а не traceback
+  - [x] вариант B (минимальный): добавить `timeout=` (например, `_SEGMENT_ENCODE_TIMEOUT`), `registered_process(...)`, обернуть `CalledProcessError` в `ConcatError` с усечённым stderr (`_STDERR_TRUNCATE`)
+- [x] ⚠️ Если выбран вариант A: сначала выполнить пункт 4.1 (в `track_progress=False`-ветке stall-watchdog убьёт процесс через `stall_kill`, т.к. `last_progress_time` не обновляется — для cut-фазы либо отключать watchdog, либо обновлять таймер по факту чтения stderr)
+- [x] Убедиться, что cancel проверяется и ВО ВРЕМЯ cut-а (не только между сегментами)
+- [x] Проверить обработку ошибок cut-фазы в `pipeline_controller` / CLI: пользователь должен видеть дружелюбное сообщение `ConcatError` со stderr, а не traceback
 
 ### Тесты
 
-- [ ] Тест: ошибка ffmpeg в cut-фазе (битый вход) → `ConcatError` с фрагментом stderr, без `CalledProcessError` наружу
-- [ ] Тест: cancel во время cut-фазы завершает процесс и поднимает `CancelledError`
-- [ ] Тест: cut-фаза с timeout → корректный `FFmpegError`/`ConcatError`, процесс убит
+- [x] Тест: ошибка ffmpeg в cut-фазе (битый вход) → `ConcatError` с фрагментом stderr, без `CalledProcessError` наружу
+- [x] Тест: cancel во время cut-фазы завершает процесс и поднимает `CancelledError`
+- [x] Тест: cut-фаза с timeout → корректный `FFmpegError`/`ConcatError`, процесс убит
 
 ---
 
