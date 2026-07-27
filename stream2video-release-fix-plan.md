@@ -7,9 +7,9 @@
 
 ## Этап 0. Подготовка
 
-- [ ] Создать ветку `fix/pre-release-audit-2` от актуального `master`
-- [ ] Прогнать текущий набор тестов (`pytest -q`) и зафиксировать базовую точку: все ~487 тестов зелёные
-- [ ] Прогнать `ruff check .` и `mypy stream2video/` (если настроены), зафиксировать текущее число предупреждений
+- [x] Создать ветку `fix/pre-release-audit-2` от актуального `master`
+- [x] Прогнать текущий набор тестов (`pytest -q`) и зафиксировать базовую точку: все ~487 тестов зелёные
+- [x] Прогнать `ruff check .` и `mypy stream2video/` (если настроены), зафиксировать текущее число предупреждений
 
 ---
 
@@ -19,24 +19,24 @@
 
 ### 1.1. Контекст-менеджер регистрации (utils.py)
 
-- [ ] Добавить в `utils.py` контекст-менеджер `registered_process(proc, owner="default")`:
-  - [ ] в `__enter__` — `set_active_process(proc, owner=owner)`
-  - [ ] в `__exit__` — `set_active_process(None, owner=owner)` (тот же owner по построению)
-- [ ] Убрать fallback на `"default"` в `get_active_process(owner)` (`_proc_registry.get(owner) or _proc_registry.get("default")`) — запрос несуществующего owner должен возвращать `None`, а не чужой процесс
-- [ ] Проверить все вызовы `get_active_process()` (в т.ч. `gui_lifecycle.py:244`) — убедиться, что после удаления fallback поведение при закрытии GUI не сломалось
+- [x] Добавить в `utils.py` контекст-менеджер `registered_process(proc, owner="default")`:
+  - [x] в `__enter__` — `set_active_process(proc, owner=owner)`
+  - [x] в `__exit__` — `set_active_process(None, owner=owner)` (тот же owner по построению)
+- [x] Убрать fallback на `"default"` в `get_active_process(owner)` (`_proc_registry.get(owner) or _proc_registry.get("default")`) — запрос несуществующего owner должен возвращать `None`, а не чужой процесс
+- [x] Проверить все вызовы `get_active_process()` (в т.ч. `gui_lifecycle.py:244`) — убедиться, что после удаления fallback поведение при закрытии GUI не сломалось
 
 ### 1.2. Точечные фиксы вызовов
 
-- [ ] `silence.py` `detect_silence_stream` (~строка 551): заменить `set_active_process(None)` на `set_active_process(None, owner="preview")` **или** перевести на `registered_process(proc, owner="preview")`
-- [ ] `waveform.py` `read_peaks_from_stream` (~строка 115): добавить снятие регистрации `"preview"` во всех путях выхода (успех, `Exception`, `TimeoutExpired`) — лучше через контекст-менеджер
-- [ ] Перевести остальные пары «регистрация/снятие» на контекст-менеджер: `concat.py` (`_run_ffmpeg`, ~716/865), `download.py` (~381/510), `silence.py` (`_run_silencedetect`, ~678/876 и ~930/965)
+- [x] `silence.py` `detect_silence_stream` (~строка 551): заменить `set_active_process(None)` на `set_active_process(None, owner="preview")` **или** перевести на `registered_process(proc, owner="preview")`
+- [x] `waveform.py` `read_peaks_from_stream` (~строка 115): добавить снятие регистрации `"preview"` во всех путях выхода (успех, `Exception`, `TimeoutExpired`) — лучше через контекст-менеджер
+- [x] Перевести остальные пары «регистрация/снятие» на контекст-менеджер: `concat.py` (`_run_ffmpeg`, ~716/865), `download.py` (~381/510), `silence.py` (`_run_silencedetect`, ~678/876 и ~930/965)
 
 ### 1.3. Тесты
 
-- [ ] Тест: preview завершился во время активного `default`-процесса → регистрация `default` НЕ снята
-- [ ] Тест: после завершения preview запись `"preview"` удалена из реестра (нет stale-записей)
-- [ ] Тест: `get_active_process("nonexistent")` возвращает `None`, а не default-процесс
-- [ ] Регрессионный тест: `cancel_process("preview")` во время preview убивает именно preview-процесс
+- [x] Тест: preview завершился во время активного `default`-процесса → регистрация `default` НЕ снята
+- [x] Тест: после завершения preview запись `"preview"` удалена из реестра (нет stale-записей)
+- [x] Тест: `get_active_process("nonexistent")` возвращает `None`, а не default-процесс
+- [x] Регрессионный тест: `cancel_process("preview")` во время preview убивает именно preview-процесс
 
 ---
 

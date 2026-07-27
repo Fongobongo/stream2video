@@ -10,7 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
-from stream2video.utils import CANCEL_POLL_INTERVAL, no_window_kwargs, set_active_process
+from stream2video.utils import CANCEL_POLL_INTERVAL, no_window_kwargs, registered_process
 
 logger = logging.getLogger(__name__)
 
@@ -285,7 +285,7 @@ def download(
 
     Spawns yt-dlp as a subprocess so the call can be cancelled (via cancel_callback
     or GUI close) and the OS process can be killed cleanly. The process is
-    registered with set_active_process for external kill.
+    registered with registered_process (owner="default") for external kill.
 
     Args:
         url: Video URL or local file path
@@ -378,139 +378,138 @@ def download(
     except FileNotFoundError as e:
         raise DownloadError("yt-dlp not found (install via 'pip install yt-dlp')") from e
 
-    set_active_process(process)
-    stdout_lines: list[str] = []
-    stderr_chunks: list[str] = []
+    with registered_process(process):
+        stdout_lines: list[str] = []
+        stderr_chunks: list[str] = []
 
-    # Watchdog state. ``last_progress_time`` is updated by the stdout
-    # drain thread each time a parseable progress line arrives; the main
-    # loop checks it against ``_CONNECT_TIMEOUT`` (before first progress)
-    # and ``_NO_PROGRESS_TIMEOUT`` (mid-download). A non-None value also
-    # tells the UI layer that yt-dlp is actually pushing bytes, not just
-    # sitting on an idle connection.
-    #
-    # The list container is a Python-mutable-cell workaround for the
-    # closure capturing ``last_progress_time`` by reference in a nested
-    # function — direct assignment would create a local binding in the
-    # drain thread and the main loop wouldn't see updates.
-    last_progress_time: list[float | None] = [None]
-    start_time = time.monotonic()
+        # Watchdog state. ``last_progress_time`` is updated by the stdout
+        # drain thread each time a parseable progress line arrives; the main
+        # loop checks it against ``_CONNECT_TIMEOUT`` (before first progress)
+        # and ``_NO_PROGRESS_TIMEOUT`` (mid-download). A non-None value also
+        # tells the UI layer that yt-dlp is actually pushing bytes, not just
+        # sitting on an idle connection.
+        #
+        # The list container is a Python-mutable-cell workaround for the
+        # closure capturing ``last_progress_time`` by reference in a nested
+        # function — direct assignment would create a local binding in the
+        # drain thread and the main loop wouldn't see updates.
+        last_progress_time: list[float | None] = [None]
+        start_time = time.monotonic()
 
-    def _drain_stdout() -> None:
-        # ``process.stdout`` is non-None here (we set stdout=PIPE in
-        # Popen), but mypy can't prove it. Assert once so the for-loop
-        # below sees a concrete IO[Any] instead of IO[Any] | None.
-        stdout = process.stdout
-        if stdout is None:
-            return
-        for line in stdout:
-            text = line.rstrip()
-            prog = _parse_progress_line(text)
-            if prog is not None:
-                last_progress_time[0] = time.monotonic()
-                if progress_callback is not None:
-                    try:
-                        progress_callback(prog)
-                    except Exception:
-                        # A callback crash must not break the download —
-                        # progress is best-effort UI feedback, not a hard
-                        # signal. Log and continue.
-                        logger.debug("progress_callback raised", exc_info=True)
-                continue
-            stdout_lines.append(text)
+        def _drain_stdout() -> None:
+            # ``process.stdout`` is non-None here (we set stdout=PIPE in
+            # Popen), but mypy can't prove it. Assert once so the for-loop
+            # below sees a concrete IO[Any] instead of IO[Any] | None.
+            stdout = process.stdout
+            if stdout is None:
+                return
+            for line in stdout:
+                text = line.rstrip()
+                prog = _parse_progress_line(text)
+                if prog is not None:
+                    last_progress_time[0] = time.monotonic()
+                    if progress_callback is not None:
+                        try:
+                            progress_callback(prog)
+                        except Exception:
+                            # A callback crash must not break the download —
+                            # progress is best-effort UI feedback, not a hard
+                            # signal. Log and continue.
+                            logger.debug("progress_callback raised", exc_info=True)
+                    continue
+                stdout_lines.append(text)
 
-    def _drain_stderr() -> None:
-        stderr = process.stderr
-        if stderr is None:
-            return
-        for line in stderr:
-            stderr_chunks.append(line)
+        def _drain_stderr() -> None:
+            stderr = process.stderr
+            if stderr is None:
+                return
+            for line in stderr:
+                stderr_chunks.append(line)
 
-    stdout_thread = threading.Thread(target=_drain_stdout, daemon=True)
-    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
-    stdout_thread.start()
-    stderr_thread.start()
+        stdout_thread = threading.Thread(target=_drain_stdout, daemon=True)
+        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        stdout_thread.start()
+        stderr_thread.start()
 
-    try:
-        deadline = time.monotonic() + download_timeout
-        while True:
-            if process.poll() is not None:
-                break
-            if cancel_callback and cancel_callback():
-                process.kill()
-                process.wait()
-                raise DownloadCancelledError("Download cancelled by user")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                process.kill()
-                process.wait()
-                raise DownloadTimeoutError(f"Download timeout after {download_timeout}s")
-
-            # Connection / progress watchdog. Two branches:
-            #   1. No progress yet AND we're past connect_timeout — the
-            #      connection didn't establish or yt-dlp is stuck before
-            #      the first byte. Kill with a clearer error than the
-            #      generic ceiling.
-            #   2. Progress seen before but silent for no_progress_timeout
-            #      — the connection dropped mid-download. yt-dlp's own
-            #      retry logic (when enabled) usually fires first, but we
-            #      don't enable it, so the watchdog is the only safety.
-            now = time.monotonic()
-            if last_progress_time[0] is None:
-                if now - start_time > connect_timeout:
+        try:
+            deadline = time.monotonic() + download_timeout
+            while True:
+                if process.poll() is not None:
+                    break
+                if cancel_callback and cancel_callback():
                     process.kill()
                     process.wait()
-                    raise DownloadTimeoutError(
-                        f"Download stalled before first byte: no progress "
-                        f"within {connect_timeout}s (DNS/TLS/handshake?)"
-                    )
-            else:
-                silent_for = now - (last_progress_time[0] or now)
-                if silent_for > no_progress_timeout:
+                    raise DownloadCancelledError("Download cancelled by user")
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     process.kill()
                     process.wait()
-                    raise DownloadTimeoutError(
-                        f"Download stalled: no progress for {int(silent_for)}s"
-                    )
-            try:
-                process.wait(timeout=min(CANCEL_POLL_INTERVAL, remaining))
-            except subprocess.TimeoutExpired:
-                pass
+                    raise DownloadTimeoutError(f"Download timeout after {download_timeout}s")
 
-        stdout_thread.join(timeout=2)
-        stderr_thread.join(timeout=2)
-
-        if process.returncode != 0:
-            stderr_text = "".join(stderr_chunks)
-            raise _classify_error(stderr_text) from None
-
-        if not stdout_lines:
-            stderr_text = "".join(stderr_chunks)
-            raise DownloadError(f"yt-dlp produced no file path. stderr: {stderr_text[:300]}")
-
-        output_path = Path(stdout_lines[-1].strip())
-        resolved = _find_downloaded_file(out_dir, output_path)
-        if resolved is None:
-            raise DownloadError(f"Download completed but file not found: {output_path}")
-
-        size = resolved.stat().st_size
-        if size == 0:
-            raise DownloadError(f"Download completed but file is empty: {resolved}")
-
-        logger.info(f"Successfully downloaded: {resolved} ({size // 1024 // 1024} MB)")
-        return DownloadResult(resolved, is_downloaded=True)
-
-    finally:
-        # Join drain threads in the finally so cancel/timeout/early-raise
-        # paths still wait for them. Threads exit when their pipes close
-        # (next block), so the join is bounded; a missed join could leak
-        # the daemon thread's pipe reads until process exit on Windows.
-        stdout_thread.join(timeout=2)
-        stderr_thread.join(timeout=2)
-        set_active_process(None)
-        for pipe in (process.stdout, process.stderr):
-            if pipe:
+                # Connection / progress watchdog. Two branches:
+                #   1. No progress yet AND we're past connect_timeout — the
+                #      connection didn't establish or yt-dlp is stuck before
+                #      the first byte. Kill with a clearer error than the
+                #      generic ceiling.
+                #   2. Progress seen before but silent for no_progress_timeout
+                #      — the connection dropped mid-download. yt-dlp's own
+                #      retry logic (when enabled) usually fires first, but we
+                #      don't enable it, so the watchdog is the only safety.
+                now = time.monotonic()
+                if last_progress_time[0] is None:
+                    if now - start_time > connect_timeout:
+                        process.kill()
+                        process.wait()
+                        raise DownloadTimeoutError(
+                            f"Download stalled before first byte: no progress "
+                            f"within {connect_timeout}s (DNS/TLS/handshake?)"
+                        )
+                else:
+                    silent_for = now - (last_progress_time[0] or now)
+                    if silent_for > no_progress_timeout:
+                        process.kill()
+                        process.wait()
+                        raise DownloadTimeoutError(
+                            f"Download stalled: no progress for {int(silent_for)}s"
+                        )
                 try:
-                    pipe.close()
-                except OSError:
+                    process.wait(timeout=min(CANCEL_POLL_INTERVAL, remaining))
+                except subprocess.TimeoutExpired:
                     pass
+
+            stdout_thread.join(timeout=2)
+            stderr_thread.join(timeout=2)
+
+            if process.returncode != 0:
+                stderr_text = "".join(stderr_chunks)
+                raise _classify_error(stderr_text) from None
+
+            if not stdout_lines:
+                stderr_text = "".join(stderr_chunks)
+                raise DownloadError(f"yt-dlp produced no file path. stderr: {stderr_text[:300]}")
+
+            output_path = Path(stdout_lines[-1].strip())
+            resolved = _find_downloaded_file(out_dir, output_path)
+            if resolved is None:
+                raise DownloadError(f"Download completed but file not found: {output_path}")
+
+            size = resolved.stat().st_size
+            if size == 0:
+                raise DownloadError(f"Download completed but file is empty: {resolved}")
+
+            logger.info(f"Successfully downloaded: {resolved} ({size // 1024 // 1024} MB)")
+            return DownloadResult(resolved, is_downloaded=True)
+
+        finally:
+            # Join drain threads in the finally so cancel/timeout/early-raise
+            # paths still wait for them. Threads exit when their pipes close
+            # (next block), so the join is bounded; a missed join could leak
+            # the daemon thread's pipe reads until process exit on Windows.
+            stdout_thread.join(timeout=2)
+            stderr_thread.join(timeout=2)
+            for pipe in (process.stdout, process.stderr):
+                if pipe:
+                    try:
+                        pipe.close()
+                    except OSError:
+                        pass

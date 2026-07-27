@@ -34,7 +34,7 @@ from stream2video.utils import (
     looks_like_oom,
     no_window_kwargs,
     read_lines_queue,
-    set_active_process,
+    registered_process,
     subprocess_kwargs,
 )
 
@@ -713,159 +713,158 @@ def _run_ffmpeg(
     except FileNotFoundError as e:
         raise FFmpegError("ffmpeg not found in PATH") from e
 
-    set_active_process(process)
-    if memory_monitor is not None:
-        # Late-bind the pid now that the process exists, then start
-        # the monitor thread. The monitor reads RSS by pid, so this
-        # must happen after Popen returns.
-        memory_monitor.pid = process.pid
-        memory_monitor.start()
-    stderr_pipe = process.stderr
-    assert stderr_pipe is not None
-    stderr_lines: list[str] = []
-    wait_for_drain = drain_stderr_lines(stderr_pipe, stderr_lines)
-    drain_done = False
-    last_progress_time = time.monotonic()
+    with registered_process(process):
+        if memory_monitor is not None:
+            # Late-bind the pid now that the process exists, then start
+            # the monitor thread. The monitor reads RSS by pid, so this
+            # must happen after Popen returns.
+            memory_monitor.pid = process.pid
+            memory_monitor.start()
+        stderr_pipe = process.stderr
+        assert stderr_pipe is not None
+        stderr_lines: list[str] = []
+        wait_for_drain = drain_stderr_lines(stderr_pipe, stderr_lines)
+        drain_done = False
+        last_progress_time = time.monotonic()
 
-    # P1.5: stall watchdog. The ``track_progress=True`` branch checks
-    # ``elapsed_since_progress`` inside its readline loop, but readline
-    # blocks until ffmpeg emits a line -- a fully-hung ffmpeg (deadlock,
-    # no stdout at all) would never surface as a stall there. This
-    # daemon thread polls ``last_progress_time`` independently of
-    # stdout availability and kills the process when the stall window
-    # expires. The track_progress loop's inline check is retained as
-    # a fast path (it kills ASAP after a stalled line arrives).
-    stall_stop = threading.Event()
+        # P1.5: stall watchdog. The ``track_progress=True`` branch checks
+        # ``elapsed_since_progress`` inside its readline loop, but readline
+        # blocks until ffmpeg emits a line -- a fully-hung ffmpeg (deadlock,
+        # no stdout at all) would never surface as a stall there. This
+        # daemon thread polls ``last_progress_time`` independently of
+        # stdout availability and kills the process when the stall window
+        # expires. The track_progress loop's inline check is retained as
+        # a fast path (it kills ASAP after a stalled line arrives).
+        stall_stop = threading.Event()
 
-    def _stall_watchdog() -> None:
-        while not stall_stop.wait(CANCEL_POLL_INTERVAL):
-            if process.poll() is not None:
-                return
-            elapsed = time.monotonic() - last_progress_time
-            if elapsed > stall_kill:
-                logger.error(
-                    f"{label}: stall watchdog firing -- no progress for "
-                    f"{int(elapsed)}s, killing process"
-                )
-                try:
-                    process.kill()
-                except Exception:
-                    logger.exception("stall watchdog: kill() failed")
-                return
-
-    stall_thread = threading.Thread(target=_stall_watchdog, daemon=True, name=f"stall_{label}")
-    stall_thread.start()
-
-    try:
-        with cancel_monitor(process, cancel_callback) as cancelled:
-            if track_progress:
-                stdout_pipe = process.stdout
-                assert stdout_pipe is not None
-                # P1.5: use a queue-based reader so the consumer loop
-                # can check cancel / stall between reads without
-                # blocking on readline(). A hung ffmpeg that stops
-                # emitting stdout would block readline() forever;
-                # the queue + get(timeout=...) lets the inline stall
-                # check run even when no new lines arrive.
-                line_queue, _reader_thread = read_lines_queue(stdout_pipe)
-                while True:
+        def _stall_watchdog() -> None:
+            while not stall_stop.wait(CANCEL_POLL_INTERVAL):
+                if process.poll() is not None:
+                    return
+                elapsed = time.monotonic() - last_progress_time
+                if elapsed > stall_kill:
+                    logger.error(
+                        f"{label}: stall watchdog firing -- no progress for "
+                        f"{int(elapsed)}s, killing process"
+                    )
                     try:
-                        raw_line = line_queue.get(timeout=CANCEL_POLL_INTERVAL)
-                    except queue.Empty:
-                        # No new line -- check cancel + stall.
+                        process.kill()
+                    except Exception:
+                        logger.exception("stall watchdog: kill() failed")
+                    return
+
+        stall_thread = threading.Thread(target=_stall_watchdog, daemon=True, name=f"stall_{label}")
+        stall_thread.start()
+
+        try:
+            with cancel_monitor(process, cancel_callback) as cancelled:
+                if track_progress:
+                    stdout_pipe = process.stdout
+                    assert stdout_pipe is not None
+                    # P1.5: use a queue-based reader so the consumer loop
+                    # can check cancel / stall between reads without
+                    # blocking on readline(). A hung ffmpeg that stops
+                    # emitting stdout would block readline() forever;
+                    # the queue + get(timeout=...) lets the inline stall
+                    # check run even when no new lines arrive.
+                    line_queue, _reader_thread = read_lines_queue(stdout_pipe)
+                    while True:
+                        try:
+                            raw_line = line_queue.get(timeout=CANCEL_POLL_INTERVAL)
+                        except queue.Empty:
+                            # No new line -- check cancel + stall.
+                            if cancel_callback and cancel_callback():
+                                process.kill()
+                                raise CancelledError(f"{label} cancelled") from None
+                            if cancelled.is_set():
+                                raise CancelledError(f"{label} cancelled") from None
+                            elapsed_since_progress = time.monotonic() - last_progress_time
+                            if elapsed_since_progress > stall_kill:
+                                process.kill()
+                                raise FFmpegError(
+                                    f"{label} stalled -- no progress for {int(elapsed_since_progress)}s, "
+                                    "possible resource exhaustion"
+                                ) from None
+                            elif elapsed_since_progress > stall_warning:
+                                logger.warning(
+                                    f"{label}: no progress for {int(elapsed_since_progress)}s -- waiting..."
+                                )
+                            continue
+                        if raw_line is None:
+                            break  # EOF -- pipe closed
                         if cancel_callback and cancel_callback():
                             process.kill()
-                            raise CancelledError(f"{label} cancelled") from None
+                            raise CancelledError(f"{label} cancelled")
                         if cancelled.is_set():
-                            raise CancelledError(f"{label} cancelled") from None
+                            raise CancelledError(f"{label} cancelled")
+                        line = raw_line.decode("utf-8", errors="replace").strip()
+                        if line.startswith("out_time_us="):
+                            last_progress_time = time.monotonic()
+                            if progress_callback:
+                                try:
+                                    us = int(line.split("=", 1)[1])
+                                    progress_callback(us)
+                                except (ValueError, IndexError):
+                                    pass
                         elapsed_since_progress = time.monotonic() - last_progress_time
                         if elapsed_since_progress > stall_kill:
                             process.kill()
                             raise FFmpegError(
                                 f"{label} stalled -- no progress for {int(elapsed_since_progress)}s, "
                                 "possible resource exhaustion"
-                            ) from None
+                            )
                         elif elapsed_since_progress > stall_warning:
                             logger.warning(
                                 f"{label}: no progress for {int(elapsed_since_progress)}s -- waiting..."
                             )
-                        continue
-                    if raw_line is None:
-                        break  # EOF -- pipe closed
-                    if cancel_callback and cancel_callback():
-                        process.kill()
-                        raise CancelledError(f"{label} cancelled")
-                    if cancelled.is_set():
-                        raise CancelledError(f"{label} cancelled")
-                    line = raw_line.decode("utf-8", errors="replace").strip()
-                    if line.startswith("out_time_us="):
-                        last_progress_time = time.monotonic()
-                        if progress_callback:
-                            try:
-                                us = int(line.split("=", 1)[1])
-                                progress_callback(us)
-                            except (ValueError, IndexError):
-                                pass
-                    elapsed_since_progress = time.monotonic() - last_progress_time
-                    if elapsed_since_progress > stall_kill:
-                        process.kill()
-                        raise FFmpegError(
-                            f"{label} stalled -- no progress for {int(elapsed_since_progress)}s, "
-                            "possible resource exhaustion"
+
+                if cancelled.is_set():
+                    raise CancelledError(f"{label} cancelled")
+                _wait_with_cancel(process, timeout, cancel_callback, label)
+                wait_for_drain()
+                drain_done = True
+
+                if process.returncode != 0:
+                    stderr_text = "".join(stderr_lines)
+                    msg = stderr_text[:_STDERR_TRUNCATE] if stderr_text else "unknown error (no stderr)"
+                    # P3.x: surface OOM as a dedicated error so the CLI/GUI
+                    # can hint the user to lower the memory budget or pick
+                    # the Low-memory preset, instead of dumping the raw
+                    # stderr. SIGKILL on POSIX (rc -9 / 137) or stderr
+                    # allocator-failure markers — see looks_like_oom.
+                    if looks_like_oom(process.returncode, stderr_text):
+                        raise FFmpegOutOfMemoryError(
+                            f"{label} ran out of memory "
+                            f"(rc={process.returncode}); "
+                            "try --preset low_memory / lowering "
+                            "--memory-limit-mb / reducing --batch-chunk-size"
                         )
-                    elif elapsed_since_progress > stall_warning:
-                        logger.warning(
-                            f"{label}: no progress for {int(elapsed_since_progress)}s -- waiting..."
+                    raise FFmpegError(f"{label} failed: {msg}")
+
+        except subprocess.TimeoutExpired as e:
+            process.kill()
+            raise FFmpegError(f"{label} timeout after {e.timeout}s") from None
+        finally:
+            stall_stop.set()
+            if memory_monitor is not None:
+                memory_monitor.stop()
+                # Surface the peak RSS so the user can see how close they
+                # came to the budget. Logged at INFO (always visible) when
+                # the monitor saw any progress; debug otherwise.
+                if memory_monitor.peak_rss_mb > 0:
+                    logger.info(
+                        f"{label}: peak RSS {memory_monitor.peak_rss_mb:.0f}MB"
+                        + (
+                            " (HARD limit hit -- task cancelled)"
+                            if memory_monitor.hard_exceeded
+                            else ""
                         )
-
-            if cancelled.is_set():
-                raise CancelledError(f"{label} cancelled")
-            _wait_with_cancel(process, timeout, cancel_callback, label)
-            wait_for_drain()
-            drain_done = True
-
-            if process.returncode != 0:
-                stderr_text = "".join(stderr_lines)
-                msg = stderr_text[:_STDERR_TRUNCATE] if stderr_text else "unknown error (no stderr)"
-                # P3.x: surface OOM as a dedicated error so the CLI/GUI
-                # can hint the user to lower the memory budget or pick
-                # the Low-memory preset, instead of dumping the raw
-                # stderr. SIGKILL on POSIX (rc -9 / 137) or stderr
-                # allocator-failure markers — see looks_like_oom.
-                if looks_like_oom(process.returncode, stderr_text):
-                    raise FFmpegOutOfMemoryError(
-                        f"{label} ran out of memory "
-                        f"(rc={process.returncode}); "
-                        "try --preset low_memory / lowering "
-                        "--memory-limit-mb / reducing --batch-chunk-size"
                     )
-                raise FFmpegError(f"{label} failed: {msg}")
-
-    except subprocess.TimeoutExpired as e:
-        process.kill()
-        raise FFmpegError(f"{label} timeout after {e.timeout}s") from None
-    finally:
-        stall_stop.set()
-        if memory_monitor is not None:
-            memory_monitor.stop()
-            # Surface the peak RSS so the user can see how close they
-            # came to the budget. Logged at INFO (always visible) when
-            # the monitor saw any progress; debug otherwise.
-            if memory_monitor.peak_rss_mb > 0:
-                logger.info(
-                    f"{label}: peak RSS {memory_monitor.peak_rss_mb:.0f}MB"
-                    + (
-                        " (HARD limit hit -- task cancelled)"
-                        if memory_monitor.hard_exceeded
-                        else ""
-                    )
-                )
-        if not drain_done:
-            wait_for_drain()
-        set_active_process(None)
-        if process.stdout is not None:
-            process.stdout.close()
-        stderr_pipe.close()
+            if not drain_done:
+                wait_for_drain()
+            if process.stdout is not None:
+                process.stdout.close()
+            stderr_pipe.close()
 
 
 def _wait_with_cancel(
