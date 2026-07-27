@@ -401,40 +401,81 @@ def no_window_kwargs() -> dict:
     return {}
 
 
-def subprocess_kwargs(low_priority: bool = False) -> dict:
+def subprocess_kwargs(low_priority: bool = False, rlimit_as_mb: int = 0) -> dict:
     """Return subprocess kwargs for ffmpeg invocations.
 
     Always suppresses the console window on Windows (see
-    ``no_window_kwargs``). When ``low_priority`` is True, additionally
-    lowers the spawned process's scheduling priority so a long encode
-    doesn't starve interactive applications:
+    ``no_window_kwargs``). When optional flags are set, additionally:
 
-    * Windows: OR ``BELOW_NORMAL_PRIORITY_CLASS`` (0x00004000) into
-      ``creationflags`` (composes with ``CREATE_NO_WINDOW``).
-    * POSIX (Linux/macOS): set ``preexec_fn`` to ``os.nice(10)`` so the
-      child starts at a higher nice level (lower priority).
+    * ``low_priority=True``: lowers the spawned process's scheduling
+      priority so a long encode doesn't starve interactive applications.
+      * Windows: OR ``BELOW_NORMAL_PRIORITY_CLASS`` (0x00004000) into
+        ``creationflags`` (composes with ``CREATE_NO_WINDOW``).
+      * POSIX: set ``preexec_fn`` to ``os.nice(10)`` so the child
+        starts at a higher nice level (lower priority).
 
-    ``preexec_fn`` is unreliable in multi-threaded programs and is
-    only used when explicitly requested (opt-in via
-    ``low_process_priority``). Default False preserves the historical
-    behaviour.
+    * ``rlimit_as_mb > 0`` (POSIX only): sets ``RLIMIT_AS`` on the
+      ffmpeg child so it cannot allocate more than ``rlimit_as_mb``
+      MiB of virtual address space. ``malloc`` / ``mmap`` will return
+      ``ENOMEM`` (and ffmpeg will bail) before the OS swaps or the
+      Linux OOM killer kicks in. This is a hard, kernel-enforced cap
+      complementing the in-process ``memory_limit_mb`` pre-flight check
+      (which only samples RSS *between* wall-clock polls and can miss a
+      fast spike). No-op on Windows (no portable equivalent; the
+      ``memory_limit_mb`` pre-flight remains the only memory door there).
+
+    â¨``preexec_fn`` is unreliable in multi-threaded programs and is
+    only used when one of the above is explicitly requested (opt-in
+    via ``low_process_priority`` / ``rlimit_as_mb``). Default False /
+    0 preserves the historical behaviour.
+
+    When both POSIX options are requested, they are composed into a
+    single ``preexec_fn`` (Python only allows one) so the child runs
+    ``os.nice(10); resource.setrlimit(RLIMIT_AS, (limit, limit))``
+    in that order.
     """
     kw = no_window_kwargs()
-    if not low_priority:
+    if not low_priority and rlimit_as_mb <= 0:
         return kw
     if sys.platform == "win32":
-        flags = kw.get("creationflags", 0)
-        kw["creationflags"] = flags | 0x00004000  # BELOW_NORMAL_PRIORITY_CLASS
-    else:
-        import os
+        if low_priority:
+            flags = kw.get("creationflags", 0)
+            kw["creationflags"] = flags | 0x00004000  # BELOW_NORMAL_PRIORITY_CLASS
+        # rlimit_as_mb is POSIX-only — ignored on Windows. The
+        # in-process memory_limit_mb pre-flight remains the only
+        # memory door there.
+        return kw
+    # POSIX: compose low_priority + rlimit_as into a single preexec_fn.
+    import os
+    import resource
 
-        def _nice_child() -> None:
+    nice_increment = 10 if low_priority else 0
+    as_bytes = int(rlimit_as_mb) * 1024 * 1024 if rlimit_as_mb > 0 else 0
+
+    def _child_setup() -> None:
+        if nice_increment:
             try:
-                os.nice(10)
+                os.nice(nice_increment)
             except OSError:
                 pass
+        if as_bytes > 0:
+            try:
+                # RLIMIT_AS: max virtual address space bytes. malloc
+                # / mmap return ENOMEM beyond this; the kernel will
+                # NOT swap or trigger the hard OOM killer (this is
+                # the "soft" memory door that lets ffmpeg bail
+                # cleanly rather than the system swapping).
+                resource.setrlimit(resource.RLIMIT_AS, (as_bytes, as_bytes))
+            except (OSError, ValueError):
+                # An unprivileged user can tighten but not loosen;
+                # setting for the first time should succeed. If the
+                # system rejects the value (some BSDs reject very low
+                # values that would immediately fault), silently fall
+                # back to no limit — the in-process pre-flight remains
+                # the safety net.
+                pass
 
-        kw["preexec_fn"] = _nice_child
+    kw["preexec_fn"] = _child_setup
     return kw
 
 

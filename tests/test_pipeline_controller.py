@@ -62,6 +62,7 @@ def _valid_config(**overrides) -> PipelineConfig:
         "x264_low_memory": False,
         "gapless_concat": False,
         "low_process_priority": False,
+        "rlimit_as_mb": 0,
     }
     defaults.update(overrides)
     return PipelineConfig(**defaults)
@@ -110,6 +111,7 @@ class TestPipelineConfig:
             "x264_low_memory",
             "gapless_concat",
             "low_process_priority",
+            "rlimit_as_mb",
             "segment_encode_timeout",
             "final_concat_timeout",
             "silence_timeout",

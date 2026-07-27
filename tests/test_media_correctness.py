@@ -1688,6 +1688,37 @@ def test_low_process_priority_produces_valid_output(synthetic_source: Path, tmp_
     assert "audio" in info.get("codec_types", [])
 
 
+def test_rlimit_as_mb_smoke(synthetic_source: Path, tmp_path: Path):
+    """rlimit_as_mb > 0 (POSIX-only) composes safely with the segment
+    path's per-segment encode + final concat. On Windows the flag is
+    a no-op (no portable RLIMIT_AS equivalent) so this is just a
+    pipeline-smoke test.
+
+    Uses a generous cap (1024 MiB) so the python interpreter + ffmpeg
+    don't fault on the synthetic 6s source (which is <1 MiB).
+    """
+    out = tmp_path / "out_rlimit.mp4"
+    silence = [SilenceSegment(1.0, 3.0), SilenceSegment(5.0, 7.0)]
+    cut_and_concat(
+        synthetic_source,
+        silence,
+        out,
+        method="segment",
+        encoder="libx264",
+        video_quality="medium",
+        rlimit_as_mb=1024,
+    )
+    info = _probe(out)
+    frames = info.get("nb_read_frames_video")
+    # Same source / silence layout as test_low_process_priority:
+    # 6s @ 30fps, kept [0-1, 3-5] = 3s ≈ 90 frames (±2 tolerance).
+    assert frames is not None and abs(frames - 90) <= 2, (
+        f"rlimit_as_mb: frames {frames} != 90; info={info}"
+    )
+    assert "video" in info.get("codec_types", [])
+    assert "audio" in info.get("codec_types", [])
+
+
 def test_low_memory_preset_tunables_produce_valid_output(synthetic_source: Path, tmp_path: Path):
     """The 'low_memory' preset's tunables (x264_low_memory=True,
     batch_chunk_size=20, low_process_priority=True) compose safely
