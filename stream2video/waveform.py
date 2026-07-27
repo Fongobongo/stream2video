@@ -23,7 +23,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from stream2video.formatters import fmt_clock_time
 from stream2video.silence import SilenceSegment
-from stream2video.utils import no_window_kwargs, set_active_process
+from stream2video.utils import no_window_kwargs, registered_process
 
 # Canvas sizing constants. Exposed as module-level so tests can pin them.
 _DEFAULT_WIDTH = 800
@@ -112,96 +112,96 @@ def read_peaks_from_stream(
         )
     except FileNotFoundError:
         return [], 0.0
-    set_active_process(proc, owner="preview")
 
     assert proc.stdout is not None
-    # Stream-decode the PCM bytes in chunks and downsample online into a
-    # fixed-size peak buffer, instead of ``proc.stdout.read()`` which
-    # used to buffer the entire 16 kHz mono s16le stream in RAM. The
-    # previous code peaked at ~230 MB / 2h and ~690-920 MB / 6-8h; with
-    # chunked reading the peak memory is bounded by ``_READ_CHUNK_BYTES``
-    # + the (fixed-size) peaks list, regardless of duration. See P1.15
-    # in the fix plan.
-    #
-    # Strategy: collect a peak per ``_BUCKET_SAMPLES`` samples (a fixed
-    # small window so the peaks list can't grow unbounded). After the
-    # full read we know ``total_samples`` and can max-pool the peaks
-    # down to exactly ``target_buckets``.
-    _READ_CHUNK_BYTES = 64 * 1024  # 64 KB ≈ 32k samples ≈ 2s of 16 kHz audio
-    # Bucket window for the first pass: small enough that even a 1s
-    # input produces a useful peaks list (16000 samples / 256 = 62
-    # peaks) and large enough that a 6h input doesn't blow up the
-    # peaks list (6h * 3600 * 16000 / 256 = 1.35M peaks — too big, so
-    # we cap target_buckets * 16 as an upper bound and max-pool down
-    # afterwards; this keeps memory bounded to ~10x the target for any
-    # duration while still being frame-accurate on the merge).
-    _BUCKET_SAMPLES = 256
-    raw_peaks: list[float] = []
-    bucket_acc = 0
-    bucket_count = 0
-    total_samples = 0
-    try:
-        while True:
-            chunk = proc.stdout.read(_READ_CHUNK_BYTES)
-            if not chunk:
-                break
-            n_samples = len(chunk) // 2
-            if n_samples == 0:
-                continue
-            total_samples += n_samples
-            for s in struct.unpack_from(f"<{n_samples}h", chunk):
-                v = abs(s)
-                if v > bucket_acc:
-                    bucket_acc = v
-                bucket_count += 1
-                if bucket_count >= _BUCKET_SAMPLES:
-                    raw_peaks.append(bucket_acc / 32768.0)
-                    bucket_acc = 0
-                    bucket_count = 0
-    except Exception:
-        proc.kill()
-        proc.wait()
-        return [], 0.0
-    proc.stdout.close()
-    try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        return [], 0.0
-    if proc.returncode != 0 or total_samples == 0:
-        return [], 0.0
+    with registered_process(proc, owner="preview"):
+        # Stream-decode the PCM bytes in chunks and downsample online into a
+        # fixed-size peak buffer, instead of ``proc.stdout.read()`` which
+        # used to buffer the entire 16 kHz mono s16le stream in RAM. The
+        # previous code peaked at ~230 MB / 2h and ~690-920 MB / 6-8h; with
+        # chunked reading the peak memory is bounded by ``_READ_CHUNK_BYTES``
+        # + the (fixed-size) peaks list, regardless of duration. See P1.15
+        # in the fix plan.
+        #
+        # Strategy: collect a peak per ``_BUCKET_SAMPLES`` samples (a fixed
+        # small window so the peaks list can't grow unbounded). After the
+        # full read we know ``total_samples`` and can max-pool the peaks
+        # down to exactly ``target_buckets``.
+        _READ_CHUNK_BYTES = 64 * 1024  # 64 KB ≈ 32k samples ≈ 2s of 16 kHz audio
+        # Bucket window for the first pass: small enough that even a 1s
+        # input produces a useful peaks list (16000 samples / 256 = 62
+        # peaks) and large enough that a 6h input doesn't blow up the
+        # peaks list (6h * 3600 * 16000 / 256 = 1.35M peaks — too big, so
+        # we cap target_buckets * 16 as an upper bound and max-pool down
+        # afterwards; this keeps memory bounded to ~10x the target for any
+        # duration while still being frame-accurate on the merge).
+        _BUCKET_SAMPLES = 256
+        raw_peaks: list[float] = []
+        bucket_acc = 0
+        bucket_count = 0
+        total_samples = 0
+        try:
+            while True:
+                chunk = proc.stdout.read(_READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                n_samples = len(chunk) // 2
+                if n_samples == 0:
+                    continue
+                total_samples += n_samples
+                for s in struct.unpack_from(f"<{n_samples}h", chunk):
+                    v = abs(s)
+                    if v > bucket_acc:
+                        bucket_acc = v
+                    bucket_count += 1
+                    if bucket_count >= _BUCKET_SAMPLES:
+                        raw_peaks.append(bucket_acc / 32768.0)
+                        bucket_acc = 0
+                        bucket_count = 0
+        except Exception:
+            proc.kill()
+            proc.wait()
+            return [], 0.0
+        proc.stdout.close()
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            return [], 0.0
+        if proc.returncode != 0 or total_samples == 0:
+            return [], 0.0
 
-    duration = total_samples / 16000.0
-    # Flush the last partial bucket so a 1.5-bucket input still gets
-    # a final peak (otherwise very short clips returned an empty list).
-    if bucket_count > 0:
-        raw_peaks.append(bucket_acc / 32768.0)
+        duration = total_samples / 16000.0
+        # Flush the last partial bucket so a 1.5-bucket input still gets
+        # a final peak (otherwise very short clips returned an empty list).
+        if bucket_count > 0:
+            raw_peaks.append(bucket_acc / 32768.0)
 
-    # Max-pool down to target_buckets. The caller's contract is "one
-    # peak per horizontal pixel-bucket", so an output larger than
-    # target_buckets would force the renderer into its n_peaks > plot_w
-    # branch (correct but wasteful); an output smaller is fine. We
-    # merge to exactly target_buckets when we exceeded it, and leave
-    # the list as-is when we didn't (short input).
-    peaks = raw_peaks
-    if target_buckets > 0 and len(peaks) > target_buckets:
-        merged: list[float] = []
-        # Integer-based slicing avoids FP drift that could create one
-        # extra bucket at the end (e.g. 63 peaks → 51 buckets instead
-        # of 50). We compute each bucket's [start, end) as
-        # ``[i * len / target, (i+1) * len / target)`` with floor
-        # division so the buckets tile exactly without overlap or gap.
-        n = len(peaks)
-        for i in range(target_buckets):
-            start = (i * n) // target_buckets
-            end = ((i + 1) * n) // target_buckets
-            if end <= start:
-                end = start + 1
-            merged.append(max(peaks[start:end]))
-        peaks = merged
+        # Max-pool down to target_buckets. The caller's contract is "one
+        # peak per horizontal pixel-bucket", so an output larger than
+        # target_buckets would force the renderer into its n_peaks > plot_w
+        # branch (correct but wasteful); an output smaller is fine. We
+        # merge to exactly target_buckets when we exceeded it, and leave
+        # the list as-is when we didn't (short input).
+        peaks = raw_peaks
+        if target_buckets > 0 and len(peaks) > target_buckets:
+            merged: list[float] = []
+            # Integer-based slicing avoids FP drift that could create one
+            # extra bucket at the end (e.g. 63 peaks → 51 buckets instead
+            # of 50). We compute each bucket's [start, end) as
+            # ``[i * len / target, (i+1) * len / target)`` with floor
+            # division so the buckets tile exactly without overlap or gap.
+            n = len(peaks)
+            for i in range(target_buckets):
+                start = (i * n) // target_buckets
+                end = ((i + 1) * n) // target_buckets
+                if end <= start:
+                    end = start + 1
+                merged.append(max(peaks[start:end]))
+            peaks = merged
 
-    return peaks, duration
+        return peaks, duration
 
 
 def silence_pixel_ranges(

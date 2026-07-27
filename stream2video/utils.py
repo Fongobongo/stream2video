@@ -331,13 +331,15 @@ _proc_registry_lock = threading.Lock()
 def get_active_process(owner: str = "default") -> subprocess.Popen | None:
     """Return the currently registered subprocess for ``owner`` (default slot).
 
-    Back-compat: callers that don't pass ``owner`` get the historical
-    single-slot behaviour (the "default" key). The registry also stores
-    the most-recently-registered process under "default" so legacy code
-    that didn't specify an owner still sees a process to cancel.
+    Returns ``None`` when ``owner`` is not registered — there is no
+    fallback to the "default" slot. Previously ``get_active_process("preview")``
+    would silently return the pipeline's ffmpeg if no preview was running,
+    which caused a parallel preview's ``finally`` to clear the pipeline's
+    registration. Callers that want the historical single-slot behaviour
+    pass ``owner="default"`` (the default).
     """
     with _proc_registry_lock:
-        return _proc_registry.get(owner) or _proc_registry.get("default")
+        return _proc_registry.get(owner)
 
 
 def set_active_process(proc: subprocess.Popen | None, owner: str = "default") -> None:
@@ -357,6 +359,26 @@ def set_active_process(proc: subprocess.Popen | None, owner: str = "default") ->
             _proc_registry.pop(owner, None)
         else:
             _proc_registry[owner] = proc
+
+
+@contextmanager
+def registered_process(proc: subprocess.Popen, owner: str = "default") -> Iterator[None]:
+    """Context manager that registers ``proc`` under ``owner`` on entry and
+    clears the same slot on exit (success or exception).
+
+    Guarantees the registry slot is always cleared by the time the block
+    exits, even on cancel/timeout/error, and that the ``owner`` used for
+    clear matches the one used for register — the historical bare
+    ``set_active_process(None)`` in ``finally`` cleared ``"default"``
+    even when the registration was under ``"preview"``, which erased a
+    concurrently-running pipeline's ffmpeg from the registry (P0 audit:
+    preview clobbered default registration).
+    """
+    set_active_process(proc, owner=owner)
+    try:
+        yield
+    finally:
+        set_active_process(None, owner=owner)
 
 
 def cancel_process(owner: str, timeout: float = 2.0) -> bool:

@@ -36,7 +36,7 @@ from stream2video.utils import (
     looks_like_oom,
     no_window_kwargs,
     read_lines_queue,
-    set_active_process,
+    registered_process,
 )
 from stream2video.utils import (
     get_video_duration as _probe_duration,
@@ -510,7 +510,6 @@ def detect_silence_stream(
     except FileNotFoundError as e:
         raise SilenceDetectionError("ffmpeg not found in PATH") from e
 
-    set_active_process(proc, owner="preview")
     assert proc.stderr is not None
     pipe = proc.stderr
 
@@ -523,32 +522,32 @@ def detect_silence_stream(
     parser = SilenceParser(on_segment=on_segment)
 
     try:
-        for raw in iter(pipe.readline, b""):
-            line = raw.decode("utf-8", errors="replace")
-            parser.feed(line)
+        with registered_process(proc, owner="preview"):
+            for raw in iter(pipe.readline, b""):
+                line = raw.decode("utf-8", errors="replace")
+                parser.feed(line)
 
-        proc.wait(timeout=timeout)
-        if proc.returncode != 0:
-            if looks_like_oom(proc.returncode, ""):
-                raise SilenceOutOfMemoryError(
-                    f"ffmpeg silencedetect OOM (rc={proc.returncode}); "
-                    "try --preset low_memory / lowering --memory-limit-mb"
-                )
-            raise SilenceDetectionError(f"ffmpeg silencedetect failed (rc={proc.returncode})")
-        # ``detect_silence_stream`` is a preview-only helper that
-        # doesn't always know the media duration (callers may pass a
-        # URL or a file we haven't probed). Pass ``duration=None`` so
-        # a trailing ``silence_start`` is dropped with a warning
-        # instead of guessing. Callers that know the duration can
-        # post-process the returned list to add the trailing segment,
-        # or call ``detect_silence`` instead (which probes the
-        # duration and closes it via ``SilenceParser.finalize``).
-        return parser.finalize(duration=None)
+            proc.wait(timeout=timeout)
+            if proc.returncode != 0:
+                if looks_like_oom(proc.returncode, ""):
+                    raise SilenceOutOfMemoryError(
+                        f"ffmpeg silencedetect OOM (rc={proc.returncode}); "
+                        "try --preset low_memory / lowering --memory-limit-mb"
+                    )
+                raise SilenceDetectionError(f"ffmpeg silencedetect failed (rc={proc.returncode})")
+            # ``detect_silence_stream`` is a preview-only helper that
+            # doesn't always know the media duration (callers may pass a
+            # URL or a file we haven't probed). Pass ``duration=None`` so
+            # a trailing ``silence_start`` is dropped with a warning
+            # instead of guessing. Callers that know the duration can
+            # post-process the returned list to add the trailing segment,
+            # or call ``detect_silence`` instead (which probes the
+            # duration and closes it via ``SilenceParser.finalize``).
+            return parser.finalize(duration=None)
     except subprocess.TimeoutExpired as e:
         proc.kill()
         raise SilenceDetectionError(f"ffmpeg timeout after {e.timeout}s") from e
     finally:
-        set_active_process(None)
         pipe.close()
 
 
@@ -675,7 +674,6 @@ def _run_silencedetect(
     except FileNotFoundError as e:
         raise SilenceDetectionError("ffmpeg not found in PATH") from e
 
-    set_active_process(process)
     stderr_pipe = process.stderr
     stdout_pipe = process.stdout
     assert stderr_pipe is not None and stdout_pipe is not None
@@ -762,7 +760,7 @@ def _run_silencedetect(
     drain_done = False
 
     try:
-        with cancel_monitor(process, cancel_callback) as cancelled:
+        with registered_process(process), cancel_monitor(process, cancel_callback) as cancelled:
             # P1.5: use queue-based reader so cancel checks run between
             # reads without blocking on readline().
             line_queue, _reader_thread = read_lines_queue(stdout_pipe)
@@ -873,7 +871,6 @@ def _run_silencedetect(
     finally:
         if not drain_done:
             wait_for_drain()
-        set_active_process(None)
         stdout_pipe.close()
         stderr_pipe.close()
 
@@ -927,7 +924,6 @@ def _extract_audio_wav(
     except FileNotFoundError as e:
         raise SilenceDetectionError("ffmpeg not found in PATH") from e
 
-    set_active_process(process)
     stderr_pipe = process.stderr
     assert stderr_pipe is not None
     stderr_lines: list[str] = []
@@ -935,7 +931,7 @@ def _extract_audio_wav(
     drain_done = False
 
     try:
-        with cancel_monitor(process, cancel_callback) as cancelled:
+        with registered_process(process), cancel_monitor(process, cancel_callback) as cancelled:
             if cancelled.is_set():
                 raise SilenceCancelledError("audio extraction cancelled")
             process.wait(timeout=timeout)
@@ -962,7 +958,6 @@ def _extract_audio_wav(
     finally:
         if not drain_done:
             wait_for_drain()
-        set_active_process(None)
         stderr_pipe.close()
 
 

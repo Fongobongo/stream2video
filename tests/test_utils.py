@@ -11,10 +11,12 @@ import pytest
 from stream2video.utils import (
     CANCEL_POLL_INTERVAL,
     cancel_monitor,
+    cancel_process,
     get_active_process,
     get_video_duration,
     get_video_start_time,
     looks_like_oom,
+    registered_process,
     set_active_process,
     subprocess_kwargs,
 )
@@ -348,9 +350,111 @@ class TestActiveProcess:
         set_active_process(None)
         assert get_active_process() is None
 
+    def test_unknown_owner_returns_none_no_fallback(self):
+        """get_active_process("nonexistent") must return None, not fall
+        back to the "default" slot — otherwise a preview's finally
+        could clobber the pipeline's registration (P0 audit 1.1)."""
+        proc = _spawn_quick_proc()
+        try:
+            set_active_process(proc)
+            assert get_active_process("preview") is None
+            assert get_active_process("nonexistent") is None
+        finally:
+            set_active_process(None)
+            proc.wait(timeout=5)
+
     def teardown_method(self, method):
         # Don't leak state into other tests.
         set_active_process(None)
+
+
+class TestRegisteredProcess:
+    """registered_process context manager — registers a subprocess under
+    an owner on entry and *always* clears the same slot on exit, even on
+    exception/early return. This is the fix for the P0 audit: preview's
+    bare ``set_active_process(None)`` in finally cleared the "default"
+    slot where the pipeline's ffmpeg was registered."""
+
+    def teardown_method(self, method):
+        set_active_process(None)
+
+    def test_clears_default_slot_on_normal_exit(self):
+        proc = _spawn_quick_proc()
+        with registered_process(proc):
+            assert get_active_process("default") is proc
+        assert get_active_process("default") is None
+        proc.wait(timeout=5)
+
+    def test_clears_preview_slot_on_normal_exit(self):
+        proc = _spawn_quick_proc()
+        with registered_process(proc, owner="preview"):
+            assert get_active_process("preview") is proc
+        assert get_active_process("preview") is None
+        proc.wait(timeout=5)
+
+    def test_clears_slot_on_exception(self):
+        proc = _spawn_quick_proc()
+        try:
+            with registered_process(proc, owner="preview"):
+                raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+        assert get_active_process("preview") is None
+        proc.wait(timeout=5)
+
+    def test_clears_slot_on_early_return(self):
+        proc = _spawn_quick_proc()
+
+        def f():
+            with registered_process(proc, owner="preview"):
+                return "done"
+
+        f()
+        assert get_active_process("preview") is None
+        proc.wait(timeout=5)
+
+    def test_preview_does_not_clobber_default(self):
+        """A preview registration under "preview" must not touch the
+        "default" slot, so a concurrent pipeline registered under
+        "default" survives preview's finally (regression for P0 1.1)."""
+        default_proc = _spawn_quick_proc()
+        preview_proc = _spawn_quick_proc()
+        try:
+            set_active_process(default_proc, owner="default")
+            with registered_process(preview_proc, owner="preview"):
+                # Both registrations coexist.
+                assert get_active_process("default") is default_proc
+                assert get_active_process("preview") is preview_proc
+            # Preview's finally cleared its own slot.
+            assert "preview" not in {
+                owner for owner in ["preview", "default"] if get_active_process(owner) is not None
+            } or get_active_process("preview") is None
+            # Default slot untouched by preview's exit.
+            assert get_active_process("default") is default_proc
+        finally:
+            set_active_process(None, owner="default")
+            set_active_process(None, owner="preview")
+            default_proc.wait(timeout=5)
+            preview_proc.wait(timeout=5)
+
+    def test_cancel_preview_kills_preview_not_default(self):
+        """cancel_process("preview") targets only the preview slot
+        (regression: a fallback in get_active_process used to make
+        cancel process cross-owner)."""
+        default_proc = _spawn_quick_proc()
+        preview_proc = _spawn_quick_proc()
+        try:
+            set_active_process(default_proc, owner="default")
+            set_active_process(preview_proc, owner="preview")
+            killed = cancel_process("preview", timeout=2.0)
+            assert killed is True
+            preview_proc.wait(timeout=5)
+            # Default process must be unaffected.
+            assert default_proc.poll() is None
+        finally:
+            set_active_process(None, owner="default")
+            set_active_process(None, owner="preview")
+            default_proc.wait(timeout=5)
 
 
 class TestSubprocessKwargs:
