@@ -867,6 +867,78 @@ def _run_ffmpeg(
             stderr_pipe.close()
 
 
+def _run_subprocess_cmd(
+    cmd: list[str],
+    *,
+    timeout: int,
+    label: str,
+    cancel_callback: Callable[[], bool] | None = None,
+    low_process_priority: bool = False,
+    rlimit_as_mb: int = 0,
+) -> None:
+    """Run a single ffmpeg command with timeout / cancel / registration.
+
+    Minimal sibling of ``_run_ffmpeg`` for commands that don't emit a
+    -progress stream (e.g. the stream-copy "cut" phase in
+    ``_run_cut_then_encode``). Unlike the historical bare
+    ``subprocess.run(check=True, capture_output=True)`` this:
+
+      * registers the process in the scoped supervisor so Cancel-GUI /
+        on-close kill reaches the running ffmpeg (P0 audit v0.3 §3);
+      * polls ``cancel_callback`` during the wait (not just between
+        segments) so a cancel mid-segment fires immediately;
+      * bounds the run with ``timeout`` so a hung ffmpeg doesn't hang
+        the whole pipeline;
+      * wraps ``CalledProcessError`` / ``TimeoutExpired`` in a
+        ``ConcatError`` carrying a truncated stderr so the CLI/GUI
+        surfaces a friendly message instead of a raw traceback.
+
+    Stderr is collected from the pipe via ``drain_stderr_lines`` and
+    surfaced on error. No progress callback — cut-фаза caller uses the
+    segment index for progress.
+    """
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            bufsize=-1,
+            **subprocess_kwargs(low_process_priority, rlimit_as_mb),
+        )
+    except FileNotFoundError as e:
+        raise FFmpegError("ffmpeg not found in PATH") from e
+
+    stderr_pipe = process.stderr
+    assert stderr_pipe is not None
+    stderr_lines: list[str] = []
+    wait_for_drain = drain_stderr_lines(stderr_pipe, stderr_lines)
+    drain_done = False
+    try:
+        with registered_process(process), cancel_monitor(process, cancel_callback) as cancelled:
+            if cancelled.is_set():
+                raise CancelledError(f"{label} cancelled")
+            _wait_with_cancel(process, timeout, cancel_callback, label)
+            if cancelled.is_set():
+                raise CancelledError(f"{label} cancelled")
+            drain_done = True
+            if process.returncode != 0:
+                stderr_text = "".join(stderr_lines)
+                if looks_like_oom(process.returncode, stderr_text):
+                    raise FFmpegOutOfMemoryError(
+                        f"{label} ran out of memory (rc={process.returncode}); "
+                        "try --preset low_memory / lowering --memory-limit-mb"
+                    )
+                msg = stderr_text[:_STDERR_TRUNCATE] if stderr_text else "unknown error (no stderr)"
+                raise ConcatError(f"{label} failed (rc={process.returncode}): {msg}")
+    except subprocess.TimeoutExpired as e:
+        process.kill()
+        raise FFmpegError(f"{label} timeout after {e.timeout}s") from None
+    finally:
+        if not drain_done:
+            wait_for_drain()
+        stderr_pipe.close()
+
+
 def _wait_with_cancel(
     process: subprocess.Popen,
     timeout: int,
@@ -1989,11 +2061,13 @@ def _run_cut_then_encode(
                     str(cut_path),
                 ]
             )
-            subprocess.run(
+            _run_subprocess_cmd(
                 cmd,
-                check=True,
-                capture_output=True,
-                **subprocess_kwargs(low_process_priority, rlimit_as_mb),
+                timeout=segment_encode_timeout,
+                label=f"cut_then_encode cut phase segment {i}",
+                cancel_callback=cancel_callback,
+                low_process_priority=low_process_priority,
+                rlimit_as_mb=rlimit_as_mb,
             )
             if progress_callback:
                 progress_callback(cut_progress_base + (i + 1) / n_segs * cut_progress_span)
