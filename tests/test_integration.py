@@ -12,6 +12,7 @@ from stream2video.concat import (
     CancelledError,
     ConcatError,
     _build_manifest,
+    _ffprobe_is_valid_media,
     _ffprobe_is_valid_mp4,
     _manifest_path,
     _run_ffmpeg,
@@ -922,6 +923,76 @@ class TestFfprobeIsValidMp4:
         assert _ffprobe_is_valid_mp4(corrupt) is False
 
 
+class TestFfprobeIsValidMedia:
+    """_ffprobe_is_valid_media — stream_type-aware validity probe
+    (P0 audit: resume in audio extract never skipped, because the
+    video-stream probe rejected every valid audio chunk)."""
+
+    def _have_ffmpeg(self) -> bool:
+        import shutil
+
+        return shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
+
+    def test_valid_audio_passes_with_stream_type_a(self, tmp_path: Path):
+        """A real, complete audio file (mp3) has an audio stream but no
+        video stream. With stream_type="a" ffprobe returns 0 → valid."""
+        if not self._have_ffmpeg():
+            pytest.skip("ffmpeg/ffprobe not available")
+        out = tmp_path / "tone.mp3"
+        import subprocess
+
+        from stream2video.utils import no_window_kwargs
+
+        r = subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=0.2",
+                "-c:a", "libmp3lame", str(out),
+            ],
+            capture_output=True, text=True, **no_window_kwargs(),
+        )
+        assert r.returncode == 0, r.stderr
+        assert out.exists() and out.stat().st_size > 0
+        assert _ffprobe_is_valid_media(out, stream_type="a") is True
+
+    def test_valid_audio_fails_with_stream_type_v(self, tmp_path: Path):
+        """Regression for the P0 bug: the same valid mp3 with a video
+        probe (stream_type="v") must be reported invalid, which is why
+        the old _ffprobe_is_valid_mp4 call rejected every resume chunk
+        in audio extract."""
+        if not self._have_ffmpeg():
+            pytest.skip("ffmpeg/ffprobe not available")
+        out = tmp_path / "tone.mp3"
+        import subprocess
+
+        from stream2video.utils import no_window_kwargs
+
+        r = subprocess.run(
+            [
+                "ffmpeg", "-y", "-loglevel", "error",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=0.2",
+                "-c:a", "libmp3lame", str(out),
+            ],
+            capture_output=True, text=True, **no_window_kwargs(),
+        )
+        assert r.returncode == 0, r.stderr
+        assert _ffprobe_is_valid_media(out, stream_type="v") is False
+
+    def test_truncated_audio_is_invalid_stream_type_a(self, tmp_path: Path):
+        """Truncated mp3 — ffmpeg crashed before writing the final
+        frames. ffprobe should reject it (no valid audio stream)."""
+        if not self._have_ffmpeg():
+            pytest.skip("ffmpeg/ffprobe not available")
+        corrupt = tmp_path / "truncated.mp3"
+        corrupt.write_bytes(b"ID3\x04\x00\x00\x00\x00\x00\x00some garbage")
+        assert _ffprobe_is_valid_media(corrupt, stream_type="a") is False
+
+    def test_default_stream_type_is_video(self, tmp_path: Path):
+        """The default of stream_type is "v" — keeps the historical
+        behaviour of _ffprobe_is_valid_mp4 for video paths."""
+        assert _ffprobe_is_valid_media(tmp_path / "missing.mp4") is False
+
+
 class TestSegmentResumeSkipCrashArtifact:
     """Fix-plan section 4 Resume/failure: crash mid-segment.
 
@@ -1154,3 +1225,73 @@ class TestBatchResumeSkipCrashArtifact:
             f"Expected 1 re-encode (corrupt chunk), got {len(encode_calls)}: {encode_calls}"
         )
         assert "chunk_0000.mp4" in encode_calls[0]
+
+
+class TestAudioExtractResumeStreamType:
+    """Resume in _run_audio_extract must use the audio-stream probe.
+
+    Regression for the P0 bug: _run_audio_extract used
+    _ffprobe_is_valid_mp4 (a video-stream probe) to validate per-segment
+    mp3/opus/aac/wav/flac chunks. Audio-only chunks have no video
+    stream, so the probe always returned False, meaning *every* resume
+    chunk was treated as corrupt and re-encoded — the resume code path
+    was effectively dead.
+
+    This test mocks _run_ffmpeg/_ffprobe_is_valid_media/_ensure_fresh_work_dir
+    so it runs without an ffmpeg binary; the assertions check that
+    a valid on-disk segment is *skipped* (no encode call), which only
+    happens if the audio probe accepts it.
+    """
+
+    def test_valid_audio_segment_is_skipped_on_resume(self, tmp_path: Path):
+        from unittest.mock import patch
+
+        video = tmp_path / "src.mkv"
+        video.write_bytes(b"fake source")
+        output = tmp_path / "out.mp3"
+        keep = [(0.0, 2.0), (2.0, 4.0)]
+
+        work_dir = tmp_path / f"_{output.stem}_audio_mp3"
+        work_dir.mkdir()
+        # Pre-existing valid segments from a previous run. Size >=
+        # min_part_bytes so the size check passes and the ffprobe
+        # check fires (otherwise the skip happens on size alone and
+        # the probe path isn't exercised).
+        for i in range(2):
+            (work_dir / f"seg_{i:06d}.mp3").write_bytes(b"\x00" * 2048)
+
+        encode_calls: list[str] = []
+
+        def fake_run_ffmpeg(cmd, *args, **kwargs):
+            out = str(cmd[-1])
+            if out.endswith(".mp3") and "seg_" in out:
+                encode_calls.append(out)
+                Path(out).write_bytes(b"re-encoded valid mp3 data")
+            return None
+
+        with (
+            patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
+            # Pretend the probe accepts every chunk (valid audio).
+            patch("stream2video.concat._ffprobe_is_valid_media", return_value=True),
+            patch("stream2video.concat._run_audio_concat_filter") as m_acf,
+            patch("stream2video.concat._run_final_concat") as m_fc,
+            patch("stream2video.concat._ensure_fresh_work_dir"),
+        ):
+            # Make the audio-concat-dispatch pick the demuxer path for mp3
+            # (not flac) so _run_final_concat is the expected join.
+            from stream2video.concat import _run_audio_extract
+
+            _run_audio_extract(
+                video, keep, output, "mp3",
+                None, None,
+            )
+
+        # Resume should have skipped both segments — no encode calls.
+        assert encode_calls == [], (
+            f"Both segments were valid audio chunks — none should have been "
+            f"re-encoded, but _run_ffmpeg was called for: {encode_calls}"
+        )
+        # And the demuxer join should have run for mp3 (the flac filter
+        # path is only chosen for output_format=="flac").
+        assert m_acf.call_count == 0
+        assert m_fc.call_count == 1

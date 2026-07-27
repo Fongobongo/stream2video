@@ -1089,13 +1089,21 @@ def _ensure_fresh_work_dir(
     _write_manifest(work_dir, current_manifest)
 
 
-def _ffprobe_is_valid_mp4(path: Path) -> bool:
-    """Quick validity check: ffprobe can read codec + duration.
+def _ffprobe_is_valid_media(path: Path, stream_type: str = "v") -> bool:
+    """Quick validity check: ffprobe can read codec + duration for the
+    requested stream type.
 
     Used by resume-skip to reject a chunk that exists and is large enough
     but is internally corrupt (e.g. ffmpeg crashed mid-write and the
-    moov atom is missing). Without this, the concat demuxer would
-    accept the file but emit a broken segment in the middle of the output.
+    moov atom is missing). Without this, the concat demuxer would accept
+    the file but emit a broken segment in the middle of the output.
+
+    ``stream_type`` selects the ffprobe ``-select_streams`` filter: ``"v"``
+    for video segments (the historical default, used by the concat
+    segment/cut/raw paths) and ``"a"`` for audio segments (audio-extract
+    resume — an audio-only file has no video stream and would otherwise
+    fail video validation → resume always re-encoded everything, see
+    the P0 audit in the v0.3 release plan).
     """
     try:
         r = subprocess.run(
@@ -1104,7 +1112,7 @@ def _ffprobe_is_valid_mp4(path: Path) -> bool:
                 "-v",
                 "error",
                 "-select_streams",
-                "v",
+                stream_type,
                 "-show_entries",
                 "stream=codec_name",
                 "-of",
@@ -1119,6 +1127,13 @@ def _ffprobe_is_valid_mp4(path: Path) -> bool:
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
     return r.returncode == 0 and bool(r.stdout.strip())
+
+
+# Back-compat alias for the old name; new call sites should use
+# _ffprobe_is_valid_media(path, stream_type=...). Kept so external
+# search/grep across older branches doesn't report a dangling reference.
+def _ffprobe_is_valid_mp4(path: Path) -> bool:
+    return _ffprobe_is_valid_media(path, stream_type="v")
 
 
 def _run_final_concat(
@@ -1359,10 +1374,13 @@ def _run_audio_extract(
 
             # Resume: skip already encoded segments. Same dual check as
             # _run_segment_concat: minimum size + ffprobe validity.
+            # Audio segments use stream_type="a" — a video-stream probe
+            # would reject any valid mp3/opus/aac/wav/flac chunk because
+            # it has no video stream, defeating resume (P0 audit v0.3).
             if (
                 seg_path.exists()
                 and seg_path.stat().st_size >= min_part_bytes
-                and _ffprobe_is_valid_mp4(seg_path)
+                and _ffprobe_is_valid_media(seg_path, stream_type="a")
             ):
                 skipped += 1
                 encoded_keep += dur
