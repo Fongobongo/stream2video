@@ -84,15 +84,15 @@
 
 ### 4.1. Флаг stall-kill в `_run_ffmpeg` (concat.py)
 
-- [ ] Завести `stall_killed = threading.Event()`; выставлять его в `_stall_watchdog` ПЕРЕД `process.kill()`
-- [ ] В блоке анализа `returncode != 0`: если `stall_killed.is_set()` — поднимать `FFmpegError("... stalled — no progress for Ns")` ДО проверки `looks_like_oom`
-- [ ] Аналогично проверить `memory_monitor`: hard-kill по памяти должен репортиться как OOM/budget, а не как generic fail (там как раз OOM-ветка уместна — убедиться, что она срабатывает)
-- [ ] Проверить симметричную логику в `silence.py` (`_run_silencedetect`) — есть ли там аналогичная гонка
+- [x] Завести `stall_killed = threading.Event()`; выставлять его в `_stall_watchdog` ПЕРЕД `process.kill()`
+- [x] В блоке анализа `returncode != 0`: если `stall_killed.is_set()` — поднимать `FFmpegError("... stalled — no progress for Ns")` ДО проверки `looks_like_oom`
+- [x] Аналогично проверить `memory_monitor`: hard-kill по памяти должен репортиться как OOM/budget, а не как generic fail (там как раз OOM-ветка уместна — убедиться, что она срабатывает)
+- [x] Проверить симметричную логику в `silence.py` (`_run_silencedetect`) — есть ли там аналогичная гонка
 
 ### 4.2. Тесты
 
-- [ ] Тест: процесс убит stall-watchdog'ом → сообщение про stall, НЕ про OOM
-- [ ] Тест: rc=-9 без stall-флага (реальный OOM-kill) → по-прежнему `FFmpegOutOfMemoryError`
+- [x] Тест: процесс убит stall-watchdog'ом → сообщение про stall, НЕ про OOM
+- [x] Тест: rc=-9 без stall-флага (реальный OOM-kill) → по-прежнему `FFmpegOutOfMemoryError`
 
 ---
 
