@@ -100,22 +100,22 @@
 
 ### 5.1. `download.py` — legacy-парсинг прогресса
 
-- [ ] `_parse_progress_line`: условие `if len(parts) < 5 and len(parts) < 4` — мёртвая логика (эквивалентно `< 4`). Выбрать одно из:
-  - [ ] честно реализовать 4-полевой fallback: `downloaded|total_estimate|speed|eta` → правильное соответствие полей (сейчас `total_estimate` получает speed, `speed` получает eta)
+- [x] `_parse_progress_line`: условие `if len(parts) < 5 and len(parts) < 4` — мёртвая логика (эквивалентно `< 4`). Выбрать одно из:
+  - [x] честно реализовать 4-полевой fallback: `downloaded|total_estimate|speed|eta` → правильное соответствие полей (сейчас `total_estimate` получает speed, `speed` получает eta)
   - [ ] или удалить мёртвую ветку и устаревший комментарий, ужесточив до `len(parts) < 5: return None`
-- [ ] Тест на выбранный вариант (строка из 4 полей парсится правильно ИЛИ отвергается)
+- [x] Тест на выбранный вариант (строка из 4 полей парсится правильно ИЛИ отвергается)
 
 ### 5.2. `detect_silence_stream` может висеть вечно (silence.py)
 
-- [ ] Заменить блокирующий `iter(pipe.readline, b"")` на `read_lines_queue` + `get(timeout=CANCEL_POLL_INTERVAL)` (как в `_run_ffmpeg`), чтобы параметр `timeout` реально работал и зависший ffmpeg не вешал preview
-- [ ] Добавить проверку cancel в цикл чтения (сейчас preview останавливается только через `cancel_process("preview")` снаружи)
-- [ ] Тест: ffmpeg, не пишущий в stderr и не завершающийся → preview падает по timeout, процесс убит
+- [x] Заменить блокирующий `iter(pipe.readline, b"")` на `read_lines_queue` + `get(timeout=CANCEL_POLL_INTERVAL)` (как в `_run_ffmpeg`), чтобы параметр `timeout` реально работал и зависший ffmpeg не вешал preview
+- [x] Добавить проверку cancel в цикл чтения (сейчас preview останавливается только через `cancel_process("preview")` снаружи)
+- [x] Тест: ffmpeg, не пишущий в stderr и не завершающийся → preview падает по timeout, процесс убит
 
 ### 5.3. `-fflags +genpts` в финальном concat (concat.py)
 
-- [ ] Проверить на реальном multi-segment файле, влияет ли флаг в текущей позиции (после `-i`, как выходная опция) на PTS результата
-- [ ] Если нет — перенести `-fflags +genpts` перед `-i` (входная опция демуксера) и перепроверить A/V-синхронизацию на длинном файле
-- [ ] Обновить комментарий «rebuilds the final PTS» по фактическому поведению
+- [x] Проверить на реальном multi-segment файле, влияет ли флаг в текущей позиции (после `-i`, как выходная опция) на PTS результата
+- [x] Если нет — перенести `-fflags +genpts` перед `-i` (входная опция демуксера) и перепроверить A/V-синхронизацию на длинном файле
+- [x] Обновить комментарий «rebuilds the final PTS» по фактическому поведению
 
 ---
 

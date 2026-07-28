@@ -1462,3 +1462,51 @@ class TestResumeEndToEnd:
                 )
 
             assert not cache.exists()
+
+
+class TestDetectSilenceStreamTimeout:
+    """Detect_silence_stream progressive path must honour ``timeout`` even
+    when ffmpeg's stderr never goes silent. Previously the function used
+    ``iter(pipe.readline, b"")`` which blocked until EOF — a hung ffmpeg
+    that never wrote anything to stderr (and never exited) would block
+    forever, defeating the timeout parameter. The P1 audit v0.3 §5.2
+    fix replaced the blocking loop with read_lines_queue + get(timeout)
+    so proc.wait(timeout=timeout) actually fires.
+    """
+
+    def test_hung_ffmpeg_raises_after_timeout(self):
+        import time
+        from unittest.mock import patch
+
+        real_popen = subprocess.Popen
+
+        def fake_popen(cmd, **kwargs):
+            # A python sleep(60) — never writes to stderr, never exits
+            # within the test's expected timeout (we set timeout=2).
+            return real_popen(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                bufsize=-1,
+            )
+
+        start = time.monotonic()
+        with (
+            patch("stream2video.silence.subprocess.Popen", side_effect=fake_popen),
+            pytest.raises(SilenceDetectionError, match="timeout"),
+        ):
+            detect_silence_stream(
+                Path("/tmp/whatever.mkv"),  # never opened — ffmpeg stub ignores it
+                threshold=-30,
+                min_silence=0.5,
+                on_segment=lambda segs: None,
+                timeout=2,
+            )
+        elapsed = time.monotonic() - start
+        # Should fire shortly after timeout=2s, well before the 60s
+        # process sleep. Allow generous slack for slow CI.
+        assert elapsed < 10.0, f"Hung ffmpeg took {elapsed:.1f}s, expected <10s"
+        assert elapsed >= 2.0, (
+            f"Timeout fired too early ({elapsed:.1f}s) — wait() should "
+            f"have waited at least the 2s timeout."
+        )

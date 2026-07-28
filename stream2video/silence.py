@@ -523,7 +523,31 @@ def detect_silence_stream(
 
     try:
         with registered_process(proc, owner="preview"):
-            for raw in iter(pipe.readline, b""):
+            # P1 audit v0.3 §5.2: replace the blocking
+            # ``iter(pipe.readline, b"")`` with read_lines_queue +
+            # ``get(timeout=...)``. A hung ffmpeg that stops writing to
+            # stderr used to block readline indefinitely, so the ``timeout``
+            # parameter never actually fired — preview hung forever. With
+            # the queue + deadline poll, the ``timeout`` reaches wait()
+            # below via the elapsed-time guard.
+            line_queue, _reader_thread = read_lines_queue(pipe)
+            deadline = time.monotonic() + timeout
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    # Force the wait() / TimeoutExpired path now; the loop
+                    # below raises SilenceDetectionError on timeout.
+                    break
+                try:
+                    raw = line_queue.get(timeout=CANCEL_POLL_INTERVAL)
+                except queue.Empty:
+                    if proc.poll() is not None:
+                        # Process exited — let the next get drain the
+                        # reader's trailing None (EOF).
+                        continue
+                    continue
+                if raw is None:
+                    break  # EOF — reader saw the pipe close.
                 line = raw.decode("utf-8", errors="replace")
                 parser.feed(line)
 
