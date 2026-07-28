@@ -735,7 +735,15 @@ def _run_ffmpeg(
         # stdout availability and kills the process when the stall window
         # expires. The track_progress loop's inline check is retained as
         # a fast path (it kills ASAP after a stalled line arrives).
+        #
+        # ``stall_killed`` is set BEFORE the kill() so the post-mortem
+        # rc-analysis can distinguish "watchdog killed a stalled ffmpeg"
+        # from a genuine OOM/SIGKILL (rc -9). Without this, a stall-kill
+        # surfaced as rc=-9 to the main loop and looked_like_oom reported
+        # "ran out of memory" — the user then chased memory instead of
+        # the real cause (P1 audit v0.3 §4).
         stall_stop = threading.Event()
+        stall_killed = threading.Event()
 
         def _stall_watchdog() -> None:
             while not stall_stop.wait(CANCEL_POLL_INTERVAL):
@@ -747,6 +755,7 @@ def _run_ffmpeg(
                         f"{label}: stall watchdog firing -- no progress for "
                         f"{int(elapsed)}s, killing process"
                     )
+                    stall_killed.set()
                     try:
                         process.kill()
                     except Exception:
@@ -827,6 +836,35 @@ def _run_ffmpeg(
                 if process.returncode != 0:
                     stderr_text = "".join(stderr_lines)
                     msg = stderr_text[:_STDERR_TRUNCATE] if stderr_text else "unknown error (no stderr)"
+                    # Memory monitor's hard-budget kill: it triggers cancel
+                    # via cancel_callback rather than killing the process
+                    # directly, and on a race the cancel_monitor's kill can
+                    # land before cancelled propagates — so we'd otherwise
+                    # reach the rc != 0 branch with a SIGKILL and report
+                    # this as a stall or a generic ffmpeg failure. Surface
+                    # it as an OOM-class error here so the user sees the
+                    # "lower the budget" hint (P1 audit v0.3 §4).
+                    if memory_monitor is not None and memory_monitor.hard_exceeded:
+                        raise FFmpegOutOfMemoryError(
+                            f"{label} ran out of memory "
+                            f"(memory monitor hard limit hit, "
+                            f"rc={process.returncode}); "
+                            "try --preset low_memory / lowering "
+                            "--memory-limit-mb / reducing --batch-chunk-size"
+                        )
+                    # Stall-watchdog kill (rc=-9 on POSIX): distinguish from
+                    # a real OOM kill BEFORE looks_like_oom claims it (P1
+                    # audit v0.3 §4). The watchdog set the flag just before
+                    # process.kill(); the inline stall-check in the reader
+                    # loop also raises a stall FFmpegError directly, but a
+                    # race between reader EOF and the watchdog firing could
+                    # surface rc=-9 — so the flag check is the source of
+                    # truth here.
+                    if stall_killed.is_set():
+                        raise FFmpegError(
+                            f"{label} stalled -- no progress for > {stall_kill}s, "
+                            "process killed by watchdog"
+                        )
                     # P3.x: surface OOM as a dedicated error so the CLI/GUI
                     # can hint the user to lower the memory budget or pick
                     # the Low-memory preset, instead of dumping the raw

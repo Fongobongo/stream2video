@@ -333,6 +333,107 @@ class TestFfmpegInvocation:
             f"at least stall_kill=2s before killing."
         )
 
+    def test_stall_killed_reports_stall_not_oom(self):
+        """Regression for P1 audit v0.3 §4: a process killed by the
+        stall watchdog gets rc=-9 on POSIX. Without the stall_killed
+        flag, looks_like_oom(rc=-9, "") would misreport this as "ran
+        out of memory". The flag must be checked FIRST so the user
+        sees "stalled" instead.
+
+        Drives a real hung subprocess (Python sleep), patches
+        looks_like_oom to assert it's never even consulted on a
+        stall-kill, and checks the raised message contains "stall".
+        """
+        import subprocess
+
+        from stream2video.concat import FFmpegError, FFmpegOutOfMemoryError
+
+        real_popen = subprocess.Popen
+
+        def fake_popen(cmd, **kwargs):
+            return real_popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        oom_called = {"yes": False}
+
+        def fake_looks_like_oom(rc, stderr_text):
+            oom_called["yes"] = True
+            return True
+
+        with (
+            patch("stream2video.concat.subprocess.Popen", side_effect=fake_popen),
+            patch("stream2video.concat.looks_like_oom", side_effect=fake_looks_like_oom),
+            pytest.raises(FFmpegError) as exc,
+        ):
+            _run_ffmpeg(
+                [sys.executable, "-c", "pass"],
+                progress_callback=lambda us: None,
+                timeout=60,
+                label="hung",
+                stall_kill=2,
+                stall_warning=1,
+            )
+        assert "stall" in str(exc.value).lower(), (
+            f"Expected 'stall' in error message, got: {exc.value}"
+        )
+        assert not isinstance(exc.value, FFmpegOutOfMemoryError), (
+            "Stall-kill must NOT be reported as OOM"
+        )
+        assert not oom_called["yes"], (
+            "looks_like_oom must not be called when stall_killed.is_set()"
+        )
+
+    def test_real_oom_rc_reports_oom_not_stall(self):
+        """Counter-test: a non-zero rc with NO stall_killed flag and
+        looks_like_oom=True must raise FFmpegOutOfMemoryError, not a
+        stall message. Guards against the opposite mistake of always
+        reporting stall for every rc=-9 (P1 audit v0.3 §4.2).
+
+        Strategy: spawn a *short* daytime process that already exited
+        (rc=0). The post-mortem block is bypassed so we can't reach the
+        looks_like_oom path that way, but we CAN exercise it by zeroing
+        the rc after wait — patch _run_ffmpeg internals:
+        ``_wait_with_cancel`` is stubbed to return 137, ``looks_like_oom``
+        returns True, and we feed a fast-exiting process so the watchdog
+        never fires (stall_killed stays clear)."""
+
+        import subprocess
+
+        from stream2video.concat import FFmpegOutOfMemoryError
+
+        real_popen = subprocess.Popen
+
+        # Fast-exiting process: returns rc=0 real, but our stub uses 137.
+        def fake_popen(cmd, **kwargs):
+            return real_popen(
+                [sys.executable, "-c", "pass"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+
+        with (
+            patch("stream2video.concat.subprocess.Popen", side_effect=fake_popen),
+            patch("stream2video.concat._wait_with_cancel", return_value=137),
+            patch("stream2video.concat.looks_like_oom", return_value=True),
+            pytest.raises(FFmpegOutOfMemoryError),
+        ):
+            _run_ffmpeg(
+                [sys.executable, "-c", "pass"],
+                progress_callback=None,
+                timeout=30,
+                label="oom-kill",
+                track_progress=False,
+                # Generous stall window so the watchdog doesn't fire
+                # before our fast process exits and _wait_with_cancel
+                # returns 137 (the patched value).
+                stall_kill=300,
+                stall_warning=120,
+            )
+
+
 
 class TestSegmentModeProgressStreaming:
     """Regression: with 0 silence segments the whole video is ONE keep segment.
