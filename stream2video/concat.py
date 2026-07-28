@@ -1266,7 +1266,7 @@ def _run_final_concat(
     Shared by ``_run_segment_concat`` and ``_run_batch_concat`` (P2.6).
     Both methods previously had identical 30-line blocks here: open
     ``concat.txt``, write one ``file <name>`` line per part, run
-    ``ffmpeg -f concat -safe 0 -i ... -c copy -fflags +genpts``,
+    ``ffmpeg -fflags +genpts -f concat -safe 0 -i ... -c copy``,
     cleanup. The only real differences were the part filename pattern
     (``seg_NNNNNN.mp4`` vs ``chunk_NNNN.mp4``) and the label string;
     both are now parameters so the body lives once.
@@ -1293,6 +1293,17 @@ def _run_final_concat(
             "error",
             "-progress",
             "pipe:1",
+            # -fflags +genpts is a *demuxer* flag, so it goes BEFORE -i,
+            # not as an output option after -i (P1 audit v0.3 §5.3). It
+            # tells the concat demuxer to generate missing PTS values
+            # for packets whose timestamps got dropped/duplicated at the
+            # segment boundaries. As an output option (the historical
+            # position after -i) it was effectively ignored for the PTS
+            # rebuild contract — the muxer honoured it only on its own
+            # output writes, which fire AFTER the demuxer has already
+            # assembled the packet stream and parsed (or missed) PTS.
+            "-fflags",
+            "+genpts",
             "-f",
             "concat",
             "-safe",
@@ -1301,8 +1312,6 @@ def _run_final_concat(
             str(list_path),
             "-c",
             "copy",
-            "-fflags",
-            "+genpts",
             str(output_path),
         ],
         progress_callback=_concat_prog,
@@ -1828,7 +1837,8 @@ def _run_segment_concat(
             #
             # `-copyts` is NOT used: kept off so the per-segment output
             # timeline starts at 0 (the contract the concat demuxer
-            # expects when `-fflags +genpts` rebuilds the final PTS).
+            # expects when ``-fflags +genpts`` (demuxer-side, placed
+            # before ``-i``) rebuilds the final PTS).
             # Without `-copyts`, timestamps in the segment file are
             # already normalised to start at 0, so a `setpts=PTS-STARTPTS`
             # is a no-op here and is omitted for clarity.
