@@ -286,16 +286,17 @@ def main(
         CONFIG_DEFAULTS["video_quality"],
         "--video-quality",
         "-vq",
-        help="Encode quality preset: 'high' (10000k / CRF 18), 'medium' (7000k / CRF 23, default), "
-        "or 'low' (3500k / CRF 28). If not passed, the config file's `video_quality` key is used.",
+        help="Encode quality preset: 'source' (encoder defaults), 'high' (10000k / CRF 18), "
+        "'medium' (7000k / CRF 23, default), or 'low' (3500k / CRF 28). If not passed, "
+        "the config file's `video_quality` key is used.",
     ),
     audio_quality: str = typer.Option(
         CONFIG_DEFAULTS["audio_quality"],
         "--audio-quality",
         "-aq",
-        help="Audio (AAC) bitrate preset: 'high' (256k), 'medium' (192k, default), "
-        "or 'low' (128k). If not passed, the config file's `audio_quality` "
-        "key is used.",
+        help="Audio (AAC) quality preset: 'source' (codec defaults + native rate/channels), "
+        "'high' (256k), 'medium' (192k, default), or 'low' (128k). If not passed, "
+        "the config file's `audio_quality` key is used.",
     ),
     download_quality: str = typer.Option(
         CONFIG_DEFAULTS["download_quality"],

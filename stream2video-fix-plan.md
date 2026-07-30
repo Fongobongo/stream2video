@@ -4,12 +4,18 @@
 >
 > Документ объединяет исходный аудит и замечания двух дополнительных агентов. Спорные утверждения перепроверены по исходникам и локальному `yt-dlp 2026.07.04`. Для media pipeline также выполнен реальный тест через `ffmpeg`.
 
-## Статус исполнения (обновление от 21 июля 2026)
+## Статус исполнения (обновление от 28 июля 2026)
 
 Все пункты P0, P1, P2 и P3 выполнены и закоммичены. Media reproduction
 тест проходит: на 6s/30FPS источнике с keep=[(0,2),(4,6)] оба метода
 (`segment` и `batch`) дают 4.02s / 120 frames (ожидалось 4.00s / 120;
 расхождение 0.02s — AAC encoder priming, в пределах одного кадра).
+
+Pre-release audit v0.3 (`stream2video-release-fix-plan.md`) закрыт по P0/P1:
+scoped process registration, audio-only resume validation, protected
+`cut_then_encode` cut phase, stall-vs-OOM diagnostics, silence-preview timeout,
+legacy progress parsing, final concat `+genpts` placement, removal of
+`_audio_quality` global, CI matrix and release metadata.
 
 **Дополнительно исправлено (20-21 июля 2026):**
 - Medium audio bitrate: `128k` → `192k` (был одинаков с low)
@@ -87,6 +93,8 @@
 | Non-AAC input codecs (Opus/MP3 in mkv) + channel layout (mono/5.1) + non-zero PTS regression tests; batch-path bug fix (start_time compensation for `-copyts` + `trim`/`atrim`) | ✅ | (current) |
 | Audio-only output formats (mp3/opus/aac-m4a/wav/flac) via `--output-format` / GUI combobox; new `_run_audio_extract` path + `_run_audio_concat_filter` for flac; `OUTPUT_FORMAT_SPECS` in config.py; 11 media correctness tests | ✅ | (current) |
 | AAC priming/gapless concat (`--gapless-concat` / GUI checkbox / `gapless_concat` config key); segment path's final join uses concat filter (re-encode) instead of concat demuxer (stream copy) so priming is added once, not per-segment; `_run_gapless_segment_concat` in concat.py; 3 media correctness tests | ✅ | (current) |
+| Pre-release audit v0.3 stages 1-5 (process registry, audio resume, cut phase protection, stall/OOM diagnostics, preview timeout, progress parser, +genpts) | ✅ | 70b5833 + 11a6855 + 0d15b39 + 008391b + 62b8fd3 |
+| Pre-release audit v0.3 stage 6 (remove `_audio_quality` global, cosmetic cleanup, CI Windows/Ubuntu matrix, release metadata) | ✅ | (current) |
 
 ### Что НЕ сделано (намеренно отложено)
 

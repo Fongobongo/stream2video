@@ -246,7 +246,7 @@ class MainWindowBuildMixin:
         self.combo_video_quality.grid(row=3, column=1, sticky="w", padx=(0, 5))
         _Tooltip(
             self.combo_video_quality,
-            "Preset for the encode step.\nhigh — 10000k / CRF 18 (large files, best quality)\nmedium — 7000k / CRF 23 (default)\nlow — 3500k / CRF 28 (small files)",
+            "Preset for the encode step.\nsource — encoder defaults\nhigh — 10000k / CRF 18 (large files, best quality)\nmedium — 7000k / CRF 23 (default)\nlow — 3500k / CRF 28 (small files)",
         )
 
         # Audio quality preset — bitrate of the AAC encode. Kept separate
@@ -262,7 +262,7 @@ class MainWindowBuildMixin:
         self.combo_audio_quality.grid(row=4, column=1, sticky="w", padx=(0, 5))
         _Tooltip(
             self.combo_audio_quality,
-            "Bitrate for the AAC audio encode.\nhigh — 256k (best quality)\nmedium — 192k (default)\nlow — 128k (smaller files)",
+            "Audio encode policy.\nsource — codec defaults, native rate/channels\nhigh — 256k (best quality)\nmedium — 192k (default)\nlow — 128k (smaller files)",
         )
 
         # Download quality preset — Twitch/YouTube resolution cap. Ignored

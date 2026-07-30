@@ -426,9 +426,15 @@ class TestRegisteredProcess:
                 assert get_active_process("default") is default_proc
                 assert get_active_process("preview") is preview_proc
             # Preview's finally cleared its own slot.
-            assert "preview" not in {
-                owner for owner in ["preview", "default"] if get_active_process(owner) is not None
-            } or get_active_process("preview") is None
+            assert (
+                "preview"
+                not in {
+                    owner
+                    for owner in ["preview", "default"]
+                    if get_active_process(owner) is not None
+                }
+                or get_active_process("preview") is None
+            )
             # Default slot untouched by preview's exit.
             assert get_active_process("default") is default_proc
         finally:

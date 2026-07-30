@@ -36,6 +36,7 @@ from stream2video.concat import (
     cut_and_concat,
     generate_keep_segments,
 )
+from stream2video.config import VALID_QUALITIES
 from stream2video.download import (
     DiskSpaceError,
     DownloadCancelledError,
@@ -659,9 +660,9 @@ def validate_pipeline_config(cfg: PipelineConfig) -> list[str]:
         )
     if cfg.encoder not in ("h264_nvenc", "h264_amf", "h264_mf", "libx264"):
         errors.append(f"Unknown encoder {cfg.encoder!r}.")
-    if cfg.video_quality not in ("high", "medium", "low"):
+    if cfg.video_quality not in VALID_QUALITIES:
         errors.append(f"Unknown video_quality {cfg.video_quality!r}.")
-    if cfg.audio_quality not in ("high", "medium", "low"):
+    if cfg.audio_quality not in VALID_QUALITIES:
         errors.append(f"Unknown audio_quality {cfg.audio_quality!r}.")
     if cfg.output_format not in ("video", "mp3", "opus", "aac", "wav", "flac"):
         errors.append(

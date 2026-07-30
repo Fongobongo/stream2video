@@ -641,7 +641,7 @@ wheels = [
 
 [[package]]
 name = "stream2video"
-version = "0.2"
+version = "0.3"
 source = { editable = "." }
 dependencies = [
     { name = "pyyaml" },
@@ -657,6 +657,7 @@ dev = [
     { name = "numpy" },
     { name = "pillow" },
     { name = "psutil" },
+    { name = "pyside6" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-qt" },
@@ -685,6 +686,7 @@ requires-dist = [
     { name = "pillow", marker = "extra == 'gui'", specifier = ">=10.0.0" },
     { name = "psutil", marker = "extra == 'dev'", specifier = ">=5.9.0" },
     { name = "psutil", marker = "extra == 'monitor'", specifier = ">=5.9.0" },
+    { name = "pyside6", marker = "extra == 'dev'", specifier = ">=6.5.0" },
     { name = "pyside6", marker = "extra == 'gui-test'", specifier = ">=6.5.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },

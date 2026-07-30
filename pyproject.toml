@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stream2video"
-version = "0.2"
+version = "0.3"
 description = "CLI tool to compress stream recordings by removing silence"
 readme = "README.md"
 license = {text = "MIT"}
@@ -31,6 +31,7 @@ dev = [
     "types-PyYAML>=6.0.0",
     "psutil>=5.9.0",
     "numpy>=1.26.0",
+    "PySide6>=6.5.0",
     "stream2video[gui]",
     "stream2video[monitor]",
 ]
@@ -40,8 +41,10 @@ gui = [
 ]
 # GUI event-loop tests (test_gui_qt.py) need a Qt binding for pytest-qt's
 # headless display auto-detection. PySide6 is the lightest Qt6 binding.
-# pytest-qt itself is in [dev] already; this extra is for CI environments
-# that want to run the Qt-driven tests without installing the full Qt SDK.
+# Since [dev] already pulls PySide6 + pytest-qt (so the full suite runs
+# out of the box on `uv sync --extra dev`), this extra is kept only for
+# standalone installs that want the Qt test deps without [dev]'s
+# lint/type toolchain.
 gui-test = [
     "PySide6>=6.5.0",
     "pytest-qt>=4.0.0",

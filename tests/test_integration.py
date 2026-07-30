@@ -382,9 +382,7 @@ class TestFfmpegInvocation:
         assert not isinstance(exc.value, FFmpegOutOfMemoryError), (
             "Stall-kill must NOT be reported as OOM"
         )
-        assert not oom_called["yes"], (
-            "looks_like_oom must not be called when stall_killed.is_set()"
-        )
+        assert not oom_called["yes"], "looks_like_oom must not be called when stall_killed.is_set()"
 
     def test_real_oom_rc_reports_oom_not_stall(self):
         """Counter-test: a non-zero rc with NO stall_killed flag and
@@ -432,7 +430,6 @@ class TestFfmpegInvocation:
                 stall_kill=300,
                 stall_warning=120,
             )
-
 
 
 class TestSegmentModeProgressStreaming:
@@ -703,6 +700,27 @@ class TestEncoderQualityPresets:
             # libx264 ignores bitrate, so -b:v must NOT be present
             assert "-b:v" not in opts
 
+    def test_source_video_quality_uses_encoder_defaults(self):
+        for enc in ("h264_mf", "h264_amf", "h264_nvenc", "libx264"):
+            opts = encoder_opts(enc, "source")
+            assert "-b:v" not in opts
+            assert "-maxrate" not in opts
+            assert "-crf" not in opts
+            assert "-cq" not in opts
+
+    def test_source_video_quality_keeps_operational_x264_opts(self):
+        opts = encoder_opts(
+            "libx264",
+            "source",
+            x264_preset="veryfast",
+            encoder_threads=2,
+            x264_low_memory=True,
+        )
+        assert opts[:2] == ["-preset", "veryfast"]
+        assert "-threads" in opts
+        assert "2" in opts
+        assert "-x264-params" in opts
+
     def test_unknown_encoder_raises(self):
         with pytest.raises(ConcatError, match="Unknown encoder"):
             encoder_opts("vp9", "medium")
@@ -714,7 +732,7 @@ class TestEncoderQualityPresets:
     def test_get_video_encoder_passes_quality(self):
         # libx264 always passes the encoder check. Verify the quality
         # preset flows through get_video_encoder into the returned opts.
-        for q in ("high", "medium", "low"):
+        for q in ("source", "high", "medium", "low"):
             enc, opts = get_video_encoder("libx264", q)
             assert enc == "libx264"
             assert opts == encoder_opts("libx264", q)
@@ -1046,11 +1064,21 @@ class TestFfprobeIsValidMedia:
 
         r = subprocess.run(
             [
-                "ffmpeg", "-y", "-loglevel", "error",
-                "-f", "lavfi", "-i", "sine=frequency=440:duration=0.2",
-                "-c:a", "libmp3lame", str(out),
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.2",
+                "-c:a",
+                "libmp3lame",
+                str(out),
             ],
-            capture_output=True, text=True, **no_window_kwargs(),
+            capture_output=True,
+            text=True,
+            **no_window_kwargs(),
         )
         assert r.returncode == 0, r.stderr
         assert out.exists() and out.stat().st_size > 0
@@ -1070,11 +1098,21 @@ class TestFfprobeIsValidMedia:
 
         r = subprocess.run(
             [
-                "ffmpeg", "-y", "-loglevel", "error",
-                "-f", "lavfi", "-i", "sine=frequency=440:duration=0.2",
-                "-c:a", "libmp3lame", str(out),
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.2",
+                "-c:a",
+                "libmp3lame",
+                str(out),
             ],
-            capture_output=True, text=True, **no_window_kwargs(),
+            capture_output=True,
+            text=True,
+            **no_window_kwargs(),
         )
         assert r.returncode == 0, r.stderr
         assert _ffprobe_is_valid_media(out, stream_type="v") is False
@@ -1383,8 +1421,12 @@ class TestAudioExtractResumeStreamType:
             from stream2video.concat import _run_audio_extract
 
             _run_audio_extract(
-                video, keep, output, "mp3",
-                None, None,
+                video,
+                keep,
+                output,
+                "mp3",
+                None,
+                None,
             )
 
         # Resume should have skipped both segments — no encode calls.
@@ -1396,6 +1438,111 @@ class TestAudioExtractResumeStreamType:
         # path is only chosen for output_format=="flac").
         assert m_acf.call_count == 0
         assert m_fc.call_count == 1
+
+
+class TestAudioQualityParametric:
+    """_audio_bitrate / _audio_opts are now parameters (P1 audit v0.3 §6.1):
+    the module-level ``_audio_quality`` global is gone. The bitrate picker
+    must reflect the *passed* value, and two consecutive calls with
+    different values must not influence each other (the original bug —
+    since the global was set once per ``cut_and_concat`` invocation, a
+    second run premultiplying ``high`` first then a ``low`` run silently
+    inherited 'high' from the prior state if the setter was bypassed by
+    a code path that didn't call _set_audio_quality)."""
+
+    def test_audio_bitrate_high(self):
+        from stream2video.concat import _audio_bitrate
+
+        assert _audio_bitrate("high") == "256k"
+
+    def test_audio_bitrate_medium(self):
+        from stream2video.concat import _audio_bitrate
+
+        assert _audio_bitrate("medium") == "192k"
+
+    def test_audio_bitrate_low(self):
+        from stream2video.concat import _audio_bitrate
+
+        assert _audio_bitrate("low") == "128k"
+
+    def test_audio_bitrate_source_omits_bitrate(self):
+        from stream2video.concat import _audio_bitrate, _audio_bitrate_opts
+
+        assert _audio_bitrate("source") == ""
+        assert _audio_bitrate_opts("source") == []
+
+    def test_audio_bitrate_invalid_raises(self):
+        from stream2video.concat import ConcatError, _audio_bitrate
+
+        with pytest.raises(ConcatError, match="Unknown audio quality"):
+            _audio_bitrate("ultra")
+
+    def test_audio_bitrate_empty_falls_back_to_default(self):
+        from stream2video.concat import _audio_bitrate
+
+        assert _audio_bitrate("") == "128k"
+
+    def test_audio_opts_returns_required_listing(self):
+        from stream2video.concat import _audio_opts
+
+        opts = _audio_opts("medium")
+        assert "-ar" in opts
+        assert "48000" in opts
+        assert "-ac" in opts
+        assert "2" in opts
+
+    def test_audio_opts_source_preserves_native_stream_shape(self):
+        from stream2video.concat import _audio_opts
+
+        assert _audio_opts("source") == []
+
+    def test_audio_opts_rejects_unknown_quality(self):
+        """_audio_opts validates the quality so a typo propagates to a
+        ConcatError rather than silently producing mediocre output."""
+        from stream2video.concat import ConcatError, _audio_opts
+
+        with pytest.raises(ConcatError, match="Unknown audio quality"):
+            _audio_opts("bogus")
+
+    def test_audio_bitrate_double_call_is_stateless(self):
+        """Two consecutive calls with different quality must not
+        influence each other — the parameter is the source of truth,
+        not a shared mutable global."""
+        from stream2video.concat import _audio_bitrate
+
+        assert _audio_bitrate("high") == "256k"
+        assert _audio_bitrate("low") == "128k"
+        assert _audio_bitrate("medium") == "192k"
+
+    def test_cut_and_concat_forwards_audio_quality_per_call(self, tmp_path: Path):
+        """Back-to-back pipeline calls must carry their own audio_quality.
+
+        This stays cheap by patching out ffmpeg work; the regression signal is
+        that ``cut_and_concat`` no longer writes a module-level preset that a
+        later run can accidentally inherit.
+        """
+        from stream2video.concat import cut_and_concat
+
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"source")
+        output = tmp_path / "out.mp4"
+        seen: list[str] = []
+
+        def fake_run_with_fallback(*args, **kwargs):
+            seen.append(kwargs["audio_quality"])
+
+        with (
+            patch("stream2video.concat.get_video_duration", return_value=2.0),
+            patch(
+                "stream2video.concat.get_video_encoder", return_value=("libx264", ["-crf", "23"])
+            ),
+            patch("stream2video.concat.has_audio_stream", return_value=True),
+            patch("stream2video.concat._run_with_fallback", side_effect=fake_run_with_fallback),
+        ):
+            cut_and_concat(video, [], output, audio_quality="high")
+            cut_and_concat(video, [], output, audio_quality="low")
+
+        assert seen == ["high", "low"]
 
 
 class TestCutThenEncodeCutPhaseProtection:
@@ -1435,8 +1582,13 @@ class TestCutThenEncodeCutPhaseProtection:
             from stream2video.concat import _run_cut_then_encode
 
             _run_cut_then_encode(
-                video, keep, output, "libx264", ["-preset", "medium"],
-                None, None,
+                video,
+                keep,
+                output,
+                "libx264",
+                ["-preset", "medium"],
+                None,
+                None,
                 encoder="libx264",
             )
         # Phase-1 cut-фаза runs exactly once per keep segment.
@@ -1462,8 +1614,13 @@ class TestCutThenEncodeCutPhaseProtection:
             pytest.raises(ConcatError, match="cut phase segment"),
         ):
             _run_cut_then_encode(
-                video, keep, output, "libx264", ["-preset", "medium"],
-                None, None,
+                video,
+                keep,
+                output,
+                "libx264",
+                ["-preset", "medium"],
+                None,
+                None,
                 encoder="libx264",
             )
 
@@ -1486,8 +1643,13 @@ class TestCutThenEncodeCutPhaseProtection:
             pytest.raises(CancelledError),
         ):
             _run_cut_then_encode(
-                video, keep, output, "libx264", ["-preset", "medium"],
-                None, None,
+                video,
+                keep,
+                output,
+                "libx264",
+                ["-preset", "medium"],
+                None,
+                None,
                 encoder="libx264",
             )
 
@@ -1510,7 +1672,12 @@ class TestCutThenEncodeCutPhaseProtection:
             pytest.raises(FFmpegError, match="timeout"),
         ):
             _run_cut_then_encode(
-                video, keep, output, "libx264", ["-preset", "medium"],
-                None, None,
+                video,
+                keep,
+                output,
+                "libx264",
+                ["-preset", "medium"],
+                None,
+                None,
                 encoder="libx264",
             )

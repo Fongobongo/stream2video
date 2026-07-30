@@ -123,38 +123,38 @@
 
 ### 6.1. Убрать глобальное состояние `_audio_quality` (concat.py)
 
-- [ ] Протащить `audio_quality` параметром в `_audio_bitrate()` / `_audio_opts()` и все места использования
-- [ ] Удалить module-level `_audio_quality` и его присваивание в `cut_and_concat`
-- [ ] Тест: два последовательных вызова `cut_and_concat` с разным `audio_quality` не влияют друг на друга (и smoke-тест на потокобезопасность, если планируется parallel encode)
+- [x] Протащить `audio_quality` параметром в `_audio_bitrate()` / `_audio_opts()` и все места использования
+- [x] Удалить module-level `_audio_quality` и его присваивание в `cut_and_concat`
+- [x] Тест: два последовательных вызова `cut_and_concat` с разным `audio_quality` не влияют друг на друга (и smoke-тест на потокобезопасность, если планируется parallel encode)
 
 ### 6.2. Унификация парсера silencedetect (P2.5 доделать)
 
-- [ ] Перевести inline-парсер в `_run_silencedetect` на общий `SilenceParser` (сейчас unified-парсер используется только в stream-версии — риск расхождения логики)
-- [ ] Убедиться, что тесты на decimal comma (P1.13) покрывают оба пути
+- [ ] Перевести inline-парсер в `_run_silencedetect` на общий `SilenceParser` (сейчас unified-парсер используется только в stream-версии — риск расхождения логики) — отложено в v0.4 (P2): сейчас inline `_on_line` использует `_to_float` и `_SILENCE_*_RE`, общие с `SilenceParser`, так что P1.13 (decimal comma) уже покрыт на обоих путях; полный перевод требует переезда throttled resume-save логики внутрь `SilenceParser` (изменение контракта обратного вызова)
+- [x] Убедиться, что тесты на decimal comma (P1.13) покрывают оба пути
 
 ### 6.3. Косметика
 
-- [ ] `concat.py`: удалить дубликат `_MIN_PART_BYTES` (объявлен ~строки 145 и ~880)
-- [ ] `concat.py`: исправить устаревший комментарий у `_AUDIO_BITRATE = "128k"` («medium keeps the historical 128k» — medium уже 192k)
-- [ ] `utils.py`: исправить битую кодировку в docstring `subprocess_kwargs` (`â¨"preexec_fn"`)
-- [ ] Прогнать grep по проекту на другие следы битой кодировки: `rg -n '[â€™Ã]' stream2video/`
+- [x] `concat.py`: удалить дубликат `_MIN_PART_BYTES` (объявлен ~строки 145 и ~880)
+- [x] `concat.py`: исправить устаревший комментарий у `_AUDIO_BITRATE = "128k"` («medium keeps the historical 128k» — medium уже 192k)
+- [x] `utils.py`: исправить битую кодировку в docstring `subprocess_kwargs` (`â¨"preexec_fn"`)
+- [x] Прогнать grep по проекту на другие следы битой кодировки: `rg -n '[â€™Ã]' stream2video/`
 
 ### 6.4. CI и релизная гигиена
 
-- [ ] Настроить/проверить GitHub Actions: `pytest` на матрице ОС (Ubuntu + **Windows** — много Windows-специфики: h264_mf, `no_window_kwargs`, priority class; macOS опционально)
-- [ ] Добавить в CI `ruff check` и `mypy` (или зафиксировать отказ от mypy осознанно)
-- [ ] Зафиксировать секцию Unreleased в `CHANGELOG.md` как версию **0.3**, проставить дату
-- [ ] Поднять версию в `pyproject.toml` до 0.3
-- [ ] Обновить `stream2video-fix-plan.md`: отметить пункты этого плана как новый раздел аудита
+- [x] Настроить/проверить GitHub Actions: `pytest` на матрице ОС (Ubuntu + **Windows** — много Windows-специфики: h264_mf, `no_window_kwargs`, priority class; macOS опционально)
+- [x] Добавить в CI `ruff check` и `mypy` (или зафиксировать отказ от mypy осознанно)
+- [x] Зафиксировать секцию Unreleased в `CHANGELOG.md` как версию **0.3**, проставить дату
+- [x] Поднять версию в `pyproject.toml` до 0.3
+- [x] Обновить `stream2video-fix-plan.md`: отметить пункты этого плана как новый раздел аудита
 
 ---
 
 ## Этап 7. Финальная проверка перед релизом
 
-- [ ] Полный прогон тестов на Linux и Windows: все зелёные
+- [ ] Полный прогон тестов на Linux и Windows: Windows local `pytest -q` зелёный (720 passed, 11 skipped, 2026-07-28); Linux локально не прогнан — Docker недоступен, покрытие настроено через CI Ubuntu matrix
 - [ ] Ручной smoke-тест на длинном VOD (2ч+), метод segment: запуск → Cancel в середине encode → процесс убит, temp-файлы на месте → повторный запуск → resume подхватывает готовые сегменты
 - [ ] Ручной smoke-тест: preview волны/тишины параллельно с энкодом → после завершения preview кнопка Cancel по-прежнему убивает ffmpeg пайплайна (регрессия этапа 1)
 - [ ] Ручной smoke-тест audio-only формата (mp3/opus) с прерыванием и resume (регрессия этапа 2)
 - [ ] Ручной smoke-тест метода cut+encode с намеренно битым входом → дружелюбная ошибка, не traceback (регрессия этапа 3)
-- [ ] Просмотреть diff целиком, squash/упорядочить коммиты, обновить README при необходимости
+- [x] Просмотреть diff целиком, squash/упорядочить коммиты, обновить README при необходимости
 - [ ] Тег релиза `v0.3`, сборка, публикация

@@ -10,7 +10,7 @@ Downloads VOD from YouTube/Twitch, detects silence via audio analysis, cuts out 
 - **Cut methods**: `segment` (fast, per-segment encode + concat demuxer) or `batch` (frame-exact, trim+concat filter)
 - **Hardware encoders**: NVIDIA NVENC, AMD AMF, Windows Media Foundation
 - **Safe encoder fallback policy** — `ask` (default) refuses silent fallback to libx264; the user must consent before a CPU-heavy encode runs. `disabled` raises immediately, `enabled` preserves the legacy silent-fallback behaviour.
-- **Audio quality presets** — `high` (256k), `medium` (192k, default), `low` (128k). A 192k/256k/320k source is no longer silently downgraded to 128k without the user's choice.
+- **Audio quality presets** — `source` (codec defaults + native rate/channels), `high` (256k), `medium` (192k, default), `low` (128k). A 192k/256k/320k source is no longer silently downgraded to 128k without the user's choice.
 - **Output FPS policy** — `source` (default) preserves the input's frame cadence without duplication; `24`/`25`/`30`/`50`/`60` force CFR conversion via the `fps` filter (duplicated frames warn about file-size cost).
 - **Resume integrity** — segment/batch working directories contain a `_manifest.json` that snapshots (source path/size/mtime, encoder, quality, keep segments, pipeline version); a mismatch wipes the work dir so old artifacts from an incompatible run cannot be reused. Each resumed chunk is ffprobe-validated for missing moov atoms.
 - **Download watchdog** — `_CONNECT_TIMEOUT` (5 min, first byte), `_NO_PROGRESS_TIMEOUT` (30 min, mid-download stall), and `_DOWNLOAD_TIMEOUT` (8 h, absolute ceiling) catch hung connections before the user stares at a frozen bar. All three are now configurable via `--download-timeout` / `--connect-timeout` / `--no-progress-timeout`.
@@ -75,8 +75,8 @@ stream2video /path/to/video.mp4
 |------|---------|-------------|
 | `-o, --output` | `./compressed_videos` | Output directory |
 | `-e, --encoder` | `h264_mf` | `h264_nvenc`, `h264_amf`, `h264_mf`, `libx264` |
-| `-vq, --video-quality` | `medium` | Encode quality preset: `high` (10000k / CRF 18), `medium` (7000k / CRF 23), `low` (3500k / CRF 28) |
-| `-aq, --audio-quality` | `medium` | Audio (AAC) bitrate preset: `high` (256k), `medium` (192k), `low` (128k) |
+| `-vq, --video-quality` | `medium` | Encode quality preset: `source` (encoder defaults), `high` (10000k / CRF 18), `medium` (7000k / CRF 23), `low` (3500k / CRF 28) |
+| `-aq, --audio-quality` | `medium` | Audio quality preset: `source` (codec defaults + native rate/channels), `high` (256k), `medium` (192k), `low` (128k) |
 | `-dq, --download-quality` | `best` | Download quality preset (Twitch/YouTube, ignored for local files): `best`, `1080p`, `720p`, `480p`, `360p` |
 | `-m, --method` | `segment` | `segment` (per-segment encode + concat demuxer) or `batch` (frame-exact trim+concat filter) |
 | `--software-fallback` | `ask` | What happens when the requested HW encoder is unavailable or fails mid-run: `ask` (refuse silent fallback — the run fails with a clear error), `disabled` (fail immediately), `enabled` (silently retry with libx264, legacy behaviour) |
@@ -138,8 +138,8 @@ margin: 0.15
 | `threshold` (dB) | -60 to -5 | -30.0 | Audio below this level = silence |
 | `min_silence` (s) | 0.1 to 60 | 2.0 | Minimum silence duration to cut |
 | `margin` (s) | -3 to 5 | 0.5 | How much to shrink silence zones. Positive = shrink silence (keep more audio around phrases). Negative = expand silence (cut more aggressively). `0` = no adjustment. |
-| `video_quality` | `high`/`medium`/`low` | `medium` | Encode quality preset. Bitrate for HW encoders (10000k/7000k/3500k); CRF for libx264 (18/23/28). Also settable via `--video-quality`. |
-| `audio_quality` | `high`/`medium`/`low` | `medium` | Audio (AAC) bitrate preset: `high` (256k), `medium` (192k), `low` (128k). Also settable via `--audio-quality`. |
+| `video_quality` | `source`/`high`/`medium`/`low` | `medium` | Encode quality preset. `source` omits stream2video's bitrate/CRF policy and lets encoder defaults apply; other presets set bitrate for HW encoders (10000k/7000k/3500k) or CRF for libx264 (18/23/28). Also settable via `--video-quality`. |
+| `audio_quality` | `source`/`high`/`medium`/`low` | `medium` | Audio quality preset. `source` omits `-b:a` and preserves native sample rate/channel layout where the output codec allows it; other presets set bitrate: `high` (256k), `medium` (192k), `low` (128k). Also settable via `--audio-quality`. |
 | `download_quality` | `best`/`1080p`/`720p`/`480p`/`360p` | `best` | Max resolution to download from Twitch/YouTube (ignored for local files). Also settable via `--download-quality`. |
 | `software_fallback` | `ask`/`disabled`/`enabled` | `ask` | What happens when the requested HW encoder is unavailable or fails mid-run. `ask` (default) refuses silent fallback to libx264; `disabled` raises immediately; `enabled` preserves the legacy silent-fallback behaviour. |
 | `x264_preset` | `ultrafast`..`slower` | `medium` | libx264 preset. Faster presets reduce CPU load at the cost of file size / quality. |
@@ -279,7 +279,8 @@ python -m stream2video.gui
 - **Per-video project directory** checkbox — group all of a video's artifacts into `{output_dir}/{stem}/`
 - **Method**: segment (per-segment encode + concat demuxer) or batch (frame-exact select/aselect)
 - **Encoder**: h264_nvenc, h264_amf, h264_mf, libx264
-- **Video quality**: high / medium / low (bitrate for HW encoders, CRF for libx264)
+- **Video quality**: source / high / medium / low (encoder defaults, or bitrate for HW encoders / CRF for libx264)
+- **Audio quality**: source / high / medium / low (codec defaults + native rate/channels, or explicit bitrate)
 - **Download quality**: best / 1080p / 720p / 480p / 360p (Twitch/YouTube, ignored for local files)
 - **Test encoder** button
 - **Progress bar** + **log panel** with real-time output
