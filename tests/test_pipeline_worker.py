@@ -525,31 +525,49 @@ class TestPipelineWorkerRun:
         assert any(text == "Error: boom" and force is True for text, force in gui.status_calls)
 
     def test_delete_after_unlinks_download_path(self, tmp_path: Path):
-        # When delete_after is True and the controller exposed a
-        # ``_download_path``, the worker unlinks the source file on
-        # success (the user explicitly opted in; the file lives only
-        # to feed the pipeline and is now redundant).
+        # ``delete_after=True`` — the controller's ``_finish`` owns the
+        # source-file unlink on success (it also clears
+        # ``_download_path`` to None). The worker's run() must NOT
+        # re-attempt deletion: after ``_finish`` the attribute is None,
+        # so any worker-side unlink block would silently never fire (the
+        # historical version did exactly that — dead code masked by this
+        # test's previous fake whose ``run()`` was a no-op and left
+        # ``_download_path`` set). This test now exercises the REAL
+        # ``_finish`` via a thin subclass that fills a fake summary
+        # (download path + output file) and delegates to the controller,
+        # so the deletion is the controller's, not the worker's.
         gui = _FakeGuiCallbacks()
         worker = PipelineWorker(gui, {"threshold": -30, "min_silence": 2, "margin": 0})
         source = tmp_path / "src.mp4"
         source.write_bytes(b"data")
+        output = tmp_path / "out" / "video_compressed.mp4"
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"out")
 
-        class _DeletingController(_FakePipelineController):
-            _download_path: Path = source  # type: ignore[misc]
+        from stream2video.pipeline_controller import PipelineController
+
+        class _FinishingController(PipelineController):
+            """Mimic a controller that already reached the finish
+            phase: seed the download path + the (post-finish) None so
+            the real ``_finish`` path runs the unlink."""
+
+            _download_path: Path | None = source  # type: ignore[misc]
 
             def run(self) -> None:
-                # No raise — happy path. The worker then reads
-                # ``controller._download_path`` for the unlink.
-                pass
+                # Skip the full pipeline; just exercise _finish, which
+                # is the real owner of the delete-after unlink.
+                self._finish(
+                    video_path=source,
+                    output_path=output,
+                    src_size_bytes=len(b"data"),
+                    src_duration=None,
+                    keep_dur=10.0,
+                )
 
         with (
             patch(
-                "stream2video.pipeline_controller.PipelineCallbacks",
-                new=_FakePipelineCallbacks,
-            ),
-            patch(
                 "stream2video.pipeline_controller.PipelineController",
-                new=_DeletingController,
+                new=_FinishingController,
             ),
         ):
             params = PipelineWorkerParams(

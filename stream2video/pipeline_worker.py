@@ -328,12 +328,14 @@ class PipelineWorker:
             controller.run()
             if video_path_ref[0]:
                 self._gui.pop_live_segments(video_path_ref[0])
-            if params.delete_after and controller._download_path is not None:
-                try:
-                    controller._download_path.unlink()
-                    self._gui.log(f"Deleted source: {controller._download_path}")
-                except OSError as e:
-                    self._gui.log(f"[WARN] Could not delete source: {e}")
+            # NOTE: source-file deletion on ``delete_after=True`` is owned
+            # by ``PipelineController._finish`` — it unlinks the path AND
+            # clears ``_download_path`` to None, so re-checking it here
+            # would always see None (dead code). The previous block did
+            #    ``controller._download_path.unlink()``
+            # but only ever fired under the test fake whose ``run()`` was a
+            # no-op (never reached ``_finish``); on the real success path
+            # it was unreachable. Do NOT duplicate the deletion here.
         except PipelineCancelled:
             self._gui.log("Pipeline cancelled")
             self._gui.ui_status("Cancelled", force=True)
