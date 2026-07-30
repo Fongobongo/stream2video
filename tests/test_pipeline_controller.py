@@ -190,6 +190,11 @@ class TestValidatePipelineConfig:
         cfg = _valid_config(output_format=fmt)
         assert validate_pipeline_config(cfg) == []
 
+    @pytest.mark.parametrize("quality", ["source", "high", "medium", "low"])
+    def test_all_quality_presets_valid(self, quality: str):
+        cfg = _valid_config(video_quality=quality, audio_quality=quality)
+        assert validate_pipeline_config(cfg) == []
+
     def test_threshold_out_of_range(self):
         cfg = _valid_config(threshold=-70.0)
         errors = validate_pipeline_config(cfg)

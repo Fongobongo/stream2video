@@ -122,8 +122,9 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     #   * ``wav``  → .wav + pcm_s16le (lossless, 48 kHz / 16-bit)
     #   * ``flac`` → .flac + flac (lossless, compressed)
     # ``audio_quality`` controls the bitrate for lossy formats; lossless
-    # formats (wav, flac) ignore it. ``-ar 48000 -ac 2`` is applied
-    # uniformly so a mono or 44.1 kHz source is normalised.
+    # formats (wav, flac) ignore it. ``source`` omits the bitrate and
+    # ``-ar 48000 -ac 2`` policy so ffmpeg keeps the decoded stream's
+    # native sample rate/channel layout where the output codec allows it.
     "output_format": "video",
     "theme": "dark",
     "recent_projects": [],
@@ -229,7 +230,7 @@ VALID_METHODS: list[str] = ["segment", "batch", "cut_then_encode"]
 
 VALID_ENCODERS: list[str] = ["h264_nvenc", "h264_amf", "h264_mf", "libx264"]
 
-VALID_QUALITIES: list[str] = ["high", "medium", "low"]
+VALID_QUALITIES: list[str] = ["source", "high", "medium", "low"]
 
 VALID_DOWNLOAD_QUALITIES: list[str] = ["best", "1080p", "720p", "480p", "360p"]
 
@@ -282,8 +283,8 @@ VALID_OUTPUT_FORMATS: list[str] = ["video", "mp3", "opus", "aac", "wav", "flac"]
 #     that don't need extra tuning.
 #
 # The bitrate knob (``-b:a``) is added by the audio-extract code path
-# from ``_audio_bitrate()`` so it stays consistent with the existing
-# ``audio_quality`` presets; lossless formats skip it.
+# from ``_audio_bitrate_opts()`` so it stays consistent with the existing
+# ``audio_quality`` presets; lossless formats and ``source`` skip it.
 OUTPUT_FORMAT_SPECS: dict[str, dict[str, Any]] = {
     "mp3": {
         "codec": "libmp3lame",

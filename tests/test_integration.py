@@ -12,6 +12,7 @@ from stream2video.concat import (
     CancelledError,
     ConcatError,
     _build_manifest,
+    _ffprobe_is_valid_media,
     _ffprobe_is_valid_mp4,
     _manifest_path,
     _run_ffmpeg,
@@ -332,6 +333,104 @@ class TestFfmpegInvocation:
             f"at least stall_kill=2s before killing."
         )
 
+    def test_stall_killed_reports_stall_not_oom(self):
+        """Regression for P1 audit v0.3 §4: a process killed by the
+        stall watchdog gets rc=-9 on POSIX. Without the stall_killed
+        flag, looks_like_oom(rc=-9, "") would misreport this as "ran
+        out of memory". The flag must be checked FIRST so the user
+        sees "stalled" instead.
+
+        Drives a real hung subprocess (Python sleep), patches
+        looks_like_oom to assert it's never even consulted on a
+        stall-kill, and checks the raised message contains "stall".
+        """
+        import subprocess
+
+        from stream2video.concat import FFmpegError, FFmpegOutOfMemoryError
+
+        real_popen = subprocess.Popen
+
+        def fake_popen(cmd, **kwargs):
+            return real_popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        oom_called = {"yes": False}
+
+        def fake_looks_like_oom(rc, stderr_text):
+            oom_called["yes"] = True
+            return True
+
+        with (
+            patch("stream2video.concat.subprocess.Popen", side_effect=fake_popen),
+            patch("stream2video.concat.looks_like_oom", side_effect=fake_looks_like_oom),
+            pytest.raises(FFmpegError) as exc,
+        ):
+            _run_ffmpeg(
+                [sys.executable, "-c", "pass"],
+                progress_callback=lambda us: None,
+                timeout=60,
+                label="hung",
+                stall_kill=2,
+                stall_warning=1,
+            )
+        assert "stall" in str(exc.value).lower(), (
+            f"Expected 'stall' in error message, got: {exc.value}"
+        )
+        assert not isinstance(exc.value, FFmpegOutOfMemoryError), (
+            "Stall-kill must NOT be reported as OOM"
+        )
+        assert not oom_called["yes"], "looks_like_oom must not be called when stall_killed.is_set()"
+
+    def test_real_oom_rc_reports_oom_not_stall(self):
+        """Counter-test: a non-zero rc with NO stall_killed flag and
+        looks_like_oom=True must raise FFmpegOutOfMemoryError, not a
+        stall message. Guards against the opposite mistake of always
+        reporting stall for every rc=-9 (P1 audit v0.3 §4.2).
+
+        Strategy: spawn a *short* daytime process that already exited
+        (rc=0). The post-mortem block is bypassed so we can't reach the
+        looks_like_oom path that way, but we CAN exercise it by zeroing
+        the rc after wait — patch _run_ffmpeg internals:
+        ``_wait_with_cancel`` is stubbed to return 137, ``looks_like_oom``
+        returns True, and we feed a fast-exiting process so the watchdog
+        never fires (stall_killed stays clear)."""
+
+        import subprocess
+
+        from stream2video.concat import FFmpegOutOfMemoryError
+
+        real_popen = subprocess.Popen
+
+        # Fast-exiting process: returns rc=0 real, but our stub uses 137.
+        def fake_popen(cmd, **kwargs):
+            return real_popen(
+                [sys.executable, "-c", "pass"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+
+        with (
+            patch("stream2video.concat.subprocess.Popen", side_effect=fake_popen),
+            patch("stream2video.concat._wait_with_cancel", return_value=137),
+            patch("stream2video.concat.looks_like_oom", return_value=True),
+            pytest.raises(FFmpegOutOfMemoryError),
+        ):
+            _run_ffmpeg(
+                [sys.executable, "-c", "pass"],
+                progress_callback=None,
+                timeout=30,
+                label="oom-kill",
+                track_progress=False,
+                # Generous stall window so the watchdog doesn't fire
+                # before our fast process exits and _wait_with_cancel
+                # returns 137 (the patched value).
+                stall_kill=300,
+                stall_warning=120,
+            )
+
 
 class TestSegmentModeProgressStreaming:
     """Regression: with 0 silence segments the whole video is ONE keep segment.
@@ -601,6 +700,27 @@ class TestEncoderQualityPresets:
             # libx264 ignores bitrate, so -b:v must NOT be present
             assert "-b:v" not in opts
 
+    def test_source_video_quality_uses_encoder_defaults(self):
+        for enc in ("h264_mf", "h264_amf", "h264_nvenc", "libx264"):
+            opts = encoder_opts(enc, "source")
+            assert "-b:v" not in opts
+            assert "-maxrate" not in opts
+            assert "-crf" not in opts
+            assert "-cq" not in opts
+
+    def test_source_video_quality_keeps_operational_x264_opts(self):
+        opts = encoder_opts(
+            "libx264",
+            "source",
+            x264_preset="veryfast",
+            encoder_threads=2,
+            x264_low_memory=True,
+        )
+        assert opts[:2] == ["-preset", "veryfast"]
+        assert "-threads" in opts
+        assert "2" in opts
+        assert "-x264-params" in opts
+
     def test_unknown_encoder_raises(self):
         with pytest.raises(ConcatError, match="Unknown encoder"):
             encoder_opts("vp9", "medium")
@@ -612,7 +732,7 @@ class TestEncoderQualityPresets:
     def test_get_video_encoder_passes_quality(self):
         # libx264 always passes the encoder check. Verify the quality
         # preset flows through get_video_encoder into the returned opts.
-        for q in ("high", "medium", "low"):
+        for q in ("source", "high", "medium", "low"):
             enc, opts = get_video_encoder("libx264", q)
             assert enc == "libx264"
             assert opts == encoder_opts("libx264", q)
@@ -922,6 +1042,96 @@ class TestFfprobeIsValidMp4:
         assert _ffprobe_is_valid_mp4(corrupt) is False
 
 
+class TestFfprobeIsValidMedia:
+    """_ffprobe_is_valid_media — stream_type-aware validity probe
+    (P0 audit: resume in audio extract never skipped, because the
+    video-stream probe rejected every valid audio chunk)."""
+
+    def _have_ffmpeg(self) -> bool:
+        import shutil
+
+        return shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
+
+    def test_valid_audio_passes_with_stream_type_a(self, tmp_path: Path):
+        """A real, complete audio file (mp3) has an audio stream but no
+        video stream. With stream_type="a" ffprobe returns 0 → valid."""
+        if not self._have_ffmpeg():
+            pytest.skip("ffmpeg/ffprobe not available")
+        out = tmp_path / "tone.mp3"
+        import subprocess
+
+        from stream2video.utils import no_window_kwargs
+
+        r = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.2",
+                "-c:a",
+                "libmp3lame",
+                str(out),
+            ],
+            capture_output=True,
+            text=True,
+            **no_window_kwargs(),
+        )
+        assert r.returncode == 0, r.stderr
+        assert out.exists() and out.stat().st_size > 0
+        assert _ffprobe_is_valid_media(out, stream_type="a") is True
+
+    def test_valid_audio_fails_with_stream_type_v(self, tmp_path: Path):
+        """Regression for the P0 bug: the same valid mp3 with a video
+        probe (stream_type="v") must be reported invalid, which is why
+        the old _ffprobe_is_valid_mp4 call rejected every resume chunk
+        in audio extract."""
+        if not self._have_ffmpeg():
+            pytest.skip("ffmpeg/ffprobe not available")
+        out = tmp_path / "tone.mp3"
+        import subprocess
+
+        from stream2video.utils import no_window_kwargs
+
+        r = subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.2",
+                "-c:a",
+                "libmp3lame",
+                str(out),
+            ],
+            capture_output=True,
+            text=True,
+            **no_window_kwargs(),
+        )
+        assert r.returncode == 0, r.stderr
+        assert _ffprobe_is_valid_media(out, stream_type="v") is False
+
+    def test_truncated_audio_is_invalid_stream_type_a(self, tmp_path: Path):
+        """Truncated mp3 — ffmpeg crashed before writing the final
+        frames. ffprobe should reject it (no valid audio stream)."""
+        if not self._have_ffmpeg():
+            pytest.skip("ffmpeg/ffprobe not available")
+        corrupt = tmp_path / "truncated.mp3"
+        corrupt.write_bytes(b"ID3\x04\x00\x00\x00\x00\x00\x00some garbage")
+        assert _ffprobe_is_valid_media(corrupt, stream_type="a") is False
+
+    def test_default_stream_type_is_video(self, tmp_path: Path):
+        """The default of stream_type is "v" — keeps the historical
+        behaviour of _ffprobe_is_valid_mp4 for video paths."""
+        assert _ffprobe_is_valid_media(tmp_path / "missing.mp4") is False
+
+
 class TestSegmentResumeSkipCrashArtifact:
     """Fix-plan section 4 Resume/failure: crash mid-segment.
 
@@ -1154,3 +1364,320 @@ class TestBatchResumeSkipCrashArtifact:
             f"Expected 1 re-encode (corrupt chunk), got {len(encode_calls)}: {encode_calls}"
         )
         assert "chunk_0000.mp4" in encode_calls[0]
+
+
+class TestAudioExtractResumeStreamType:
+    """Resume in _run_audio_extract must use the audio-stream probe.
+
+    Regression for the P0 bug: _run_audio_extract used
+    _ffprobe_is_valid_mp4 (a video-stream probe) to validate per-segment
+    mp3/opus/aac/wav/flac chunks. Audio-only chunks have no video
+    stream, so the probe always returned False, meaning *every* resume
+    chunk was treated as corrupt and re-encoded — the resume code path
+    was effectively dead.
+
+    This test mocks _run_ffmpeg/_ffprobe_is_valid_media/_ensure_fresh_work_dir
+    so it runs without an ffmpeg binary; the assertions check that
+    a valid on-disk segment is *skipped* (no encode call), which only
+    happens if the audio probe accepts it.
+    """
+
+    def test_valid_audio_segment_is_skipped_on_resume(self, tmp_path: Path):
+        from unittest.mock import patch
+
+        video = tmp_path / "src.mkv"
+        video.write_bytes(b"fake source")
+        output = tmp_path / "out.mp3"
+        keep = [(0.0, 2.0), (2.0, 4.0)]
+
+        work_dir = tmp_path / f"_{output.stem}_audio_mp3"
+        work_dir.mkdir()
+        # Pre-existing valid segments from a previous run. Size >=
+        # min_part_bytes so the size check passes and the ffprobe
+        # check fires (otherwise the skip happens on size alone and
+        # the probe path isn't exercised).
+        for i in range(2):
+            (work_dir / f"seg_{i:06d}.mp3").write_bytes(b"\x00" * 2048)
+
+        encode_calls: list[str] = []
+
+        def fake_run_ffmpeg(cmd, *args, **kwargs):
+            out = str(cmd[-1])
+            if out.endswith(".mp3") and "seg_" in out:
+                encode_calls.append(out)
+                Path(out).write_bytes(b"re-encoded valid mp3 data")
+            return None
+
+        with (
+            patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
+            # Pretend the probe accepts every chunk (valid audio).
+            patch("stream2video.concat._ffprobe_is_valid_media", return_value=True),
+            patch("stream2video.concat._run_audio_concat_filter") as m_acf,
+            patch("stream2video.concat._run_final_concat") as m_fc,
+            patch("stream2video.concat._ensure_fresh_work_dir"),
+        ):
+            # Make the audio-concat-dispatch pick the demuxer path for mp3
+            # (not flac) so _run_final_concat is the expected join.
+            from stream2video.concat import _run_audio_extract
+
+            _run_audio_extract(
+                video,
+                keep,
+                output,
+                "mp3",
+                None,
+                None,
+            )
+
+        # Resume should have skipped both segments — no encode calls.
+        assert encode_calls == [], (
+            f"Both segments were valid audio chunks — none should have been "
+            f"re-encoded, but _run_ffmpeg was called for: {encode_calls}"
+        )
+        # And the demuxer join should have run for mp3 (the flac filter
+        # path is only chosen for output_format=="flac").
+        assert m_acf.call_count == 0
+        assert m_fc.call_count == 1
+
+
+class TestAudioQualityParametric:
+    """_audio_bitrate / _audio_opts are now parameters (P1 audit v0.3 §6.1):
+    the module-level ``_audio_quality`` global is gone. The bitrate picker
+    must reflect the *passed* value, and two consecutive calls with
+    different values must not influence each other (the original bug —
+    since the global was set once per ``cut_and_concat`` invocation, a
+    second run premultiplying ``high`` first then a ``low`` run silently
+    inherited 'high' from the prior state if the setter was bypassed by
+    a code path that didn't call _set_audio_quality)."""
+
+    def test_audio_bitrate_high(self):
+        from stream2video.concat import _audio_bitrate
+
+        assert _audio_bitrate("high") == "256k"
+
+    def test_audio_bitrate_medium(self):
+        from stream2video.concat import _audio_bitrate
+
+        assert _audio_bitrate("medium") == "192k"
+
+    def test_audio_bitrate_low(self):
+        from stream2video.concat import _audio_bitrate
+
+        assert _audio_bitrate("low") == "128k"
+
+    def test_audio_bitrate_source_omits_bitrate(self):
+        from stream2video.concat import _audio_bitrate, _audio_bitrate_opts
+
+        assert _audio_bitrate("source") == ""
+        assert _audio_bitrate_opts("source") == []
+
+    def test_audio_bitrate_invalid_raises(self):
+        from stream2video.concat import ConcatError, _audio_bitrate
+
+        with pytest.raises(ConcatError, match="Unknown audio quality"):
+            _audio_bitrate("ultra")
+
+    def test_audio_bitrate_empty_falls_back_to_default(self):
+        from stream2video.concat import _audio_bitrate
+
+        assert _audio_bitrate("") == "128k"
+
+    def test_audio_opts_returns_required_listing(self):
+        from stream2video.concat import _audio_opts
+
+        opts = _audio_opts("medium")
+        assert "-ar" in opts
+        assert "48000" in opts
+        assert "-ac" in opts
+        assert "2" in opts
+
+    def test_audio_opts_source_preserves_native_stream_shape(self):
+        from stream2video.concat import _audio_opts
+
+        assert _audio_opts("source") == []
+
+    def test_audio_opts_rejects_unknown_quality(self):
+        """_audio_opts validates the quality so a typo propagates to a
+        ConcatError rather than silently producing mediocre output."""
+        from stream2video.concat import ConcatError, _audio_opts
+
+        with pytest.raises(ConcatError, match="Unknown audio quality"):
+            _audio_opts("bogus")
+
+    def test_audio_bitrate_double_call_is_stateless(self):
+        """Two consecutive calls with different quality must not
+        influence each other — the parameter is the source of truth,
+        not a shared mutable global."""
+        from stream2video.concat import _audio_bitrate
+
+        assert _audio_bitrate("high") == "256k"
+        assert _audio_bitrate("low") == "128k"
+        assert _audio_bitrate("medium") == "192k"
+
+    def test_cut_and_concat_forwards_audio_quality_per_call(self, tmp_path: Path):
+        """Back-to-back pipeline calls must carry their own audio_quality.
+
+        This stays cheap by patching out ffmpeg work; the regression signal is
+        that ``cut_and_concat`` no longer writes a module-level preset that a
+        later run can accidentally inherit.
+        """
+        from stream2video.concat import cut_and_concat
+
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"source")
+        output = tmp_path / "out.mp4"
+        seen: list[str] = []
+
+        def fake_run_with_fallback(*args, **kwargs):
+            seen.append(kwargs["audio_quality"])
+
+        with (
+            patch("stream2video.concat.get_video_duration", return_value=2.0),
+            patch(
+                "stream2video.concat.get_video_encoder", return_value=("libx264", ["-crf", "23"])
+            ),
+            patch("stream2video.concat.has_audio_stream", return_value=True),
+            patch("stream2video.concat._run_with_fallback", side_effect=fake_run_with_fallback),
+        ):
+            cut_and_concat(video, [], output, audio_quality="high")
+            cut_and_concat(video, [], output, audio_quality="low")
+
+        assert seen == ["high", "low"]
+
+
+class TestCutThenEncodeCutPhaseProtection:
+    """Phase-1 cut-фаза in _run_cut_then_encode previously ran via a bare
+    ``subprocess.run(check=True, capture_output=True)`` with no timeout,
+    no cancel, no process registration, and the resulting
+    ``CalledProcessError`` did NOT match the ``exc_types`` filter in
+    ``_with_libx264_fallback`` — so a corrupt-source cut surfaced as a raw
+    traceback (P0 audit v0.3 §3). Tests below mock the helper
+    ``_run_subprocess_cmd`` and assert the right exceptions are raised
+    so the GUI/CLI see a friendly message instead.
+    """
+
+    def test_cut_phase_called_in_phase1(self, tmp_path: Path):
+        from unittest.mock import patch
+
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"source")
+        output = tmp_path / "out.mkv"
+        keep = [(0.0, 1.0), (1.0, 2.0)]
+        calls: list[str] = []
+
+        def fake_helper(cmd, *, timeout, label, **kwargs):
+            # Track the "cut phase segment N" calls only — out_path is last arg.
+            out = str(cmd[-1])
+            calls.append(out)
+            Path(out).write_bytes(b"\x00" * 2048)
+            return None
+
+        with (
+            patch("stream2video.concat._run_subprocess_cmd", side_effect=fake_helper),
+            patch("stream2video.concat._run_final_concat"),
+            patch("stream2video.concat._ffprobe_is_valid_mp4", return_value=True),
+            patch("stream2video.concat._run_ffmpeg"),
+            patch("stream2video.concat._ensure_fresh_work_dir"),
+        ):
+            from stream2video.concat import _run_cut_then_encode
+
+            _run_cut_then_encode(
+                video,
+                keep,
+                output,
+                "libx264",
+                ["-preset", "medium"],
+                None,
+                None,
+                encoder="libx264",
+            )
+        # Phase-1 cut-фаза runs exactly once per keep segment.
+        assert len(calls) == 2, calls
+
+    def test_cut_phase_concat_distance_wraps_in_concat_error(self, tmp_path: Path):
+        from unittest.mock import patch
+
+        from stream2video.concat import ConcatError, _run_cut_then_encode
+
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"source")
+        output = tmp_path / "out.mkv"
+        keep = [(0.0, 1.0)]
+
+        def failed_helper(cmd, *, timeout, label, **kwargs):
+            # Simulate a corrupt-source ffmpeg failure during cut.
+            raise ConcatError(f"{label} failed (rc=1): Streamcopy failed at sub-zero pts")
+
+        with (
+            patch("stream2video.concat._run_subprocess_cmd", side_effect=failed_helper),
+            patch("stream2video.concat._ensure_fresh_work_dir"),
+            pytest.raises(ConcatError, match="cut phase segment"),
+        ):
+            _run_cut_then_encode(
+                video,
+                keep,
+                output,
+                "libx264",
+                ["-preset", "medium"],
+                None,
+                None,
+                encoder="libx264",
+            )
+
+    def test_cut_phase_cancel_raises_cancelled_error(self, tmp_path: Path):
+        from unittest.mock import patch
+
+        from stream2video.concat import CancelledError, _run_cut_then_encode
+
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"source")
+        output = tmp_path / "out.mkv"
+        keep = [(0.0, 1.0)]
+
+        def cancelled_helper(cmd, *, timeout, label, **kwargs):
+            raise CancelledError("cut cancelled")
+
+        with (
+            patch("stream2video.concat._run_subprocess_cmd", side_effect=cancelled_helper),
+            patch("stream2video.concat._ensure_fresh_work_dir"),
+            pytest.raises(CancelledError),
+        ):
+            _run_cut_then_encode(
+                video,
+                keep,
+                output,
+                "libx264",
+                ["-preset", "medium"],
+                None,
+                None,
+                encoder="libx264",
+            )
+
+    def test_cut_phase_timeout_raises_ffmpeg_error(self, tmp_path: Path):
+        from unittest.mock import patch
+
+        from stream2video.concat import FFmpegError, _run_cut_then_encode
+
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"source")
+        output = tmp_path / "out.mkv"
+        keep = [(0.0, 1.0)]
+
+        def timeout_helper(cmd, *, timeout, label, **kwargs):
+            raise FFmpegError(f"{label} timeout after 600s")
+
+        with (
+            patch("stream2video.concat._run_subprocess_cmd", side_effect=timeout_helper),
+            patch("stream2video.concat._ensure_fresh_work_dir"),
+            pytest.raises(FFmpegError, match="timeout"),
+        ):
+            _run_cut_then_encode(
+                video,
+                keep,
+                output,
+                "libx264",
+                ["-preset", "medium"],
+                None,
+                None,
+                encoder="libx264",
+            )

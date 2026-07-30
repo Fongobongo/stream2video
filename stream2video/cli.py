@@ -93,13 +93,29 @@ def _make_sigint_cancel() -> tuple[threading.Event, Callable[[], bool]]:
     Returns (event, callback). The callback returns True once SIGINT has been
     received. The event is set by the signal handler in the main thread, but
     signal handlers in Python can only safely set an event/flag, not raise.
+
+    When called from a non-main thread (host application embedding the CLI
+    in a worker thread) ``signal.signal`` raises ``ValueError`` — Python only
+    allows signal handling from the interpreter's main thread. In that case
+    the function logs a warning and returns an event that never fires: the
+    embedding host owns Ctrl+C dispatch (e.g. via its own signal handler that
+    sets the returned event), and the CLI run proceeds without a SIGINT hook.
+    The pipeline's ``cancel_callback`` is still polled, so a host that flips
+    the event manually still cancels cleanly.
     """
     event = threading.Event()
 
     def _handler(signum: Any, frame: Any) -> None:
         event.set()
 
-    signal.signal(signal.SIGINT, _handler)
+    try:
+        signal.signal(signal.SIGINT, _handler)
+    except (ValueError, OSError) as e:
+        # ``ValueError`` is raised when called from a non-main thread;
+        # ``OSError`` on some platforms for the same reason. Log and
+        # continue — the embedding host is responsible for wiring Ctrl+C
+        # to the returned event (or to its own cancel mechanism).
+        logger.warning(f"Could not install SIGINT handler (non-main thread?): {e}")
 
     def _cb() -> bool:
         return event.is_set()
@@ -286,16 +302,17 @@ def main(
         CONFIG_DEFAULTS["video_quality"],
         "--video-quality",
         "-vq",
-        help="Encode quality preset: 'high' (10000k / CRF 18), 'medium' (7000k / CRF 23, default), "
-        "or 'low' (3500k / CRF 28). If not passed, the config file's `video_quality` key is used.",
+        help="Encode quality preset: 'source' (encoder defaults), 'high' (10000k / CRF 18), "
+        "'medium' (7000k / CRF 23, default), or 'low' (3500k / CRF 28). If not passed, "
+        "the config file's `video_quality` key is used.",
     ),
     audio_quality: str = typer.Option(
         CONFIG_DEFAULTS["audio_quality"],
         "--audio-quality",
         "-aq",
-        help="Audio (AAC) bitrate preset: 'high' (256k), 'medium' (192k, default), "
-        "or 'low' (128k). If not passed, the config file's `audio_quality` "
-        "key is used.",
+        help="Audio (AAC) quality preset: 'source' (codec defaults + native rate/channels), "
+        "'high' (256k), 'medium' (192k, default), or 'low' (128k). If not passed, "
+        "the config file's `audio_quality` key is used.",
     ),
     download_quality: str = typer.Option(
         CONFIG_DEFAULTS["download_quality"],
@@ -541,7 +558,16 @@ def main(
     console.print("\n[bold cyan]stream2video[/bold cyan] - Compress by removing silence")
     console.print(f"Logs saved to: {log_file}\n")
 
-    prev_handler = signal.getsignal(signal.SIGINT)
+    # ``signal.getsignal`` / ``signal.signal`` can only be called from the
+    # interpreter's main thread; a host embedding ``cli.main`` in a worker
+    # thread would otherwise crash here with ``ValueError``. When that
+    # happens, fall back to ``None`` so the ``finally``-block restore path
+    # uses ``SIG_DFL`` (and even that restore will be guarded below).
+    try:
+        prev_handler: Any = signal.getsignal(signal.SIGINT)
+    except (ValueError, OSError) as e:
+        logger.warning(f"Could not read current SIGINT handler: {e}")
+        prev_handler = None
     _cancel_event, cancel_cb = _make_sigint_cancel()
 
     fh = None

@@ -34,7 +34,7 @@ from stream2video.utils import (
     looks_like_oom,
     no_window_kwargs,
     read_lines_queue,
-    set_active_process,
+    registered_process,
     subprocess_kwargs,
 )
 
@@ -108,11 +108,12 @@ def _quote_concat_path(p: str) -> str:
 
 
 _VIDEO_BITRATE = "7000k"
-# Audio bitrate presets. ``medium`` keeps the historical 128k so default
-# output is unchanged on upgrade. ``high``/``low`` give the user a real
-# choice so a 192k/256k/320k source is no longer silently downgraded --
-# see P0.3 in the fix plan. Set at encode time only; the value is read
-# through ``_audio_bitrate()`` so runtime override is a single knob.
+# Audio bitrate presets. ``medium`` is the default 192k preset; ``high``/``low``
+# give the user a real choice so a 192k/256k/320k source is no longer silently
+# downgraded to 128k. ``source`` skips the bitrate/resample/downmix policy.
+# P1 audit v0.3 §6.1: callers pass ``audio_quality`` explicitly via
+# ``_audio_bitrate_opts(q)`` / ``_audio_opts(q)``, eliminating the module-level
+# ``_audio_quality`` global that made consecutive runs share mutable state.
 _AUDIO_BITRATE = "128k"
 _AUDIO_BITRATES: dict[str, str] = {
     "high": "256k",
@@ -123,7 +124,7 @@ _AUDIO_BITRATES: dict[str, str] = {
 # normalised everything to stereo 48 kHz AAC -- the source was never
 # preserved, but output was at least consistent across segments. Keep
 # that explicit conversion so the audio path is documented, but route
-# it through ``_audio_opts()`` so an explicit "preserve source" preset
+# it through ``_audio_opts(q)`` so an explicit "preserve source" preset
 # can be added as a follow-up without rewriting every call site.
 _AUDIO_SAMPLE_RATE = "48000"
 _AUDIO_CHANNELS = "2"
@@ -142,40 +143,51 @@ _STALL_KILL = 300
 _MIN_PART_BYTES = 1024
 
 
-def _audio_bitrate() -> str:
+def _audio_bitrate(audio_quality: str = "") -> str:
     """Bitrate string for the AAC encoder based on ``audio_quality``.
 
-    Reads the module-level ``_audio_quality`` set by ``cut_and_concat``
-    via ``_set_audio_quality``. Defaults to ``medium`` (192k) when unset
-    so existing tests/benchmarks that don't go through the pipeline
-    entry point keep their historical output.
+    Empty string (the default) falls back to ``_AUDIO_BITRATE`` (128k)
+    only so trivial test/benchmark call sites that don't go through
+    ``cut_and_concat`` keep their historical output. Real pipeline paths
+    always pass an explicit quality (``source``/``high``/``medium``/``low``)
+    through their ``audio_quality`` parameter; unknown values raise
+    :class:`ConcatError` so a typo doesn't silently fall back to 128k.
     """
-    return _AUDIO_BITRATES.get(_audio_quality, _AUDIO_BITRATE)
+    if audio_quality == "":
+        return _AUDIO_BITRATE
+    if audio_quality == "source":
+        return ""
+    if audio_quality not in _AUDIO_BITRATES:
+        raise ConcatError(
+            f"Unknown audio quality {audio_quality!r} "
+            f"(use {' or '.join(repr(k) for k in VALID_QUALITIES)})"
+        )
+    return _AUDIO_BITRATES[audio_quality]
 
 
-def _audio_opts() -> list[str]:
+def _audio_bitrate_opts(audio_quality: str = "") -> list[str]:
+    """Return ``-b:a`` opts for lossy audio, or none for ``source``."""
+    bitrate = _audio_bitrate(audio_quality)
+    return ["-b:a", bitrate] if bitrate else []
+
+
+def _audio_opts(audio_quality: str = "") -> list[str]:
     """Output-side AAC options: sample rate + channel layout.
 
-    Centralised so a follow-up "preserve source" preset (no `-ar`/`-ac`)
-    is one knob. Returns a fresh list each call so callers may mutate
-    freely without affecting shared state.
+    ``source`` returns no ``-ar`` / ``-ac`` flags, allowing ffmpeg to keep
+    the decoded stream's native sample rate and channel layout where the
+    selected output codec supports it. Other presets keep the historical
+    stereo 48 kHz normalisation. Returns a fresh list each call so callers
+    may mutate freely.
     """
-    return ["-ar", _AUDIO_SAMPLE_RATE, "-ac", _AUDIO_CHANNELS]
-
-
-# Audio quality preset for the current pipeline run. Thread-safe enough
-# for this codebase's sequential pipeline (one encode at a time,
-# cancellation-checked) -- set once per ``cut_and_concat`` invocation.
-_audio_quality: str = "medium"
-
-
-def _set_audio_quality(q: str) -> None:
-    global _audio_quality
-    if q not in _AUDIO_BITRATES:
+    if audio_quality == "source":
+        return []
+    if audio_quality not in ("", *_AUDIO_BITRATES):
         raise ConcatError(
-            f"Unknown audio quality {q!r} (use {' or '.join(repr(k) for k in _AUDIO_BITRATES)})"
+            f"Unknown audio quality {audio_quality!r} "
+            f"(use {' or '.join(repr(k) for k in VALID_QUALITIES)})"
         )
-    _audio_quality = q
+    return ["-ar", _AUDIO_SAMPLE_RATE, "-ac", _AUDIO_CHANNELS]
 
 
 # Bitrate (HW encoders) and CRF (libx264) per ``video_quality`` preset.
@@ -258,7 +270,6 @@ def cut_and_concat(
                 f"Source {video_path.name} has no audio stream -- cannot "
                 f"produce {output_format} output"
             )
-        _set_audio_quality(audio_quality)
         _run_audio_extract(
             video_path,
             keep_segments,
@@ -287,7 +298,6 @@ def cut_and_concat(
         x264_low_memory=x264_low_memory,
     )
     logger.info(f"Encoder: {vcodec} {vcodec_opts} (quality={video_quality})")
-    _set_audio_quality(audio_quality)
 
     # Detect whether the source has an audio stream ONCE. Probing per
     # segment would be wasteful; passing the flag down lets the
@@ -398,8 +408,10 @@ def encoder_opts(
 ) -> list[str]:
     """Return the ffmpeg encoder options for ``encoder`` at ``quality`` preset.
 
-    quality: ``high`` / ``medium`` / ``low``. Affects bitrate (HW encoders)
-    and CRF (libx264). ``medium`` reproduces the previously hard-coded
+    quality: ``source`` / ``high`` / ``medium`` / ``low``. ``high``/
+    ``medium``/``low`` affect bitrate (HW encoders) and CRF (libx264).
+    ``source`` omits the project bitrate/CRF policy and lets ffmpeg's
+    encoder defaults apply. ``medium`` reproduces the previously hard-coded
     options exactly so existing output is unchanged.
 
     ``x264_preset`` (libx264 only): one of ``VALID_X264_PRESETS``. Default
@@ -431,6 +443,12 @@ def encoder_opts(
             f"(use {' or '.join(repr(p) for p in VALID_X264_PRESETS)})"
         )
     threads_opt = _threads_opt(encoder_threads)
+
+    if quality == "source":
+        low_mem = _x264_low_memory_opts() if encoder == "libx264" and x264_low_memory else []
+        if encoder == "libx264":
+            return ["-preset", x264_preset, *threads_opt, *low_mem]
+        return [*threads_opt]
 
     bitrate = _VIDEO_BITRATES[quality]
     if encoder == "h264_mf":
@@ -713,158 +731,271 @@ def _run_ffmpeg(
     except FileNotFoundError as e:
         raise FFmpegError("ffmpeg not found in PATH") from e
 
-    set_active_process(process)
-    if memory_monitor is not None:
-        # Late-bind the pid now that the process exists, then start
-        # the monitor thread. The monitor reads RSS by pid, so this
-        # must happen after Popen returns.
-        memory_monitor.pid = process.pid
-        memory_monitor.start()
-    stderr_pipe = process.stderr
-    assert stderr_pipe is not None
-    stderr_lines: list[str] = []
-    wait_for_drain = drain_stderr_lines(stderr_pipe, stderr_lines)
-    drain_done = False
-    last_progress_time = time.monotonic()
+    with registered_process(process):
+        if memory_monitor is not None:
+            # Late-bind the pid now that the process exists, then start
+            # the monitor thread. The monitor reads RSS by pid, so this
+            # must happen after Popen returns.
+            memory_monitor.pid = process.pid
+            memory_monitor.start()
+        stderr_pipe = process.stderr
+        assert stderr_pipe is not None
+        stderr_lines: list[str] = []
+        wait_for_drain = drain_stderr_lines(stderr_pipe, stderr_lines)
+        drain_done = False
+        last_progress_time = time.monotonic()
 
-    # P1.5: stall watchdog. The ``track_progress=True`` branch checks
-    # ``elapsed_since_progress`` inside its readline loop, but readline
-    # blocks until ffmpeg emits a line -- a fully-hung ffmpeg (deadlock,
-    # no stdout at all) would never surface as a stall there. This
-    # daemon thread polls ``last_progress_time`` independently of
-    # stdout availability and kills the process when the stall window
-    # expires. The track_progress loop's inline check is retained as
-    # a fast path (it kills ASAP after a stalled line arrives).
-    stall_stop = threading.Event()
+        # P1.5: stall watchdog. The ``track_progress=True`` branch checks
+        # ``elapsed_since_progress`` inside its readline loop, but readline
+        # blocks until ffmpeg emits a line -- a fully-hung ffmpeg (deadlock,
+        # no stdout at all) would never surface as a stall there. This
+        # daemon thread polls ``last_progress_time`` independently of
+        # stdout availability and kills the process when the stall window
+        # expires. The track_progress loop's inline check is retained as
+        # a fast path (it kills ASAP after a stalled line arrives).
+        #
+        # ``stall_killed`` is set BEFORE the kill() so the post-mortem
+        # rc-analysis can distinguish "watchdog killed a stalled ffmpeg"
+        # from a genuine OOM/SIGKILL (rc -9). Without this, a stall-kill
+        # surfaced as rc=-9 to the main loop and looked_like_oom reported
+        # "ran out of memory" — the user then chased memory instead of
+        # the real cause (P1 audit v0.3 §4).
+        stall_stop = threading.Event()
+        stall_killed = threading.Event()
 
-    def _stall_watchdog() -> None:
-        while not stall_stop.wait(CANCEL_POLL_INTERVAL):
-            if process.poll() is not None:
-                return
-            elapsed = time.monotonic() - last_progress_time
-            if elapsed > stall_kill:
-                logger.error(
-                    f"{label}: stall watchdog firing -- no progress for "
-                    f"{int(elapsed)}s, killing process"
-                )
-                try:
-                    process.kill()
-                except Exception:
-                    logger.exception("stall watchdog: kill() failed")
-                return
-
-    stall_thread = threading.Thread(target=_stall_watchdog, daemon=True, name=f"stall_{label}")
-    stall_thread.start()
-
-    try:
-        with cancel_monitor(process, cancel_callback) as cancelled:
-            if track_progress:
-                stdout_pipe = process.stdout
-                assert stdout_pipe is not None
-                # P1.5: use a queue-based reader so the consumer loop
-                # can check cancel / stall between reads without
-                # blocking on readline(). A hung ffmpeg that stops
-                # emitting stdout would block readline() forever;
-                # the queue + get(timeout=...) lets the inline stall
-                # check run even when no new lines arrive.
-                line_queue, _reader_thread = read_lines_queue(stdout_pipe)
-                while True:
+        def _stall_watchdog() -> None:
+            while not stall_stop.wait(CANCEL_POLL_INTERVAL):
+                if process.poll() is not None:
+                    return
+                elapsed = time.monotonic() - last_progress_time
+                if elapsed > stall_kill:
+                    logger.error(
+                        f"{label}: stall watchdog firing -- no progress for "
+                        f"{int(elapsed)}s, killing process"
+                    )
+                    stall_killed.set()
                     try:
-                        raw_line = line_queue.get(timeout=CANCEL_POLL_INTERVAL)
-                    except queue.Empty:
-                        # No new line -- check cancel + stall.
+                        process.kill()
+                    except Exception:
+                        logger.exception("stall watchdog: kill() failed")
+                    return
+
+        stall_thread = threading.Thread(target=_stall_watchdog, daemon=True, name=f"stall_{label}")
+        stall_thread.start()
+
+        try:
+            with cancel_monitor(process, cancel_callback) as cancelled:
+                if track_progress:
+                    stdout_pipe = process.stdout
+                    assert stdout_pipe is not None
+                    # P1.5: use a queue-based reader so the consumer loop
+                    # can check cancel / stall between reads without
+                    # blocking on readline(). A hung ffmpeg that stops
+                    # emitting stdout would block readline() forever;
+                    # the queue + get(timeout=...) lets the inline stall
+                    # check run even when no new lines arrive.
+                    line_queue, _reader_thread = read_lines_queue(stdout_pipe)
+                    while True:
+                        try:
+                            raw_line = line_queue.get(timeout=CANCEL_POLL_INTERVAL)
+                        except queue.Empty:
+                            # No new line -- check cancel + stall.
+                            if cancel_callback and cancel_callback():
+                                process.kill()
+                                raise CancelledError(f"{label} cancelled") from None
+                            if cancelled.is_set():
+                                raise CancelledError(f"{label} cancelled") from None
+                            elapsed_since_progress = time.monotonic() - last_progress_time
+                            if elapsed_since_progress > stall_kill:
+                                process.kill()
+                                raise FFmpegError(
+                                    f"{label} stalled -- no progress for {int(elapsed_since_progress)}s, "
+                                    "possible resource exhaustion"
+                                ) from None
+                            elif elapsed_since_progress > stall_warning:
+                                logger.warning(
+                                    f"{label}: no progress for {int(elapsed_since_progress)}s -- waiting..."
+                                )
+                            continue
+                        if raw_line is None:
+                            break  # EOF -- pipe closed
                         if cancel_callback and cancel_callback():
                             process.kill()
-                            raise CancelledError(f"{label} cancelled") from None
+                            raise CancelledError(f"{label} cancelled")
                         if cancelled.is_set():
-                            raise CancelledError(f"{label} cancelled") from None
+                            raise CancelledError(f"{label} cancelled")
+                        line = raw_line.decode("utf-8", errors="replace").strip()
+                        if line.startswith("out_time_us="):
+                            last_progress_time = time.monotonic()
+                            if progress_callback:
+                                try:
+                                    us = int(line.split("=", 1)[1])
+                                    progress_callback(us)
+                                except (ValueError, IndexError):
+                                    pass
                         elapsed_since_progress = time.monotonic() - last_progress_time
                         if elapsed_since_progress > stall_kill:
                             process.kill()
                             raise FFmpegError(
                                 f"{label} stalled -- no progress for {int(elapsed_since_progress)}s, "
                                 "possible resource exhaustion"
-                            ) from None
+                            )
                         elif elapsed_since_progress > stall_warning:
                             logger.warning(
                                 f"{label}: no progress for {int(elapsed_since_progress)}s -- waiting..."
                             )
-                        continue
-                    if raw_line is None:
-                        break  # EOF -- pipe closed
-                    if cancel_callback and cancel_callback():
-                        process.kill()
-                        raise CancelledError(f"{label} cancelled")
-                    if cancelled.is_set():
-                        raise CancelledError(f"{label} cancelled")
-                    line = raw_line.decode("utf-8", errors="replace").strip()
-                    if line.startswith("out_time_us="):
-                        last_progress_time = time.monotonic()
-                        if progress_callback:
-                            try:
-                                us = int(line.split("=", 1)[1])
-                                progress_callback(us)
-                            except (ValueError, IndexError):
-                                pass
-                    elapsed_since_progress = time.monotonic() - last_progress_time
-                    if elapsed_since_progress > stall_kill:
-                        process.kill()
-                        raise FFmpegError(
-                            f"{label} stalled -- no progress for {int(elapsed_since_progress)}s, "
-                            "possible resource exhaustion"
-                        )
-                    elif elapsed_since_progress > stall_warning:
-                        logger.warning(
-                            f"{label}: no progress for {int(elapsed_since_progress)}s -- waiting..."
-                        )
 
+                if cancelled.is_set():
+                    raise CancelledError(f"{label} cancelled")
+                _wait_with_cancel(process, timeout, cancel_callback, label)
+                wait_for_drain()
+                drain_done = True
+
+                if process.returncode != 0:
+                    stderr_text = "".join(stderr_lines)
+                    msg = (
+                        stderr_text[:_STDERR_TRUNCATE]
+                        if stderr_text
+                        else "unknown error (no stderr)"
+                    )
+                    # Memory monitor's hard-budget kill: it triggers cancel
+                    # via cancel_callback rather than killing the process
+                    # directly, and on a race the cancel_monitor's kill can
+                    # land before cancelled propagates — so we'd otherwise
+                    # reach the rc != 0 branch with a SIGKILL and report
+                    # this as a stall or a generic ffmpeg failure. Surface
+                    # it as an OOM-class error here so the user sees the
+                    # "lower the budget" hint (P1 audit v0.3 §4).
+                    if memory_monitor is not None and memory_monitor.hard_exceeded:
+                        raise FFmpegOutOfMemoryError(
+                            f"{label} ran out of memory "
+                            f"(memory monitor hard limit hit, "
+                            f"rc={process.returncode}); "
+                            "try --preset low_memory / lowering "
+                            "--memory-limit-mb / reducing --batch-chunk-size"
+                        )
+                    # Stall-watchdog kill (rc=-9 on POSIX): distinguish from
+                    # a real OOM kill BEFORE looks_like_oom claims it (P1
+                    # audit v0.3 §4). The watchdog set the flag just before
+                    # process.kill(); the inline stall-check in the reader
+                    # loop also raises a stall FFmpegError directly, but a
+                    # race between reader EOF and the watchdog firing could
+                    # surface rc=-9 — so the flag check is the source of
+                    # truth here.
+                    if stall_killed.is_set():
+                        raise FFmpegError(
+                            f"{label} stalled -- no progress for > {stall_kill}s, "
+                            "process killed by watchdog"
+                        )
+                    # P3.x: surface OOM as a dedicated error so the CLI/GUI
+                    # can hint the user to lower the memory budget or pick
+                    # the Low-memory preset, instead of dumping the raw
+                    # stderr. SIGKILL on POSIX (rc -9 / 137) or stderr
+                    # allocator-failure markers — see looks_like_oom.
+                    if looks_like_oom(process.returncode, stderr_text):
+                        raise FFmpegOutOfMemoryError(
+                            f"{label} ran out of memory "
+                            f"(rc={process.returncode}); "
+                            "try --preset low_memory / lowering "
+                            "--memory-limit-mb / reducing --batch-chunk-size"
+                        )
+                    raise FFmpegError(f"{label} failed: {msg}")
+
+        except subprocess.TimeoutExpired as e:
+            process.kill()
+            raise FFmpegError(f"{label} timeout after {e.timeout}s") from None
+        finally:
+            stall_stop.set()
+            if memory_monitor is not None:
+                memory_monitor.stop()
+                # Surface the peak RSS so the user can see how close they
+                # came to the budget. Logged at INFO (always visible) when
+                # the monitor saw any progress; debug otherwise.
+                if memory_monitor.peak_rss_mb > 0:
+                    logger.info(
+                        f"{label}: peak RSS {memory_monitor.peak_rss_mb:.0f}MB"
+                        + (
+                            " (HARD limit hit -- task cancelled)"
+                            if memory_monitor.hard_exceeded
+                            else ""
+                        )
+                    )
+            if not drain_done:
+                wait_for_drain()
+            if process.stdout is not None:
+                process.stdout.close()
+            stderr_pipe.close()
+
+
+def _run_subprocess_cmd(
+    cmd: list[str],
+    *,
+    timeout: int,
+    label: str,
+    cancel_callback: Callable[[], bool] | None = None,
+    low_process_priority: bool = False,
+    rlimit_as_mb: int = 0,
+) -> None:
+    """Run a single ffmpeg command with timeout / cancel / registration.
+
+    Minimal sibling of ``_run_ffmpeg`` for commands that don't emit a
+    -progress stream (e.g. the stream-copy "cut" phase in
+    ``_run_cut_then_encode``). Unlike the historical bare
+    ``subprocess.run(check=True, capture_output=True)`` this:
+
+      * registers the process in the scoped supervisor so Cancel-GUI /
+        on-close kill reaches the running ffmpeg (P0 audit v0.3 §3);
+      * polls ``cancel_callback`` during the wait (not just between
+        segments) so a cancel mid-segment fires immediately;
+      * bounds the run with ``timeout`` so a hung ffmpeg doesn't hang
+        the whole pipeline;
+      * wraps ``CalledProcessError`` / ``TimeoutExpired`` in a
+        ``ConcatError`` carrying a truncated stderr so the CLI/GUI
+        surfaces a friendly message instead of a raw traceback.
+
+    Stderr is collected from the pipe via ``drain_stderr_lines`` and
+    surfaced on error. No progress callback — cut-фаза caller uses the
+    segment index for progress.
+    """
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            bufsize=-1,
+            **subprocess_kwargs(low_process_priority, rlimit_as_mb),
+        )
+    except FileNotFoundError as e:
+        raise FFmpegError("ffmpeg not found in PATH") from e
+
+    stderr_pipe = process.stderr
+    assert stderr_pipe is not None
+    stderr_lines: list[str] = []
+    wait_for_drain = drain_stderr_lines(stderr_pipe, stderr_lines)
+    drain_done = False
+    try:
+        with registered_process(process), cancel_monitor(process, cancel_callback) as cancelled:
             if cancelled.is_set():
                 raise CancelledError(f"{label} cancelled")
             _wait_with_cancel(process, timeout, cancel_callback, label)
-            wait_for_drain()
+            if cancelled.is_set():
+                raise CancelledError(f"{label} cancelled")
             drain_done = True
-
             if process.returncode != 0:
                 stderr_text = "".join(stderr_lines)
-                msg = stderr_text[:_STDERR_TRUNCATE] if stderr_text else "unknown error (no stderr)"
-                # P3.x: surface OOM as a dedicated error so the CLI/GUI
-                # can hint the user to lower the memory budget or pick
-                # the Low-memory preset, instead of dumping the raw
-                # stderr. SIGKILL on POSIX (rc -9 / 137) or stderr
-                # allocator-failure markers — see looks_like_oom.
                 if looks_like_oom(process.returncode, stderr_text):
                     raise FFmpegOutOfMemoryError(
-                        f"{label} ran out of memory "
-                        f"(rc={process.returncode}); "
-                        "try --preset low_memory / lowering "
-                        "--memory-limit-mb / reducing --batch-chunk-size"
+                        f"{label} ran out of memory (rc={process.returncode}); "
+                        "try --preset low_memory / lowering --memory-limit-mb"
                     )
-                raise FFmpegError(f"{label} failed: {msg}")
-
+                msg = stderr_text[:_STDERR_TRUNCATE] if stderr_text else "unknown error (no stderr)"
+                raise ConcatError(f"{label} failed (rc={process.returncode}): {msg}")
     except subprocess.TimeoutExpired as e:
         process.kill()
         raise FFmpegError(f"{label} timeout after {e.timeout}s") from None
     finally:
-        stall_stop.set()
-        if memory_monitor is not None:
-            memory_monitor.stop()
-            # Surface the peak RSS so the user can see how close they
-            # came to the budget. Logged at INFO (always visible) when
-            # the monitor saw any progress; debug otherwise.
-            if memory_monitor.peak_rss_mb > 0:
-                logger.info(
-                    f"{label}: peak RSS {memory_monitor.peak_rss_mb:.0f}MB"
-                    + (
-                        " (HARD limit hit -- task cancelled)"
-                        if memory_monitor.hard_exceeded
-                        else ""
-                    )
-                )
         if not drain_done:
             wait_for_drain()
-        set_active_process(None)
-        if process.stdout is not None:
-            process.stdout.close()
         stderr_pipe.close()
 
 
@@ -908,11 +1039,6 @@ def _wait_with_cancel(
 # tooling) the user can pass --force.
 
 PIPELINE_VERSION = 3  # bump when the on-disk segment/chunk format changes
-
-# Minimum chunk/segment size to consider valid for resume. A 1-byte file
-# is missing the moov atom (or never had one written) -- reuse would
-# corrupt the final concat in the middle.
-_MIN_PART_BYTES = 1024
 
 
 def _manifest_path(work_dir: Path) -> Path:
@@ -1090,13 +1216,21 @@ def _ensure_fresh_work_dir(
     _write_manifest(work_dir, current_manifest)
 
 
-def _ffprobe_is_valid_mp4(path: Path) -> bool:
-    """Quick validity check: ffprobe can read codec + duration.
+def _ffprobe_is_valid_media(path: Path, stream_type: str = "v") -> bool:
+    """Quick validity check: ffprobe can read codec + duration for the
+    requested stream type.
 
     Used by resume-skip to reject a chunk that exists and is large enough
     but is internally corrupt (e.g. ffmpeg crashed mid-write and the
-    moov atom is missing). Without this, the concat demuxer would
-    accept the file but emit a broken segment in the middle of the output.
+    moov atom is missing). Without this, the concat demuxer would accept
+    the file but emit a broken segment in the middle of the output.
+
+    ``stream_type`` selects the ffprobe ``-select_streams`` filter: ``"v"``
+    for video segments (the historical default, used by the concat
+    segment/cut/raw paths) and ``"a"`` for audio segments (audio-extract
+    resume — an audio-only file has no video stream and would otherwise
+    fail video validation → resume always re-encoded everything, see
+    the P0 audit in the v0.3 release plan).
     """
     try:
         r = subprocess.run(
@@ -1105,7 +1239,7 @@ def _ffprobe_is_valid_mp4(path: Path) -> bool:
                 "-v",
                 "error",
                 "-select_streams",
-                "v",
+                stream_type,
                 "-show_entries",
                 "stream=codec_name",
                 "-of",
@@ -1120,6 +1254,13 @@ def _ffprobe_is_valid_mp4(path: Path) -> bool:
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
     return r.returncode == 0 and bool(r.stdout.strip())
+
+
+# Back-compat alias for the old name; new call sites should use
+# _ffprobe_is_valid_media(path, stream_type=...). Kept so external
+# search/grep across older branches doesn't report a dangling reference.
+def _ffprobe_is_valid_mp4(path: Path) -> bool:
+    return _ffprobe_is_valid_media(path, stream_type="v")
 
 
 def _run_final_concat(
@@ -1142,7 +1283,7 @@ def _run_final_concat(
     Shared by ``_run_segment_concat`` and ``_run_batch_concat`` (P2.6).
     Both methods previously had identical 30-line blocks here: open
     ``concat.txt``, write one ``file <name>`` line per part, run
-    ``ffmpeg -f concat -safe 0 -i ... -c copy -fflags +genpts``,
+    ``ffmpeg -fflags +genpts -f concat -safe 0 -i ... -c copy``,
     cleanup. The only real differences were the part filename pattern
     (``seg_NNNNNN.mp4`` vs ``chunk_NNNN.mp4``) and the label string;
     both are now parameters so the body lives once.
@@ -1169,6 +1310,17 @@ def _run_final_concat(
             "error",
             "-progress",
             "pipe:1",
+            # -fflags +genpts is a *demuxer* flag, so it goes BEFORE -i,
+            # not as an output option after -i (P1 audit v0.3 §5.3). It
+            # tells the concat demuxer to generate missing PTS values
+            # for packets whose timestamps got dropped/duplicated at the
+            # segment boundaries. As an output option (the historical
+            # position after -i) it was effectively ignored for the PTS
+            # rebuild contract — the muxer honoured it only on its own
+            # output writes, which fire AFTER the demuxer has already
+            # assembled the packet stream and parsed (or missed) PTS.
+            "-fflags",
+            "+genpts",
             "-f",
             "concat",
             "-safe",
@@ -1177,8 +1329,6 @@ def _run_final_concat(
             str(list_path),
             "-c",
             "copy",
-            "-fflags",
-            "+genpts",
             str(output_path),
         ],
         progress_callback=_concat_prog,
@@ -1197,6 +1347,7 @@ def _run_audio_concat_filter(
     part_paths: list[Path],
     *,
     codec: str,
+    audio_quality: str,
     extra_opts: list[str],
     total_duration: float,
     progress_callback: Callable[[float], None] | None = None,
@@ -1252,7 +1403,7 @@ def _run_audio_concat_filter(
             "[outa]",
             "-c:a",
             codec,
-            *_audio_opts(),
+            *_audio_opts(audio_quality),
             *extra_opts,
             str(output_path),
         ],
@@ -1303,8 +1454,8 @@ def _run_audio_extract(
     flac) the priming is zero and the output is sample-accurate.
 
     ``audio_quality`` controls the bitrate for lossy formats via
-    ``_audio_bitrate()`` (high=256k, medium=192k, low=128k); wav/flac
-    ignore it.
+    ``_audio_bitrate_opts()`` (high=256k, medium=192k, low=128k);
+    ``source`` and wav/flac omit the bitrate knob.
     """
     spec = OUTPUT_FORMAT_SPECS.get(output_format)
     if spec is None:
@@ -1345,7 +1496,7 @@ def _run_audio_extract(
     # command line readable in the log.
     bitrate_opts: list[str] = []
     if not lossless:
-        bitrate_opts = ["-b:a", _audio_bitrate()]
+        bitrate_opts = _audio_bitrate_opts(audio_quality)
 
     try:
         encoded_keep = 0.0
@@ -1360,10 +1511,13 @@ def _run_audio_extract(
 
             # Resume: skip already encoded segments. Same dual check as
             # _run_segment_concat: minimum size + ffprobe validity.
+            # Audio segments use stream_type="a" — a video-stream probe
+            # would reject any valid mp3/opus/aac/wav/flac chunk because
+            # it has no video stream, defeating resume (P0 audit v0.3).
             if (
                 seg_path.exists()
                 and seg_path.stat().st_size >= min_part_bytes
-                and _ffprobe_is_valid_mp4(seg_path)
+                and _ffprobe_is_valid_media(seg_path, stream_type="a")
             ):
                 skipped += 1
                 encoded_keep += dur
@@ -1405,7 +1559,7 @@ def _run_audio_extract(
                     "-c:a",
                     codec,
                     *bitrate_opts,
-                    *_audio_opts(),
+                    *_audio_opts(audio_quality),
                     *extra_opts,
                     str(seg_path),
                 ],
@@ -1454,6 +1608,7 @@ def _run_audio_extract(
                 output_path,
                 part_paths,
                 codec=codec,
+                audio_quality=audio_quality,
                 extra_opts=extra_opts,
                 total_duration=total_duration,
                 progress_callback=progress_callback,
@@ -1537,7 +1692,6 @@ def _run_gapless_segment_concat(
     if n == 0:
         raise ConcatError("gapless concat: no parts to join")
 
-    _set_audio_quality(audio_quality)
     inputs: list[str] = []
     for p in part_paths:
         inputs.extend(["-i", str(p)])
@@ -1569,9 +1723,8 @@ def _run_gapless_segment_concat(
             *vcodec_opts,
             "-c:a",
             "aac",
-            "-b:a",
-            _audio_bitrate(),
-            *_audio_opts(),
+            *_audio_bitrate_opts(audio_quality),
+            *_audio_opts(audio_quality),
             "-movflags",
             "+faststart",
             str(output_path),
@@ -1701,7 +1854,8 @@ def _run_segment_concat(
             #
             # `-copyts` is NOT used: kept off so the per-segment output
             # timeline starts at 0 (the contract the concat demuxer
-            # expects when `-fflags +genpts` rebuilds the final PTS).
+            # expects when ``-fflags +genpts`` (demuxer-side, placed
+            # before ``-i``) rebuilds the final PTS).
             # Without `-copyts`, timestamps in the segment file are
             # already normalised to start at 0, so a `setpts=PTS-STARTPTS`
             # is a no-op here and is omitted for clarity.
@@ -1759,7 +1913,14 @@ def _run_segment_concat(
                     vcodec,
                     *vcodec_opts,
                     *(
-                        ["-map", "0:a:0?", "-c:a", "aac", "-b:a", _audio_bitrate(), *_audio_opts()]
+                        [
+                            "-map",
+                            "0:a:0?",
+                            "-c:a",
+                            "aac",
+                            *_audio_bitrate_opts(audio_quality),
+                            *_audio_opts(audio_quality),
+                        ]
                         if source_has_audio
                         else []
                     ),
@@ -1972,11 +2133,13 @@ def _run_cut_then_encode(
                     str(cut_path),
                 ]
             )
-            subprocess.run(
+            _run_subprocess_cmd(
                 cmd,
-                check=True,
-                capture_output=True,
-                **subprocess_kwargs(low_process_priority, rlimit_as_mb),
+                timeout=segment_encode_timeout,
+                label=f"cut_then_encode cut phase segment {i}",
+                cancel_callback=cancel_callback,
+                low_process_priority=low_process_priority,
+                rlimit_as_mb=rlimit_as_mb,
             )
             if progress_callback:
                 progress_callback(cut_progress_base + (i + 1) / n_segs * cut_progress_span)
@@ -2014,18 +2177,13 @@ def _run_cut_then_encode(
 
         audio_encode_opts: list[str] = []
         if source_has_audio:
-            audio_bitrate = _AUDIO_BITRATES.get(audio_quality, "192k")
             audio_encode_opts = [
                 "-map",
                 "0:a:0?",
                 "-c:a",
                 "aac",
-                "-b:a",
-                audio_bitrate,
-                "-ar",
-                "48000",
-                "-ac",
-                "2",
+                *_audio_bitrate_opts(audio_quality),
+                *_audio_opts(audio_quality),
             ]
 
         encode_progress_base = 0.5
@@ -2530,9 +2688,8 @@ def _run_batch_concat(
                                 "[outa]",
                                 "-c:a",
                                 "aac",
-                                "-b:a",
-                                _audio_bitrate(),
-                                *_audio_opts(),
+                                *_audio_bitrate_opts(audio_quality),
+                                *_audio_opts(audio_quality),
                             ]
                             if source_has_audio
                             else []
@@ -2659,8 +2816,3 @@ def _with_libx264_fallback(
                     x264_low_memory=x264_low_memory,
                 ),
             )
-            # The fallback reuses _audio_bitrate() / _audio_opts() which
-            # read the module-level _audio_quality. Keep the call explicit
-            # so a future caller that bypasses cut_and_concat still gets
-            # the right AAC preset on the retry.
-            _set_audio_quality(audio_quality)

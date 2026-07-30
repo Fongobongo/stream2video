@@ -311,6 +311,33 @@ class TestProgressParsing:
         assert _parse_progress_line("s2v_progress|") is None
         assert _parse_progress_line("s2v_progress") is None
 
+    def test_legacy_4_field_line_parses_with_correct_mapping(self):
+        """Regression for P1 audit v0.3 §5.1: a 4-field legacy yt-dlp
+        line from an old partial download uses the layout
+        ``downloaded|total_estimate|speed|eta``. Previously the dead
+        ``if len(parts) < 5 and len(parts) < 4`` branch meant 4-field
+        lines were rejected, and even the 5-field fallback mis-mapped
+        ``total_estimate←speed`` and ``speed←eta``. After the fix the
+        4-field path maps each field to the right slot."""
+        prog = _parse_progress_line("s2v_progress|500|1000|100|5")
+        assert prog is not None
+        assert prog.downloaded_bytes == 500.0
+        # 4-field has no exact total; total_estimate (parts[1]=1000) is used
+        # → effective_total via the prefer-exact-else-estimate path.
+        assert prog.total_bytes == 1000.0
+        assert prog.speed == 100.0
+        assert prog.eta == 5.0
+
+    def test_legacy_4_field_with_na_total_uses_none(self):
+        """A 4-field legacy line with ``NA`` for the total_estimate slot:
+        total stays None and the UI falls back to indeterminate."""
+        prog = _parse_progress_line("s2v_progress|500|NA|100|5")
+        assert prog is not None
+        assert prog.downloaded_bytes == 500.0
+        assert prog.total_bytes is None
+        assert prog.speed == 100.0
+        assert prog.eta == 5.0
+
     def test_progress_callback_is_invoked(self):
         """The progress_callback is called from the stdout drain thread
         for each progress-template line, with parsed DownloadProgress.
