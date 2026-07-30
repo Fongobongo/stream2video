@@ -90,6 +90,7 @@ curl -sL -o "%TEMP%\ffmpeg.zip" https://github.com/BtbN/FFmpeg-Builds/releases/d
 if %errorlevel% equ 0 (
     powershell -Command "Expand-Archive -Path '%TEMP%\ffmpeg.zip' -DestinationPath '%PORT_DIR%\ffmpeg_tmp' -Force; if(Test-Path '%PORT_DIR%\ffmpeg_tmp\ffmpeg-master-latest-win64-gpl'){Move-Item '%PORT_DIR%\ffmpeg_tmp\ffmpeg-master-latest-win64-gpl\*' '%PORT_DIR%\ffmpeg' -Force; Remove-Item '%PORT_DIR%\ffmpeg_tmp' -Recurse -Force}"
     if exist "%PORT_DIR%\ffmpeg\bin\ffmpeg.exe" (
+        set "FFMPEG_DIR=%PORT_DIR%\ffmpeg\bin"
         set "PATH=%FFMPEG_DIR%;%PATH%"
     ) else (
         echo [WARN] ffmpeg extract failed. Install manually: winget install Gyan.FFmpeg

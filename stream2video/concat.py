@@ -108,11 +108,12 @@ def _quote_concat_path(p: str) -> str:
 
 
 _VIDEO_BITRATE = "7000k"
-# Audio bitrate presets. ``medium`` keeps the historical 128k so default
-# output is unchanged on upgrade. ``high``/``low`` give the user a real
-# choice so a 192k/256k/320k source is no longer silently downgraded --
-# see P0.3 in the fix plan. Set at encode time only; the value is read
-# through ``_audio_bitrate()`` so runtime override is a single knob.
+# Audio bitrate presets. ``medium`` is the default 192k preset; ``high``/``low``
+# give the user a real choice so a 192k/256k/320k source is no longer silently
+# downgraded to 128k. ``source`` skips the bitrate/resample/downmix policy.
+# P1 audit v0.3 §6.1: callers pass ``audio_quality`` explicitly via
+# ``_audio_bitrate_opts(q)`` / ``_audio_opts(q)``, eliminating the module-level
+# ``_audio_quality`` global that made consecutive runs share mutable state.
 _AUDIO_BITRATE = "128k"
 _AUDIO_BITRATES: dict[str, str] = {
     "high": "256k",
@@ -123,7 +124,7 @@ _AUDIO_BITRATES: dict[str, str] = {
 # normalised everything to stereo 48 kHz AAC -- the source was never
 # preserved, but output was at least consistent across segments. Keep
 # that explicit conversion so the audio path is documented, but route
-# it through ``_audio_opts()`` so an explicit "preserve source" preset
+# it through ``_audio_opts(q)`` so an explicit "preserve source" preset
 # can be added as a follow-up without rewriting every call site.
 _AUDIO_SAMPLE_RATE = "48000"
 _AUDIO_CHANNELS = "2"
@@ -142,40 +143,51 @@ _STALL_KILL = 300
 _MIN_PART_BYTES = 1024
 
 
-def _audio_bitrate() -> str:
+def _audio_bitrate(audio_quality: str = "") -> str:
     """Bitrate string for the AAC encoder based on ``audio_quality``.
 
-    Reads the module-level ``_audio_quality`` set by ``cut_and_concat``
-    via ``_set_audio_quality``. Defaults to ``medium`` (192k) when unset
-    so existing tests/benchmarks that don't go through the pipeline
-    entry point keep their historical output.
+    Empty string (the default) falls back to ``_AUDIO_BITRATE`` (128k)
+    only so trivial test/benchmark call sites that don't go through
+    ``cut_and_concat`` keep their historical output. Real pipeline paths
+    always pass an explicit quality (``source``/``high``/``medium``/``low``)
+    through their ``audio_quality`` parameter; unknown values raise
+    :class:`ConcatError` so a typo doesn't silently fall back to 128k.
     """
-    return _AUDIO_BITRATES.get(_audio_quality, _AUDIO_BITRATE)
+    if audio_quality == "":
+        return _AUDIO_BITRATE
+    if audio_quality == "source":
+        return ""
+    if audio_quality not in _AUDIO_BITRATES:
+        raise ConcatError(
+            f"Unknown audio quality {audio_quality!r} "
+            f"(use {' or '.join(repr(k) for k in VALID_QUALITIES)})"
+        )
+    return _AUDIO_BITRATES[audio_quality]
 
 
-def _audio_opts() -> list[str]:
+def _audio_bitrate_opts(audio_quality: str = "") -> list[str]:
+    """Return ``-b:a`` opts for lossy audio, or none for ``source``."""
+    bitrate = _audio_bitrate(audio_quality)
+    return ["-b:a", bitrate] if bitrate else []
+
+
+def _audio_opts(audio_quality: str = "") -> list[str]:
     """Output-side AAC options: sample rate + channel layout.
 
-    Centralised so a follow-up "preserve source" preset (no `-ar`/`-ac`)
-    is one knob. Returns a fresh list each call so callers may mutate
-    freely without affecting shared state.
+    ``source`` returns no ``-ar`` / ``-ac`` flags, allowing ffmpeg to keep
+    the decoded stream's native sample rate and channel layout where the
+    selected output codec supports it. Other presets keep the historical
+    stereo 48 kHz normalisation. Returns a fresh list each call so callers
+    may mutate freely.
     """
-    return ["-ar", _AUDIO_SAMPLE_RATE, "-ac", _AUDIO_CHANNELS]
-
-
-# Audio quality preset for the current pipeline run. Thread-safe enough
-# for this codebase's sequential pipeline (one encode at a time,
-# cancellation-checked) -- set once per ``cut_and_concat`` invocation.
-_audio_quality: str = "medium"
-
-
-def _set_audio_quality(q: str) -> None:
-    global _audio_quality
-    if q not in _AUDIO_BITRATES:
+    if audio_quality == "source":
+        return []
+    if audio_quality not in ("", *_AUDIO_BITRATES):
         raise ConcatError(
-            f"Unknown audio quality {q!r} (use {' or '.join(repr(k) for k in _AUDIO_BITRATES)})"
+            f"Unknown audio quality {audio_quality!r} "
+            f"(use {' or '.join(repr(k) for k in VALID_QUALITIES)})"
         )
-    _audio_quality = q
+    return ["-ar", _AUDIO_SAMPLE_RATE, "-ac", _AUDIO_CHANNELS]
 
 
 # Bitrate (HW encoders) and CRF (libx264) per ``video_quality`` preset.
@@ -258,7 +270,6 @@ def cut_and_concat(
                 f"Source {video_path.name} has no audio stream -- cannot "
                 f"produce {output_format} output"
             )
-        _set_audio_quality(audio_quality)
         _run_audio_extract(
             video_path,
             keep_segments,
@@ -287,7 +298,6 @@ def cut_and_concat(
         x264_low_memory=x264_low_memory,
     )
     logger.info(f"Encoder: {vcodec} {vcodec_opts} (quality={video_quality})")
-    _set_audio_quality(audio_quality)
 
     # Detect whether the source has an audio stream ONCE. Probing per
     # segment would be wasteful; passing the flag down lets the
@@ -398,8 +408,10 @@ def encoder_opts(
 ) -> list[str]:
     """Return the ffmpeg encoder options for ``encoder`` at ``quality`` preset.
 
-    quality: ``high`` / ``medium`` / ``low``. Affects bitrate (HW encoders)
-    and CRF (libx264). ``medium`` reproduces the previously hard-coded
+    quality: ``source`` / ``high`` / ``medium`` / ``low``. ``high``/
+    ``medium``/``low`` affect bitrate (HW encoders) and CRF (libx264).
+    ``source`` omits the project bitrate/CRF policy and lets ffmpeg's
+    encoder defaults apply. ``medium`` reproduces the previously hard-coded
     options exactly so existing output is unchanged.
 
     ``x264_preset`` (libx264 only): one of ``VALID_X264_PRESETS``. Default
@@ -431,6 +443,12 @@ def encoder_opts(
             f"(use {' or '.join(repr(p) for p in VALID_X264_PRESETS)})"
         )
     threads_opt = _threads_opt(encoder_threads)
+
+    if quality == "source":
+        low_mem = _x264_low_memory_opts() if encoder == "libx264" and x264_low_memory else []
+        if encoder == "libx264":
+            return ["-preset", x264_preset, *threads_opt, *low_mem]
+        return [*threads_opt]
 
     bitrate = _VIDEO_BITRATES[quality]
     if encoder == "h264_mf":
@@ -835,7 +853,11 @@ def _run_ffmpeg(
 
                 if process.returncode != 0:
                     stderr_text = "".join(stderr_lines)
-                    msg = stderr_text[:_STDERR_TRUNCATE] if stderr_text else "unknown error (no stderr)"
+                    msg = (
+                        stderr_text[:_STDERR_TRUNCATE]
+                        if stderr_text
+                        else "unknown error (no stderr)"
+                    )
                     # Memory monitor's hard-budget kill: it triggers cancel
                     # via cancel_callback rather than killing the process
                     # directly, and on a race the cancel_monitor's kill can
@@ -1017,11 +1039,6 @@ def _wait_with_cancel(
 # tooling) the user can pass --force.
 
 PIPELINE_VERSION = 3  # bump when the on-disk segment/chunk format changes
-
-# Minimum chunk/segment size to consider valid for resume. A 1-byte file
-# is missing the moov atom (or never had one written) -- reuse would
-# corrupt the final concat in the middle.
-_MIN_PART_BYTES = 1024
 
 
 def _manifest_path(work_dir: Path) -> Path:
@@ -1330,6 +1347,7 @@ def _run_audio_concat_filter(
     part_paths: list[Path],
     *,
     codec: str,
+    audio_quality: str,
     extra_opts: list[str],
     total_duration: float,
     progress_callback: Callable[[float], None] | None = None,
@@ -1385,7 +1403,7 @@ def _run_audio_concat_filter(
             "[outa]",
             "-c:a",
             codec,
-            *_audio_opts(),
+            *_audio_opts(audio_quality),
             *extra_opts,
             str(output_path),
         ],
@@ -1436,8 +1454,8 @@ def _run_audio_extract(
     flac) the priming is zero and the output is sample-accurate.
 
     ``audio_quality`` controls the bitrate for lossy formats via
-    ``_audio_bitrate()`` (high=256k, medium=192k, low=128k); wav/flac
-    ignore it.
+    ``_audio_bitrate_opts()`` (high=256k, medium=192k, low=128k);
+    ``source`` and wav/flac omit the bitrate knob.
     """
     spec = OUTPUT_FORMAT_SPECS.get(output_format)
     if spec is None:
@@ -1478,7 +1496,7 @@ def _run_audio_extract(
     # command line readable in the log.
     bitrate_opts: list[str] = []
     if not lossless:
-        bitrate_opts = ["-b:a", _audio_bitrate()]
+        bitrate_opts = _audio_bitrate_opts(audio_quality)
 
     try:
         encoded_keep = 0.0
@@ -1541,7 +1559,7 @@ def _run_audio_extract(
                     "-c:a",
                     codec,
                     *bitrate_opts,
-                    *_audio_opts(),
+                    *_audio_opts(audio_quality),
                     *extra_opts,
                     str(seg_path),
                 ],
@@ -1590,6 +1608,7 @@ def _run_audio_extract(
                 output_path,
                 part_paths,
                 codec=codec,
+                audio_quality=audio_quality,
                 extra_opts=extra_opts,
                 total_duration=total_duration,
                 progress_callback=progress_callback,
@@ -1673,7 +1692,6 @@ def _run_gapless_segment_concat(
     if n == 0:
         raise ConcatError("gapless concat: no parts to join")
 
-    _set_audio_quality(audio_quality)
     inputs: list[str] = []
     for p in part_paths:
         inputs.extend(["-i", str(p)])
@@ -1705,9 +1723,8 @@ def _run_gapless_segment_concat(
             *vcodec_opts,
             "-c:a",
             "aac",
-            "-b:a",
-            _audio_bitrate(),
-            *_audio_opts(),
+            *_audio_bitrate_opts(audio_quality),
+            *_audio_opts(audio_quality),
             "-movflags",
             "+faststart",
             str(output_path),
@@ -1896,7 +1913,14 @@ def _run_segment_concat(
                     vcodec,
                     *vcodec_opts,
                     *(
-                        ["-map", "0:a:0?", "-c:a", "aac", "-b:a", _audio_bitrate(), *_audio_opts()]
+                        [
+                            "-map",
+                            "0:a:0?",
+                            "-c:a",
+                            "aac",
+                            *_audio_bitrate_opts(audio_quality),
+                            *_audio_opts(audio_quality),
+                        ]
                         if source_has_audio
                         else []
                     ),
@@ -2153,18 +2177,13 @@ def _run_cut_then_encode(
 
         audio_encode_opts: list[str] = []
         if source_has_audio:
-            audio_bitrate = _AUDIO_BITRATES.get(audio_quality, "192k")
             audio_encode_opts = [
                 "-map",
                 "0:a:0?",
                 "-c:a",
                 "aac",
-                "-b:a",
-                audio_bitrate,
-                "-ar",
-                "48000",
-                "-ac",
-                "2",
+                *_audio_bitrate_opts(audio_quality),
+                *_audio_opts(audio_quality),
             ]
 
         encode_progress_base = 0.5
@@ -2669,9 +2688,8 @@ def _run_batch_concat(
                                 "[outa]",
                                 "-c:a",
                                 "aac",
-                                "-b:a",
-                                _audio_bitrate(),
-                                *_audio_opts(),
+                                *_audio_bitrate_opts(audio_quality),
+                                *_audio_opts(audio_quality),
                             ]
                             if source_has_audio
                             else []
@@ -2798,8 +2816,3 @@ def _with_libx264_fallback(
                     x264_low_memory=x264_low_memory,
                 ),
             )
-            # The fallback reuses _audio_bitrate() / _audio_opts() which
-            # read the module-level _audio_quality. Keep the call explicit
-            # so a future caller that bypasses cut_and_concat still gets
-            # the right AAC preset on the retry.
-            _set_audio_quality(audio_quality)

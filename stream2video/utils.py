@@ -446,7 +446,7 @@ def subprocess_kwargs(low_priority: bool = False, rlimit_as_mb: int = 0) -> dict
       fast spike). No-op on Windows (no portable equivalent; the
       ``memory_limit_mb`` pre-flight remains the only memory door there).
 
-    â¨``preexec_fn`` is unreliable in multi-threaded programs and is
+    ``preexec_fn`` is unreliable in multi-threaded programs and is
     only used when one of the above is explicitly requested (opt-in
     via ``low_process_priority`` / ``rlimit_as_mb``). Default False /
     0 preserves the historical behaviour.
