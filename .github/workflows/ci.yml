@@ -2,17 +2,21 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
   pull_request:
-    branches: [main]
+    branches: [master, main]
 
 env:
   PYTHON_VERSION: "3.13"
 
 jobs:
   test:
-    name: Lint + types + tests
-    runs-on: ubuntu-latest
+    name: Lint + types + tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -29,13 +33,18 @@ jobs:
       - name: Set up Python
         run: uv python install ${{ env.PYTHON_VERSION }}
 
-      - name: Install ffmpeg
+      - name: Install ffmpeg (Ubuntu)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Install ffmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y --no-progress
 
       - name: Verify ffmpeg/ffprobe
         run: |
-          ffmpeg -version | head -n 1
-          ffprobe -version | head -n 1
+          ffmpeg -version
+          ffprobe -version
 
       - name: Sync dependencies
         run: uv sync --all-extras --dev
