@@ -88,8 +88,8 @@ def open_in_file_manager(path: Path) -> None:
 # Target window size for the GUI on a typical desktop. Exported so
 # tests can pin the constants and the GUI can import them without
 # duplicating the values.
-_DEFAULT_WINDOW_W = 1080
-_DEFAULT_WINDOW_H = 680
+_DEFAULT_WINDOW_W = 1280
+_DEFAULT_WINDOW_H = 720
 # Margins reserved around the window so it doesn't butt up against
 # the screen edges or the taskbar / Dock.
 _SCREEN_MARGIN_W = 40
@@ -99,7 +99,7 @@ _SCREEN_MARGIN_H = 60
 def fit_to_screen(sw: int, sh: int) -> tuple[int, int]:
     """Return the default window size (w, h) clamped to the screen.
 
-    Targets 1080x680 on a typical desktop; shrinks to (sw-40) x (sh-60)
+    Targets 1121x643 on a typical desktop; shrinks to (sw-40) x (sh-60)
     on smaller displays. The ``max(1, ...)`` floor guards against
     negative/zero values from absurdly small screens (e.g., a remote
     session at 200x150) where ``sw - 40`` could otherwise go negative.

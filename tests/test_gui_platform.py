@@ -103,10 +103,10 @@ class TestOpenInFileManager:
 
 class TestFitToScreen:
     def test_typical_desktop_returns_target(self):
-        # 1920x1080 is large enough to fit the default 1080x680.
+        # 1920x1080 is large enough to fit the default 1280x720.
         w, h = fit_to_screen(1920, 1080)
-        assert w == 1080
-        assert h == 680
+        assert w == 1280
+        assert h == 720
 
     def test_small_screen_clamps(self):
         # 800x600 screen: 800-40=760, 600-60=540.

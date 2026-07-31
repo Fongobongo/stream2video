@@ -38,6 +38,7 @@ dev = [
 gui = [
     "customtkinter>=5.2.0",
     "Pillow>=10.0.0",
+    "psutil>=5.9.0",
 ]
 # GUI event-loop tests (test_gui_qt.py) need a Qt binding for pytest-qt's
 # headless display auto-detection. PySide6 is the lightest Qt6 binding.

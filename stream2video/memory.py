@@ -49,6 +49,7 @@ except ImportError:
 # runaway ffmpeg before it OOMs the machine (typical RSS growth on a
 # bad filter graph is ~100 MB/s) without adding noticeable overhead.
 _POLL_INTERVAL = 2.0
+_missing_psutil_warned = False
 
 
 def _available_ram_mb() -> float | None:
@@ -123,7 +124,9 @@ class MemoryMonitor:
         self.hard_exceeded = False
         self.peak_rss_mb: float = 0.0
 
-        if not _HAS_PSUTIL:
+        global _missing_psutil_warned
+        if not _HAS_PSUTIL and not _missing_psutil_warned:
+            _missing_psutil_warned = True
             logger.warning(
                 "psutil not installed — MemoryMonitor is a no-op. "
                 "Install with `pip install psutil` to enable RSS-based "

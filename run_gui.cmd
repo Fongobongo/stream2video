@@ -51,10 +51,10 @@ if not exist "%PORT_DIR%\venv\" (
 )
 set "PYTHON=%PORT_DIR%\venv\Scripts\python.exe"
 
-"%PYTHON%" -c "import stream2video; import customtkinter; import PIL" 2>nul
+"%PYTHON%" -c "import stream2video; import customtkinter; import PIL; import psutil" 2>nul
 if errorlevel 1 (
     echo ==^> Installing dependencies...
-    "%PYTHON%" -m pip install -e "%~dp0.[gui]"
+    "%PYTHON%" -m pip install -e ".[gui,monitor]"
     if errorlevel 1 (
         echo [ERROR] pip install failed
         pause

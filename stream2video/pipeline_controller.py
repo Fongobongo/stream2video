@@ -275,7 +275,7 @@ def _clamp_fraction(value: float) -> float:
 
 def _estimate_silence_span(src_duration: float | None, *, cache_hit: bool) -> float:
     if cache_hit:
-        return 0.03
+        return 0.10
     if src_duration is None or src_duration <= 0:
         return PROG_SILENCE_END - PROG_DOWNLOAD_END
     if src_duration <= 10 * 60:
@@ -291,7 +291,7 @@ def _build_progress_plan(
     src_duration: float | None,
     silence_cache_hit: bool,
 ) -> ProgressPlan:
-    download_end = PROG_DOWNLOAD_END if is_downloaded else 0.02
+    download_end = 0.0 if not is_downloaded else PROG_DOWNLOAD_END
     silence_span = _estimate_silence_span(src_duration, cache_hit=silence_cache_hit)
     silence_end = min(0.75, download_end + silence_span)
     return ProgressPlan(download_end=download_end, silence_end=silence_end)
@@ -336,6 +336,12 @@ class PipelineController:
     _progress_plan: ProgressPlan = field(default_factory=ProgressPlan, init=False)
     _download_was_real: bool = field(default=True, init=False)
     _src_duration: float | None = field(default=None, init=False)
+
+    def _set_status(self, text: str, *, force: bool = False) -> None:
+        try:
+            self.cb.on_status(text, force=force)  # type: ignore[call-arg]
+        except TypeError:
+            self.cb.on_status(text)
 
     def run(self) -> PipelineResult:
         """Run the three-phase pipeline. Raises ``PipelineError`` on failure.
@@ -422,7 +428,7 @@ class PipelineController:
         and ``PipelineCancelled`` on user cancel.
         """
         self.cb.on_progress(0.0)
-        self.cb.on_status("Step 1/3: Downloading / resolving video...")
+        self._set_status("Step 1/3: Resolving input...", force=True)
         self.cb.on_log("Step 1/3: Downloading / resolving video...")
 
         try:
@@ -496,8 +502,10 @@ class PipelineController:
             )
 
         if download_result.is_downloaded:
+            self._set_status("Step 1/3: Download complete", force=True)
             self.cb.on_log(f"Downloaded: {self.cfg.input_raw} -> {video_path}")
         else:
+            self._set_status("Step 1/3: Local file ready", force=True)
             self.cb.on_log(f"Download skipped (file already on disk): {video_path}")
 
         return video_path, src_size_bytes, src_duration
@@ -513,7 +521,7 @@ class PipelineController:
         """
         output_dir = getattr(self, "_output_dir_resolved", self.cfg.output_dir)
         self.cb.on_progress(self._progress_plan.download_end)
-        self.cb.on_status("Step 2/3: Detecting silence...")
+        self._set_status("Step 2/3: Detecting silence...", force=True)
         self.cb.on_log(
             f"Step 2/3: Detecting silence "
             f"(threshold={self.cfg.threshold}dB, "
@@ -559,14 +567,14 @@ class PipelineController:
             if f > 0.01:
                 remaining = elapsed / f - elapsed
                 controller.cb.on_progress(controller._progress_plan.map_silence(f))
-                controller.cb.on_status(
+                controller._set_status(
                     f"Step 2/3: Silence... {f * 100:.0f}% "
                     f"({fmt_time(elapsed)}/{fmt_time(remaining)})"
                 )
                 controller.cb.on_overall(elapsed, remaining, True)
             else:
                 controller.cb.on_progress(controller._progress_plan.download_end)
-                controller.cb.on_status(
+                controller._set_status(
                     f"Step 2/3: Silence... {fmt_time(elapsed)} (calculating ETA)"
                 )
                 controller.cb.on_overall(elapsed, None, True)
@@ -607,7 +615,7 @@ class PipelineController:
         """
         output_dir = getattr(self, "_output_dir_resolved", self.cfg.output_dir)
         self.cb.on_progress(self._progress_plan.silence_end)
-        self.cb.on_status("Step 3/3: Cutting and concatenating...")
+        self._set_status("Step 3/3: Cutting and concatenating...", force=True)
         self.cb.on_log(
             f"Step 3/3: Cutting & concatenating "
             f"(method={self.cfg.method}, encoder={self.cfg.encoder}, "
@@ -645,14 +653,14 @@ class PipelineController:
             if f > 0.01:
                 remaining = elapsed / f - elapsed
                 controller.cb.on_progress(controller._progress_plan.map_concat(f))
-                controller.cb.on_status(
+                controller._set_status(
                     f"Step 3/3: Cutting... {f * 100:.0f}% "
                     f"({fmt_time(elapsed)}/{fmt_time(remaining)})"
                 )
                 controller.cb.on_overall(elapsed, remaining, False)
             else:
                 controller.cb.on_progress(controller._progress_plan.silence_end)
-                controller.cb.on_status(
+                controller._set_status(
                     f"Step 3/3: Cutting... {fmt_time(elapsed)} (calculating ETA)"
                 )
                 controller.cb.on_overall(elapsed, None, False)

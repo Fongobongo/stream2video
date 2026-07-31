@@ -376,13 +376,15 @@ class TestPipelineControllerRun:
             result = controller.run()
 
         assert isinstance(result, PipelineResult)
-        # Local input skips real downloading, so download gets 2%, short
-        # silence detection gets 25%, and concat receives the remaining 73%.
-        assert any("download 2%, silence 25%, concat 73%" in s for s in calls["log"])
-        assert any(pytest.approx(v, abs=1e-6) == 0.02 for v in calls["progress"])
-        assert any(pytest.approx(v, abs=1e-6) == 0.145 for v in calls["progress"])
-        assert any(pytest.approx(v, abs=1e-6) == 0.27 for v in calls["progress"])
-        assert any(pytest.approx(v, abs=1e-6) == 0.635 for v in calls["progress"])
+        assert "Step 1/3: Local file ready" in calls["status"]
+        assert not any(s == "Step 1/3: Download complete" for s in calls["status"])
+        # Local input skips downloading, so download gets 0%,
+        # silence detection gets 25%, and concat receives the remaining 75%.
+        assert any("download 0%, silence 25%, concat 75%" in s for s in calls["log"])
+        assert any(pytest.approx(v, abs=1e-6) == 0.0 for v in calls["progress"])
+        assert any(pytest.approx(v, abs=1e-6) == 0.125 for v in calls["progress"])
+        assert any(pytest.approx(v, abs=1e-6) == 0.25 for v in calls["progress"])
+        assert any(pytest.approx(v, abs=1e-6) == 0.625 for v in calls["progress"])
         assert calls["progress"][-1] == 1.0
         assert calls["progress"] == sorted(calls["progress"])
 
@@ -430,11 +432,11 @@ class TestPipelineControllerRun:
 
         assert isinstance(result, PipelineResult)
         detect_mock.assert_not_called()
-        # Cache hit makes silence a tiny 3% phase, so concat gets 92%.
-        assert any("download 5%, silence 3%, concat 92%" in s for s in calls["log"])
+        # Cache hit makes silence a 10% phase, so concat gets 85%.
+        assert any("download 5%, silence 10%, concat 85%" in s for s in calls["log"])
         assert any(pytest.approx(v, abs=1e-6) == 0.05 for v in calls["progress"])
-        assert any(pytest.approx(v, abs=1e-6) == 0.08 for v in calls["progress"])
-        assert any(pytest.approx(v, abs=1e-6) == 0.54 for v in calls["progress"])
+        assert any(pytest.approx(v, abs=1e-6) == 0.15 for v in calls["progress"])
+        assert any(pytest.approx(v, abs=1e-6) == 0.575 for v in calls["progress"])
         assert calls["progress"][-1] == 1.0
         assert calls["progress"] == sorted(calls["progress"])
 
