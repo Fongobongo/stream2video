@@ -65,7 +65,9 @@ class ProgressUiMixin:
             self._tk_after(0, lambda: self.lbl_total.configure(text=""))
 
     def _ui_progress(self, value: float) -> None:
-        self._tk_after(0, lambda: self.progress.set(max(0.0, min(1.0, value))))
+        clamped = max(0.0, min(1.0, value))
+        self._tk_after(0, lambda: self.progress.set(clamped))
+        self._tk_after(0, lambda: self.lbl_progress_pct.configure(text=f"{clamped * 100:.0f}%"))
 
     def _ui_overall(
         self,

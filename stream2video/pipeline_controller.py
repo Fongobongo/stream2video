@@ -49,6 +49,7 @@ from stream2video.download import (
     download,
 )
 from stream2video.formatters import fmt_size, fmt_time
+from stream2video.gui_helpers import build_silence_info_line
 from stream2video.memory import _available_ram_mb
 from stream2video.paths import apply_per_video_dir
 from stream2video.silence import (
@@ -318,6 +319,13 @@ class PipelineController:
                 )
             keep_segments = generate_keep_segments(video_path, silence_segments)
             keep_dur = sum(e - s for s, e in keep_segments)
+            self.cb.on_info(
+                build_silence_info_line(
+                    num_silence=len(silence_segments),
+                    num_keep=len(keep_segments),
+                    keep_duration=keep_dur,
+                )
+            )
             output_path = self._run_concat_phase(video_path, silence_segments, keep_dur)
             return self._finish(video_path, output_path, src_size_bytes, src_duration, keep_dur)
         except PipelineError:

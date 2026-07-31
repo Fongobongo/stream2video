@@ -36,6 +36,8 @@ from typing import Any, Protocol
 
 from stream2video.gui_log_handler import QueueHandler
 
+logger = logging.getLogger(__name__)
+
 
 class TkRoot(Protocol):
     """Structural type for anything that quacks like a Tk root (has
@@ -65,12 +67,12 @@ class TkDispatcher:
     def schedule(self, ms: int, func: Callable[..., Any]) -> None:
         try:
             self._root.after(ms, func)
-        except Exception:
+        except Exception as e:
             # ``TclError`` from root destroyed + any other exception from
-            # a dead root → drop the queued update quietly (mirror the
-            # original `pass`-on-Exception so the worker's finally can
-            # still run cleanup).
-            pass
+            # a dead root → drop the queued update so the worker's finally
+            # can still run cleanup, but log unexpected scheduler failures.
+            if e.__class__.__name__ != "TclError":
+                logger.debug("TkDispatcher.schedule dropped callback", exc_info=True)
 
 
 class TkTextbox(Protocol):

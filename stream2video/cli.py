@@ -31,6 +31,7 @@ from stream2video.config import (
     VALID_ENCODERS,
     VALID_METHODS,
     VALID_OUTPUT_FORMATS,
+    VALID_OUTPUT_FPS,
     VALID_QUALITIES,
     VALID_SOFTWARE_FALLBACKS,
     VALID_X264_PRESETS,
@@ -242,6 +243,7 @@ def load_config(config_file: Path | None) -> dict:
         ("download_quality", VALID_DOWNLOAD_QUALITIES),
         ("software_fallback", VALID_SOFTWARE_FALLBACKS),
         ("x264_preset", VALID_X264_PRESETS),
+        ("output_fps", VALID_OUTPUT_FPS),
         ("output_format", VALID_OUTPUT_FORMATS),
     ]
     for key, valid in enum_specs:
@@ -506,6 +508,13 @@ def main(
         "(default 1024). Smaller files are re-encoded. If not passed, the "
         "config file's `min_part_bytes` key is used.",
     ),
+    output_fps: str = typer.Option(
+        CONFIG_DEFAULTS["output_fps"],
+        "--output-fps",
+        help="Output FPS policy: 'source' preserves the source cadence; "
+        "'24', '25', '30', '50', or '60' force CFR conversion via ffmpeg's "
+        "fps filter. If not passed, the config file's `output_fps` key is used.",
+    ),
     output_format: str = typer.Option(
         CONFIG_DEFAULTS["output_format"],
         "--output-format",
@@ -633,6 +642,7 @@ def main(
             "software_fallback", software_fallback, VALID_SOFTWARE_FALLBACKS
         )
         x264_preset = _resolved_str("x264_preset", x264_preset, VALID_X264_PRESETS)
+        output_fps = _resolved_str("output_fps", output_fps, VALID_OUTPUT_FPS)
         output_format = _resolved_str("output_format", output_format, VALID_OUTPUT_FORMATS)
 
         # Output filename extension follows the chosen output_format.
@@ -1031,6 +1041,7 @@ def main(
                     software_fallback=software_fallback,
                     x264_preset=x264_preset,
                     encoder_threads=resolved_encoder_threads,
+                    output_fps=output_fps,
                     output_format=output_format,
                     memory_limit_mb=resolved_memory_limit_mb,
                     memory_reserve_mb=resolved_memory_reserve_mb,

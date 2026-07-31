@@ -151,6 +151,13 @@ class TestIsPreviewableInput:
         f.write_text("dummy")
         assert is_previewable_input(str(f)) is True
 
+    def test_tilde_local_file_returns_true(self, tmp_path: Path, monkeypatch):
+        f = tmp_path / "video.mp4"
+        f.write_text("dummy")
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
+        assert is_previewable_input("~/video.mp4") is True
+
     def test_nonexistent_local_file_returns_false(self, tmp_path: Path):
         missing = tmp_path / "does_not_exist.mp4"
         assert is_previewable_input(str(missing)) is False

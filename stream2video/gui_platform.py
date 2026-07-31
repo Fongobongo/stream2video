@@ -130,6 +130,6 @@ def is_previewable_input(raw: str) -> bool:
     if re.match(r"^https?://", raw, re.IGNORECASE):
         return False
     try:
-        return Path(raw).is_file()
+        return Path(raw).expanduser().is_file()
     except (OSError, ValueError):
         return False

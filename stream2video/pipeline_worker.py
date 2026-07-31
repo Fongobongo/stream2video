@@ -47,6 +47,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from stream2video.config import CONFIG_DEFAULTS
 from stream2video.download import DownloadProgress
 from stream2video.formatters import fmt_size, fmt_speed, fmt_time
 from stream2video.silence import SilenceSegment
@@ -158,34 +159,46 @@ def build_pipeline_config_from_snapshot(
         video_quality=params.video_quality,
         audio_quality=params.audio_quality,
         download_quality=params.download_quality,
-        software_fallback=config.get("software_fallback", "ask"),
-        x264_preset=config.get("x264_preset", "medium"),
-        encoder_threads=config.get("encoder_threads", "auto"),
-        output_fps=config.get("output_fps", "source"),
-        output_format=config.get("output_format", "video"),
+        software_fallback=config.get("software_fallback", CONFIG_DEFAULTS["software_fallback"]),
+        x264_preset=config.get("x264_preset", CONFIG_DEFAULTS["x264_preset"]),
+        encoder_threads=config.get("encoder_threads", CONFIG_DEFAULTS["encoder_threads"]),
+        output_fps=config.get("output_fps", CONFIG_DEFAULTS["output_fps"]),
+        output_format=config.get("output_format", CONFIG_DEFAULTS["output_format"]),
         force=params.force,
         delete_after=params.delete_after,
         per_video_dir=params.per_video_dir,
         threshold=float(config["threshold"]),
         min_silence=float(config["min_silence"]),
         margin=float(config["margin"]),
-        memory_limit_mb=config.get("memory_limit_mb", "auto"),
-        memory_reserve_mb=config.get("memory_reserve_mb", 2048),
-        x264_low_memory=config.get("x264_low_memory", False),
-        gapless_concat=config.get("gapless_concat", False),
-        low_process_priority=config.get("low_process_priority", False),
-        rlimit_as_mb=config.get("rlimit_as_mb", 0),
-        download_timeout=config.get("download_timeout", 28800),
-        connect_timeout=config.get("connect_timeout", 300),
-        no_progress_timeout=config.get("no_progress_timeout", 1800),
-        segment_encode_timeout=config.get("segment_encode_timeout", 600),
-        final_concat_timeout=config.get("final_concat_timeout", 86400),
-        silence_timeout=config.get("silence_timeout", 36000),
-        stall_kill_timeout=config.get("stall_kill_timeout", 300),
-        stall_warning_timeout=config.get("stall_warning_timeout", 120),
-        waveform_timeout=config.get("waveform_timeout", 300),
-        batch_chunk_size=config.get("batch_chunk_size", 40),
-        min_part_bytes=config.get("min_part_bytes", 1024),
+        memory_limit_mb=config.get("memory_limit_mb", CONFIG_DEFAULTS["memory_limit_mb"]),
+        memory_reserve_mb=config.get("memory_reserve_mb", CONFIG_DEFAULTS["memory_reserve_mb"]),
+        x264_low_memory=config.get("x264_low_memory", CONFIG_DEFAULTS["x264_low_memory"]),
+        gapless_concat=config.get("gapless_concat", CONFIG_DEFAULTS["gapless_concat"]),
+        low_process_priority=config.get(
+            "low_process_priority", CONFIG_DEFAULTS["low_process_priority"]
+        ),
+        rlimit_as_mb=config.get("rlimit_as_mb", CONFIG_DEFAULTS["rlimit_as_mb"]),
+        download_timeout=config.get("download_timeout", CONFIG_DEFAULTS["download_timeout"]),
+        connect_timeout=config.get("connect_timeout", CONFIG_DEFAULTS["connect_timeout"]),
+        no_progress_timeout=config.get(
+            "no_progress_timeout", CONFIG_DEFAULTS["no_progress_timeout"]
+        ),
+        segment_encode_timeout=config.get(
+            "segment_encode_timeout", CONFIG_DEFAULTS["segment_encode_timeout"]
+        ),
+        final_concat_timeout=config.get(
+            "final_concat_timeout", CONFIG_DEFAULTS["final_concat_timeout"]
+        ),
+        silence_timeout=config.get("silence_timeout", CONFIG_DEFAULTS["silence_timeout"]),
+        stall_kill_timeout=config.get(
+            "stall_kill_timeout", CONFIG_DEFAULTS["stall_kill_timeout"]
+        ),
+        stall_warning_timeout=config.get(
+            "stall_warning_timeout", CONFIG_DEFAULTS["stall_warning_timeout"]
+        ),
+        waveform_timeout=config.get("waveform_timeout", CONFIG_DEFAULTS["waveform_timeout"]),
+        batch_chunk_size=config.get("batch_chunk_size", CONFIG_DEFAULTS["batch_chunk_size"]),
+        min_part_bytes=config.get("min_part_bytes", CONFIG_DEFAULTS["min_part_bytes"]),
     )
 
 
@@ -291,11 +304,12 @@ class PipelineWorker:
         # Mutable holder for the resolved video path — the
         # ``on_output_resolved`` callback fills it and ``_on_live_segment``
         # / the success cleanup read it after.
-        video_path_ref: list[Path] = [Path()]
+        video_path_ref: list[Path | None] = [None]
         download_start = time.monotonic()
 
         def _on_live_segment(seg_list: list[SilenceSegment]) -> None:
-            self._gui.set_live_segments(video_path_ref[0], list(seg_list))
+            if video_path_ref[0] is not None:
+                self._gui.set_live_segments(video_path_ref[0], list(seg_list))
 
         def _on_output_resolved(out_dir: Path, vpath: Path, is_dl: bool) -> None:
             video_path_ref[0] = vpath
@@ -326,7 +340,7 @@ class PipelineWorker:
 
         try:
             controller.run()
-            if video_path_ref[0]:
+            if video_path_ref[0] is not None:
                 self._gui.pop_live_segments(video_path_ref[0])
             # NOTE: source-file deletion on ``delete_after=True`` is owned
             # by ``PipelineController._finish`` — it unlinks the path AND

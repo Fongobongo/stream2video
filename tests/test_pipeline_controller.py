@@ -323,6 +323,7 @@ class TestPipelineControllerRun:
 
         assert isinstance(result, PipelineResult)
         assert result.video_path == fake_video
+        assert calls.get("info") == ["Silence: 0 segments\nKeep: 1 segments (1s)"]
         # Status updates were called
         assert any("Step 1/3" in s for s in calls["status"])
         assert any("Step 2/3" in s for s in calls["status"])

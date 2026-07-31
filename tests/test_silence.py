@@ -1131,6 +1131,39 @@ class TestResumeEndToEnd:
     one Popen call per invocation.
     """
 
+    def test_fresh_wav_detection_saves_resume_checkpoints(self, tmp_path: Path):
+        video = tmp_path / "video.mp4"
+        video.write_text("dummy", encoding="utf-8")
+        resume = tmp_path / "video_silence_cache.json.resume"
+        calls: list[dict] = []
+
+        def fake_run_silencedetect(*args, **kwargs):
+            calls.append({"args": args, "kwargs": kwargs})
+            return [SilenceSegment(1.0, 2.0)]
+
+        with (
+            patch("stream2video.silence._probe_duration", return_value=10.0),
+            patch("stream2video.silence._is_wav_cache_valid", return_value=False),
+            patch("stream2video.silence._extract_audio_wav"),
+            patch("stream2video.silence._run_silencedetect", side_effect=fake_run_silencedetect),
+        ):
+            detect_silence(
+                video,
+                output_dir=tmp_path,
+                resume_cache_path=resume,
+                threshold=-30.0,
+                min_silence=1.0,
+                margin=0.0,
+            )
+
+        wav_call = next(call for call in calls if call["args"][6] == "WAV")
+        assert wav_call["kwargs"]["resume_save_path"] == resume
+        assert wav_call["kwargs"]["resume_save_config"] == {
+            "threshold": -30.0,
+            "min_silence": 1.0,
+            "margin": 0.0,
+        }
+
     def _fake_popen_factory(self, stderr_payload: str, *, capture_cmd: bool = False):
         """Single-call Popen factory. Records the cmd for inspection if
         `capture_cmd` is set (returned via `record["cmd"]`)."""

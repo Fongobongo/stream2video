@@ -105,18 +105,16 @@ class MainWindowBuildMixin:
         )
 
         # ── Center: Controls ──
-        ctrl_frame = ctk.CTkFrame(self)
+        ctrl_frame = ctk.CTkScrollableFrame(self)
         ctrl_frame.grid(row=0, column=1, sticky="nsew", padx=3, pady=4)
 
         ctk.CTkLabel(
             ctrl_frame, text="Controls", anchor="w", font=ctk.CTkFont(size=12, weight="bold")
         ).pack(fill="x", padx=5, pady=(6, 2))
         # Input
-        ctk.CTkLabel(
-            ctrl_frame, text="Input Video (Twitch/YouTube URL or local path):", anchor="w"
-        ).pack(fill="x", padx=5, pady=(1, 1))
         row = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
-        row.pack(fill="x", padx=5, pady=(0, 5))
+        row.pack(fill="x", padx=5, pady=(0, 4))
+        ctk.CTkLabel(row, text="Input:", width=58, anchor="w").pack(side="left", padx=(0, 5))
         self.input_var = StringVar()
         self.entry_input = ctk.CTkEntry(
             row,
@@ -135,11 +133,9 @@ class MainWindowBuildMixin:
         )
 
         # Output dir
-        ctk.CTkLabel(ctrl_frame, text="Output Directory:", anchor="w").pack(
-            fill="x", padx=5, pady=(0, 1)
-        )
         row2 = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
-        row2.pack(fill="x", padx=5, pady=(0, 6))
+        row2.pack(fill="x", padx=5, pady=(0, 5))
+        ctk.CTkLabel(row2, text="Output:", width=58, anchor="w").pack(side="left", padx=(0, 5))
         self.entry_output = ctk.CTkEntry(row2, placeholder_text="compressed_videos")
         self.entry_output.pack(side="left", fill="x", expand=True)
         if self.config.get("output_dir"):
@@ -196,13 +192,17 @@ class MainWindowBuildMixin:
 
         opt_frame = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
         opt_frame.pack(fill="x", padx=5, pady=1)
+        opt_frame.grid_columnconfigure(1, weight=1)
+        opt_frame.grid_columnconfigure(3, weight=1)
 
-        ctk.CTkLabel(opt_frame, text="Method:").grid(row=0, column=0, sticky="w", padx=(0, 5))
+        ctk.CTkLabel(opt_frame, text="Method:", width=62, anchor="w").grid(
+            row=0, column=0, sticky="w", padx=(0, 4), pady=(0, 2)
+        )
         self.combo_method = ctk.CTkComboBox(
-            opt_frame, values=VALID_METHODS, state="readonly", width=120
+            opt_frame, values=VALID_METHODS, state="readonly", width=108
         )
         self.combo_method.set(self.config["method"])
-        self.combo_method.grid(row=0, column=1, sticky="w", padx=(0, 5))
+        self.combo_method.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=(0, 2))
         _Tooltip(
             self.combo_method,
             "Segment: faster, ~1.5h, encodes each segment then joins.\n"
@@ -210,16 +210,18 @@ class MainWindowBuildMixin:
             "Cut-then-encode: best quality, one encode pass after lossless cut.",
         )
 
-        ctk.CTkLabel(opt_frame, text="Encoder:").grid(row=1, column=0, sticky="w", padx=(0, 5))
+        ctk.CTkLabel(opt_frame, text="Encoder:", width=62, anchor="w").grid(
+            row=0, column=2, sticky="w", padx=(0, 4), pady=(0, 2)
+        )
         self.combo_encoder = ctk.CTkComboBox(
             opt_frame,
             values=VALID_ENCODERS,
             state="readonly",
             command=self._on_encoder_change,
-            width=120,
+            width=108,
         )
         self.combo_encoder.set(self.config["encoder"])
-        self.combo_encoder.grid(row=1, column=1, sticky="w", padx=(0, 5))
+        self.combo_encoder.grid(row=0, column=3, sticky="ew", padx=(0, 5), pady=(0, 2))
         _Tooltip(
             self.combo_encoder,
             "h264_nvenc — NVIDIA GPU (GTX 1000+, RTX)\nh264_amf — AMD GPU (RX 400+, Ryzen APU)\nh264_mf — Windows Media Foundation (any GPU)\nlibx264 — CPU software encode (most compatible)",
@@ -228,22 +230,22 @@ class MainWindowBuildMixin:
         self.btn_test_encoders = ctk.CTkButton(
             opt_frame, text="Test encoder", width=90, command=self._test_encoders
         )
-        self.btn_test_encoders.grid(row=1, column=2, padx=(5, 0))
+        self.btn_test_encoders.grid(row=1, column=3, sticky="e", padx=(3, 0), pady=(0, 2))
 
         self.lbl_encoder_desc = ctk.CTkLabel(opt_frame, text="", font=("", 10, "italic"))
         self.lbl_encoder_desc.grid(
-            row=2, column=0, columnspan=4, sticky="w", padx=(0, 5), pady=(1, 0)
+            row=1, column=0, columnspan=3, sticky="w", padx=(0, 5), pady=(0, 2)
         )
 
         # Video quality preset — bitrate (HW encoders) / CRF (libx264).
-        ctk.CTkLabel(opt_frame, text="Video quality:").grid(
-            row=3, column=0, sticky="w", padx=(0, 5)
+        ctk.CTkLabel(opt_frame, text="Video:", width=62, anchor="w").grid(
+            row=2, column=0, sticky="w", padx=(0, 4), pady=(0, 2)
         )
         self.combo_video_quality = ctk.CTkComboBox(
-            opt_frame, values=VALID_QUALITIES, state="readonly", width=120
+            opt_frame, values=VALID_QUALITIES, state="readonly", width=108
         )
         self.combo_video_quality.set(self.config["video_quality"])
-        self.combo_video_quality.grid(row=3, column=1, sticky="w", padx=(0, 5))
+        self.combo_video_quality.grid(row=2, column=1, sticky="ew", padx=(0, 8), pady=(0, 2))
         _Tooltip(
             self.combo_video_quality,
             "Preset for the encode step.\nsource — encoder defaults\nhigh — 10000k / CRF 18 (large files, best quality)\nmedium — 7000k / CRF 23 (default)\nlow — 3500k / CRF 28 (small files)",
@@ -252,14 +254,14 @@ class MainWindowBuildMixin:
         # Audio quality preset — bitrate of the AAC encode. Kept separate
         # from video_quality so a 192k/256k source is not silently downgraded
         # to 128k (P0.3 in the fix plan).
-        ctk.CTkLabel(opt_frame, text="Audio quality:").grid(
-            row=4, column=0, sticky="w", padx=(0, 5)
+        ctk.CTkLabel(opt_frame, text="Audio:", width=62, anchor="w").grid(
+            row=2, column=2, sticky="w", padx=(0, 4), pady=(0, 2)
         )
         self.combo_audio_quality = ctk.CTkComboBox(
-            opt_frame, values=VALID_QUALITIES, state="readonly", width=120
+            opt_frame, values=VALID_QUALITIES, state="readonly", width=108
         )
         self.combo_audio_quality.set(self.config.get("audio_quality", "medium"))
-        self.combo_audio_quality.grid(row=4, column=1, sticky="w", padx=(0, 5))
+        self.combo_audio_quality.grid(row=2, column=3, sticky="ew", padx=(0, 5), pady=(0, 2))
         _Tooltip(
             self.combo_audio_quality,
             "Audio encode policy.\nsource — codec defaults, native rate/channels\nhigh — 256k (best quality)\nmedium — 192k (default)\nlow — 128k (smaller files)",
@@ -267,14 +269,14 @@ class MainWindowBuildMixin:
 
         # Download quality preset — Twitch/YouTube resolution cap. Ignored
         # for local files (the source file is used as-is).
-        ctk.CTkLabel(opt_frame, text="Download quality:").grid(
-            row=5, column=0, sticky="w", padx=(0, 5)
+        ctk.CTkLabel(opt_frame, text="Download:", width=62, anchor="w").grid(
+            row=3, column=0, sticky="w", padx=(0, 4), pady=(0, 2)
         )
         self.combo_download_quality = ctk.CTkComboBox(
-            opt_frame, values=VALID_DOWNLOAD_QUALITIES, state="readonly", width=120
+            opt_frame, values=VALID_DOWNLOAD_QUALITIES, state="readonly", width=108
         )
         self.combo_download_quality.set(self.config["download_quality"])
-        self.combo_download_quality.grid(row=5, column=1, sticky="w", padx=(0, 5))
+        self.combo_download_quality.grid(row=3, column=1, sticky="ew", padx=(0, 8), pady=(0, 2))
         _Tooltip(
             self.combo_download_quality,
             "Max resolution to download from Twitch/YouTube.\nbest — highest available (default)\n1080p / 720p / 480p / 360p — cap height\nIgnored for local files.",
@@ -285,39 +287,42 @@ class MainWindowBuildMixin:
         # audio-only values (mp3/opus/aac/wav/flac) drop the video
         # stream entirely and produce a standalone audio file whose
         # codec matches the format's conventional choice.
-        ctk.CTkLabel(opt_frame, text="Output format:").grid(
-            row=6, column=0, sticky="w", padx=(0, 5)
+        ctk.CTkLabel(opt_frame, text="Format:", width=62, anchor="w").grid(
+            row=3, column=2, sticky="w", padx=(0, 4), pady=(0, 2)
         )
         self.combo_output_format = ctk.CTkComboBox(
-            opt_frame, values=VALID_OUTPUT_FORMATS, state="readonly", width=120
+            opt_frame, values=VALID_OUTPUT_FORMATS, state="readonly", width=108
         )
         self.combo_output_format.set(self.config.get("output_format", "video"))
-        self.combo_output_format.grid(row=6, column=1, sticky="w", padx=(0, 5))
+        self.combo_output_format.grid(row=3, column=3, sticky="ew", padx=(0, 5), pady=(0, 2))
         _Tooltip(
             self.combo_output_format,
             "Output container/codec.\nvideo — H.264 + AAC MP4 (default)\nmp3 / opus / aac(m4a) — lossy audio only\nwav / flac — lossless audio only\nAudio-only outputs drop the video stream.",
         )
-
-        opt_frame.grid_columnconfigure(1, weight=0)
         self._on_encoder_change(self.config["encoder"])
 
-        self.chk_force = ctk.CTkCheckBox(ctrl_frame, text="Force re-detect silence (ignore cache)")
+        toggle_frame = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
+        toggle_frame.pack(fill="x", padx=5, pady=(2, 1))
+        toggle_frame.grid_columnconfigure(0, weight=1)
+        toggle_frame.grid_columnconfigure(1, weight=1)
+
+        self.chk_force = ctk.CTkCheckBox(toggle_frame, text="Force re-detect silence")
         if self.config.get("force"):
             self.chk_force.select()
-        self.chk_force.pack(anchor="w", padx=5, pady=(4, 1))
+        self.chk_force.grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(1, 2))
 
-        self.chk_delete = ctk.CTkCheckBox(ctrl_frame, text="Delete downloaded source after success")
+        self.chk_delete = ctk.CTkCheckBox(toggle_frame, text="Delete downloaded source")
         if self.config.get("delete_after"):
             self.chk_delete.select()
-        self.chk_delete.pack(anchor="w", padx=5, pady=(4, 1))
+        self.chk_delete.grid(row=0, column=1, sticky="w", padx=(0, 0), pady=(1, 2))
 
         self.chk_per_video_dir = ctk.CTkCheckBox(
-            ctrl_frame,
-            text="Create separate subdirectory for this video's project",
+            toggle_frame,
+            text="Create separate project subdirectory",
         )
         if self.config.get("per_video_dir"):
             self.chk_per_video_dir.select()
-        self.chk_per_video_dir.pack(anchor="w", padx=5, pady=(4, 1))
+        self.chk_per_video_dir.grid(row=1, column=0, columnspan=2, sticky="w", pady=(1, 2))
 
         # Resource preset — bundle of tunables (x264_low_memory,
         # memory_limit_mb, batch_chunk_size, low_process_priority). The
@@ -325,15 +330,19 @@ class MainWindowBuildMixin:
         # below still win on a per-key basis (their last write to
         # self.config during _collect_gui_state takes precedence over
         # preset application during _start_pipeline).
-        ctk.CTkLabel(ctrl_frame, text="Resource preset:").pack(anchor="w", padx=5, pady=(4, 1))
+        preset_row = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
+        preset_row.pack(fill="x", padx=5, pady=(2, 2))
+        ctk.CTkLabel(preset_row, text="Resource preset:", width=112, anchor="w").pack(
+            side="left", padx=(0, 5)
+        )
         self.combo_preset = ctk.CTkComboBox(
-            ctrl_frame,
+            preset_row,
             values=list(PRESET_NAMES),
             state="readonly",
             width=180,
         )
         self.combo_preset.set(self.config.get("preset", DEFAULT_PRESET))
-        self.combo_preset.pack(anchor="w", padx=5, pady=(0, 1))
+        self.combo_preset.pack(side="left")
         _Tooltip(
             self.combo_preset,
             "Resource preset — a bundle of tunables (x264_low_memory, "
@@ -351,13 +360,18 @@ class MainWindowBuildMixin:
             "tunables but restore normal scheduling priority.",
         )
 
+        advanced_toggle_frame = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
+        advanced_toggle_frame.pack(fill="x", padx=5, pady=(0, 2))
+        advanced_toggle_frame.grid_columnconfigure(0, weight=1)
+        advanced_toggle_frame.grid_columnconfigure(1, weight=1)
+
         self.chk_x264_low_memory = ctk.CTkCheckBox(
-            ctrl_frame,
-            text="Low-memory x264 (reduces RAM, slightly larger file)",
+            advanced_toggle_frame,
+            text="Low-memory x264",
         )
         if self.config.get("x264_low_memory", False):
             self.chk_x264_low_memory.select()
-        self.chk_x264_low_memory.pack(anchor="w", padx=5, pady=(4, 1))
+        self.chk_x264_low_memory.grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(1, 2))
         _Tooltip(
             self.chk_x264_low_memory,
             "Reduces x264's frame-buffer footprint via rc-lookahead=10, "
@@ -367,12 +381,12 @@ class MainWindowBuildMixin:
         )
 
         self.chk_gapless_concat = ctk.CTkCheckBox(
-            ctrl_frame,
-            text="Gapless audio concat (re-encode audio in final join)",
+            advanced_toggle_frame,
+            text="Gapless audio concat",
         )
         if self.config.get("gapless_concat", False):
             self.chk_gapless_concat.select()
-        self.chk_gapless_concat.pack(anchor="w", padx=5, pady=(4, 1))
+        self.chk_gapless_concat.grid(row=0, column=1, sticky="w", padx=(0, 0), pady=(1, 2))
         _Tooltip(
             self.chk_gapless_concat,
             "Re-encodes the audio track in the final concat pass so "
@@ -385,12 +399,12 @@ class MainWindowBuildMixin:
         )
 
         self.chk_low_process_priority = ctk.CTkCheckBox(
-            ctrl_frame,
-            text="Low process priority (ffmpeg runs below-normal)",
+            advanced_toggle_frame,
+            text="Low process priority",
         )
         if self.config.get("low_process_priority", False):
             self.chk_low_process_priority.select()
-        self.chk_low_process_priority.pack(anchor="w", padx=5, pady=(4, 1))
+        self.chk_low_process_priority.grid(row=1, column=0, columnspan=2, sticky="w", pady=(1, 2))
         _Tooltip(
             self.chk_low_process_priority,
             "Spawns ffmpeg at a lower scheduling priority so a "
@@ -441,24 +455,35 @@ class MainWindowBuildMixin:
         # Step / Complete label, left-anchored, immediately after Cancel.
         # Fixed max width (no fill/expand) so the text caps out instead of
         # stretching across the whole row.
-        self.lbl_status = ctk.CTkLabel(left_cluster, text="", anchor="w", width=400)
+        self.lbl_status = ctk.CTkLabel(left_cluster, text="", anchor="w", width=220)
         self.lbl_status.pack(side="left", padx=(4, 0))
 
         self.bottom_frame = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
         self.bottom_frame.pack(fill="x", padx=5, pady=(0, 6))
-        # 1:5 grid — progress bar at ~17% width (half of the previous 33%).
-        # Row 0 holds the bar in col 0 and the live Elapsed/Remaining label
-        # in col 1, left-anchored, immediately to the right of the bar.
+        # Fixed compact bar: CTkProgressBar defaults to ~200px, so set
+        # an explicit width about one third smaller and do not stretch it.
+        # Row 0 holds the bar, explicit overall percent, and live
+        # Elapsed/Remaining label.
         # Row 1 holds the Total wall-clock label, full width.
         self.bottom_frame.grid_columnconfigure(0, weight=1)
-        self.bottom_frame.grid_columnconfigure(1, weight=5)
+        self.bottom_frame.grid_columnconfigure(1, weight=0)
+        self.bottom_frame.grid_columnconfigure(2, weight=8)
         self.progress = ctk.CTkProgressBar(
             self.bottom_frame,
             mode="determinate",
             height=10,
+            width=135,
         )
         self.progress.set(0)
-        self.progress.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.progress.grid(row=0, column=0, sticky="w", padx=(0, 6))
+        self.lbl_progress_pct = ctk.CTkLabel(
+            self.bottom_frame,
+            text="0%",
+            anchor="w",
+            width=42,
+            text_color=("gray40", "gray60"),
+        )
+        self.lbl_progress_pct.grid(row=0, column=1, sticky="w", padx=(0, 6))
         # Live Elapsed/Remaining for the current phase. Same row as the
         # bar, left-anchored, immediately to the right of the bar.
         self.lbl_overall = ctk.CTkLabel(
@@ -467,7 +492,7 @@ class MainWindowBuildMixin:
             anchor="w",
             text_color=("gray40", "gray60"),
         )
-        self.lbl_overall.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self.lbl_overall.grid(row=0, column=2, sticky="w", padx=(2, 0))
         # Total pipeline wall-clock, updated in real time. Row 1, full width.
         self.lbl_total = ctk.CTkLabel(
             self.bottom_frame,
@@ -475,7 +500,7 @@ class MainWindowBuildMixin:
             anchor="w",
             text_color=("gray40", "gray60"),
         )
-        self.lbl_total.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(2, 0))
+        self.lbl_total.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(2, 0))
 
         # ── Right: Log panel + Waveform button ──
         # The waveform preview is opened in its own Toplevel window when

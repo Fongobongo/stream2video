@@ -58,6 +58,14 @@ _DB_FLOOR = 1e-4  # = -80 dB
 _WAVEFORM_TIMEOUT = 300  # seconds
 
 
+def _half_height_for_db(db: float, plot_h: int) -> int:
+    db_range = _DB_AXIS_TOP - _DB_AXIS_BOTTOM
+    max_half_h = max(1, plot_h // 2 - 1)
+    clamped = max(_DB_AXIS_BOTTOM, min(_DB_AXIS_TOP, db))
+    h = (clamped - _DB_AXIS_BOTTOM) / db_range * max_half_h
+    return max(0, round(h))
+
+
 def read_peaks_from_stream(
     input_path: Path,
     target_buckets: int,
@@ -328,7 +336,7 @@ def slice_peaks_by_time(
     # Map [vs, ve] to bucket indices [lo, hi] in `peaks`.
     n = len(peaks)
     lo = int(vs / total_duration * n)
-    hi = max(lo + 1, int(ve / total_duration * n))
+    hi = max(lo + 1, math.ceil(ve / total_duration * n))
     hi = min(n, hi)
     return list(peaks[lo:hi])
 
@@ -451,17 +459,6 @@ def render_waveform_image(
     def _bar_color(plot_x: int) -> tuple[int, int, int]:
         return bar_color_silenced if bool(silenced[plot_x]) else wave_color
 
-    # Pre-compute the dB scale bar height lookup. Mapping 0 dB -> midline_y,
-    # _DB_AXIS_BOTTOM dB -> 1 px (visibility floor). Linear in dB across
-    # the range, so a -30 dB peak reaches halfway up.
-    db_range = _DB_AXIS_TOP - _DB_AXIS_BOTTOM  # > 0
-    max_half_h = max(1, plot_h // 2 - 1)
-
-    def _half_h_for_db(db: float) -> int:
-        clamped = max(_DB_AXIS_BOTTOM, min(_DB_AXIS_TOP, db))
-        h = (clamped - _DB_AXIS_BOTTOM) / db_range * max_half_h
-        return max(1, int(h))
-
     for px in range(plot_w):
         if n_peaks == plot_w:
             p = peaks[px]
@@ -474,7 +471,7 @@ def render_waveform_image(
         if p < _DB_FLOOR:
             continue
         db = 20 * math.log10(p)
-        h = _half_h_for_db(db)
+        h = _half_height_for_db(db, plot_h)
         color = _bar_color(px)
         draw.line(
             [(x_left + px, midline_y - h), (x_left + px, midline_y + h)],
@@ -562,18 +559,15 @@ def _draw_threshold_lines(
     """
     if plot_w <= 0 or plot_h <= 0:
         return
-    db_range = _DB_AXIS_TOP - _DB_AXIS_BOTTOM
     midline_y = plot_h // 2
-    max_half_h = max(1, plot_h // 2 - 1)
     clamped = max(_DB_AXIS_BOTTOM, min(_DB_AXIS_TOP, threshold_db))
-    frac = (_DB_AXIS_TOP - clamped) / db_range
-    half_h = (1 - frac) * max_half_h
-    y_top = round(midline_y - half_h)
+    half_h = _half_height_for_db(clamped, plot_h)
+    y_top = midline_y - half_h
     y_top = max(0, min(plot_h - 1, y_top))
     x_right = x_left + plot_w - 1
     draw.line([(x_left, y_top), (x_right, y_top)], fill=color, width=1)
     if half_h > 0:
-        y_bot = round(midline_y + half_h)
+        y_bot = midline_y + half_h
         y_bot = max(0, min(plot_h - 1, y_bot))
         draw.line([(x_left, y_bot), (x_right, y_bot)], fill=color, width=1)
 
@@ -606,9 +600,7 @@ def _draw_db_axis(
     """
     if plot_h <= 0:
         return
-    db_range = _DB_AXIS_TOP - _DB_AXIS_BOTTOM
     midline_y = plot_h // 2
-    max_half_h = max(1, plot_h // 2 - 1)
     tick_x_outer = DB_AXIS_WIDTH - 1  # rightmost pixel of the tick (at the boundary)
     tick_x_inner = DB_AXIS_WIDTH - 5  # 4-px tick length
     label_x = DB_AXIS_WIDTH - 7  # right-aligned just left of the tick
@@ -626,20 +618,19 @@ def _draw_db_axis(
     db = _DB_AXIS_TOP
     while db >= _DB_AXIS_BOTTOM - 1e-9:
         # Bar half-height for this dB value. Identical formula to
-        # ``_half_h_for_db`` in ``render_waveform_image``: the bar is
+        # ``_half_height_for_db`` in ``render_waveform_image``: the bar is
         # drawn from ``midline_y - half_h`` down to
         # ``midline_y + half_h``; the upper tick is on the top edge,
         # the lower tick on the bottom edge.
-        frac = (_DB_AXIS_TOP - db) / db_range  # 0 at top, 1 at bottom
-        half_h = (1 - frac) * max_half_h
-        y_top = round(midline_y - half_h)
+        half_h = _half_height_for_db(db, plot_h)
+        y_top = midline_y - half_h
         y_top = max(0, min(plot_h - 1, y_top))
         draw.line([(tick_x_inner, y_top), (tick_x_outer, y_top)], fill=text_color)
         # Format: "0", "-5", "-10", ... up to "-60".
         label = f"{round(db)}"
         draw.text((label_x, y_top), label, fill=text_color, font=font, anchor="rm")
         if half_h > 0:
-            y_bot = round(midline_y + half_h)
+            y_bot = midline_y + half_h
             y_bot = max(0, min(plot_h - 1, y_bot))
             draw.line([(tick_x_inner, y_bot), (tick_x_outer, y_bot)], fill=text_color)
             draw.text((label_x, y_bot), label, fill=text_color, font=font, anchor="rm")

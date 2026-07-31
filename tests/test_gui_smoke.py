@@ -79,6 +79,7 @@ class TestGuiInstantiation:
             "chk_delete",
             "chk_per_video_dir",
             "progress",
+            "lbl_progress_pct",
             "lbl_status",
             "lbl_overall",
             "lbl_total",

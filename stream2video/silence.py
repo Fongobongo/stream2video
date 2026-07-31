@@ -367,6 +367,9 @@ def detect_silence(
                 None,
                 cancel_callback,
                 "WAV",
+                on_segment=on_segment,
+                resume_save_path=resume_cache_path,
+                resume_save_config=current_config,
                 timeout=effective_timeout,
             )
             # Sample-verify must NOT use the user-facing progress_callback:
@@ -681,6 +684,11 @@ def _run_silencedetect(
         progress_divisor = max(0.0, base_divisor - resume_from)
     else:
         progress_divisor = base_divisor
+    if progress_callback is not None and (progress_divisor is None or progress_divisor <= 0):
+        logger.info(
+            "Silence progress disabled for %s: input duration is unavailable from ffprobe",
+            label,
+        )
 
     try:
         logger.info(

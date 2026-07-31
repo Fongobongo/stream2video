@@ -393,6 +393,13 @@ def cancel_process(owner: str, timeout: float = 2.0) -> bool:
         proc = _proc_registry.get(owner)
     if proc is None or proc.poll() is not None:
         return False
+    for pipe_name in ("stdin", "stdout", "stderr"):
+        pipe = getattr(proc, pipe_name, None)
+        if pipe is not None:
+            try:
+                pipe.close()
+            except Exception:
+                logger.debug("cancel_process(%r): closing %s failed", owner, pipe_name, exc_info=True)
     try:
         proc.kill()
     except Exception:
@@ -401,8 +408,9 @@ def cancel_process(owner: str, timeout: float = 2.0) -> bool:
     try:
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        pass
-    return True
+        logger.warning("cancel_process(%r): process did not exit within %.1fs", owner, timeout)
+        return False
+    return proc.poll() is not None
 
 
 def list_active_owners() -> list[str]:

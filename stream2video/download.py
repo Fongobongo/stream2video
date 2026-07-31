@@ -282,6 +282,34 @@ def _find_downloaded_file(out_dir: Path, expected: Path) -> Path | None:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
+def _stderr_snippet(stderr_chunks: list[str], limit: int = 300) -> str:
+    text = "".join(stderr_chunks).strip()
+    return text[-limit:] if text else ""
+
+
+def _timeout_error(message: str, stderr_chunks: list[str]) -> DownloadTimeoutError:
+    snippet = _stderr_snippet(stderr_chunks)
+    if snippet:
+        return DownloadTimeoutError(f"{message}. stderr: {snippet}")
+    return DownloadTimeoutError(message)
+
+
+def _resolve_reported_download_path(out_dir: Path, stdout_lines: list[str]) -> tuple[Path | None, Path | None]:
+    """Find the downloaded file path among yt-dlp stdout lines."""
+    last_candidate: Path | None = None
+    for line in reversed(stdout_lines):
+        text = line.strip()
+        if not text:
+            continue
+        candidate = Path(text)
+        if last_candidate is None:
+            last_candidate = candidate
+        resolved = _find_downloaded_file(out_dir, candidate)
+        if resolved is not None:
+            return resolved, candidate
+    return None, last_candidate
+
+
 def download(
     url: str,
     out_dir: Path,
@@ -406,6 +434,7 @@ def download(
         # function — direct assignment would create a local binding in the
         # drain thread and the main loop wouldn't see updates.
         last_progress_time: list[float | None] = [None]
+        last_activity_time: list[float] = [time.monotonic()]
         start_time = time.monotonic()
 
         def _drain_stdout() -> None:
@@ -417,6 +446,7 @@ def download(
                 return
             for line in stdout:
                 text = line.rstrip()
+                last_activity_time[0] = time.monotonic()
                 prog = _parse_progress_line(text)
                 if prog is not None:
                     last_progress_time[0] = time.monotonic()
@@ -436,6 +466,7 @@ def download(
             if stderr is None:
                 return
             for line in stderr:
+                last_activity_time[0] = time.monotonic()
                 stderr_chunks.append(line)
 
         stdout_thread = threading.Thread(target=_drain_stdout, daemon=True)
@@ -456,7 +487,12 @@ def download(
                 if remaining <= 0:
                     process.kill()
                     process.wait()
-                    raise DownloadTimeoutError(f"Download timeout after {download_timeout}s")
+                    stdout_thread.join(timeout=2)
+                    stderr_thread.join(timeout=2)
+                    raise _timeout_error(
+                        f"Download timeout after {download_timeout}s",
+                        stderr_chunks,
+                    )
 
                 # Connection / progress watchdog. Two branches:
                 #   1. No progress yet AND we're past connect_timeout — the
@@ -469,20 +505,28 @@ def download(
                 #      don't enable it, so the watchdog is the only safety.
                 now = time.monotonic()
                 if last_progress_time[0] is None:
-                    if now - start_time > connect_timeout:
+                    idle_for = now - max(start_time, last_activity_time[0])
+                    if idle_for > connect_timeout:
                         process.kill()
                         process.wait()
-                        raise DownloadTimeoutError(
+                        stdout_thread.join(timeout=2)
+                        stderr_thread.join(timeout=2)
+                        raise _timeout_error(
                             f"Download stalled before first byte: no progress "
-                            f"within {connect_timeout}s (DNS/TLS/handshake?)"
+                            f"and no yt-dlp activity within {connect_timeout}s "
+                            "(DNS/TLS/handshake?)",
+                            stderr_chunks,
                         )
                 else:
                     silent_for = now - (last_progress_time[0] or now)
                     if silent_for > no_progress_timeout:
                         process.kill()
                         process.wait()
-                        raise DownloadTimeoutError(
-                            f"Download stalled: no progress for {int(silent_for)}s"
+                        stdout_thread.join(timeout=2)
+                        stderr_thread.join(timeout=2)
+                        raise _timeout_error(
+                            f"Download stalled: no progress for {int(silent_for)}s",
+                            stderr_chunks,
                         )
                 try:
                     process.wait(timeout=min(CANCEL_POLL_INTERVAL, remaining))
@@ -500,10 +544,9 @@ def download(
                 stderr_text = "".join(stderr_chunks)
                 raise DownloadError(f"yt-dlp produced no file path. stderr: {stderr_text[:300]}")
 
-            output_path = Path(stdout_lines[-1].strip())
-            resolved = _find_downloaded_file(out_dir, output_path)
+            resolved, reported_path = _resolve_reported_download_path(out_dir, stdout_lines)
             if resolved is None:
-                raise DownloadError(f"Download completed but file not found: {output_path}")
+                raise DownloadError(f"Download completed but file not found: {reported_path}")
 
             size = resolved.stat().st_size
             if size == 0:

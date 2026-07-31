@@ -107,6 +107,7 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     # Minimum bytes for a resumed part file to be considered valid
     # (P3.4). Smaller files are treated as corrupt and re-encoded.
     "min_part_bytes": 1024,
+    "preset": "balanced",
     "force": False,
     "delete_after": False,
     "per_video_dir": True,
@@ -182,6 +183,9 @@ PRESETS: dict[str, dict[str, Any]] = {
 
 PRESET_NAMES = tuple(PRESETS.keys())
 DEFAULT_PRESET = "balanced"
+PRESET_MANAGED_KEYS = frozenset(
+    key for name, values in PRESETS.items() if name != DEFAULT_PRESET for key in values
+)
 
 
 def apply_preset(config: dict[str, Any], preset: str) -> dict[str, Any]:
@@ -189,22 +193,23 @@ def apply_preset(config: dict[str, Any], preset: str) -> dict[str, Any]:
 
     Pure: doesn't mutate ``config``. Unknown ``preset`` raises
     ``ValueError`` so the CLI / GUI can surface the typo. When ``preset``
-    equals ``balanced`` (or any preset with no overrides) the returned
-    dict is a shallow copy of the input — the historical defaults
-    survive verbatim.
+    equals ``balanced`` the returned dict resets preset-managed tunables
+    to ``CONFIG_DEFAULTS``. This lets the GUI undo a previously selected
+    resource preset without requiring a restart.
 
-    Presets only touch the tunables listed in ``PRESETS[preset]``;
-    anything else the user set is preserved. This means a user can
-    pick "Low memory" and still override, say, ``encoder_threads=4``
-    after applying the preset — the explicit value wins because preset
-    application is a one-shot transform, not a sticky link.
+    Presets only touch the union of tunables listed in ``PRESETS``;
+    anything else the user set is preserved. Callers that have explicit
+    per-field overrides should apply them after this function.
     """
     if preset not in PRESETS:
         raise ValueError(
             f"Unknown preset {preset!r} (use {' or '.join(repr(p) for p in PRESET_NAMES)})"
         )
     out = dict(config)
+    for key in PRESET_MANAGED_KEYS:
+        out[key] = CONFIG_DEFAULTS[key]
     out.update(PRESETS[preset])
+    out["preset"] = preset
     return out
 
 
@@ -341,6 +346,7 @@ USER_DEFAULT_KEYS: list[str] = [
     "video_quality",
     "audio_quality",
     "download_quality",
+    "preset",
     "software_fallback",
     "x264_preset",
     "encoder_threads",
@@ -433,6 +439,8 @@ def coerce_typed_value(key: str, value: Any) -> Any:
         if isinstance(value, int | float) and value >= 0:
             return int(value)
         return None
+    if key == "preset":
+        return value if isinstance(value, str) and value in PRESET_NAMES else None
     if isinstance(default, bool):
         return value if isinstance(value, bool) else None
     if isinstance(default, int | float):

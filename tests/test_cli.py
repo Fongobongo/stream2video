@@ -5,6 +5,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import pytest
 import typer
@@ -83,6 +84,78 @@ class TestCliLoggingSetup:
             assert cli.logger.level == original_logger_level
         finally:
             cli._console_handler.setLevel(original_handler_level)
+
+
+class TestCliOutputFps:
+    def test_output_fps_flag_reaches_cut_and_concat(self, tmp_path: Path):
+        from typer.testing import CliRunner
+
+        from stream2video.cli import app
+        from stream2video.download import DownloadResult
+
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"source")
+        out_dir = tmp_path / "out"
+        received: dict = {}
+
+        def fake_cut_and_concat(video_path, silence_segments, output_path, **kwargs):
+            received.update(kwargs)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"out")
+            return output_path
+
+        with (
+            patch("stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)),
+            patch("stream2video.cli.load_silence_cache", return_value=[]),
+            patch("stream2video.cli.cut_and_concat", side_effect=fake_cut_and_concat),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    str(src),
+                    "-o",
+                    str(out_dir),
+                    "--no-per-video-dir",
+                    "--output-fps",
+                    "30",
+                ],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert received["output_fps"] == "30"
+
+    def test_output_fps_yaml_reaches_cut_and_concat(self, tmp_path: Path):
+        from typer.testing import CliRunner
+
+        from stream2video.cli import app
+        from stream2video.download import DownloadResult
+
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"source")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("output_fps: '60'\nper_video_dir: false\n", encoding="utf-8")
+        received: dict = {}
+
+        def fake_cut_and_concat(video_path, silence_segments, output_path, **kwargs):
+            received.update(kwargs)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"out")
+            return output_path
+
+        with (
+            patch("stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)),
+            patch("stream2video.cli.load_silence_cache", return_value=[]),
+            patch("stream2video.cli.cut_and_concat", side_effect=fake_cut_and_concat),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [str(src), "-o", str(tmp_path / "out"), "-c", str(cfg)],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert received["output_fps"] == "60"
 
 
 class TestCliPerVideoDir:

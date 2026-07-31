@@ -13,6 +13,7 @@ from stream2video.download import (
     DownloadError,
     DownloadProgress,
     DownloadResult,
+    DownloadTimeoutError,
     PermissionDeniedError,
     URLValidationError,
     VideoNotAvailableError,
@@ -21,6 +22,8 @@ from stream2video.download import (
     _format_selector_for_quality,
     _is_local_file,
     _parse_progress_line,
+    _resolve_reported_download_path,
+    _timeout_error,
     _validate_url,
     download,
 )
@@ -155,6 +158,28 @@ class TestFindDownloadedFile:
         with TemporaryDirectory() as tmpdir:
             expected = Path("C:\\Videos\\different.mp4")
             assert _find_downloaded_file(Path(tmpdir), expected) is None
+
+    def test_reported_path_scans_past_postprocessor_noise(self):
+        with TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir)
+            video = out_dir / "abc123.mp4"
+            video.write_bytes(b"ok")
+            resolved, reported = _resolve_reported_download_path(
+                out_dir,
+                [
+                    "s2v_progress|100|100|NA|0|0",
+                    str(video),
+                    "Deleting original file abc123.webm (pass -k to keep)",
+                ],
+            )
+            assert resolved == video
+            assert reported == video
+
+    def test_timeout_error_includes_stderr_diagnostics(self):
+        err = _timeout_error("Download timeout after 1s", ["HTTP 403\n", "proxy refused\n"])
+        assert isinstance(err, DownloadTimeoutError)
+        assert "HTTP 403" in str(err)
+        assert "proxy refused" in str(err)
 
 
 class TestClassifyError:

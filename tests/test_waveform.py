@@ -780,8 +780,14 @@ class TestSlicePeaksByTime:
         returns the middle 2-3 buckets."""
         peaks = list(range(10))
         out = slice_peaks_by_time(peaks, 10.0, 2.5, 7.5)
-        # Indices 2.5/10*10=2, 7.5/10*10=7 → peaks[2:7]
-        assert out == [2, 3, 4, 5, 6]
+        # The visible range partially overlaps bucket 7, so the right
+        # edge is ceiled and included.
+        assert out == [2, 3, 4, 5, 6, 7]
+
+    def test_sub_bucket_window_crossing_boundary_includes_both_buckets(self):
+        peaks = [0.1, 0.9, 0.2]
+        out = slice_peaks_by_time(peaks, 3.0, 0.9, 1.1)
+        assert out == [0.1, 0.9]
 
     def test_clamps_overshoot_left(self):
         peaks = [0.1, 0.2, 0.3, 0.4, 0.5]

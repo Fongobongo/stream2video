@@ -11,7 +11,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from stream2video.config import (
     OUTPUT_FORMAT_SPECS,
@@ -23,6 +23,7 @@ from stream2video.config import (
     VALID_SOFTWARE_FALLBACKS,
     VALID_X264_PRESETS,
 )
+from stream2video.memory import MemoryMonitor, auto_budget_mb
 from stream2video.silence import SilenceSegment
 from stream2video.utils import (
     CANCEL_POLL_INTERVAL,
@@ -37,9 +38,6 @@ from stream2video.utils import (
     registered_process,
     subprocess_kwargs,
 )
-
-if TYPE_CHECKING:
-    from stream2video.memory import MemoryMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -208,6 +206,51 @@ _encoder_check_cache: dict[str, bool] = {}
 _encoder_check_lock = threading.Lock()
 
 
+def _memory_budget_mb(memory_limit_mb: str | int) -> float | None:
+    """Resolve the user-facing memory limit value to a numeric MB budget."""
+    if memory_limit_mb == "auto":
+        return auto_budget_mb()
+    if memory_limit_mb is None:
+        return None
+    try:
+        value = float(memory_limit_mb)
+    except (TypeError, ValueError):
+        logger.warning("Ignoring invalid memory_limit_mb=%r", memory_limit_mb)
+        return None
+    return value if value > 0 else None
+
+
+def _make_memory_monitor_factory(
+    memory_limit_mb: str | int,
+    memory_reserve_mb: int,
+) -> Callable[[str], MemoryMonitor | None] | None:
+    budget_mb = _memory_budget_mb(memory_limit_mb)
+    reserve_mb = max(0.0, float(memory_reserve_mb))
+    if budget_mb is None and reserve_mb <= 0:
+        return None
+    if budget_mb is not None:
+        logger.info("Memory guardrail: RSS budget %.0fMB, reserve %.0fMB", budget_mb, reserve_mb)
+    else:
+        logger.info("Memory guardrail: RSS budget disabled, reserve %.0fMB", reserve_mb)
+
+    def _factory(label: str) -> MemoryMonitor | None:
+        return MemoryMonitor(
+            0,
+            memory_limit_mb=budget_mb,
+            memory_reserve_mb=reserve_mb,
+            label=label,
+        )
+
+    return _factory
+
+
+def _new_memory_monitor(
+    memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None,
+    label: str,
+) -> MemoryMonitor | None:
+    return memory_monitor_factory(label) if memory_monitor_factory is not None else None
+
+
 def cut_and_concat(
     video_path: Path,
     silence_segments: list[SilenceSegment],
@@ -247,6 +290,7 @@ def cut_and_concat(
         )
 
     keep_segments = generate_keep_segments(video_path, silence_segments)
+    memory_monitor_factory = _make_memory_monitor_factory(memory_limit_mb, memory_reserve_mb)
 
     if not keep_segments:
         raise ConcatError("No video segments to keep after removing silence")
@@ -285,6 +329,7 @@ def cut_and_concat(
             min_part_bytes=min_part_bytes,
             low_process_priority=low_process_priority,
             rlimit_as_mb=rlimit_as_mb,
+            memory_monitor_factory=memory_monitor_factory,
         )
         return output_path
 
@@ -336,6 +381,7 @@ def cut_and_concat(
         stall_warning=stall_warning_timeout,
         batch_chunk_size=batch_chunk_size,
         min_part_bytes=min_part_bytes,
+        memory_monitor_factory=memory_monitor_factory,
     )
 
     return output_path
@@ -732,11 +778,23 @@ def _run_ffmpeg(
         raise FFmpegError("ffmpeg not found in PATH") from e
 
     with registered_process(process):
+        memory_cancelled = threading.Event()
+
+        def _memory_cancel_callback() -> bool:
+            memory_cancelled.set()
+            return True
+
+        def _effective_cancel_callback() -> bool:
+            if memory_cancelled.is_set():
+                return True
+            return bool(cancel_callback and cancel_callback())
+
         if memory_monitor is not None:
             # Late-bind the pid now that the process exists, then start
             # the monitor thread. The monitor reads RSS by pid, so this
             # must happen after Popen returns.
             memory_monitor.pid = process.pid
+            memory_monitor.cancel_callback = _memory_cancel_callback
             memory_monitor.start()
         stderr_pipe = process.stderr
         assert stderr_pipe is not None
@@ -784,7 +842,7 @@ def _run_ffmpeg(
         stall_thread.start()
 
         try:
-            with cancel_monitor(process, cancel_callback) as cancelled:
+            with cancel_monitor(process, _effective_cancel_callback) as cancelled:
                 if track_progress:
                     stdout_pipe = process.stdout
                     assert stdout_pipe is not None
@@ -800,7 +858,7 @@ def _run_ffmpeg(
                             raw_line = line_queue.get(timeout=CANCEL_POLL_INTERVAL)
                         except queue.Empty:
                             # No new line -- check cancel + stall.
-                            if cancel_callback and cancel_callback():
+                            if _effective_cancel_callback():
                                 process.kill()
                                 raise CancelledError(f"{label} cancelled") from None
                             if cancelled.is_set():
@@ -819,7 +877,7 @@ def _run_ffmpeg(
                             continue
                         if raw_line is None:
                             break  # EOF -- pipe closed
-                        if cancel_callback and cancel_callback():
+                        if _effective_cancel_callback():
                             process.kill()
                             raise CancelledError(f"{label} cancelled")
                         if cancelled.is_set():
@@ -847,7 +905,7 @@ def _run_ffmpeg(
 
                 if cancelled.is_set():
                     raise CancelledError(f"{label} cancelled")
-                _wait_with_cancel(process, timeout, cancel_callback, label)
+                _wait_with_cancel(process, timeout, _effective_cancel_callback, label)
                 wait_for_drain()
                 drain_done = True
 
@@ -901,6 +959,15 @@ def _run_ffmpeg(
                         )
                     raise FFmpegError(f"{label} failed: {msg}")
 
+        except CancelledError:
+            if memory_monitor is not None and memory_monitor.hard_exceeded:
+                raise FFmpegOutOfMemoryError(
+                    f"{label} ran out of memory "
+                    "(memory monitor hard limit hit); "
+                    "try --preset low_memory / lowering --memory-limit-mb / "
+                    "reducing --batch-chunk-size"
+                ) from None
+            raise
         except subprocess.TimeoutExpired as e:
             process.kill()
             raise FFmpegError(f"{label} timeout after {e.timeout}s") from None
@@ -980,6 +1047,7 @@ def _run_subprocess_cmd(
             _wait_with_cancel(process, timeout, cancel_callback, label)
             if cancelled.is_set():
                 raise CancelledError(f"{label} cancelled")
+            wait_for_drain()
             drain_done = True
             if process.returncode != 0:
                 stderr_text = "".join(stderr_lines)
@@ -1277,6 +1345,7 @@ def _run_final_concat(
     stall_warning: int = _STALL_WARNING,
     low_process_priority: bool = False,
     rlimit_as_mb: int = 0,
+    memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
 ) -> None:
     """Build ``concat.txt`` and run the final concat-demuxer pass.
 
@@ -1302,6 +1371,7 @@ def _run_final_concat(
         if progress_callback and total_duration > 0:
             progress_callback(min(us / 1_000_000 / total_duration * 0.1, 0.1) + 0.9)
 
+    label_text = label
     _run_ffmpeg(
         [
             "ffmpeg",
@@ -1333,8 +1403,9 @@ def _run_final_concat(
         ],
         progress_callback=_concat_prog,
         timeout=timeout,
-        label=label,
+        label=label_text,
         cancel_callback=cancel_callback,
+        memory_monitor=_new_memory_monitor(memory_monitor_factory, label_text),
         stall_kill=stall_kill,
         stall_warning=stall_warning,
         low_process_priority=low_process_priority,
@@ -1357,6 +1428,7 @@ def _run_audio_concat_filter(
     stall_warning: int = _STALL_WARNING,
     low_process_priority: bool = False,
     rlimit_as_mb: int = 0,
+    memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
 ) -> None:
     """Join audio parts via the ``concat`` filter (re-encode path).
 
@@ -1388,6 +1460,7 @@ def _run_audio_concat_filter(
         if progress_callback and total_duration > 0:
             progress_callback(min(us / 1_000_000 / total_duration * 0.1, 0.1) + 0.9)
 
+    label_text = "audio concat filter"
     _run_ffmpeg(
         [
             "ffmpeg",
@@ -1409,8 +1482,9 @@ def _run_audio_concat_filter(
         ],
         progress_callback=_concat_prog,
         timeout=timeout,
-        label="audio concat filter",
+        label=label_text,
         cancel_callback=cancel_callback,
+        memory_monitor=_new_memory_monitor(memory_monitor_factory, label_text),
         stall_kill=stall_kill,
         stall_warning=stall_warning,
         low_process_priority=low_process_priority,
@@ -1433,6 +1507,7 @@ def _run_audio_extract(
     min_part_bytes: int = _MIN_PART_BYTES,
     low_process_priority: bool = False,
     rlimit_as_mb: int = 0,
+    memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
 ) -> None:
     """Extract audio-only output (mp3/opus/aac/wav/flac) from keep segments.
 
@@ -1539,6 +1614,7 @@ def _run_audio_extract(
                     abs_time = _encoded_keep + seg_frac * _dur
                     progress_callback(min(abs_time / total_duration * 0.9, 0.9))
 
+            label_text = f"audio segment {i} encode"
             _run_ffmpeg(
                 [
                     "ffmpeg",
@@ -1565,8 +1641,9 @@ def _run_audio_extract(
                 ],
                 progress_callback=_seg_prog,
                 timeout=segment_encode_timeout,
-                label=f"audio segment {i} encode",
+                label=label_text,
                 cancel_callback=cancel_callback,
+                memory_monitor=_new_memory_monitor(memory_monitor_factory, label_text),
                 stall_kill=stall_kill,
                 stall_warning=stall_warning,
                 low_process_priority=low_process_priority,
@@ -1618,6 +1695,7 @@ def _run_audio_extract(
                 stall_warning=stall_warning,
                 low_process_priority=low_process_priority,
                 rlimit_as_mb=rlimit_as_mb,
+                memory_monitor_factory=memory_monitor_factory,
             )
         else:
             _run_final_concat(
@@ -1633,6 +1711,7 @@ def _run_audio_extract(
                 stall_warning=stall_warning,
                 low_process_priority=low_process_priority,
                 rlimit_as_mb=rlimit_as_mb,
+                memory_monitor_factory=memory_monitor_factory,
             )
         logger.info(f"Successfully created audio output: {output_path}")
 
@@ -1658,6 +1737,7 @@ def _run_gapless_segment_concat(
     stall_warning: int = _STALL_WARNING,
     low_process_priority: bool = False,
     rlimit_as_mb: int = 0,
+    memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
 ) -> None:
     """Gapless segment join via concat filter (re-encode both streams).
 
@@ -1703,6 +1783,7 @@ def _run_gapless_segment_concat(
         if progress_callback and total_duration > 0:
             progress_callback(min(us / 1_000_000 / total_duration * 0.1, 0.1) + 0.9)
 
+    label_text = "gapless segment concat"
     _run_ffmpeg(
         [
             "ffmpeg",
@@ -1731,8 +1812,9 @@ def _run_gapless_segment_concat(
         ],
         progress_callback=_concat_prog,
         timeout=timeout,
-        label="gapless segment concat",
+        label=label_text,
         cancel_callback=cancel_callback,
+        memory_monitor=_new_memory_monitor(memory_monitor_factory, label_text),
         stall_kill=stall_kill,
         stall_warning=stall_warning,
         low_process_priority=low_process_priority,
@@ -1763,6 +1845,7 @@ def _run_segment_concat(
     stall_kill: int = _STALL_KILL,
     stall_warning: int = _STALL_WARNING,
     min_part_bytes: int = _MIN_PART_BYTES,
+    memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
 ) -> None:
     """Encode each segment, join with concat demuxer (or concat filter for gapless).
 
@@ -1872,6 +1955,7 @@ def _run_segment_concat(
                     abs_time = _encoded_keep + seg_frac * _dur
                     progress_callback(min(abs_time / total_duration * 0.9, 0.9))
 
+            label_text = f"segment {i} encode"
             _run_ffmpeg(
                 [
                     "ffmpeg",
@@ -1928,8 +2012,9 @@ def _run_segment_concat(
                 ],
                 progress_callback=_seg_prog,
                 timeout=segment_encode_timeout,
-                label=f"segment {i} encode",
+                label=label_text,
                 cancel_callback=cancel_callback,
+                memory_monitor=_new_memory_monitor(memory_monitor_factory, label_text),
                 stall_kill=stall_kill,
                 stall_warning=stall_warning,
                 low_process_priority=low_process_priority,
@@ -1983,6 +2068,7 @@ def _run_segment_concat(
                 stall_warning=stall_warning,
                 low_process_priority=low_process_priority,
                 rlimit_as_mb=rlimit_as_mb,
+                memory_monitor_factory=memory_monitor_factory,
             )
         else:
             _run_final_concat(
@@ -1998,6 +2084,7 @@ def _run_segment_concat(
                 stall_warning=stall_warning,
                 low_process_priority=low_process_priority,
                 rlimit_as_mb=rlimit_as_mb,
+                memory_monitor_factory=memory_monitor_factory,
             )
         logger.info(f"Successfully created output: {output_path}")
 
@@ -2032,6 +2119,7 @@ def _run_cut_then_encode(
     min_part_bytes: int = _MIN_PART_BYTES,
     low_process_priority: bool = False,
     rlimit_as_mb: int = 0,
+    memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
 ) -> None:
     """Cut lossless segments, concat losslessly, then do ONE final encode.
 
@@ -2167,6 +2255,7 @@ def _run_cut_then_encode(
                 stall_warning=stall_warning,
                 low_process_priority=low_process_priority,
                 rlimit_as_mb=rlimit_as_mb,
+                memory_monitor_factory=memory_monitor_factory,
             )
 
         # ── Phase 3: One final encode ──
@@ -2194,6 +2283,7 @@ def _run_cut_then_encode(
                 frac = min(us / 1_000_000 / total_duration, 1.0)
                 progress_callback(encode_progress_base + frac * encode_progress_span)
 
+        label_text = "cut_then_encode final encode"
         _run_ffmpeg(
             [
                 "ffmpeg",
@@ -2215,8 +2305,9 @@ def _run_cut_then_encode(
             ],
             progress_callback=_encode_prog,
             timeout=final_concat_timeout,
-            label="cut_then_encode final encode",
+            label=label_text,
             cancel_callback=cancel_callback,
+            memory_monitor=_new_memory_monitor(memory_monitor_factory, label_text),
             stall_kill=stall_kill,
             stall_warning=stall_warning,
             low_process_priority=low_process_priority,
@@ -2259,6 +2350,7 @@ def _run_with_fallback(
     stall_warning: int = _STALL_WARNING,
     batch_chunk_size: int = _BATCH_CHUNK_SIZE,
     min_part_bytes: int = _MIN_PART_BYTES,
+    memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
 ) -> None:
     """Run segment or batch concat with the primary encoder; fall back to libx264 on failure.
 
@@ -2321,6 +2413,7 @@ def _run_with_fallback(
                 stall_kill=stall_kill,
                 stall_warning=stall_warning,
                 min_part_bytes=min_part_bytes,
+                memory_monitor_factory=memory_monitor_factory,
             )
         elif method == "cut_then_encode":
             _run_cut_then_encode(
@@ -2345,6 +2438,7 @@ def _run_with_fallback(
                 min_part_bytes=min_part_bytes,
                 low_process_priority=low_process_priority,
                 rlimit_as_mb=rlimit_as_mb,
+                memory_monitor_factory=memory_monitor_factory,
             )
         else:
             _run_batch_concat(
@@ -2370,6 +2464,7 @@ def _run_with_fallback(
                 min_part_bytes=min_part_bytes,
                 low_process_priority=low_process_priority,
                 rlimit_as_mb=rlimit_as_mb,
+                memory_monitor_factory=memory_monitor_factory,
             )
 
     _with_libx264_fallback(
@@ -2411,6 +2506,7 @@ def _run_batch_concat(
     min_part_bytes: int = _MIN_PART_BYTES,
     low_process_priority: bool = False,
     rlimit_as_mb: int = 0,
+    memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
 ) -> None:
     """Process chunks sequentially: each chunk → temp file, then concat.
 
@@ -2650,6 +2746,7 @@ def _run_batch_concat(
                         frac = min(us / 1_000_000 / chunk_dur, 1.0) if chunk_dur > 0 else 1.0
                         progress_callback(min(base + frac * span, 0.9))
 
+                label_text = f"batch chunk {ci}/{n_chunks}"
                 _run_ffmpeg(
                     [
                         "ffmpeg",
@@ -2698,8 +2795,9 @@ def _run_batch_concat(
                     ],
                     progress_callback=_chunk_prog,
                     timeout=segment_encode_timeout,
-                    label=f"batch chunk {ci}/{n_chunks}",
+                    label=label_text,
                     cancel_callback=cancel_callback,
+                    memory_monitor=_new_memory_monitor(memory_monitor_factory, label_text),
                     stall_kill=stall_kill,
                     stall_warning=stall_warning,
                     low_process_priority=low_process_priority,
@@ -2733,6 +2831,7 @@ def _run_batch_concat(
             stall_warning=stall_warning,
             low_process_priority=low_process_priority,
             rlimit_as_mb=rlimit_as_mb,
+            memory_monitor_factory=memory_monitor_factory,
         )
         logger.info(f"batch: successfully created {output_path}")
 

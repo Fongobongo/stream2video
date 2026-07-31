@@ -725,7 +725,7 @@ class WaveformMixin:
                 if token != self._waveform_render_token:
                     return
                 if not peaks or duration <= 0:
-                    self.after(
+                    self._tk_after(
                         0,
                         lambda: self._safe_status_set("No audio stream found"),
                     )
@@ -743,7 +743,7 @@ class WaveformMixin:
                 self._waveform_cursor_known = False
 
                 # Phase 1.5: render the bare waveform (no overlay yet)
-                self.after(
+                self._tk_after(
                     0,
                     lambda: self._safe_status_set("Rendering peaks... (detecting silence)"),
                 )
@@ -761,7 +761,7 @@ class WaveformMixin:
                 if raw_segments is None:
                     cache_path = out_dir / f"{in_path.stem}_silence_cache.json"
                     # P1.16: dry-run detection.
-                    self.after(
+                    self._tk_after(
                         0,
                         lambda: self._safe_status_set(
                             "No silence cache — running dry-run detect..."
@@ -825,7 +825,7 @@ class WaveformMixin:
                         "last_count": len(segments),
                         "last_view": (self._waveform_view_start, self._waveform_view_end),
                     }
-                    self.after(
+                    self._tk_after(
                         1000,
                         lambda: self._poll_live_segments(in_path, margin, token, poll_state),
                     )

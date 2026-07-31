@@ -387,9 +387,7 @@ class TestPipelineWorkerRun:
     def test_runs_controller_with_built_config_and_callbacks(self):
         # Happy path: the worker constructs the PipelineController with
         # the config, callbacks, the GUI's cancel event, and the two
-        # extra hooks (on_live_segment, on_output_resolved). After the
-        # controller finishes, the worker pops live segments and flips
-        # the button state to idle.
+        # extra hooks (on_live_segment, on_output_resolved).
         gui = _FakeGuiCallbacks()
         worker = PipelineWorker(gui, {"threshold": -30, "min_silence": 2, "margin": 0})
 
@@ -418,6 +416,9 @@ class TestPipelineWorkerRun:
         assert callable(_FakePipelineController.last_instance.kwargs["on_output_resolved"])
         # Button state restored to "not running" in finally.
         assert gui.running_state_changes[-1] is False
+        # The fake controller never resolves a video path, so the worker
+        # must not pop Path('.') from the live-segment store.
+        assert gui.live_segments_pops == []
 
     def test_pipeline_cancelled_sets_status_and_logs(self):
         # Cancellation: the user hit Cancel; the controller raised

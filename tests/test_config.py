@@ -416,13 +416,19 @@ class TestApplyPreset:
         assert out == CONFIG_DEFAULTS
         assert out is not CONFIG_DEFAULTS  # copy, not alias
 
-    def test_balanced_preserves_user_overrides(self):
-        # User-set values (e.g. x264_low_memory=True) survive a balanced
-        # preset application — balanced never overwrites them.
+    def test_balanced_resets_preset_tunables(self):
+        # Switching back to balanced must undo values left by another
+        # preset; otherwise the GUI preset combo becomes sticky until
+        # restart.
         cfg = dict(CONFIG_DEFAULTS)
         cfg["x264_low_memory"] = True
+        cfg["batch_chunk_size"] = 20
+        cfg["low_process_priority"] = True
         out = apply_preset(cfg, "balanced")
-        assert out["x264_low_memory"] is True
+        assert out["x264_low_memory"] is CONFIG_DEFAULTS["x264_low_memory"]
+        assert out["batch_chunk_size"] == CONFIG_DEFAULTS["batch_chunk_size"]
+        assert out["low_process_priority"] is CONFIG_DEFAULTS["low_process_priority"]
+        assert out["preset"] == "balanced"
 
     def test_low_memory_overrides_tunables(self):
         out = apply_preset(dict(CONFIG_DEFAULTS), "low_memory")
