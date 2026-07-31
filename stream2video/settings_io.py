@@ -46,6 +46,7 @@ SAVE_SETTINGS_KEYS: tuple[str, ...] = (
     "force",
     "delete_after",
     "per_video_dir",
+    "completion_sound",
     "x264_low_memory",
     "gapless_concat",
     "low_process_priority",
@@ -72,6 +73,7 @@ USER_DEFAULTS_KEYS: tuple[str, ...] = (
     "force",
     "delete_after",
     "per_video_dir",
+    "completion_sound",
     "x264_low_memory",
     "gapless_concat",
     "low_process_priority",
@@ -97,6 +99,7 @@ def build_save_settings_snapshot(widgets: dict[str, Any]) -> dict[str, Any]:
             "force":             bool,  # bool(chk_force.get())
             "delete_after":      bool,  # bool(chk_delete.get())
             "per_video_dir":     bool,  # bool(chk_per_video_dir.get())
+            "completion_sound":  bool,  # bool(chk_completion_sound.get())
             "x264_low_memory":   bool,  # bool(chk_x264_low_memory.get())
             "gapless_concat":    bool,  # bool(chk_gapless_concat.get())
             "low_process_priority": bool,  # bool(chk_low_process_priority.get())

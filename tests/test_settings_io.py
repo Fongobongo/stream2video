@@ -49,6 +49,7 @@ class TestSaveSettingsKeys:
             "force",
             "delete_after",
             "per_video_dir",
+            "completion_sound",
             "x264_low_memory",
             "theme",
         ):
@@ -87,6 +88,7 @@ class TestBuildSaveSettingsSnapshot:
             "force",
             "delete_after",
             "per_video_dir",
+            "completion_sound",
             "x264_low_memory",
             "gapless_concat",
             "low_process_priority",
@@ -115,6 +117,7 @@ class TestBuildSaveSettingsSnapshot:
             "force": True,
             "delete_after": False,
             "per_video_dir": True,
+            "completion_sound": True,
             "x264_low_memory": False,
             "gapless_concat": True,
             "low_process_priority": True,
@@ -126,6 +129,7 @@ class TestBuildSaveSettingsSnapshot:
         assert snapshot["force"] is True
         assert snapshot["delete_after"] is False
         assert snapshot["per_video_dir"] is True
+        assert snapshot["completion_sound"] is True
         assert snapshot["x264_low_memory"] is False
         assert snapshot["preset"] == "low_memory"
         assert snapshot["theme"] == "dark"
@@ -159,6 +163,7 @@ class TestBuildUserDefaultsSnapshot:
             "force": False,
             "delete_after": True,
             "per_video_dir": False,
+            "completion_sound": True,
             "x264_low_memory": True,
             "gapless_concat": False,
             "low_process_priority": True,
@@ -168,6 +173,7 @@ class TestBuildUserDefaultsSnapshot:
         snapshot = build_user_defaults_snapshot(widgets)
         assert snapshot["threshold"] == -30.0
         assert snapshot["margin"] == 0.5
+        assert snapshot["completion_sound"] is True
         assert snapshot["x264_low_memory"] is True
         assert snapshot["preset"] == "maximum_performance"
 

@@ -247,6 +247,7 @@ class Stream2VideoGUI(
         self.config["gapless_concat"] = bool(self.chk_gapless_concat.get())
         self.config["low_process_priority"] = bool(self.chk_low_process_priority.get())
         self.config["x264_low_memory"] = bool(self.chk_x264_low_memory.get())
+        self.config["completion_sound"] = bool(self.chk_completion_sound.get())
         force = bool(self.chk_force.get())
         per_video_dir = bool(self.chk_per_video_dir.get())
         delete_after = bool(self.chk_delete.get())

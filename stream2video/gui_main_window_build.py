@@ -316,13 +316,20 @@ class MainWindowBuildMixin:
             self.chk_delete.select()
         self.chk_delete.grid(row=0, column=1, sticky="w", padx=(0, 0), pady=(1, 2))
 
-        self.chk_per_video_dir = ctk.CTkCheckBox(
-            toggle_frame,
-            text="Create separate project subdirectory",
-        )
+        self.chk_per_video_dir = ctk.CTkCheckBox(toggle_frame, text="Project subdirectory")
         if self.config.get("per_video_dir"):
             self.chk_per_video_dir.select()
-        self.chk_per_video_dir.grid(row=1, column=0, columnspan=2, sticky="w", pady=(1, 2))
+        self.chk_per_video_dir.grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(1, 2))
+
+        self.chk_completion_sound = ctk.CTkCheckBox(toggle_frame, text="Sound when done")
+        if self.config.get("completion_sound", False):
+            self.chk_completion_sound.select()
+        self.chk_completion_sound.grid(row=1, column=1, sticky="w", padx=(0, 0), pady=(1, 2))
+        _Tooltip(
+            self.chk_completion_sound,
+            "Play a short generated chime when the pipeline finishes. "
+            "Success and cancel/failure use different sounds.",
+        )
 
         # Resource preset — bundle of tunables (x264_low_memory,
         # memory_limit_mb, batch_chunk_size, low_process_priority). The

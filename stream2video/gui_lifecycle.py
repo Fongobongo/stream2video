@@ -58,6 +58,7 @@ class LifecycleMixin:
             "force": bool(self.chk_force.get()),
             "delete_after": bool(self.chk_delete.get()),
             "per_video_dir": bool(self.chk_per_video_dir.get()),
+            "completion_sound": bool(self.chk_completion_sound.get()),
             "x264_low_memory": bool(self.chk_x264_low_memory.get()),
             "gapless_concat": bool(self.chk_gapless_concat.get()),
             "low_process_priority": bool(self.chk_low_process_priority.get()),
@@ -93,6 +94,7 @@ class LifecycleMixin:
         self._set_checkbox(self.chk_force, self.config["force"])
         self._set_checkbox(self.chk_delete, self.config["delete_after"])
         self._set_checkbox(self.chk_per_video_dir, self.config["per_video_dir"])
+        self._set_checkbox(self.chk_completion_sound, self.config.get("completion_sound", False))
         self._set_checkbox(self.chk_x264_low_memory, self.config.get("x264_low_memory", False))
         self._set_checkbox(self.chk_gapless_concat, self.config.get("gapless_concat", False))
         self._set_checkbox(
@@ -153,6 +155,7 @@ class LifecycleMixin:
             "force": bool(self.chk_force.get()),
             "delete_after": bool(self.chk_delete.get()),
             "per_video_dir": bool(self.chk_per_video_dir.get()),
+            "completion_sound": bool(self.chk_completion_sound.get()),
             "x264_low_memory": bool(self.chk_x264_low_memory.get()),
             "gapless_concat": bool(self.chk_gapless_concat.get()),
             "low_process_priority": bool(self.chk_low_process_priority.get()),

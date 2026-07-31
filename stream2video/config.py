@@ -111,6 +111,7 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     "force": False,
     "delete_after": False,
     "per_video_dir": True,
+    "completion_sound": False,
     "output_dir": "",
     # Output container / codec policy. ``video`` (default) preserves the
     # historical behaviour: H.264 video + AAC stereo audio muxed into
@@ -373,6 +374,7 @@ USER_DEFAULT_KEYS: list[str] = [
     "force",
     "delete_after",
     "per_video_dir",
+    "completion_sound",
     "theme",
 ]
 

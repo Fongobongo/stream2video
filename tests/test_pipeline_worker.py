@@ -277,13 +277,25 @@ class TestBuildCompletionCallback:
 
     def test_status_log_lines_popup_total_all_called(self):
         gui = self._FakeGui()
-        cb = build_completion_callback(gui)
-        cb(self._summary())
+        with patch("stream2video.pipeline_worker.play_completion_sound", return_value=None) as sound:
+            cb = build_completion_callback(gui, completion_sound=True)
+            cb(self._summary())
         assert gui.status_texts  # one status line set
         assert gui.log_lines  # summary's log lines forwarded
         assert gui.popup_texts  # one popup shown
         assert gui.cleared_overall is True  # bar's eta line cleared
         assert gui.total_calls == [12.5]  # pipeline_seconds
+        sound.assert_called_once_with(enabled=True)
+
+    def test_completion_sound_warning_is_logged(self):
+        gui = self._FakeGui()
+        with patch(
+            "stream2video.pipeline_worker.play_completion_sound",
+            return_value="no audio device",
+        ):
+            cb = build_completion_callback(gui, completion_sound=True)
+            cb(self._summary())
+        assert any("[WARN] no audio device" in line for line in gui.log_lines)
 
 
 class _FakePipelineCallbacks:
@@ -426,7 +438,10 @@ class TestPipelineWorkerRun:
         # separately caught so the GUI's "Cancelled" status text isn't
         # displayed as a generic failure).
         gui = _FakeGuiCallbacks()
-        worker = PipelineWorker(gui, {"threshold": -30, "min_silence": 2, "margin": 0})
+        worker = PipelineWorker(
+            gui,
+            {"threshold": -30, "min_silence": 2, "margin": 0, "completion_sound": True},
+        )
 
         class _CancellingController(_FakePipelineController):
             def run(self) -> None:
@@ -443,11 +458,13 @@ class TestPipelineWorkerRun:
                 "stream2video.pipeline_controller.PipelineController",
                 new=_CancellingController,
             ),
+            patch("stream2video.pipeline_worker.play_completion_sound", return_value=None) as sound,
         ):
             worker.run(self._params())
 
         assert any("Pipeline cancelled" in m for m in gui.logs)
         assert any(text == "Cancelled" and force is True for text, force in gui.status_calls)
+        sound.assert_called_once_with(enabled=True, kind="attention")
         # Button restored even on cancel.
         assert gui.running_state_changes[-1] is False
 
@@ -470,6 +487,7 @@ class TestPipelineWorkerRun:
                 "stream2video.pipeline_controller.PipelineController",
                 new=_FailingController,
             ),
+            patch("stream2video.pipeline_worker.play_completion_sound", return_value=None) as sound,
         ):
             worker.run(self._params())
         assert any("Download failed" in m for m in gui.logs)
@@ -477,6 +495,7 @@ class TestPipelineWorkerRun:
             "Failed: network impossible" in text and force is True
             for text, force in gui.status_calls
         )
+        sound.assert_called_once_with(enabled=False, kind="attention")
 
     def test_pipeline_concat_error_logs_concat_failure(self):
         gui = _FakeGuiCallbacks()

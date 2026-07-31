@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from stream2video.config import CONFIG_DEFAULTS
+from stream2video.completion_sound import play_completion_sound
 from stream2video.download import DownloadProgress
 from stream2video.formatters import fmt_size, fmt_speed, fmt_time
 from stream2video.silence import SilenceSegment
@@ -238,7 +239,11 @@ def build_download_progress_callback(
     return _on_download_progress
 
 
-def build_completion_callback(gui: PipelineGuiCallbacks) -> Callable[[dict], None]:
+def build_completion_callback(
+    gui: PipelineGuiCallbacks,
+    *,
+    completion_sound: bool = False,
+) -> Callable[[dict], None]:
     """Factory: build the ``on_pipeline_complete`` callback the
     PipelineCallbacks expect, mapping the controller's summary dict to
     a status line + log lines + a "Complete" popup.
@@ -264,6 +269,9 @@ def build_completion_callback(gui: PipelineGuiCallbacks) -> Callable[[dict], Non
         gui.clear_overall_label()
         gui.ui_total(summary["pipeline_seconds"])
         gui.show_complete_popup(result["popup"])
+        warning = play_completion_sound(enabled=completion_sound)
+        if warning is not None:
+            gui.log(f"[WARN] {warning}")
 
     return _on_pipeline_complete
 
@@ -287,6 +295,14 @@ class PipelineWorker:
     def __init__(self, gui: PipelineGuiCallbacks, config: dict[str, Any]):
         self._gui = gui
         self._config = config
+
+    def _play_completion_sound(self, kind: str) -> None:
+        warning = play_completion_sound(
+            enabled=bool(self._config.get("completion_sound", False)),
+            kind=kind,
+        )
+        if warning is not None:
+            self._gui.log(f"[WARN] {warning}")
 
     def run(self, params: PipelineWorkerParams) -> None:
         from stream2video.pipeline_controller import (
@@ -327,7 +343,10 @@ class PipelineWorker:
             on_overall=self._gui.ui_overall,
             on_total=self._gui.ui_total,
             on_download_progress=build_download_progress_callback(self._gui, download_start),
-            on_pipeline_complete=build_completion_callback(self._gui),
+            on_pipeline_complete=build_completion_callback(
+                self._gui,
+                completion_sound=bool(self._config.get("completion_sound", False)),
+            ),
         )
 
         controller = PipelineController(
@@ -353,18 +372,23 @@ class PipelineWorker:
         except PipelineCancelled:
             self._gui.log("Pipeline cancelled")
             self._gui.ui_status("Cancelled", force=True)
+            self._play_completion_sound("attention")
         except PipelineDownloadError as e:
             self._gui.log(f"[ERROR] Download failed: {e}")
             self._gui.ui_status(f"Failed: {e}", force=True)
+            self._play_completion_sound("attention")
         except PipelineSilenceError as e:
             self._gui.log(f"[ERROR] Silence detection failed: {e}")
             self._gui.ui_status(f"Failed: {e}", force=True)
+            self._play_completion_sound("attention")
         except PipelineConcatError as e:
             self._gui.log(f"[ERROR] {e}")
             self._gui.ui_status(f"Failed: {e}", force=True)
+            self._play_completion_sound("attention")
         except PipelineUnexpectedError as e:
             self._gui.log(f"[ERROR] Unexpected: {e}")
             logger.exception("Pipeline error")
             self._gui.ui_status(f"Error: {e}", force=True)
+            self._play_completion_sound("attention")
         finally:
             self._gui.set_running(False)

@@ -78,6 +78,7 @@ class TestGuiInstantiation:
             "chk_force",
             "chk_delete",
             "chk_per_video_dir",
+            "chk_completion_sound",
             "progress",
             "lbl_progress_pct",
             "lbl_status",

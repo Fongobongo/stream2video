@@ -39,6 +39,7 @@ class TestConfigDefaults:
             "force",
             "delete_after",
             "per_video_dir",
+            "completion_sound",
             "output_dir",
             "theme",
             "recent_projects",
