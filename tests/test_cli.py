@@ -13,6 +13,65 @@ import typer
 from stream2video.cli import load_config
 
 
+class TestCliMemoryReservePreflight:
+    """CLI must refuse to start silence detection when available RAM is below
+    ``memory_reserve_mb`` (parity with the GUI pipeline controller).
+    """
+
+    def test_exits_before_silence_when_ram_below_reserve(self, tmp_path: Path):
+        from typer.testing import CliRunner
+
+        from stream2video.cli import app
+        from stream2video.download import DownloadResult
+
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"source")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("memory_reserve_mb: 32000\nper_video_dir: false\n", encoding="utf-8")
+
+        with (
+            patch("stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)),
+            patch("stream2video.memory._available_ram_mb", return_value=8000.0),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [str(src), "-o", str(tmp_path / "out"), "-c", str(cfg)],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 1
+        assert "Not enough free RAM" in result.output
+
+    def test_continues_when_ram_above_reserve(self, tmp_path: Path):
+        from typer.testing import CliRunner
+
+        from stream2video.cli import app
+        from stream2video.download import DownloadResult
+
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"source")
+        out_dir = tmp_path / "out"
+
+        def fake_cut_and_concat(video_path, silence_segments, output_path, **kwargs):
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"out")
+            return output_path
+
+        with (
+            patch("stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)),
+            patch("stream2video.cli.load_silence_cache", return_value=[]),
+            patch("stream2video.cli.cut_and_concat", side_effect=fake_cut_and_concat),
+            patch("stream2video.memory._available_ram_mb", return_value=64 * 1024.0),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [str(src), "-o", str(out_dir), "--no-per-video-dir"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+
+
 class TestLoadConfigBoolValidation:
     """``load_config`` must reject non-bool values for the bool config keys.
 

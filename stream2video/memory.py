@@ -64,6 +64,36 @@ def _available_ram_mb() -> float | None:
         return None
 
 
+def check_memory_reserve(
+    memory_reserve_mb: int,
+    phase_name: str,
+    on_log: Callable[[str], None] | None = None,
+) -> bool:
+    """Return True if available RAM is above the configured reserve.
+
+    Emits a warning when the reserve is tight (<1.5x reserve) and an
+    error when the reserve is violated, then returns False so the caller
+    can refuse to start the next heavy stage. ``on_log`` defaults to the
+    module logger so the CLI and GUI share the same behaviour.
+    """
+    log = on_log if on_log is not None else lambda msg: logger.info("%s", msg)
+    avail = _available_ram_mb()
+    if avail is None:
+        return True
+    if avail < memory_reserve_mb * 1.5:
+        log(
+            f"[WARN] Available RAM {avail:.0f} MB is tight "
+            f"(reserve={memory_reserve_mb} MB) — {phase_name} may be risky."
+        )
+    if avail < memory_reserve_mb:
+        log(
+            f"[ERROR] Available RAM {avail:.0f} MB is below reserve "
+            f"{memory_reserve_mb} MB — refusing to start {phase_name}."
+        )
+        return False
+    return True
+
+
 def _process_rss_mb(pid: int) -> float | None:
     """Return the RSS of ``pid`` in MB, or None if not measurable."""
     if not _HAS_PSUTIL:

@@ -50,7 +50,7 @@ from stream2video.download import (
 )
 from stream2video.formatters import fmt_size, fmt_time
 from stream2video.gui_helpers import build_silence_info_line
-from stream2video.memory import _available_ram_mb
+from stream2video.memory import check_memory_reserve
 from stream2video.paths import apply_per_video_dir
 from stream2video.silence import (
     SilenceCancelledError,
@@ -65,34 +65,6 @@ from stream2video.utils import get_video_duration
 logger = logging.getLogger(__name__)
 
 _MEMORY_POLL_INTERVAL = 2.0
-
-
-def _check_memory_reserve(
-    cfg_memory_reserve_mb: int,
-    phase_name: str,
-    on_log: Callable[[str], None],
-) -> bool:
-    """Check if available RAM is above the reserve. Return True if OK.
-
-    Logs a warning when the reserve is tight and returns False when
-    the reserve is already violated so the caller can refuse to start
-    the next heavy stage.
-    """
-    avail = _available_ram_mb()
-    if avail is None:
-        return True
-    if avail < cfg_memory_reserve_mb * 1.5:
-        on_log(
-            f"[WARN] Available RAM {avail:.0f} MB is tight "
-            f"(reserve={cfg_memory_reserve_mb} MB) — {phase_name} may be risky."
-        )
-    if avail < cfg_memory_reserve_mb:
-        on_log(
-            f"[ERROR] Available RAM {avail:.0f} MB is below reserve "
-            f"{cfg_memory_reserve_mb} MB — refusing to start {phase_name}."
-        )
-        return False
-    return True
 
 
 @dataclass(frozen=True)
@@ -366,7 +338,7 @@ class PipelineController:
             video_path, src_size_bytes, src_duration = self._run_download_phase()
             if self.cancel_event.is_set():
                 raise PipelineCancelled("cancelled between download and silence")
-            if not _check_memory_reserve(
+            if not check_memory_reserve(
                 self.cfg.memory_reserve_mb,
                 "silence detection",
                 self.cb.on_log,
@@ -379,7 +351,7 @@ class PipelineController:
             silence_segments = self._run_silence_phase(video_path)
             if self.cancel_event.is_set():
                 raise PipelineCancelled("cancelled between silence and concat")
-            if not _check_memory_reserve(
+            if not check_memory_reserve(
                 self.cfg.memory_reserve_mb,
                 "concat phase",
                 self.cb.on_log,

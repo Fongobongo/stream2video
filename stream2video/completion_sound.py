@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import logging
 import math
+import shutil
 import struct
+import subprocess
 import sys
 import wave
 from pathlib import Path
@@ -48,28 +50,65 @@ def ensure_completion_chime(path: Path | None = None, *, kind: str = "success") 
     return out
 
 
+def _play_with_winsound(chime: Path) -> str | None:
+    import winsound
+
+    winsound.PlaySound(
+        str(chime),
+        winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
+    )
+    return None
+
+
+# POSIX players in probe order. Each entry is (argv-template, executables) —
+# the first executable found in PATH wins. All of these play unconditionally
+# asynchronously and exit when the file ends, so no SND_ASYNC equivalent is
+# needed.
+_POSIX_PLAYERS: tuple[tuple[str, ...], ...] = (
+    ("afplay",),          # macOS (preinstalled)
+    ("paplay",),          # PulseAudio / PipeWire
+    ("aplay", "-q"),      # ALSA
+    ("ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"),  # ffmpeg fallback
+)
+
+
+def _play_with_posix(chime: Path) -> str | None:
+    for entry in _POSIX_PLAYERS:
+        exe = entry[0]
+        if shutil.which(exe) is None:
+            continue
+        subprocess.Popen(
+            [exe, *entry[1:], str(chime)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return None
+    return (
+        "No audio player found. Install one of: afplay (macOS), paplay "
+        "(pulseaudio-utils), aplay (alsa-utils), or ffplay (ffmpeg)."
+    )
+
+
 def play_completion_sound(*, enabled: bool, kind: str = "success") -> str | None:
     """Play the completion chime asynchronously.
 
     Returns ``None`` on success/disabled, or a warning string if playback
     is unavailable. The pipeline treats sound as a best-effort nicety.
+
+    Backends: Windows ``winsound``; macOS ``afplay``; Linux ``paplay`` /
+    ``aplay`` / ``ffplay`` (first available in PATH).
     """
     if not enabled:
         return None
     if kind not in _VALID_KINDS:
         return f"Unknown completion sound kind: {kind}"
-    if sys.platform != "win32":
-        return "Completion sound is only supported on Windows for now."
 
     try:
-        import winsound
-
         chime = ensure_completion_chime(kind=kind)
-        winsound.PlaySound(
-            str(chime),
-            winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
-        )
-        return None
+        if sys.platform == "win32":
+            return _play_with_winsound(chime)
+        return _play_with_posix(chime)
     except Exception as exc:
         logger.debug("Completion sound playback failed", exc_info=True)
         return f"Could not play completion sound: {exc}"

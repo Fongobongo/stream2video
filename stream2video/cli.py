@@ -49,6 +49,7 @@ from stream2video.download import (
     download,
 )
 from stream2video.gui_helpers import build_download_status
+from stream2video.memory import check_memory_reserve
 from stream2video.paths import apply_per_video_dir
 from stream2video.silence import (
     SilenceCancelledError,
@@ -953,6 +954,16 @@ def main(
             # Step 2: Detect silence (with cache support)
             task2 = progress.add_task("[cyan]Detecting silence segments...", total=100)
 
+            # Pre-flight memory-reserve check, same as the GUI controller.
+            # Refuse to start a heavy phase when available RAM is already
+            # below the configured reserve.
+            if not check_memory_reserve(resolved_memory_reserve_mb, "silence detection"):
+                console.print(
+                    f"[red]Not enough free RAM:[/red] below reserve "
+                    f"{resolved_memory_reserve_mb} MB — refusing to start silence detection."
+                )
+                raise typer.Exit(1)
+
             try:
                 silence_segments = None
                 if not force:
@@ -1026,6 +1037,12 @@ def main(
                 progress.update(task3, completed=min(fraction * 100, 100))
 
             try:
+                if not check_memory_reserve(resolved_memory_reserve_mb, "concat phase"):
+                    console.print(
+                        f"[red]Not enough free RAM:[/red] below reserve "
+                        f"{resolved_memory_reserve_mb} MB — refusing to start concat."
+                    )
+                    raise typer.Exit(1)
                 output_video = output_dir / f"{video_path.stem}_{output_suffix}"
 
                 cut_and_concat(
