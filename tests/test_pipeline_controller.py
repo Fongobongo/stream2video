@@ -333,6 +333,111 @@ class TestPipelineControllerRun:
         # Completion callback was called
         assert len(calls["complete"]) == 1
 
+    def test_local_input_uses_compact_dynamic_progress_weights(self, tmp_path: Path):
+        cfg = _valid_config(output_dir=tmp_path, input_raw=str(tmp_path / "src.mp4"))
+        cb, calls = self._make_callbacks()
+        cancel = __import__("threading").Event()
+        controller = PipelineController(cfg=cfg, cb=cb, cancel_event=cancel)
+
+        fake_video = tmp_path / "src.mp4"
+        fake_video.write_bytes(b"dummy")
+
+        def fake_download(url, out_dir, **kwargs):
+            from stream2video.download import DownloadResult
+
+            return DownloadResult(path=fake_video, is_downloaded=False)
+
+        def fake_detect_silence(*args, **kwargs):
+            kwargs["progress_callback"](0.5)
+            return []
+
+        def fake_cut_and_concat(*args, **kwargs):
+            kwargs["progress_callback"](0.5)
+            args[2].write_bytes(b"output")
+
+        with (
+            patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+            patch(
+                "stream2video.pipeline_controller.detect_silence",
+                side_effect=fake_detect_silence,
+            ),
+            patch("stream2video.pipeline_controller.save_silence_cache"),
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=None),
+            patch("stream2video.pipeline_controller.cut_and_concat", side_effect=fake_cut_and_concat),
+            patch(
+                "stream2video.pipeline_controller.generate_keep_segments", return_value=[(0.0, 1.0)]
+            ),
+            patch("stream2video.pipeline_controller.get_video_duration", return_value=300.0),
+            patch(
+                "stream2video.pipeline_controller.apply_per_video_dir",
+                return_value=(tmp_path, fake_video),
+            ),
+        ):
+            result = controller.run()
+
+        assert isinstance(result, PipelineResult)
+        # Local input skips real downloading, so download gets 2%, short
+        # silence detection gets 25%, and concat receives the remaining 73%.
+        assert any("download 2%, silence 25%, concat 73%" in s for s in calls["log"])
+        assert any(pytest.approx(v, abs=1e-6) == 0.02 for v in calls["progress"])
+        assert any(pytest.approx(v, abs=1e-6) == 0.145 for v in calls["progress"])
+        assert any(pytest.approx(v, abs=1e-6) == 0.27 for v in calls["progress"])
+        assert any(pytest.approx(v, abs=1e-6) == 0.635 for v in calls["progress"])
+        assert calls["progress"][-1] == 1.0
+        assert calls["progress"] == sorted(calls["progress"])
+
+    def test_silence_cache_hit_reweights_progress_toward_concat(self, tmp_path: Path):
+        cfg = _valid_config(output_dir=tmp_path, input_raw="https://example.com/v")
+        cb, calls = self._make_callbacks()
+        cancel = __import__("threading").Event()
+        controller = PipelineController(cfg=cfg, cb=cb, cancel_event=cancel)
+
+        fake_video = tmp_path / "downloaded.mp4"
+        fake_video.write_bytes(b"dummy")
+        cached_segments = [MagicMock(start=0.0, end=1.0)]
+
+        def fake_download(url, out_dir, **kwargs):
+            from stream2video.download import DownloadResult
+
+            return DownloadResult(path=fake_video, is_downloaded=True)
+
+        def fake_cut_and_concat(*args, **kwargs):
+            kwargs["progress_callback"](0.5)
+            args[2].write_bytes(b"output")
+
+        with (
+            patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+            patch("stream2video.pipeline_controller.detect_silence") as detect_mock,
+            patch("stream2video.pipeline_controller.save_silence_cache"),
+            patch(
+                "stream2video.pipeline_controller.load_silence_cache",
+                return_value=cached_segments,
+            ),
+            patch(
+                "stream2video.pipeline_controller.generate_keep_segments", return_value=[(0.0, 1.0)]
+            ),
+            patch(
+                "stream2video.pipeline_controller.cut_and_concat",
+                side_effect=fake_cut_and_concat,
+            ),
+            patch("stream2video.pipeline_controller.get_video_duration", return_value=300.0),
+            patch(
+                "stream2video.pipeline_controller.apply_per_video_dir",
+                return_value=(tmp_path, fake_video),
+            ),
+        ):
+            result = controller.run()
+
+        assert isinstance(result, PipelineResult)
+        detect_mock.assert_not_called()
+        # Cache hit makes silence a tiny 3% phase, so concat gets 92%.
+        assert any("download 5%, silence 3%, concat 92%" in s for s in calls["log"])
+        assert any(pytest.approx(v, abs=1e-6) == 0.05 for v in calls["progress"])
+        assert any(pytest.approx(v, abs=1e-6) == 0.08 for v in calls["progress"])
+        assert any(pytest.approx(v, abs=1e-6) == 0.54 for v in calls["progress"])
+        assert calls["progress"][-1] == 1.0
+        assert calls["progress"] == sorted(calls["progress"])
+
     def test_download_failure_raises_pipeline_download_error(self, tmp_path: Path):
         cfg = _valid_config(output_dir=tmp_path, input_raw="https://example.com/v")
         cb, _calls = self._make_callbacks()

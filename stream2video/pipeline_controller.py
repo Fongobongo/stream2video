@@ -5,7 +5,7 @@ that interleaves:
   * pure pipeline orchestration (download → silence → cut+concat)
   * Tk widget updates (progress bar, status label, log textbox)
   * cancel / error handling
-  * per-step progress mapping (download 0..5%, silence 5..40%, cut 40..100%)
+  * per-step progress mapping (download / silence / cut+concat)
 
 This module defines:
   * ``PipelineConfig`` — immutable snapshot of the 22 inputs.
@@ -227,15 +227,74 @@ class PipelineUnexpectedError(PipelineError):
     """Any other exception not mapped to a specific phase."""
 
 
-# Progress-bar fractions for each phase. Sum to 1.0:
-#   0.00..0.05  download (5%)
-#   0.05..0.40  silence detection (35%)
-#   0.40..1.00  cut+concat (60%)
-# Kept as module constants so tests can pin them and the controller
-# stays in sync with the GUI's _ui_overall more_phases flag.
+# Default progress-bar fractions. Individual runs may shrink cheap
+# phases (local input / silence cache) and give the remaining span to
+# cut+concat, but these values remain the conservative fallback profile.
 PROG_DOWNLOAD_END = 0.05
 PROG_SILENCE_END = 0.40
 PROG_CONCAT_END = 1.00
+
+
+@dataclass(frozen=True)
+class ProgressPlan:
+    """Per-run overall progress mapping for the three heavy phases."""
+
+    download_end: float = PROG_DOWNLOAD_END
+    silence_end: float = PROG_SILENCE_END
+    concat_end: float = PROG_CONCAT_END
+
+    @property
+    def download_span(self) -> float:
+        return self.download_end
+
+    @property
+    def silence_span(self) -> float:
+        return self.silence_end - self.download_end
+
+    @property
+    def concat_span(self) -> float:
+        return self.concat_end - self.silence_end
+
+    def map_silence(self, fraction: float) -> float:
+        return self.download_end + _clamp_fraction(fraction) * self.silence_span
+
+    def map_concat(self, fraction: float) -> float:
+        return self.silence_end + _clamp_fraction(fraction) * self.concat_span
+
+    def weights_percent(self) -> tuple[int, int, int]:
+        return (
+            round(self.download_span * 100),
+            round(self.silence_span * 100),
+            round(self.concat_span * 100),
+        )
+
+
+def _clamp_fraction(value: float) -> float:
+    return max(0.0, min(1.0, value))
+
+
+def _estimate_silence_span(src_duration: float | None, *, cache_hit: bool) -> float:
+    if cache_hit:
+        return 0.03
+    if src_duration is None or src_duration <= 0:
+        return PROG_SILENCE_END - PROG_DOWNLOAD_END
+    if src_duration <= 10 * 60:
+        return 0.25
+    if src_duration <= 60 * 60:
+        return 0.30
+    return PROG_SILENCE_END - PROG_DOWNLOAD_END
+
+
+def _build_progress_plan(
+    *,
+    is_downloaded: bool,
+    src_duration: float | None,
+    silence_cache_hit: bool,
+) -> ProgressPlan:
+    download_end = PROG_DOWNLOAD_END if is_downloaded else 0.02
+    silence_span = _estimate_silence_span(src_duration, cache_hit=silence_cache_hit)
+    silence_end = min(0.75, download_end + silence_span)
+    return ProgressPlan(download_end=download_end, silence_end=silence_end)
 
 
 @dataclass
@@ -274,14 +333,21 @@ class PipelineController:
     _download_path: Path | None = field(default=None, init=False)
     _output_path: Path | None = field(default=None, init=False)
     _pipeline_start: float = field(default=0.0, init=False)
+    _progress_plan: ProgressPlan = field(default_factory=ProgressPlan, init=False)
+    _download_was_real: bool = field(default=True, init=False)
+    _src_duration: float | None = field(default=None, init=False)
 
     def run(self) -> PipelineResult:
         """Run the three-phase pipeline. Raises ``PipelineError`` on failure.
 
         Phases:
-          1. Download / resolve input path (5% of progress bar)
-          2. Silence detection (35% of progress bar)
-          3. Cut + concat (60% of progress bar)
+          1. Download / resolve input path
+          2. Silence detection
+          3. Cut + concat
+
+        The overall progress fractions are chosen per run: local files
+        and cached silence detection get a smaller slice, so the bar is
+        less misleading and cut+concat receives the remaining weight.
 
         Each phase checks ``self.cancel_event`` before starting so a
         Ctrl+C between phases aborts cleanly. Mid-phase cancellation
@@ -397,6 +463,7 @@ class PipelineController:
         self._output_dir_resolved = output_dir
 
         self._download_path = video_path if download_result.is_downloaded else None
+        self._download_was_real = download_result.is_downloaded
 
         # Fire the mid-pipeline hook so the GUI can update its
         # recent-projects panel, output label, and file-info widgets
@@ -409,6 +476,16 @@ class PipelineController:
 
         src_size_bytes = video_path.stat().st_size
         src_duration = get_video_duration(video_path)
+        self._src_duration = src_duration
+        self._progress_plan = _build_progress_plan(
+            is_downloaded=download_result.is_downloaded,
+            src_duration=src_duration,
+            silence_cache_hit=False,
+        )
+        dl_w, silence_w, concat_w = self._progress_plan.weights_percent()
+        self.cb.on_log(
+            f"Progress weights: download {dl_w}%, silence {silence_w}%, concat {concat_w}%"
+        )
         self.cb.on_log(f"Size: {fmt_size(src_size_bytes)}")
 
         file_size_mb = src_size_bytes // 1024 // 1024
@@ -435,7 +512,7 @@ class PipelineController:
         ``PipelineCancelled`` on user cancel.
         """
         output_dir = getattr(self, "_output_dir_resolved", self.cfg.output_dir)
-        self.cb.on_progress(PROG_DOWNLOAD_END)
+        self.cb.on_progress(self._progress_plan.download_end)
         self.cb.on_status("Step 2/3: Detecting silence...")
         self.cb.on_log(
             f"Step 2/3: Detecting silence "
@@ -460,7 +537,18 @@ class PipelineController:
 
         cache = None if self.cfg.force else load_silence_cache(video_path, output_dir, config)
         if cache is not None:
+            self._progress_plan = _build_progress_plan(
+                is_downloaded=self._download_was_real,
+                src_duration=self._src_duration,
+                silence_cache_hit=True,
+            )
             self.cb.on_log(f"Loaded {len(cache)} silence segments from cache")
+            dl_w, silence_w, concat_w = self._progress_plan.weights_percent()
+            self.cb.on_log(
+                f"Progress weights adjusted: download {dl_w}%, "
+                f"silence {silence_w}%, concat {concat_w}%"
+            )
+            self.cb.on_progress(self._progress_plan.silence_end)
             return cache
 
         silence_start = time.monotonic()
@@ -470,16 +558,14 @@ class PipelineController:
             elapsed = time.monotonic() - silence_start
             if f > 0.01:
                 remaining = elapsed / f - elapsed
-                controller.cb.on_progress(
-                    PROG_DOWNLOAD_END + f * (PROG_SILENCE_END - PROG_DOWNLOAD_END)
-                )
+                controller.cb.on_progress(controller._progress_plan.map_silence(f))
                 controller.cb.on_status(
                     f"Step 2/3: Silence... {f * 100:.0f}% "
                     f"({fmt_time(elapsed)}/{fmt_time(remaining)})"
                 )
                 controller.cb.on_overall(elapsed, remaining, True)
             else:
-                controller.cb.on_progress(PROG_DOWNLOAD_END)
+                controller.cb.on_progress(controller._progress_plan.download_end)
                 controller.cb.on_status(
                     f"Step 2/3: Silence... {fmt_time(elapsed)} (calculating ETA)"
                 )
@@ -502,6 +588,7 @@ class PipelineController:
             resume_cache_path.unlink(missing_ok=True)
         except OSError as e:
             self.cb.on_log(f"[WARN] Could not clean up resume cache: {e}")
+        self.cb.on_progress(self._progress_plan.silence_end)
         self.cb.on_log(f"Detected {len(silence_segments)} silence segments")
         return silence_segments
 
@@ -519,7 +606,7 @@ class PipelineController:
         ``PipelineCancelled`` on user cancel.
         """
         output_dir = getattr(self, "_output_dir_resolved", self.cfg.output_dir)
-        self.cb.on_progress(PROG_SILENCE_END)
+        self.cb.on_progress(self._progress_plan.silence_end)
         self.cb.on_status("Step 3/3: Cutting and concatenating...")
         self.cb.on_log(
             f"Step 3/3: Cutting & concatenating "
@@ -557,16 +644,14 @@ class PipelineController:
             elapsed = time.monotonic() - cut_start
             if f > 0.01:
                 remaining = elapsed / f - elapsed
-                controller.cb.on_progress(
-                    PROG_SILENCE_END + f * (PROG_CONCAT_END - PROG_SILENCE_END)
-                )
+                controller.cb.on_progress(controller._progress_plan.map_concat(f))
                 controller.cb.on_status(
                     f"Step 3/3: Cutting... {f * 100:.0f}% "
                     f"({fmt_time(elapsed)}/{fmt_time(remaining)})"
                 )
                 controller.cb.on_overall(elapsed, remaining, False)
             else:
-                controller.cb.on_progress(PROG_SILENCE_END)
+                controller.cb.on_progress(controller._progress_plan.silence_end)
                 controller.cb.on_status(
                     f"Step 3/3: Cutting... {fmt_time(elapsed)} (calculating ETA)"
                 )
@@ -615,7 +700,7 @@ class PipelineController:
         keep_dur: float,
     ) -> PipelineResult:
         """Build the success summary and clean up."""
-        self.cb.on_progress(PROG_CONCAT_END)
+        self.cb.on_progress(self._progress_plan.concat_end)
         dst_size_bytes = output_path.stat().st_size
         total_elapsed = time.monotonic() - self._pipeline_start
 
