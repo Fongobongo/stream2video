@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
 import pytest
@@ -39,7 +40,7 @@ def test_cut_and_concat_builds_memory_monitor_factory(tmp_path: Path):
 
 def test_run_subprocess_cmd_waits_for_stderr_drain_before_oom_classification():
     class _FakeProcess:
-        args = ["ffmpeg"]
+        args: ClassVar[list[str]] = ["ffmpeg"]
 
         def __init__(self):
             self.stderr = io.BytesIO()

@@ -76,6 +76,7 @@ def play_completion_sound(*, enabled: bool, kind: str = "success") -> str | None
 
 
 def _build_chime_samples(kind: str) -> list[int]:
+    notes: tuple[tuple[float, float, float], ...]
     if kind == "attention":
         notes = (
             (440.00, 0.00, 0.26),

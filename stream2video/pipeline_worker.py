@@ -47,8 +47,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-from stream2video.config import CONFIG_DEFAULTS
 from stream2video.completion_sound import play_completion_sound
+from stream2video.config import CONFIG_DEFAULTS
 from stream2video.download import DownloadProgress
 from stream2video.formatters import fmt_size, fmt_speed, fmt_time
 from stream2video.silence import SilenceSegment
