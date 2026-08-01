@@ -600,11 +600,14 @@ def main(
         # the YAML key ``preset`` (if present) is used, else
         # DEFAULT_PRESET.
         def _resolved_preset(flag_value: str) -> str:
-            src = ctx.get_parameter_source("preset")
-            if src == ParameterSource.COMMANDLINE:
-                value = flag_value
-            else:
+            if ParameterSource is None:
                 value = str(config.get("preset", DEFAULT_PRESET))
+            else:
+                src = ctx.get_parameter_source("preset")
+                if src == ParameterSource.COMMANDLINE:
+                    value = flag_value
+                else:
+                    value = str(config.get("preset", DEFAULT_PRESET))
             if value not in PRESET_NAMES:
                 console.print(
                     f"[red]Invalid preset:[/red] {value!r} "
@@ -622,8 +625,14 @@ def main(
         # (which came from YAML if provided, else CONFIG_DEFAULTS, with
         # preset overrides already applied above).
         def _resolved_str(name: str, flag_value: str, valid: list[str]) -> str:
-            src = ctx.get_parameter_source(name)
-            value = flag_value if src == ParameterSource.COMMANDLINE else config[name]
+            if ParameterSource is None:
+                value = config[name]
+            else:
+                src = ctx.get_parameter_source(name)
+                if src == ParameterSource.COMMANDLINE:
+                    value = flag_value
+                else:
+                    value = config[name]
             if value not in valid:
                 console.print(
                     f"[red]Invalid {name}:[/red] {value!r} "
@@ -678,6 +687,8 @@ def main(
         def _resolved_encoder_threads(
             flag_value: str,
         ) -> str | int:
+            if ParameterSource is None:
+                return config.get("encoder_threads", "auto")
             src = ctx.get_parameter_source("encoder_threads")
             if src == ParameterSource.COMMANDLINE:
                 v = flag_value.strip()
@@ -703,6 +714,8 @@ def main(
         resolved_encoder_threads: str | int = _resolved_encoder_threads(encoder_threads)
 
         def _resolved_memory_limit_mb(flag_value: str) -> str | int:
+            if ParameterSource is None:
+                return config.get("memory_limit_mb", "auto")
             src = ctx.get_parameter_source("memory_limit_mb")
             if src == ParameterSource.COMMANDLINE:
                 v = flag_value.strip()
@@ -727,6 +740,8 @@ def main(
         resolved_memory_limit_mb: str | int = _resolved_memory_limit_mb(memory_limit_mb)
 
         def _resolved_memory_reserve_mb(flag_value: int) -> int:
+            if ParameterSource is None:
+                return int(config.get("memory_reserve_mb", 2048))
             src = ctx.get_parameter_source("memory_reserve_mb")
             if src == ParameterSource.COMMANDLINE:
                 if flag_value < 0:
@@ -740,6 +755,8 @@ def main(
         resolved_memory_reserve_mb: int = _resolved_memory_reserve_mb(memory_reserve_mb)
 
         def _resolved_x264_low_memory(flag_value: bool) -> bool:
+            if ParameterSource is None:
+                return bool(config.get("x264_low_memory", False))
             src = ctx.get_parameter_source("x264_low_memory")
             if src == ParameterSource.COMMANDLINE:
                 return flag_value
@@ -748,6 +765,8 @@ def main(
         resolved_x264_low_memory: bool = _resolved_x264_low_memory(x264_low_memory)
 
         def _resolved_gapless_concat(flag_value: bool) -> bool:
+            if ParameterSource is None:
+                return bool(config.get("gapless_concat", False))
             src = ctx.get_parameter_source("gapless_concat")
             if src == ParameterSource.COMMANDLINE:
                 return flag_value
@@ -756,6 +775,8 @@ def main(
         resolved_gapless_concat: bool = _resolved_gapless_concat(gapless_concat)
 
         def _resolved_low_process_priority(flag_value: bool) -> bool:
+            if ParameterSource is None:
+                return bool(config.get("low_process_priority", False))
             src = ctx.get_parameter_source("low_process_priority")
             if src == ParameterSource.COMMANDLINE:
                 return flag_value
@@ -764,6 +785,8 @@ def main(
         resolved_low_process_priority: bool = _resolved_low_process_priority(low_process_priority)
 
         def _resolved_bool(name: str, flag_value: bool | None) -> bool:
+            if ParameterSource is None:
+                return bool(config.get(name, False))
             src = ctx.get_parameter_source(name)
             if src == ParameterSource.COMMANDLINE:
                 return bool(flag_value)
@@ -781,6 +804,8 @@ def main(
         config["per_video_dir"] = per_video_dir_resolved
 
         def _resolved_int(name: str, flag_value: int) -> int:
+            if ParameterSource is None:
+                return int(config.get(name, CONFIG_DEFAULTS.get(name, flag_value)))
             src = ctx.get_parameter_source(name)
             if src == ParameterSource.COMMANDLINE:
                 return int(flag_value)

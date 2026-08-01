@@ -370,6 +370,8 @@ class PipelineWorker:
             # no-op (never reached ``_finish``); on the real success path
             # it was unreachable. Do NOT duplicate the deletion here.
         except PipelineCancelled:
+            if video_path_ref[0] is not None:
+                self._gui.pop_live_segments(video_path_ref[0])
             self._gui.log("Pipeline cancelled")
             self._gui.ui_status("Cancelled", force=True)
             self._play_completion_sound("attention")

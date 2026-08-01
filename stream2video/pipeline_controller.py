@@ -377,17 +377,55 @@ class PipelineController:
             # PipelineSilenceError, PipelineConcatError, PipelineCancelled).
             # Re-raise as-is so the caller sees the specific phase that
             # failed, not a generic PipelineUnexpectedError.
+            # Clean up the incomplete download so a failed run doesn't
+            # leave a stale file on disk.
+            if self._download_path is not None and self._download_path.exists():
+                try:
+                    self._download_path.unlink()
+                except OSError:
+                    pass
+            self._download_path = None
             raise
         except (CancelledError, SilenceCancelledError, DownloadCancelledError) as e:
+            if self._download_path is not None and self._download_path.exists():
+                try:
+                    self._download_path.unlink()
+                except OSError:
+                    pass
+            self._download_path = None
             raise PipelineCancelled(str(e)) from e
         except (DownloadError, URLValidationError) as e:
+            if self._download_path is not None and self._download_path.exists():
+                try:
+                    self._download_path.unlink()
+                except OSError:
+                    pass
+            self._download_path = None
             raise PipelineDownloadError(str(e)) from e
         except SilenceDetectionError as e:
+            if self._download_path is not None and self._download_path.exists():
+                try:
+                    self._download_path.unlink()
+                except OSError:
+                    pass
+            self._download_path = None
             raise PipelineSilenceError(str(e)) from e
         except ConcatError as e:
+            if self._download_path is not None and self._download_path.exists():
+                try:
+                    self._download_path.unlink()
+                except OSError:
+                    pass
+            self._download_path = None
             raise PipelineConcatError(str(e)) from e
         except Exception as e:
             logger.exception("Pipeline unexpected error")
+            if self._download_path is not None and self._download_path.exists():
+                try:
+                    self._download_path.unlink()
+                except OSError:
+                    pass
+            self._download_path = None
             raise PipelineUnexpectedError(str(e)) from e
 
     # ── Phase 1: Download / resolve ──────────────────────────────

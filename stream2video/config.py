@@ -178,7 +178,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         "x264_low_memory": True,
         "low_process_priority": True,
     },
-    "balanced": {},
+    "balanced": {"gapless_concat": True},
     "maximum_performance": {
         "x264_low_memory": False,
         "memory_limit_mb": 0,

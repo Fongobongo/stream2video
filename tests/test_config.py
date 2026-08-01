@@ -486,7 +486,7 @@ class TestApplyPreset:
         # over CONFIG_DEFAULTS — otherwise a user who never touches the
         # preset combobox would suddenly get non-default tunables.
         assert DEFAULT_PRESET == "balanced"
-        assert PRESETS["balanced"] == {}
+        assert PRESETS["balanced"] == {"gapless_concat": True}
 
     def test_all_presets_are_subsets_of_config_defaults_keys(self):
         # Every tunable a preset overrides must exist in CONFIG_DEFAULTS,

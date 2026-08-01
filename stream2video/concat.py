@@ -183,7 +183,7 @@ def _audio_opts(audio_quality: str = "") -> list[str]:
     if audio_quality not in ("", *_AUDIO_BITRATES):
         raise ConcatError(
             f"Unknown audio quality {audio_quality!r} "
-            f"(use {' or '.join(repr(k) for k in VALID_QUALITIES)})"
+            f"(use {' or '.join(repr(k) for k in _AUDIO_BITRATES)})"
         )
     return ["-ar", _AUDIO_SAMPLE_RATE, "-ac", _AUDIO_CHANNELS]
 
@@ -736,7 +736,7 @@ def get_video_encoder(
 
 def _run_ffmpeg(
     cmd: list[str],
-    progress_callback: Callable[[int], None] | None,
+    progress_callback: Callable[[float], None] | None,
     timeout: int,
     label: str = "ffmpeg",
     cancel_callback: Callable[[], bool] | None = None,
@@ -748,7 +748,7 @@ def _run_ffmpeg(
     rlimit_as_mb: int = 0,
 ) -> None:
     """Run an ffmpeg command. With track_progress=True (default), parses ffmpeg's
-    -progress stream from stdout and invokes progress_callback(us). With False,
+    -progress stream from stdout and invokes progress_callback(seconds). With False,
     stdout is discarded -- use for per-segment encodes where the segment index
     already implies progress.
 
@@ -888,7 +888,7 @@ def _run_ffmpeg(
                             if progress_callback:
                                 try:
                                     us = int(line.split("=", 1)[1])
-                                    progress_callback(us)
+                                    progress_callback(us / 1_000_000)
                                 except (ValueError, IndexError):
                                     pass
                         elapsed_since_progress = time.monotonic() - last_progress_time
@@ -970,6 +970,13 @@ def _run_ffmpeg(
             raise
         except subprocess.TimeoutExpired as e:
             process.kill()
+            if memory_monitor is not None and memory_monitor.hard_exceeded:
+                raise FFmpegOutOfMemoryError(
+                    f"{label} ran out of memory "
+                    "(memory monitor hard limit hit); "
+                    "try --preset low_memory / lowering --memory-limit-mb / "
+                    "reducing --batch-chunk-size"
+                ) from None
             raise FFmpegError(f"{label} timeout after {e.timeout}s") from None
         finally:
             stall_stop.set()
@@ -1367,9 +1374,9 @@ def _run_final_concat(
         for part in part_paths:
             lf.write(f"file {_quote_concat_path(part.name)}\n")
 
-    def _concat_prog(us: int) -> None:
+    def _concat_prog(seconds: float) -> None:
         if progress_callback and total_duration > 0:
-            progress_callback(min(us / 1_000_000 / total_duration * 0.1, 0.1) + 0.9)
+            progress_callback(min(seconds / total_duration * 0.1, 0.1) + 0.9)
 
     label_text = label
     _run_ffmpeg(
@@ -1456,9 +1463,9 @@ def _run_audio_concat_filter(
     chain = "".join(f"[{i}:a]" for i in range(n))
     graph = f"{chain}concat=n={n}:v=0:a=1[outa]"
 
-    def _concat_prog(us: int) -> None:
+    def _concat_prog(seconds: float) -> None:
         if progress_callback and total_duration > 0:
-            progress_callback(min(us / 1_000_000 / total_duration * 0.1, 0.1) + 0.9)
+            progress_callback(min(seconds / total_duration * 0.1, 0.1) + 0.9)
 
     label_text = "audio concat filter"
     _run_ffmpeg(
@@ -1601,7 +1608,7 @@ def _run_audio_extract(
                 continue
 
             def _seg_prog(
-                us: int,
+                seconds: float,
                 _dur: float = dur,
                 _encoded_keep: float = encoded_keep,
             ) -> None:
@@ -1610,7 +1617,7 @@ def _run_audio_extract(
                 # segment path's _seg_prog. The 0.9 ceiling leaves room
                 # for the final concat pass.
                 if progress_callback and total_duration > 0 and _dur > 0:
-                    seg_frac = min(us / 1_000_000 / _dur, 1.0)
+                    seg_frac = min(seconds / _dur, 1.0)
                     abs_time = _encoded_keep + seg_frac * _dur
                     progress_callback(min(abs_time / total_duration * 0.9, 0.9))
 
@@ -1779,9 +1786,9 @@ def _run_gapless_segment_concat(
     chain = "".join(f"[{i}:v][{i}:a]" for i in range(n))
     graph = f"{chain}concat=n={n}:v=1:a=1[outv][outa]"
 
-    def _concat_prog(us: int) -> None:
+    def _concat_prog(seconds: float) -> None:
         if progress_callback and total_duration > 0:
-            progress_callback(min(us / 1_000_000 / total_duration * 0.1, 0.1) + 0.9)
+            progress_callback(min(seconds / total_duration * 0.1, 0.1) + 0.9)
 
     label_text = "gapless segment concat"
     _run_ffmpeg(
@@ -1943,7 +1950,7 @@ def _run_segment_concat(
             # already normalised to start at 0, so a `setpts=PTS-STARTPTS`
             # is a no-op here and is omitted for clarity.
 
-            def _seg_prog(us: int, _dur: float = dur, _encoded_keep: float = encoded_keep) -> None:
+            def _seg_prog(seconds: float, _dur: float = dur, _encoded_keep: float = encoded_keep) -> None:
                 # ffmpeg -progress reports `out_time_us` -- the position within
                 # this segment's output, NOT the original video. Map it to
                 # absolute progress across the whole video so the GUI/CLI
@@ -1951,7 +1958,7 @@ def _run_segment_concat(
                 # hour (e.g. 0 silence segments → 1 keep segment = the
                 # whole video).
                 if progress_callback and total_duration > 0 and _dur > 0:
-                    seg_frac = min(us / 1_000_000 / _dur, 1.0)
+                    seg_frac = min(seconds / _dur, 1.0)
                     abs_time = _encoded_keep + seg_frac * _dur
                     progress_callback(min(abs_time / total_duration * 0.9, 0.9))
 
@@ -2278,9 +2285,9 @@ def _run_cut_then_encode(
         encode_progress_base = 0.5
         encode_progress_span = 0.5
 
-        def _encode_prog(us: int) -> None:
+        def _encode_prog(seconds: float) -> None:
             if progress_callback and total_duration > 0:
-                frac = min(us / 1_000_000 / total_duration, 1.0)
+                frac = min(seconds / total_duration, 1.0)
                 progress_callback(encode_progress_base + frac * encode_progress_span)
 
         label_text = "cut_then_encode final encode"
@@ -2730,7 +2737,7 @@ def _run_batch_concat(
             try:
 
                 def _chunk_prog(
-                    us: int, _chunk: Any = chunk, _encoded_duration: float = encoded_duration
+                    seconds: float, _chunk: Any = chunk, _encoded_duration: float = encoded_duration
                 ) -> None:
                     chunk_dur = sum(e - s for s, e in _chunk)
                     if progress_callback and total_duration > 0:
@@ -2743,7 +2750,7 @@ def _run_batch_concat(
                         # finishes. Convert to a per-chunk fraction first,
                         # then scale to absolute progress -- same trick as
                         # `_seg_prog` in `_run_segment_concat`.
-                        frac = min(us / 1_000_000 / chunk_dur, 1.0) if chunk_dur > 0 else 1.0
+                        frac = min(seconds / chunk_dur, 1.0) if chunk_dur > 0 else 1.0
                         progress_callback(min(base + frac * span, 0.9))
 
                 label_text = f"batch chunk {ci}/{n_chunks}"

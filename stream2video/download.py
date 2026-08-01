@@ -518,7 +518,7 @@ def download(
                             stderr_chunks,
                         )
                 else:
-                    silent_for = now - (last_progress_time[0] or now)
+                    silent_for = now - last_progress_time[0]
                     if silent_for > no_progress_timeout:
                         process.kill()
                         process.wait()

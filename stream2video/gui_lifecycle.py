@@ -83,6 +83,8 @@ class LifecycleMixin:
         self.combo_theme.set(self.config["theme"])
         self.entry_input.delete(0, "end")
         self.entry_output.delete(0, "end")
+        self._output_path = None
+        self._download_path = None
 
         self.combo_method.set(self.config["method"])
         self.combo_encoder.set(self.config["encoder"])
@@ -256,6 +258,13 @@ class LifecycleMixin:
             try:
                 self._output_path.unlink()
                 _logger.info(f"Cleaned up incomplete output: {self._output_path}")
+            except OSError:
+                pass
+        # Clean up incomplete download file
+        if self._download_path is not None and self._download_path.exists():
+            try:
+                self._download_path.unlink()
+                _logger.info(f"Cleaned up incomplete download: {self._download_path}")
             except OSError:
                 pass
         try:
