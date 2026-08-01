@@ -38,32 +38,32 @@ class SlidersMixin:
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", padx=6, pady=(2, 0))
 
-        lbl = ctk.CTkLabel(row, text=label, width=150, anchor="w")
+        lbl = ctk.CTkLabel(row, text=label, width=95, anchor="w")
         lbl.pack(side="left")
         if tooltip:
             _Tooltip(lbl, tooltip)
 
         slider = ctk.CTkSlider(
-            row, from_=min_v, to=max_v, number_of_steps=round((max_v - min_v) * 10)
+            row, from_=min_v, to=max_v, number_of_steps=round((max_v - min_v) * 10), width=110
         )
         slider.set(current)
-        slider.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        slider.pack(side="left", padx=(0, 4))
 
-        entry_val = ctk.CTkEntry(row, width=65, justify="right")
+        entry_val = ctk.CTkEntry(row, width=52, justify="right")
         entry_val.insert(0, format_slider_entry_value(current))
-        entry_val.pack(side="right")
+        entry_val.pack(side="left")
 
         btn_default = ctk.CTkButton(
             row,
             text="D",
-            width=28,
-            height=24,
-            font=("", 10, "bold"),
+            width=20,
+            height=20,
+            font=("", 9, "bold"),
             command=lambda k=key, d=CONFIG_DEFAULTS.get(key, current), sv=slider, ev=entry_val: (
                 self._reset_default(d, sv, ev, k)
             ),
         )
-        btn_default.pack(side="right", padx=(4, 0))
+        btn_default.pack(side="left", padx=(2, 0))
 
         slider._entry_val = entry_val
         setattr(self, f"_slider_{key}", slider)

@@ -14,8 +14,8 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     "margin": 0.5,
     "method": "segment",
     "encoder": "h264_mf",
-    "video_quality": "medium",
-    "audio_quality": "medium",
+    "video_quality": "source",
+    "audio_quality": "source",
     "download_quality": "best",
     "software_fallback": "ask",
     "x264_preset": "medium",
@@ -60,7 +60,11 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     # but it sacrifices frame accuracy (-c copy snaps to keyframes);
     # ``gapless_concat`` keeps frame accuracy AND gapless audio. Default
     # False preserves the historical behaviour (concat demuxer, faster).
-    "gapless_concat": False,
+    # Default True: per-segment AAC priming (~21ms at 48kHz) accumulates
+    # as A/V drift on multi-segment outputs — the gapless concat filter
+    # adds priming only once. Users who want the old (faster, concat
+    # demuxer) behaviour can flip it off.
+    "gapless_concat": True,
     # Lower ffmpeg scheduling priority (opt-in, P3.x). When True, ffmpeg
     # subprocesses are spawned at BELOW_NORMAL_PRIORITY_CLASS on Windows
     # and nice +10 on POSIX so a long-running encode doesn't starve
@@ -111,7 +115,7 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     "force": False,
     "delete_after": False,
     "per_video_dir": True,
-    "completion_sound": False,
+    "completion_sound": True,
     "output_dir": "",
     # Output container / codec policy. ``video`` (default) preserves the
     # historical behaviour: H.264 video + AAC stereo audio muxed into

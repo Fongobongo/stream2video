@@ -133,7 +133,8 @@ class TestBuildPipelineConfigFromSnapshot:
         assert cfg.memory_limit_mb == "auto"
         assert cfg.memory_reserve_mb == 2048
         assert cfg.x264_low_memory is False
-        assert cfg.gapless_concat is False
+        # gapless_concat defaults to True (A/V drift fix) since 0.3.
+        assert cfg.gapless_concat is True
         # Timeout / batch size / min-part defaults
         assert cfg.download_timeout == 28800
         assert cfg.connect_timeout == 300
