@@ -41,6 +41,9 @@ _logger = logging.getLogger("stream2video.gui")
 class LifecycleMixin:
     """Settings persistence + window lifecycle (close / restore / save)."""
 
+    _output_path: Path | None
+    _download_path: Path | None
+
     def _save_settings(self) -> None:
         # Read widgets in the main thread (Tk reads are unsafe from
         # worker threads); forward the snapshot through the pure
