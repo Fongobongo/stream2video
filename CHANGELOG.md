@@ -1,5 +1,18 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **GUI completion sounds** — optional short generated chime on success and a distinct attention sound on cancel/failure. Synthesised at runtime (no bundled assets); enabled via the "Sound when done" checkbox (persisted). Backends: Windows `winsound`, macOS `afplay`, Linux `paplay` / `aplay` / `ffplay` (first found in PATH).
+- **Dynamic pipeline progress weights** — the overall progress bar now adapts to the run: local-file inputs shrink the download slice, silence-cache hits shrink the silence slice, and cut+concat receives the remaining weight. Phase percentages are logged when chosen.
+- **Compact GUI progress row** — the progress bar is shown next to an explicit % label and the Elapsed/Remaining label; input/output rows and combobox columns were tightened so no horizontal scrolling is needed at the default 1280×720 window. psutil was added as a hard dep of the `[gui]` extra; `run_gui.cmd` installs `.[gui,monitor]` and checks for psutil.
+- **CLI memory-reserve pre-flight** — the CLI now runs the same available-RAM check the GUI controller has: before silence detection and before concat, when available RAM < `memory_reserve_mb`, the run refuses to start with a clear error instead of choking mid-encode.
+
+### Fixed
+- **Pipeline:** stderr drain is now awaited in the cut phase so OOM classification isn't racing the drain thread; RAM-monitor cancellation surfaces as `FFmpegOutOfMemoryError` (with a memory hint) instead of a generic concatenation failure; first-run silence detection writes resume checkpoints so Ctrl+C no longer restarts from t=0; `download()` picks the real file path out of yt-dlp's stdout instead of assuming the last line is the path; watchdogs include stderr in timeout errors; path expansion (`~`) accepted in the Waveform-open eligibility check.
+- **GUI:** the Silence info label is now actually filled (the info callback was wired but never called); cross-thread `after()` calls from the waveform render worker now use the thread-safe dispatcher; Tk callback drops no longer swallow non-`TclError` errors silently; preset switching is no longer sticky (selecting a preset then "balanced" restores defaults); the preset selection now survives an app restart. `cancel_process` closes the child's stdio pipes before `kill()` so ffmpeg can't linger on a full pipe buffer; a kill that times out now warns and returns `False` instead of pretending success.
+- **Waveform rendering:** peak slicing no longer drops the bucket under the cursor at high zoom (`ceil` instead of floor), and the threshold / dB-axis / bar-height math is unified in one helper so the threshold line renders exactly at the bar height.
+
 ## [0.3] - 2026-07-28
 
 ### Added
