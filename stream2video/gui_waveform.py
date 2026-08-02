@@ -411,7 +411,15 @@ class WaveformMixin:
                 pass
             self._waveform_tooltip_after_id = None
         self._hide_waveform_tooltip()
-        self._waveform_tooltip_after_id = self.after_idle(self._show_waveform_tooltip_on_idle)
+        # ``after_idle`` raises TclError if the window is already
+        # destroyed — catch it so the exception doesn't propagate to the
+        # Tk event loop as an unhandled error.
+        try:
+            self._waveform_tooltip_after_id = self.after_idle(
+                self._show_waveform_tooltip_on_idle
+            )
+        except Exception:
+            self._waveform_tooltip_after_id = None
 
     def _on_waveform_leave(self, _event: Any) -> None:
         """Forget the cursor position when it leaves the image so
@@ -1024,10 +1032,17 @@ class WaveformMixin:
                 if count_changed:
                     self._log(f"  Waveform updated: {len(segments)} silences so far")
 
-        self.after(
-            1000,
-            lambda: self._poll_live_segments(in_path, margin, token, state),
-        )
+        # Re-schedule the next poll. ``after()`` raises TclError if the
+        # window is already destroyed (e.g. user closed the main window
+        # while the pipeline is running) - catch it so the exception
+        # doesn't propagate to the Tk event loop as an unhandled error.
+        try:
+            self.after(
+                1000,
+                lambda: self._poll_live_segments(in_path, margin, token, state),
+            )
+        except Exception:
+            pass
 
     def _safe_status_set(self, text: str) -> None:
         """Update the waveform status label; no-op if the popup is closed."""

@@ -217,6 +217,7 @@ def silence_pixel_ranges(
     total_duration: float,
     plot_width: int,
     view_start: float = 0.0,
+    n_peaks: int | None = None,
 ) -> list[tuple[int, int]]:
     """Map silence ``(start, end)`` ranges to ``(x_left, x_right)`` pixels
     within the visible window ``[view_start, view_start + total_duration)``.
@@ -230,6 +231,12 @@ def silence_pixel_ranges(
     replacement for the original ``[0, total_duration)`` mapping — pass
     the actual left edge of the visible window when the renderer is
     showing a panned/zoomed sub-region of the timeline.
+
+    When ``n_peaks`` is provided the mapping aligns with the bar-rendering
+    loop's ``px * n_peaks // plot_width`` bucket indexing, ensuring the
+    silence overlay lines up exactly with the waveform bars at any zoom
+    level (rather than drifting by up to one peak-bucket width when the
+    view is a narrow slice of the full duration).
     """
     if total_duration <= 0 or plot_width <= 0:
         return []
@@ -242,9 +249,18 @@ def silence_pixel_ranges(
         end = min(view_end, seg.end)
         if end <= start:
             continue
-        # Map the segment's position within the visible window.
-        x_left = int((start - view_start) / total_duration * plot_width)
-        x_right = int((end - view_start) / total_duration * plot_width)
+        if n_peaks is not None and n_peaks > 0:
+            # Map via peak-bucket space so the overlay aligns with the
+            # same bucket boundaries used by the bar-rendering loop.
+            # px = bucket_index * plot_width / n_peaks
+            bucket_start = (start - view_start) / total_duration * n_peaks
+            bucket_end = (end - view_start) / total_duration * n_peaks
+            x_left = int(bucket_start / n_peaks * plot_width)
+            x_right = int(bucket_end / n_peaks * plot_width)
+        else:
+            # Map the segment's position within the visible window.
+            x_left = int((start - view_start) / total_duration * plot_width)
+            x_right = int((end - view_start) / total_duration * plot_width)
         # Ensure the right edge advances at least 1px past the left so
         # sub-pixel-wide silences still render as a thin line.
         if x_right == x_left:
@@ -443,7 +459,7 @@ def render_waveform_image(
     silenced = bytearray(plot_w)
     if total_duration and total_duration > 0 and silence_segments:
         for x_lp, x_rp in silence_pixel_ranges(
-            silence_segments, total_duration, plot_w, view_start
+            silence_segments, total_duration, plot_w, view_start, n_peaks=len(peaks)
         ):
             for x in range(x_lp, x_rp):
                 if 0 <= x < plot_w:
@@ -514,7 +530,7 @@ def render_waveform_image(
         overlay = Image.new("RGBA", (plot_w, plot_h), (0, 0, 0, 0))
         ov_draw = ImageDraw.Draw(overlay)
         for x_lp, x_rp in silence_pixel_ranges(
-            silence_segments, total_duration, plot_w, view_start
+            silence_segments, total_duration, plot_w, view_start, n_peaks=len(peaks)
         ):
             ov_draw.rectangle(
                 [(x_lp, 0), (x_rp - 1, plot_h - 1)],

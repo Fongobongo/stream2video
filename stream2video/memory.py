@@ -261,7 +261,12 @@ def auto_budget_mb() -> float | None:
         return None
     try:
         vm = psutil.virtual_memory()
-        return vm.total / (1024 * 1024) * 0.60
+        budget = vm.total / (1024 * 1024) * 0.60
+        # On very low-RAM systems (512 MB total → ~307 MB budget) the
+        # monitor would kill almost any encode immediately. Impose a
+        # floor so the pipeline remains usable; the reserve floor still
+        # protects the OS.
+        return max(budget, 512.0)
     except Exception:
         logger.debug("psutil.virtual_memory failed in auto_budget_mb", exc_info=True)
         return None

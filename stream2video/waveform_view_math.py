@@ -84,6 +84,11 @@ def compute_zoom_view(
         anchor = view_start + cursor_frac * view_duration
     else:
         anchor = (view_start + view_end) / 2.0
+        # When anchoring on the center, use 0.5 so the new view is
+        # centered on the anchor rather than shifted by the stale
+        # cursor_frac (which may be from an old mousemove and would
+        # produce an asymmetric zoom).
+        cursor_frac = 0.5
     new_start = anchor - cursor_frac * new_duration
     new_start = max(0.0, min(duration - new_duration, new_start))
     return (new_start, new_start + new_duration)

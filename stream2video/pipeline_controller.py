@@ -24,6 +24,7 @@ separately by ``tests/test_media_correctness.py``).
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -504,7 +505,7 @@ class PipelineController:
         )
         self.cb.on_log(f"Size: {fmt_size(src_size_bytes)}")
 
-        file_size_mb = src_size_bytes // 1024 // 1024
+        file_size_mb = math.ceil(src_size_bytes / 1024 / 1024)
         if self.cfg.method == "batch" and file_size_mb > 4096:
             self.cb.on_log(
                 f"[WARN] File is {file_size_mb} MB — batch mode may use a lot of RAM. "

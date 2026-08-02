@@ -57,6 +57,13 @@ def cancel_monitor(
                     process.kill()
                 except Exception:
                     pass
+                # Re-raising from a daemon thread would not propagate to
+                # the caller — the caller's wait loop only sees
+                # ``cancelled.is_set()`` and raises a generic
+                # ``CancelledError``. The real error is already logged
+                # above via ``logger.exception``; that is the most we can
+                # do from a background thread without changing the
+                # caller's control flow.
 
         thread = threading.Thread(target=_monitor, daemon=True)
         thread.start()

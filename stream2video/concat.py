@@ -1338,6 +1338,50 @@ def _ffprobe_is_valid_mp4(path: Path) -> bool:
     return _ffprobe_is_valid_media(path, stream_type="v")
 
 
+def _ffprobe_duration_ok(path: Path, expected_seconds: float, *, slack: float = 1.0) -> bool:
+    """Check that a resume part's ffprobe duration is close to the expected value.
+
+    ffmpeg killed mid-write can leave a valid moov atom (the file passes
+    ``_ffprobe_is_valid_media``) but a truncated body — the duration read
+    from the moov reflects the planned length, not the actual content. Comparing
+    against the expected duration catches holes in the middle of the final
+    video. ``slack`` is the tolerance in seconds; 1.0s covers encoder flush
+    jitter and ffmpeg's own rounding without accepting truncated outputs.
+
+    When ffprobe cannot determine the duration (corrupt file, timeout,
+    non-media data), returns ``True`` — the caller's existing
+    ``_ffprobe_is_valid_media`` codec check already gatekeeps those cases,
+    and we don't want to double-reject a file whose codec is fine but
+    whose duration is unreadable for unrelated reasons.
+    """
+    try:
+        r = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            **no_window_kwargs(),
+        )
+        if r.returncode != 0:
+            return True  # duration unreadable — fall back to codec check alone
+        duration_str = r.stdout.strip()
+        if not duration_str:
+            return True
+        actual = float(duration_str)
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+        return True  # duration unreadable — fall back to codec check alone
+    return abs(actual - expected_seconds) <= slack
+
+
 def _run_final_concat(
     work_dir: Path,
     output_path: Path,
@@ -1600,6 +1644,7 @@ def _run_audio_extract(
                 seg_path.exists()
                 and seg_path.stat().st_size >= min_part_bytes
                 and _ffprobe_is_valid_media(seg_path, stream_type="a")
+                and _ffprobe_duration_ok(seg_path, dur)
             ):
                 skipped += 1
                 encoded_keep += dur
@@ -2194,11 +2239,13 @@ def _run_cut_then_encode(
             cut_path = cut_dir / f"cut_{i:06d}.mkv"
 
             # Resume skip: if the file exists, is large enough, and
-            # passes ffprobe validation, reuse it.
+            # passes ffprobe validation AND has the expected duration,
+            # reuse it.
             if (
                 cut_path.exists()
                 and cut_path.stat().st_size >= min_part_bytes
                 and _ffprobe_is_valid_mp4(cut_path)
+                and _ffprobe_duration_ok(cut_path, dur)
             ):
                 logger.debug(f"cut_then_encode: reusing cut_{i:06d}.mkv")
                 continue
@@ -2613,6 +2660,7 @@ def _run_batch_concat(
                 chunk_path.exists()
                 and chunk_path.stat().st_size >= min_part_bytes
                 and _ffprobe_is_valid_mp4(chunk_path)
+                and _ffprobe_duration_ok(chunk_path, sum(e - s for s, e in chunk))
             ):
                 skipped += 1
                 encoded_duration += sum(e - s for s, e in chunk)

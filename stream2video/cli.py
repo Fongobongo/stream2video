@@ -1031,7 +1031,10 @@ def main(
                     save_silence_cache(video_path, silence_segments, output_dir, config)
                     # Detection succeeded → the final cache is the
                     # source of truth, the resume file can be removed.
-                    resume_cache_path.unlink(missing_ok=True)
+                    try:
+                        resume_cache_path.unlink(missing_ok=True)
+                    except OSError as e:
+                        logger.warning(f"Could not remove stale resume cache: {e}")
 
                 # By here `silence_segments` is non-None — either loaded
                 # from cache or freshly detected. Narrow the type so the
