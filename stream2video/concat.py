@@ -2636,10 +2636,14 @@ def _run_batch_concat(
     # historical behaviour is preserved exactly. Probed once before the
     # chunk loop so it doesn't add an ffprobe call per chunk.
     start_time = get_video_start_time(video_path)
-    if start_time < -0.1:
-        # Negative start_time (DTS-based capture artifacts) is handled
-        # by ffmpeg's ``-avoid_negative_ts`` at the muxer level; treat
-        # it as zero here so we don't overcompensate a non-issue.
+    # Clamp negative start_time to 0. A negative container start_time
+    # (e.g. -2.0 from DTS-based captures) means ffmpeg shifts timestamps
+    # so the earliest DTS starts at 0 — the actual PTS timeline IS
+    # 0-indexed, and compensating would shift the trim windows early by
+    # |start_time|, cutting real content the user wants to keep.
+    # ffmpeg's ``-avoid_negative_ts`` at the muxer level already zeroes
+    # the DTS side; we just need to not double-compensate here.
+    if start_time < 0.0:
         start_time = 0.0
 
     try:
@@ -2759,9 +2763,17 @@ def _run_batch_concat(
                 # fail mid-graph. The concat filter's ``a=1`` flag is
                 # similarly dropped for audio-less sources so the output
                 # is video-only. See P1.14 in the fix plan.
+                #
+                # ``apad`` + ``atrim=0:duration`` pads/trims the audio
+                # chain to exactly match the video chain's duration so
+                # the concat filter doesn't see a shorter audio stream
+                # bleeding silence into the next segment's timeslot
+                # (audio-outlives-video inside the final concat demuxer
+                # join). The padding is silence, so no audible artifact.
                 if source_has_audio:
                     a_chains.append(
-                        f"[0:a]atrim={s + start_time}:{e + start_time},asetpts=PTS-STARTPTS[a{idx}]"
+                        f"[0:a]atrim={s + start_time}:{e + start_time},asetpts=PTS-STARTPTS,"
+                        f"apad,atrim=0:{e - s}[a{idx}]"
                     )
             n = len(chunk)
             if source_has_audio:

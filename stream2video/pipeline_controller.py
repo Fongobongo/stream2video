@@ -316,6 +316,21 @@ class PipelineController:
         except TypeError:
             self.cb.on_status(text)
 
+    def _cleanup_download_path(self) -> None:
+        """Delete the downloaded source file if this run actually downloaded it.
+
+        ``_download_path`` is only set when the download phase wrote a
+        fresh file (``download_result.is_downloaded``). For local files
+        it's always None, so this is a no-op — the user's local file is
+        never touched (ownership check).
+        """
+        if self._download_path is not None and self._download_path.exists():
+            try:
+                self._download_path.unlink()
+            except OSError:
+                pass
+        self._download_path = None
+
     def run(self) -> PipelineResult:
         """Run the three-phase pipeline. Raises ``PipelineError`` on failure.
 
@@ -380,53 +395,23 @@ class PipelineController:
             # failed, not a generic PipelineUnexpectedError.
             # Clean up the incomplete download so a failed run doesn't
             # leave a stale file on disk.
-            if self._download_path is not None and self._download_path.exists():
-                try:
-                    self._download_path.unlink()
-                except OSError:
-                    pass
-            self._download_path = None
+            self._cleanup_download_path()
             raise
         except (CancelledError, SilenceCancelledError, DownloadCancelledError) as e:
-            if self._download_path is not None and self._download_path.exists():
-                try:
-                    self._download_path.unlink()
-                except OSError:
-                    pass
-            self._download_path = None
+            self._cleanup_download_path()
             raise PipelineCancelled(str(e)) from e
         except (DownloadError, URLValidationError) as e:
-            if self._download_path is not None and self._download_path.exists():
-                try:
-                    self._download_path.unlink()
-                except OSError:
-                    pass
-            self._download_path = None
+            self._cleanup_download_path()
             raise PipelineDownloadError(str(e)) from e
         except SilenceDetectionError as e:
-            if self._download_path is not None and self._download_path.exists():
-                try:
-                    self._download_path.unlink()
-                except OSError:
-                    pass
-            self._download_path = None
+            self._cleanup_download_path()
             raise PipelineSilenceError(str(e)) from e
         except ConcatError as e:
-            if self._download_path is not None and self._download_path.exists():
-                try:
-                    self._download_path.unlink()
-                except OSError:
-                    pass
-            self._download_path = None
+            self._cleanup_download_path()
             raise PipelineConcatError(str(e)) from e
         except Exception as e:
             logger.exception("Pipeline unexpected error")
-            if self._download_path is not None and self._download_path.exists():
-                try:
-                    self._download_path.unlink()
-                except OSError:
-                    pass
-            self._download_path = None
+            self._cleanup_download_path()
             raise PipelineUnexpectedError(str(e)) from e
 
     # ── Phase 1: Download / resolve ──────────────────────────────

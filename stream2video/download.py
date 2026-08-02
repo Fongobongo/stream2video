@@ -456,8 +456,14 @@ def download(
                         except Exception:
                             # A callback crash must not break the download —
                             # progress is best-effort UI feedback, not a hard
-                            # signal. Log and continue.
-                            logger.debug("progress_callback raised", exc_info=True)
+                            # signal. Log at WARNING so the user (and any
+                            # developer reading the log) sees the real reason
+                            # the progress bar stopped updating, not just a
+                            # silent freeze.
+                            logger.warning(
+                                "progress_callback raised; download continues",
+                                exc_info=True,
+                            )
                     continue
                 stdout_lines.append(text)
 

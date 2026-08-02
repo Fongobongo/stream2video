@@ -250,13 +250,15 @@ def silence_pixel_ranges(
         if end <= start:
             continue
         if n_peaks is not None and n_peaks > 0:
-            # Map via peak-bucket space so the overlay aligns with the
-            # same bucket boundaries used by the bar-rendering loop.
-            # px = bucket_index * plot_width / n_peaks
-            bucket_start = (start - view_start) / total_duration * n_peaks
-            bucket_end = (end - view_start) / total_duration * n_peaks
-            x_left = int(bucket_start / n_peaks * plot_width)
-            x_right = int(bucket_end / n_peaks * plot_width)
+            # Snap to the nearest peak-bucket boundary so the overlay
+            # column aligns with the bar-rendering loop's bucket-to-pixel
+            # mapping at any zoom level. The bar loop computes
+            # ``px = bucket_index * plot_width // n_peaks``; we invert
+            # that here so both edges land on the same bucket boundary.
+            bucket_lo = round((start - view_start) / total_duration * n_peaks)
+            bucket_hi = round((end - view_start) / total_duration * n_peaks)
+            x_left = bucket_lo * plot_width // n_peaks
+            x_right = bucket_hi * plot_width // n_peaks
         else:
             # Map the segment's position within the visible window.
             x_left = int((start - view_start) / total_duration * plot_width)
@@ -350,6 +352,10 @@ def slice_peaks_by_time(
     if ve <= vs:
         return []
     # Map [vs, ve] to bucket indices [lo, hi] in `peaks`.
+    # int() on the left edge + ceil() on the right edge ensures a
+    # sub-bucket window that straddles a bucket boundary still includes
+    # both neighbouring buckets — dropping a partial bucket would create
+    # a hole in the rendered waveform.
     n = len(peaks)
     lo = int(vs / total_duration * n)
     hi = max(lo + 1, math.ceil(ve / total_duration * n))

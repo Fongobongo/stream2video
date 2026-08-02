@@ -354,11 +354,14 @@ def detect_silence(
             )
         else:
             _extract_audio_wav(video_path, wav_path, cancel_callback, timeout=effective_timeout)
-            # The WAV was just (re-)extracted — no prior work to resume
-            # from, even if `initial_segments` was set above (it came
-            # from an old run whose state is no longer in sync with the
-            # new WAV). Drop the resume context for the canonical
-            # detection so we don't skip work we don't actually have.
+            # The WAV was just (re-)extracted with -copyts — its PTS
+            # timeline matches the source video exactly, so the
+            # resume context (initial_segments + resume_from) is still
+            # valid. Pass it through so a cancelled/crashed run can
+            # pick up from the last checkpoint instead of starting
+            # from t=0 on a multi-hour source. Both the WAV and the
+            # .resume file live in source-time coordinates thanks to
+            # -copyts on the extraction side.
             segments_D = _run_silencedetect(
                 wav_path,
                 threshold,
@@ -368,6 +371,8 @@ def detect_silence(
                 cancel_callback,
                 "WAV",
                 on_segment=on_segment,
+                initial_segments=initial_segments,
+                resume_from=resume_from,
                 resume_save_path=resume_cache_path,
                 resume_save_config=current_config,
                 timeout=effective_timeout,
