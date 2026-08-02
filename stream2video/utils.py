@@ -10,6 +10,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, Any
 
+from stream2video.tools import ffprobe_path
+
 logger = logging.getLogger(__name__)
 
 CANCEL_POLL_INTERVAL = 0.5
@@ -76,7 +78,7 @@ def cancel_monitor(
 def get_video_duration(video_path: Path) -> float | None:
     """Get video duration in seconds via ffprobe."""
     cmd = [
-        "ffprobe",
+        ffprobe_path(),
         "-v",
         "error",
         "-show_entries",
@@ -124,7 +126,7 @@ def get_video_start_time(video_path: Path) -> float:
     most sources have start_time=0 anyway.
     """
     cmd = [
-        "ffprobe",
+        ffprobe_path(),
         "-v",
         "error",
         "-show_entries",
@@ -165,7 +167,7 @@ def has_audio_stream(video_path: Path) -> bool:
     sources. See P1.14 in the fix plan.
     """
     cmd = [
-        "ffprobe",
+        ffprobe_path(),
         "-v",
         "error",
         "-select_streams",

@@ -305,7 +305,12 @@ class TestWavCacheFallback:
         call_index = {"i": 0}
 
         def _is_extract_cmd(cmd) -> bool:
-            if not cmd or cmd[0] != "ffmpeg":
+            # ``cmd[0]`` is the *resolved* ffmpeg path in production (see
+            # ``tools.ffmpeg_path`` — the pipeline stops spawning via the
+            # bare name precisely so a mid-run PATH / winget shim hiccup
+            # can't surface as FileNotFoundError). Match on the basename so
+            # this test model stays correct either way.
+            if not cmd or Path(cmd[0]).name.lower() not in ("ffmpeg", "ffmpeg.exe"):
                 return False
             has_vn = "-vn" in cmd
             ends_wav = bool(cmd[-1:]) and str(cmd[-1]).endswith(".wav")

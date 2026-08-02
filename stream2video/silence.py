@@ -29,6 +29,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from stream2video.config import CONFIG_DEFAULTS
+from stream2video.tools import ffmpeg_path
 from stream2video.utils import (
     CANCEL_POLL_INTERVAL,
     cancel_monitor,
@@ -495,7 +496,7 @@ def detect_silence_stream(
     # Progressive path: parse stderr line-by-line and fire the callback.
     noise = 10 ** (threshold / 20)
     cmd = [
-        "ffmpeg",
+        ffmpeg_path(),
         "-hide_banner",
         "-nostats",
         "-i",
@@ -660,7 +661,7 @@ def _run_silencedetect(
     # the `initial + new` merge on real videos. With `-copyts`, ffmpeg
     # preserves the source PTS and the segments are directly
     # concatenable. The option is harmless (no-op) when not seeking.
-    cmd = ["ffmpeg", "-copyts", "-progress", "pipe:1"]
+    cmd = [ffmpeg_path(), "-copyts", "-progress", "pipe:1"]
     if resume_from is not None and resume_from > 0:
         # `-ss` before `-i` = fast seek (keyframe-aligned). Accurate
         # seek (output PTS aligned) is not needed — silencedetect
@@ -931,7 +932,7 @@ def _extract_audio_wav(
     wav_path.parent.mkdir(parents=True, exist_ok=True)
 
     cmd = [
-        "ffmpeg",
+        ffmpeg_path(),
         "-y",
         "-copyts",
         "-i",

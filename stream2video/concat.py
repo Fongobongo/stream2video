@@ -25,6 +25,7 @@ from stream2video.config import (
 )
 from stream2video.memory import MemoryMonitor, auto_budget_mb
 from stream2video.silence import SilenceSegment
+from stream2video.tools import ffmpeg_path, ffprobe_path
 from stream2video.utils import (
     CANCEL_POLL_INTERVAL,
     cancel_monitor,
@@ -618,7 +619,7 @@ def check_encoder(name: str) -> bool:
         try:
             r = subprocess.run(
                 [
-                    "ffmpeg",
+                    ffmpeg_path(),
                     "-y",
                     "-v",
                     "error",
@@ -1322,7 +1323,7 @@ def _ffprobe_is_valid_media(path: Path, stream_type: str = "v") -> bool:
     try:
         r = subprocess.run(
             [
-                "ffprobe",
+                ffprobe_path(),
                 "-v",
                 "error",
                 "-select_streams",
@@ -1369,7 +1370,7 @@ def _ffprobe_duration_ok(path: Path, expected_seconds: float, *, slack: float = 
     try:
         r = subprocess.run(
             [
-                "ffprobe",
+                ffprobe_path(),
                 "-v",
                 "error",
                 "-show_entries",
@@ -1437,7 +1438,7 @@ def _run_final_concat(
     label_text = label
     _run_ffmpeg(
         [
-            "ffmpeg",
+            ffmpeg_path(),
             "-y",
             "-loglevel",
             "error",
@@ -1526,7 +1527,7 @@ def _run_audio_concat_filter(
     label_text = "audio concat filter"
     _run_ffmpeg(
         [
-            "ffmpeg",
+            ffmpeg_path(),
             "-y",
             "-loglevel",
             "error",
@@ -1681,7 +1682,7 @@ def _run_audio_extract(
             label_text = f"audio segment {i} encode"
             _run_ffmpeg(
                 [
-                    "ffmpeg",
+                    ffmpeg_path(),
                     "-y",
                     "-loglevel",
                     "error",
@@ -1850,7 +1851,7 @@ def _run_gapless_segment_concat(
     label_text = "gapless segment concat"
     _run_ffmpeg(
         [
-            "ffmpeg",
+            ffmpeg_path(),
             "-y",
             "-loglevel",
             "error",
@@ -2022,7 +2023,7 @@ def _run_segment_concat(
             label_text = f"segment {i} encode"
             _run_ffmpeg(
                 [
-                    "ffmpeg",
+                    ffmpeg_path(),
                     "-y",
                     "-loglevel",
                     "error",
@@ -2263,7 +2264,7 @@ def _run_cut_then_encode(
                 continue
 
             cmd = [
-                "ffmpeg",
+                ffmpeg_path(),
                 "-y",
                 "-loglevel",
                 "error",
@@ -2352,7 +2353,7 @@ def _run_cut_then_encode(
         label_text = "cut_then_encode final encode"
         _run_ffmpeg(
             [
-                "ffmpeg",
+                ffmpeg_path(),
                 "-y",
                 "-loglevel",
                 "error",
@@ -2828,7 +2829,7 @@ def _run_batch_concat(
                 label_text = f"batch chunk {ci}/{n_chunks}"
                 _run_ffmpeg(
                     [
-                        "ffmpeg",
+                        ffmpeg_path(),
                         "-y",
                         "-loglevel",
                         "error",

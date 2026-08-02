@@ -23,6 +23,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from stream2video.formatters import fmt_clock_time
 from stream2video.silence import SilenceSegment
+from stream2video.tools import ffmpeg_path
 from stream2video.utils import no_window_kwargs, registered_process
 
 # Canvas sizing constants. Exposed as module-level so tests can pin them.
@@ -91,7 +92,7 @@ def read_peaks_from_stream(
         return [], 0.0
 
     cmd = [
-        "ffmpeg",
+        ffmpeg_path(),
         "-hide_banner",
         "-nostats",
         "-loglevel",
