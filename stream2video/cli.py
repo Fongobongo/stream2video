@@ -451,16 +451,19 @@ def main(
         str(CONFIG_DEFAULTS["memory_limit_mb"]),
         "--memory-limit-mb",
         help="RAM budget for the encode pipeline: 'auto' (60%% of total RAM, "
-        "default) or a positive MB value. 0 disables the budget check (only "
-        "the OS reserve remains). If not passed, the config file's "
+        "default) or a positive MB value. Exceeding 95%% of the budget cancels "
+        "the running ffmpeg (only ffmpeg's own RSS, not other apps' pressure). "
+        "0 disables the budget check. If not passed, the config file's "
         "`memory_limit_mb` key is used.",
     ),
     memory_reserve_mb: int = typer.Option(
         CONFIG_DEFAULTS["memory_reserve_mb"],
         "--memory-reserve-mb",
-        help="Hard floor of available RAM in MB that the pipeline never violates. "
-        "Default 2048 (2 GB). Raise on memory-constrained laptops. If not "
-        "passed, the config file's `memory_reserve_mb` key is used.",
+        help="Available-RAM warning floor in MB. Below this the pipeline logs a "
+        "warning but keeps running (cancelling on transient system-wide dips "
+        "would lose encode progress). Pre-flight still refuses to start a new "
+        "phase below this floor. Default 2048 (2 GB). If not passed, the "
+        "config file's `memory_reserve_mb` key is used.",
     ),
     segment_encode_timeout: int = typer.Option(
         CONFIG_DEFAULTS["segment_encode_timeout"],

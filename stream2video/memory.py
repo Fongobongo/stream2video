@@ -12,16 +12,23 @@ Design:
   * Soft threshold (default 80% of budget): warning log + set
     ``soft_exceeded`` so the pipeline can refuse to start a new
     parallel heavy task.
-  * Hard threshold (default 95% of budget, OR OS reserve violated):
-    cancel the current task via the same ``cancel_callback`` the user
-    uses for Ctrl+C, so the existing cleanup path runs.
+  * Hard threshold (default 95% of budget): cancel the current task
+    via the same ``cancel_callback`` the user uses for Ctrl+C, so the
+    existing cleanup path runs.
   * When ``psutil`` is unavailable the monitor degrades to a no-op
     with a one-time warning; the historical behaviour (no memory
     guardrail) is preserved so users without psutil aren't blocked.
-  * The OS reserve is a hard floor: the monitor never lets the
-    pipeline's RSS push ``available RAM`` below ``memory_reserve_mb``.
-    This catches the case where the budget was computed from total RAM
-    but other processes (browser, IDE) already took a chunk.
+  * The OS reserve is a WARNING floor, not a kill switch: when
+    ``available RAM`` drops below ``memory_reserve_mb`` the monitor
+    logs a warning once so the user sees the system is tight, but the
+    encode keeps running. Cancelling a multi-minute ffmpeg on a
+    transient dip (browser GC, AV scan, file cache pressure) would lose
+    all of that work — and Windows recovers from memory pressure via
+    standby-list trimming / paging far more gracefully than a
+    cancelled encode recovers. Only the ffmpeg process's own RSS
+    budget (``memory_limit_mb``) cancels the task; that one cannot
+    false-fire on pressure from *other* apps the way the system-wide
+    available-RAM number can.
 
 The monitor is intentionally process-scoped (one ffmpeg at a time)
 rather than system-scoped — system-wide memory pressure is the OS's
@@ -136,10 +143,10 @@ class MemoryMonitor:
         label: str = "ffmpeg",
     ):
         self.pid = pid
-        # ``memory_limit_mb=None`` disables the budget check; only the
-        # OS reserve remains. Used when the user hasn't set a budget
-        # (the default) so we still catch a runaway encode via the
-        # reserve but don't enforce a soft cap.
+        # ``memory_limit_mb=None`` disables the RSS budget check. The
+        # OS reserve then remains as a warning-only signal — it never
+        # cancels the task, so with no budget configured encode RAM is
+        # effectively unbounded (as it was before P1.17).
         self.memory_limit_mb = memory_limit_mb
         self.memory_reserve_mb = memory_reserve_mb
         self.soft_threshold_frac = soft_threshold_frac
@@ -153,6 +160,10 @@ class MemoryMonitor:
         self.soft_exceeded = False
         self.hard_exceeded = False
         self.peak_rss_mb: float = 0.0
+        # Set when available RAM dipped below ``memory_reserve_mb`` at
+        # least once. Informational only — surfaced in the final peak-RSS
+        # log line; unlike ``hard_exceeded`` it does NOT cancel anything.
+        self.os_reserve_breached = False
 
         global _missing_psutil_warned
         if not _HAS_PSUTIL and not _missing_psutil_warned:
@@ -178,6 +189,7 @@ class MemoryMonitor:
 
     def _run(self) -> None:
         warned_soft = False
+        warned_reserve = False
         while not self._stop_event.wait(_POLL_INTERVAL):
             rss = _process_rss_mb(self.pid)
             if rss is not None:
@@ -223,28 +235,32 @@ class MemoryMonitor:
                             except Exception:
                                 logger.debug("on_warning raised", exc_info=True)
 
-            # OS reserve check — independent of the budget. Even when
-            # the user hasn't set a budget, refuse to drive available
-            # RAM below the reserve floor (default 2 GB).
+            # OS reserve check — warning only, never cancels. The
+            # available-RAM reading reflects pressure from ALL processes
+            # (browser, IDE, file cache churn), so cancelling a running
+            # encode on it trades a guaranteed loss of the work already
+            # done for a hypothetical swap the OS usually handles by
+            # trimming the standby list. Surface it once so the user
+            # can see the system was tight; the per-process RSS budget
+            # above remains the only hard door.
             avail = _available_ram_mb()
             if avail is not None and avail < self.memory_reserve_mb:
-                self.hard_exceeded = True
-                msg = (
-                    f"available RAM {avail:.0f}MB < reserve "
-                    f"{self.memory_reserve_mb:.0f}MB — cancelling {self.label}"
-                )
-                logger.error(msg)
-                if self.on_warning is not None:
-                    try:
-                        self.on_warning(msg)
-                    except Exception:
-                        logger.debug("on_warning raised", exc_info=True)
-                if self.cancel_callback is not None:
-                    try:
-                        self.cancel_callback()
-                    except Exception:
-                        logger.debug("cancel_callback raised", exc_info=True)
-                return
+                self.os_reserve_breached = True
+                if not warned_reserve:
+                    warned_reserve = True
+                    msg = (
+                        f"available RAM {avail:.0f}MB < reserve "
+                        f"{self.memory_reserve_mb:.0f}MB — system memory "
+                        f"is tight; {self.label} continues (reserve "
+                        "violation is logged, not enforced; see "
+                        "memory_reserve_mb docs)"
+                    )
+                    logger.warning(msg)
+                    if self.on_warning is not None:
+                        try:
+                            self.on_warning(msg)
+                        except Exception:
+                            logger.debug("on_warning raised", exc_info=True)
 
 
 def auto_budget_mb() -> float | None:

@@ -229,9 +229,16 @@ def _make_memory_monitor_factory(
     if budget_mb is None and reserve_mb <= 0:
         return None
     if budget_mb is not None:
-        logger.info("Memory guardrail: RSS budget %.0fMB, reserve %.0fMB", budget_mb, reserve_mb)
+        logger.info(
+            "Memory guardrail: RSS budget %.0fMB, reserve %.0fMB (warning-only)",
+            budget_mb,
+            reserve_mb,
+        )
     else:
-        logger.info("Memory guardrail: RSS budget disabled, reserve %.0fMB", reserve_mb)
+        logger.info(
+            "Memory guardrail: RSS budget disabled, reserve %.0fMB (warning-only)",
+            reserve_mb,
+        )
 
     def _factory(label: str) -> MemoryMonitor | None:
         return MemoryMonitor(
@@ -991,6 +998,11 @@ def _run_ffmpeg(
                         + (
                             " (HARD limit hit -- task cancelled)"
                             if memory_monitor.hard_exceeded
+                            else ""
+                        )
+                        + (
+                            " (OS reserve was breached -- warning only)"
+                            if getattr(memory_monitor, "os_reserve_breached", False)
                             else ""
                         )
                     )

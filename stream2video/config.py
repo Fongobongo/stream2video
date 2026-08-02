@@ -35,9 +35,15 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     # start of the run; a positive int is taken as a MB cap. ``None`` /
     # ``0`` disables the budget check (only the OS reserve remains).
     "memory_limit_mb": "auto",
-    # Hard floor of available RAM the pipeline never violates — even
-    # when the budget hasn't been hit, going below this triggers a
-    # cancel so the OS doesn't swap. 2 GB matches the default Windows
+    # Warning floor for available RAM. When a pre-flight check or the
+    # encode-time monitor sees available RAM below this, it logs a
+    # warning but does NOT cancel running work — cancelling a
+    # multi-minute encode on a transient system-wide dip would lose the
+    # work already done, and Windows recovers from memory pressure by
+    # trimming standby / paging long before a real failure. Only the
+    # ffmpeg process's own RSS budget (``memory_limit_mb``) cancels a
+    # running encode. The pre-flight check still refuses to START a new
+    # heavy phase below this floor. 2 GB matches the default Windows
     # commit limit behaviour for the System process; raise it on
     # memory-constrained laptops.
     "memory_reserve_mb": 2048,
