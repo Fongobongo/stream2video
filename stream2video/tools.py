@@ -28,8 +28,11 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import subprocess
+import time
 from functools import cache
 from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -89,4 +92,75 @@ def ffprobe_path() -> str:
 def reset_tool_cache() -> None:
     """Drop the cached resolutions so tests can re-resolve with patched PATH."""
     _resolve_uncached.cache_clear()
+
+
+# Number of *additional* spawn attempts after the first one fails with
+# FileNotFoundError. Total spawn tries = 1 + _SPAWN_RETRY_ATTEMPTS.
+#
+# Why: on Windows, a ``FileNotFoundError`` ``CreateProcess`` result is not
+# always permanent — winget shim targets and certain AV/Defender filter
+# drivers intermittently block the image briefly. Before this helper even
+# one transient failure terminated hours-long pipelines (incident
+# 2026-08-02/03: after 380 successful segment encodes in one process, the
+# all-important concat spawn failed with "ffmpeg not found in PATH").
+_SPAWN_RETRY_ATTEMPTS = 3
+_SPAWN_RETRY_DELAY_S = 1.5
+
+
+def _re_resolve_cmd0(cmd: list) -> tuple[list, str]:
+    """If ``cmd[0]`` looks like our resolved ffmpeg/ffprobe, re-resolve it.
+
+    Returns ``(new_cmd, tool_name_or_empty)``.
+    """
+    exe0 = str(cmd[0]).lower() if cmd else ""
+    if "ffprobe" in exe0:
+        return [ffprobe_path(), *cmd[1:]], "ffprobe"
+    if "ffmpeg" in exe0:
+        return [ffmpeg_path(), *cmd[1:]], "ffmpeg"
+    return cmd, ""
+
+
+def _spawn_with_retry(
+    kind: str, cmd: list[str], kwargs: dict[str, Any]
+) -> subprocess.Popen[Any] | subprocess.CompletedProcess[Any]:
+    """Internal: spawn via Popen or run with retry on transient FNF."""
+    fn = subprocess.Popen if kind == "popen" else subprocess.run
+    last_exc: FileNotFoundError | None = None
+    for attempt in range(1 + _SPAWN_RETRY_ATTEMPTS):
+        try:
+            return fn(cmd, **kwargs)
+        except FileNotFoundError as exc:
+            last_exc = exc
+            if attempt >= _SPAWN_RETRY_ATTEMPTS:
+                break
+            reset_tool_cache()
+            cmd, tool = _re_resolve_cmd0(cmd)
+            logger.warning(
+                "spawn attempt %d/%d failed (FileNotFoundError for %r); "
+                "re-resolved %s and retrying in %.1fs",
+                attempt + 1,
+                1 + _SPAWN_RETRY_ATTEMPTS,
+                cmd[0],
+                tool or "tool",
+                _SPAWN_RETRY_DELAY_S,
+            )
+            time.sleep(_SPAWN_RETRY_DELAY_S)
+    assert last_exc is not None
+    raise last_exc
+
+
+def popen_with_retry(cmd: list[str], **popen_kwargs: Any) -> subprocess.Popen[Any]:
+    """``subprocess.Popen(cmd)`` with transparent retry on transient FNF.
+
+    Re-resolves the binary path (bypassing a possibly stale winget shim),
+    waits briefly between attempts, and re-raises the *last*
+    ``FileNotFoundError`` if every attempt fails — so callers' existing
+    "ffmpeg not found in PATH" handling still fires.
+    """
+    return _spawn_with_retry("popen", list(cmd), popen_kwargs)  # type: ignore[return-value]
+
+
+def run_with_retry(cmd: list[str], **run_kwargs: Any) -> subprocess.CompletedProcess[Any]:
+    """``subprocess.run(cmd)`` with transparent retry on transient FNF."""
+    return _spawn_with_retry("run", list(cmd), run_kwargs)  # type: ignore[return-value]
 

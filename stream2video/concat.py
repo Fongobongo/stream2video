@@ -25,7 +25,7 @@ from stream2video.config import (
 )
 from stream2video.memory import MemoryMonitor, auto_budget_mb
 from stream2video.silence import SilenceSegment
-from stream2video.tools import ffmpeg_path, ffprobe_path
+from stream2video.tools import ffmpeg_path, ffprobe_path, popen_with_retry, run_with_retry
 from stream2video.utils import (
     CANCEL_POLL_INTERVAL,
     cancel_monitor,
@@ -617,7 +617,7 @@ def check_encoder(name: str) -> bool:
         if name in _encoder_check_cache:
             return _encoder_check_cache[name]
         try:
-            r = subprocess.run(
+            r = run_with_retry(
                 [
                     ffmpeg_path(),
                     "-y",
@@ -775,7 +775,7 @@ def _run_ffmpeg(
     """
     stdout_target = subprocess.PIPE if track_progress else subprocess.DEVNULL
     try:
-        process = subprocess.Popen(
+        process = popen_with_retry(
             cmd,
             stdout=stdout_target,
             stderr=subprocess.PIPE,
@@ -1045,7 +1045,7 @@ def _run_subprocess_cmd(
     segment index for progress.
     """
     try:
-        process = subprocess.Popen(
+        process = popen_with_retry(
             cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
@@ -1321,7 +1321,7 @@ def _ffprobe_is_valid_media(path: Path, stream_type: str = "v") -> bool:
     the P0 audit in the v0.3 release plan).
     """
     try:
-        r = subprocess.run(
+        r = run_with_retry(
             [
                 ffprobe_path(),
                 "-v",
@@ -1368,7 +1368,7 @@ def _ffprobe_duration_ok(path: Path, expected_seconds: float, *, slack: float = 
     whose duration is unreadable for unrelated reasons.
     """
     try:
-        r = subprocess.run(
+        r = run_with_retry(
             [
                 ffprobe_path(),
                 "-v",
