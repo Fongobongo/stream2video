@@ -783,7 +783,11 @@ def _run_ffmpeg(
             **subprocess_kwargs(low_process_priority, rlimit_as_mb),
         )
     except FileNotFoundError as e:
-        raise FFmpegError("ffmpeg not found in PATH") from e
+        raise FFmpegError(
+            f"ffmpeg not found in PATH "
+            f"(attempted: {cmd[0]!r}, winerror={getattr(e, 'winerror', '?')}, "
+            f"filename={getattr(e, 'filename', '?')!r})"
+        ) from e
 
     with registered_process(process):
         memory_cancelled = threading.Event()
@@ -1053,7 +1057,11 @@ def _run_subprocess_cmd(
             **subprocess_kwargs(low_process_priority, rlimit_as_mb),
         )
     except FileNotFoundError as e:
-        raise FFmpegError("ffmpeg not found in PATH") from e
+        raise FFmpegError(
+            f"ffmpeg not found in PATH "
+            f"(attempted: {cmd[0]!r}, winerror={getattr(e, 'winerror', '?')}, "
+            f"filename={getattr(e, 'filename', '?')!r})"
+        ) from e
 
     stderr_pipe = process.stderr
     assert stderr_pipe is not None

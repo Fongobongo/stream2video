@@ -32,7 +32,7 @@ import subprocess
 import time
 from functools import cache
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +123,16 @@ def _re_resolve_cmd0(cmd: list) -> tuple[list, str]:
 def _spawn_with_retry(
     kind: str, cmd: list[str], kwargs: dict[str, Any]
 ) -> subprocess.Popen[Any] | subprocess.CompletedProcess[Any]:
-    """Internal: spawn via Popen or run with retry on transient FNF."""
+    """Internal: spawn via Popen or run with retry on transient FNF.
+
+    Each failed attempt logs the full exception detail (``winerror``,
+    ``filename``) plus a low-level ``CreateProcessW`` probe of the resolved
+    binary. On a locked/missing binary the probe surfaces the real NTSTATUS
+    mapped to Win32 (e.g. ``2`` = file not found, ``3`` = path not found,
+    ``5`` = access denied), which is what separates "shim vanished" from
+    "filter driver blocked the image" — both surface as the same opaque
+    ``FileNotFoundError`` from ``subprocess``.
+    """
     fn = subprocess.Popen if kind == "popen" else subprocess.run
     last_exc: FileNotFoundError | None = None
     for attempt in range(1 + _SPAWN_RETRY_ATTEMPTS):
@@ -131,22 +140,72 @@ def _spawn_with_retry(
             return fn(cmd, **kwargs)
         except FileNotFoundError as exc:
             last_exc = exc
+            probe = _createprocess_probe(cmd[0])
+            logger.warning(
+                "spawn attempt %d/%d failed (FileNotFoundError: filename=%r "
+                "winerror=%s); CreateProcess probe: %s",
+                attempt + 1,
+                1 + _SPAWN_RETRY_ATTEMPTS,
+                exc.filename,
+                exc.winerror,
+                probe,
+            )
             if attempt >= _SPAWN_RETRY_ATTEMPTS:
                 break
             reset_tool_cache()
             cmd, tool = _re_resolve_cmd0(cmd)
             logger.warning(
-                "spawn attempt %d/%d failed (FileNotFoundError for %r); "
-                "re-resolved %s and retrying in %.1fs",
-                attempt + 1,
-                1 + _SPAWN_RETRY_ATTEMPTS,
-                cmd[0],
+                "re-resolved %s -> %r; retrying in %.1fs",
                 tool or "tool",
+                cmd[0],
                 _SPAWN_RETRY_DELAY_S,
             )
             time.sleep(_SPAWN_RETRY_DELAY_S)
     assert last_exc is not None
     raise last_exc
+
+
+def _createprocess_probe(exe: str) -> str:
+    """Try ``CreateProcessW(exe)`` directly; return a one-line diagnostic.
+
+    Never raises. On non-Windows returns a static note.
+    """
+    if os.name != "nt":
+        return "probe n/a (not Windows)"
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    try:
+        try:
+            exists = Path(exe).is_file()
+        except OSError:
+            exists = False
+
+        si = (ctypes.c_byte * 112)()  # STARTUPINFO storage; contents unused
+
+        class PROCESS_INFORMATION(ctypes.Structure):
+            _fields_: ClassVar[list[tuple[str, Any]]] = [
+                ("hProcess", wintypes.HANDLE),
+                ("hThread", wintypes.HANDLE),
+                ("dwProcessId", wintypes.DWORD),
+                ("dwThreadId", wintypes.DWORD),
+            ]
+
+        pi = PROCESS_INFORMATION()
+        buf = ctypes.create_unicode_buffer(f'"{exe}" -version')
+        ok = kernel32.CreateProcessW(
+            None, buf, None, None, False, 0, None, None,
+            ctypes.cast(si, ctypes.c_void_p), ctypes.byref(pi),
+        )
+        if ok:
+            kernel32.CloseHandle(pi.hProcess)
+            kernel32.CloseHandle(pi.hThread)
+            return f"CreateProcessW OK (exists={exists}); wait, spawn just worked?!"
+        err = ctypes.get_last_error()
+        return f"CreateProcessW failed: winerror={err} ({ctypes.FormatError(err).strip()}); exists={exists}"
+    except Exception as e:  # pragma: no cover - probe must never kill the caller
+        return f"probe raised {type(e).__name__}: {e}"
 
 
 def popen_with_retry(cmd: list[str], **popen_kwargs: Any) -> subprocess.Popen[Any]:
