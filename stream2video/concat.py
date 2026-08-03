@@ -774,6 +774,13 @@ def _run_ffmpeg(
     historical behaviour for callers that haven't been updated).
     """
     stdout_target = subprocess.PIPE if track_progress else subprocess.DEVNULL
+    # Debug logging to help diagnose spawn failures from real GUI runs. When
+    # this exception fires, we want to know exactly what was attempted.
+    logger.debug(
+        f"spawning ffmpeg: cmd[0]={cmd[0]!r}, "
+        f"cmdlen={len(cmd)}, path_exists={Path(cmd[0]).is_file()}, "
+        f"cwd={os.getcwd()!r}, shell={os.getenv('COMSPEC', '?')}"
+    )
     try:
         process = popen_with_retry(
             cmd,
@@ -783,10 +790,24 @@ def _run_ffmpeg(
             **subprocess_kwargs(low_process_priority, rlimit_as_mb),
         )
     except FileNotFoundError as e:
+        logger.error(
+            "ffmpeg spawn failed: cmd[0]=%r exists=%s cmdlen=%d winerror=%s "
+            "filename=%r strerror=%r cwd=%r env_path_prefix=%r",
+            cmd[0],
+            Path(cmd[0]).is_file(),
+            len(cmd),
+            getattr(e, "winerror", "?"),
+            getattr(e, "filename", "?"),
+            getattr(e, "strerror", "?"),
+            os.getcwd(),
+            os.environ.get("PATH", "")[:200],
+        )
         raise FFmpegError(
             f"ffmpeg not found in PATH "
-            f"(attempted: {cmd[0]!r}, winerror={getattr(e, 'winerror', '?')}, "
-            f"filename={getattr(e, 'filename', '?')!r})"
+            f"(attempted: {cmd[0]!r}, exists={Path(cmd[0]).is_file()}, "
+            f"winerror={getattr(e, 'winerror', '?')}, "
+            f"filename={getattr(e, 'filename', '?')!r}, "
+            f"strerror={getattr(e, 'strerror', '?')!r})"
         ) from e
 
     with registered_process(process):

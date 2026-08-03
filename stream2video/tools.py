@@ -135,9 +135,26 @@ def _spawn_with_retry(
     """
     fn = subprocess.Popen if kind == "popen" else subprocess.run
     last_exc: FileNotFoundError | None = None
+    # On the first attempt try exactly what the caller asked. On retries,
+    # disable STARTF_USESTDHANDLES: the pipeline's parent's stdhandles can
+    # be in an inconsistent state (CPython bug #37380: when the parent's
+    # stdout handle is in a "console code page switching" state after
+    # ``chcp``, and the child is spawned with ``CREATE_NO_WINDOW`` AND
+    # ``STARTF_USESTDHANDLES``, CreateProcessW returns 206). The safe
+    # workaround is to spawn with ``creationflags=0`` so Windows uses the
+    # parent's console handles as-is (or creates a fresh console where
+    # none is attached for pythonw.exe).
     for attempt in range(1 + _SPAWN_RETRY_ATTEMPTS):
+        try_kwargs = kwargs
+        if attempt > 0:
+            try_kwargs = {**kwargs, "creationflags": 0}
+            logger.warning(
+                "retrying spawn with creationflags=0 (workaround for "
+                "CreateProcess error 206 when parent's console code page "
+                "was changed after spawning with CREATE_NO_WINDOW)"
+            )
         try:
-            return fn(cmd, **kwargs)
+            return fn(cmd, **try_kwargs)
         except FileNotFoundError as exc:
             last_exc = exc
             probe = _createprocess_probe(cmd[0])
@@ -154,12 +171,6 @@ def _spawn_with_retry(
                 break
             reset_tool_cache()
             cmd, tool = _re_resolve_cmd0(cmd)
-            logger.warning(
-                "re-resolved %s -> %r; retrying in %.1fs",
-                tool or "tool",
-                cmd[0],
-                _SPAWN_RETRY_DELAY_S,
-            )
             time.sleep(_SPAWN_RETRY_DELAY_S)
     assert last_exc is not None
     raise last_exc
