@@ -784,6 +784,14 @@ def _run_ffmpeg(
     try:
         process = popen_with_retry(
             cmd,
+            # stdin=DEVNULL is CRITICAL on Windows when the parent is a
+            # pythonw.exe (GUI subsystem) launched from cmd.exe with an
+            # attached console: inheriting the parent's console-mode stdin
+            # handle is the documented trigger for CreateProcessW to fail
+            # with ERROR_FILENAME_EXCED_RANGE (winerror 206) — the exact
+            # error observed in production runs on 2026-08-02/03. See
+            # CPython issue 37380 and the note in stream2video.tools.
+            stdin=subprocess.DEVNULL,
             stdout=stdout_target,
             stderr=subprocess.PIPE,
             bufsize=-1,
@@ -2147,7 +2155,35 @@ def _run_segment_concat(
         # priming to compensate for, so the concat filter would just
         # add a pointless re-encode of nothing.
         part_paths = [seg_dir / f"seg_{i:06d}.mp4" for i in range(n_segs)]
-        if gapless_concat and source_has_audio and n_segs > 1:
+
+        # Windows CreateProcess caps the command line at 32,767 chars. The
+        # gapless concat filter puts one ``-i <path>`` per segment PLUS the
+        # whole ``[0:v][0:a]...[N:v][N:a]concat=n=N:v=1:a=1[outv][outa]``
+        # graph inline, which blows past the limit with a few hundred
+        # segments (measured: 381 segments → 48K chars → winerror 206).
+        # In that case fall back to the concat demuxer, which references a
+        # file list on disk and stays tiny regardless of segment count.
+        # Estimate: each '-i "path"' ≈ path_len + 6; graph ≈ 17 chars per
+        # segment plus template boilerplate.
+        gapless_cmd_len_if_used = 0
+        if gapless_concat and source_has_audio and n_segs > 1 and os.name == "nt":
+            per_input = len(str(part_paths[0])) + 6 if part_paths else 0
+            gapless_cmd_len_if_used = per_input * n_segs + n_segs * 17 + 400
+
+        use_gapless = (
+            gapless_concat
+            and source_has_audio
+            and n_segs > 1
+            and (os.name != "nt" or gapless_cmd_len_if_used <= 30_000)
+        )
+        if gapless_concat and source_has_audio and n_segs > 1 and not use_gapless:
+            logger.warning(
+                f"gapless concat skipped: {n_segs} segments would exceed the "
+                f"Windows 32K command-line limit (~{gapless_cmd_len_if_used} chars); "
+                f"falling back to concat demuxer (stream copy)"
+            )
+
+        if use_gapless:
             _run_gapless_segment_concat(
                 output_path,
                 part_paths,
