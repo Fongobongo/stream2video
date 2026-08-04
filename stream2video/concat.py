@@ -1824,6 +1824,92 @@ def _run_audio_extract(
         raise
 
 
+# Cap on inputs per gapless concat-filter invocation on Windows. Each
+# input costs ~len(path)+6 cmdline chars plus ~17 of filter graph; the
+# Win32 CreateProcess command line is capped at 32,767 chars total, so a
+# few hundred segments would otherwise blow past it (the 2026-08-02/03
+# incident: 381 segments → 48K chars → winerror 206). 200 inputs of a
+# ~110-char path ≈ 26K chars — safely under. Shrunk by tests to
+# exercise the tree without writing hundreds of files.
+_GAPLESS_MAX_INPUTS_PER_CALL = 200
+
+
+def _concat_filter_one_pass(
+    part_paths: list[Path],
+    output_path: Path,
+    vcodec: str,
+    vcodec_opts: list[str],
+    *,
+    audio_codec: str,
+    audio_opts: list[str],
+    total_duration: float,
+    progress_callback: Callable[[float], None] | None = None,
+    cancel_callback: Callable[[], bool] | None = None,
+    timeout: int,
+    label: str,
+    stall_kill: int,
+    stall_warning: int,
+    low_process_priority: bool = False,
+    rlimit_as_mb: int = 0,
+    memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
+) -> None:
+    """Run one concat-filter pass over ``part_paths`` → ``output_path``.
+
+    Decodes every part (video + audio) into a single joined stream and
+    re-encodes once — exact gapless semantics for whichever codecs the
+    caller picks. Used by :func:`_run_gapless_segment_concat` both for
+    the final output (user codecs) and for intermediate levels when the
+    input count exceeds the per-call command-line budget (lossless PCM
+    audio + ``-c:v copy`` on intermediates).
+    """
+    n = len(part_paths)
+    inputs: list[str] = []
+    for p in part_paths:
+        inputs.extend(["-i", str(p)])
+    chain = "".join(f"[{i}:v][{i}:a]" for i in range(n))
+    graph = f"{chain}concat=n={n}:v=1:a=1[outv][outa]"
+
+    def _prog(seconds: float) -> None:
+        if progress_callback and total_duration > 0:
+            progress_callback(min(seconds / total_duration, 1.0))
+
+    _run_ffmpeg(
+        [
+            ffmpeg_path(),
+            "-y",
+            "-loglevel",
+            "error",
+            "-progress",
+            "pipe:1",
+            *inputs,
+            "-filter_complex",
+            graph,
+            "-map",
+            "[outv]",
+            "-map",
+            "[outa]",
+            "-c:v",
+            vcodec,
+            *vcodec_opts,
+            "-c:a",
+            audio_codec,
+            *audio_opts,
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ],
+        progress_callback=_prog,
+        timeout=timeout,
+        label=label,
+        cancel_callback=cancel_callback,
+        memory_monitor=_new_memory_monitor(memory_monitor_factory, label),
+        stall_kill=stall_kill,
+        stall_warning=stall_warning,
+        low_process_priority=low_process_priority,
+        rlimit_as_mb=rlimit_as_mb,
+    )
+
+
 def _run_gapless_segment_concat(
     output_path: Path,
     part_paths: list[Path],
@@ -1869,59 +1955,144 @@ def _run_gapless_segment_concat(
     The ``-filter_complex`` graph interleaves video and audio pads
     (``[0:v][0:a][1:v][1:a]...``) because the concat filter expects
     them in that order, not all-videos-then-all-audios.
+
+    Windows caps the command line at 32,767 chars; with a few hundred
+    segments the single call can not fit (measured 48 069 at 381 of
+    108-char paths — winerror 206). When the estimated single-pass
+    command approaches the limit, we cascade the joins into a tree:
+    groups of at most ``max_inputs`` parts are joined into
+    intermediates, then the intermediates are joined again, etc.
+    Intermediates use lossless PCM audio (no priming is ever written)
+    and ``-c:v copy`` on the video, so intermediates cost no re-encode.
+    Only the final pass to ``output_path`` applies the user's
+    ``audio_quality`` / video codec — the output is identical to what a
+    single-pass would have produced, except the concat filter now runs
+    2·log(N)-ish times instead of once (lossless intermediates make the
+    extra passes free of quality loss).
+
+    Tree intermediates are kept in ``output_path.parent /
+    _gapless_tree_<stem>`` so an interrupted run keeps the working
+    set for the next attempt; the dir is deleted on success.
     """
     n = len(part_paths)
     if n == 0:
         raise ConcatError("gapless concat: no parts to join")
 
-    inputs: list[str] = []
-    for p in part_paths:
-        inputs.extend(["-i", str(p)])
-    # concat filter expects interleaved [v0][a0][v1][a1]... ordering.
-    chain = "".join(f"[{i}:v][{i}:a]" for i in range(n))
-    graph = f"{chain}concat=n={n}:v=1:a=1[outv][outa]"
+    # Maximum inputs per call so the final cmdline stays well under 32K.
+    # Honour the module-level cap first (tests shrink it); then tighten it
+    # further if the actual paths are long (a 250-char path in a deep temp
+    # dir needs fewer inputs than an 80-char one to stay under 24K).
+    if os.name == "nt":
+        worst_path = max(len(str(p)) for p in part_paths) + 23
+        max_inputs = min(
+            _GAPLESS_MAX_INPUTS_PER_CALL,
+            max(2, (24_000 - 512) // max(1, worst_path)),
+        )
+    else:
+        max_inputs = _GAPLESS_MAX_INPUTS_PER_CALL
 
-    def _concat_prog(seconds: float) -> None:
-        if progress_callback and total_duration > 0:
-            progress_callback(min(seconds / total_duration * 0.1, 0.1) + 0.9)
-
-    label_text = "gapless segment concat"
-    _run_ffmpeg(
-        [
-            ffmpeg_path(),
-            "-y",
-            "-loglevel",
-            "error",
-            "-progress",
-            "pipe:1",
-            *inputs,
-            "-filter_complex",
-            graph,
-            "-map",
-            "[outv]",
-            "-map",
-            "[outa]",
-            "-c:v",
+    if n <= max_inputs or os.name != "nt":
+        _concat_filter_one_pass(
+            part_paths,
+            output_path,
             vcodec,
-            *vcodec_opts,
-            "-c:a",
-            "aac",
-            *_audio_bitrate_opts(audio_quality),
-            *_audio_opts(audio_quality),
-            "-movflags",
-            "+faststart",
-            str(output_path),
-        ],
-        progress_callback=_concat_prog,
-        timeout=timeout,
-        label=label_text,
+            vcodec_opts,
+            audio_codec="aac",
+            audio_opts=[*_audio_bitrate_opts(audio_quality), *_audio_opts(audio_quality)],
+            total_duration=total_duration,
+            progress_callback=(
+                (lambda s: progress_callback(min(s / total_duration * 0.1, 0.1) + 0.9))
+                if progress_callback and total_duration > 0
+                else None
+            ),
+            cancel_callback=cancel_callback,
+            timeout=timeout,
+            label="gapless segment concat",
+            stall_kill=stall_kill,
+            stall_warning=stall_warning,
+            low_process_priority=low_process_priority,
+            rlimit_as_mb=rlimit_as_mb,
+            memory_monitor_factory=memory_monitor_factory,
+        )
+        return
+
+    # ── Tree path (Windows, too many inputs for one pass) ──
+    tree_dir = output_path.parent / f"_gapless_tree_{output_path.stem}"
+    tree_dir.mkdir(parents=True, exist_ok=True)
+
+    current = list(part_paths)
+    level = 0
+    while len(current) > max_inputs:
+        next_level: list[Path] = []
+        n_groups = (len(current) + max_inputs - 1) // max_inputs
+        for g in range(n_groups):
+            chunk = current[g * max_inputs : (g + 1) * max_inputs]
+            inter = tree_dir / f"L{level}_{g:05d}.mkv"
+            if cancel_callback and cancel_callback():
+                raise CancelledError(f"gapless tree L{level} cancelled")
+            if inter.exists() and inter.stat().st_size >= _MIN_PART_BYTES:
+                next_level.append(inter)
+                continue
+            logger.info(
+                f"gapless tree L{level}: joining group {g + 1}/{n_groups} "
+                f"({len(chunk)} parts) -> {inter.name}"
+            )
+            # Intermediates: video stream-copied (no re-encode), audio
+            # decoded to PCM in MKV (lossless, no priming). The concat
+            # filter still runs and rewrites PTS across chunk
+            # boundaries, so PCM stays sample-accurate.
+            _concat_filter_one_pass(
+                chunk,
+                inter,
+                "copy",  # video: no re-encode in intermediates
+                [],
+                audio_codec="pcm_s16le",
+                audio_opts=[],
+                total_duration=0,  # no per-chunk progress
+                progress_callback=None,
+                cancel_callback=cancel_callback,
+                timeout=timeout,
+                label=f"gapless tree L{level} G{g}",
+                stall_kill=stall_kill,
+                stall_warning=stall_warning,
+                low_process_priority=low_process_priority,
+                rlimit_as_mb=rlimit_as_mb,
+                memory_monitor_factory=memory_monitor_factory,
+            )
+            next_level.append(inter)
+        current = next_level
+        level += 1
+
+    # Final pass: encode video + audio with user settings, full priming
+    # fix happens here (audiodec=re-encode), progress callback mapped to
+    # the last 10% of the bar.
+    logger.info(
+        f"gapless tree: {n} parts -> {len(current)} intermediates after "
+        f"{level + 1} level(s); final join with encode"
+    )
+    _concat_filter_one_pass(
+        current,
+        output_path,
+        vcodec,
+        vcodec_opts,
+        audio_codec="aac",
+        audio_opts=[*_audio_bitrate_opts(audio_quality), *_audio_opts(audio_quality)],
+        total_duration=total_duration,
+        progress_callback=(
+            (lambda s: progress_callback(min(s / total_duration * 0.1, 0.1) + 0.9))
+            if progress_callback and total_duration > 0
+            else None
+        ),
         cancel_callback=cancel_callback,
-        memory_monitor=_new_memory_monitor(memory_monitor_factory, label_text),
+        timeout=timeout,
+        label="gapless segment concat (final)",
         stall_kill=stall_kill,
         stall_warning=stall_warning,
         low_process_priority=low_process_priority,
         rlimit_as_mb=rlimit_as_mb,
+        memory_monitor_factory=memory_monitor_factory,
     )
+    shutil.rmtree(tree_dir, ignore_errors=True)
 
 
 def _run_segment_concat(
@@ -2156,34 +2327,15 @@ def _run_segment_concat(
         # add a pointless re-encode of nothing.
         part_paths = [seg_dir / f"seg_{i:06d}.mp4" for i in range(n_segs)]
 
-        # Windows CreateProcess caps the command line at 32,767 chars. The
-        # gapless concat filter puts one ``-i <path>`` per segment PLUS the
-        # whole ``[0:v][0:a]...[N:v][N:a]concat=n=N:v=1:a=1[outv][outa]``
-        # graph inline, which blows past the limit with a few hundred
-        # segments (measured: 381 segments → 48K chars → winerror 206).
-        # In that case fall back to the concat demuxer, which references a
-        # file list on disk and stays tiny regardless of segment count.
-        # Estimate: each '-i "path"' ≈ path_len + 6; graph ≈ 17 chars per
-        # segment plus template boilerplate.
-        gapless_cmd_len_if_used = 0
-        if gapless_concat and source_has_audio and n_segs > 1 and os.name == "nt":
-            per_input = len(str(part_paths[0])) + 6 if part_paths else 0
-            gapless_cmd_len_if_used = per_input * n_segs + n_segs * 17 + 400
-
-        use_gapless = (
-            gapless_concat
-            and source_has_audio
-            and n_segs > 1
-            and (os.name != "nt" or gapless_cmd_len_if_used <= 30_000)
-        )
-        if gapless_concat and source_has_audio and n_segs > 1 and not use_gapless:
-            logger.warning(
-                f"gapless concat skipped: {n_segs} segments would exceed the "
-                f"Windows 32K command-line limit (~{gapless_cmd_len_if_used} chars); "
-                f"falling back to concat demuxer (stream copy)"
-            )
-
-        if use_gapless:
+        # Gapless concat path: the tree builder inside
+        # ``_run_gapless_segment_concat`` splits N parts into
+        # max_inputs-sized groups, joins them pairwise through
+        # intermediate files, and finally applies the user-selected
+        # codecs on the last pass. No single-pass command exceeds the
+        # Windows 32K limit no matter how many segments were generated.
+        # The demuxer path is used when ``gapless_concat`` is off, or
+        # when the source has no audio (nothing to re-encode).
+        if gapless_concat and source_has_audio and n_segs > 1:
             _run_gapless_segment_concat(
                 output_path,
                 part_paths,

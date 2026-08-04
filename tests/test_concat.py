@@ -69,77 +69,53 @@ def test_run_subprocess_cmd_waits_for_stderr_drain_before_oom_classification():
         _run_subprocess_cmd(["ffmpeg"], timeout=5, label="cut phase")
 
 
-@pytest.mark.parametrize("n_segs,expect_gapless", [(2, True), (380, False)])
-def test_gapless_concat_falls_back_when_cmdline_would_exceed_windows_limit(
-    tmp_path: Path, n_segs: int, expect_gapless: bool, monkeypatch
+def test_gapless_uses_tree_when_cmdline_would_exceed_windows_limit(
+    tmp_path: Path, monkeypatch
 ):
-    """The gapless concat filter passes one ``-i <path>`` per segment plus the
-    whole concat graph inline. With a few hundred segments the command line
-    exceeds Windows' 32K CreateProcess limit → winerror 206
-    (FileNotFoundError) — the incident of 2026-08-02/03.
+    """After the 2026-08-02/03 incident the gapless path never falls back
+    to the concat demuxer: it splits many inputs into groups joined via
+    intermediates (binary tree) and runs the final encode once.
 
-    When that would happen on Windows, ``_run_segment_concat`` must fall back
-    to the concat demuxer (file list on disk) instead of spawning.
+    This test drives ``_run_gapless_segment_concat`` with a shrunken
+    ``_GAPLESS_MAX_INPUTS_PER_CALL`` so the tree logic is exercised with
+    just a handful of synthetic parts. The flat helper is replaced with a
+    recorder; every "leaf" call must receive ≤ the cap.
     """
-    monkeypatch.setattr("os.name", "nt")
-
     from stream2video import concat as concat_mod
 
-    seen: list[str] = []
+    recorded_leaf_sizes: list[int] = []
+    recorded_outputs: list[Path] = []
 
-    def fake_gapless(*args, **kwargs):
-        seen.append("gapless")
+    def fake_one_pass(part_paths, output_path, vcodec, vcodec_opts, **kwargs):
+        recorded_leaf_sizes.append(len(part_paths))
+        recorded_outputs.append(Path(output_path))
 
-    def fake_demuxer(*args, **kwargs):
-        seen.append("demuxer")
+    monkeypatch.setattr(concat_mod, "_concat_filter_one_pass", fake_one_pass)
+    monkeypatch.setattr(concat_mod, "_GAPLESS_MAX_INPUTS_PER_CALL", 2)
 
-    monkeypatch.setattr(concat_mod, "_run_gapless_segment_concat", fake_gapless)
-    monkeypatch.setattr(concat_mod, "_run_final_concat", fake_demuxer)
-
-    keep = [(float(i), float(i) + 1.0) for i in range(n_segs)]
-
-    video = tmp_path / "src.mp4"
-    video.write_bytes(b"src")
+    parts = [tmp_path / f"seg_{i:06d}.mp4" for i in range(5)]
+    for p in parts:
+        p.write_bytes(b"\x00" * 2048)
     out = tmp_path / "out.mp4"
 
-    with (
-        patch.object(concat_mod, "_ensure_fresh_work_dir"),
-        patch.object(concat_mod, "_build_manifest", return_value={}),
-        patch.object(concat_mod, "_ffprobe_is_valid_media", return_value=True),
-        patch.object(concat_mod, "_ffprobe_duration_ok", return_value=True),
-        patch.object(concat_mod, "_run_ffmpeg"),  # segments: pretend encoded
-        patch.object(concat_mod, "_new_memory_monitor", return_value=None),
-    ):
-        # Pre-create all seg files so resume-skip succeeds
-        # The real seg_dir is derived from out path: ``_<stem>_segments``
-        real_seg_dir = tmp_path / "_out_segments"
-        for i in range(n_segs):
-            fake_seg = real_seg_dir / f"seg_{i:06d}.mp4"
-            fake_seg.parent.mkdir(parents=True, exist_ok=True)
-            fake_seg.write_bytes(b"\x00" * 2048)  # > min_part_bytes (1024)
+    concat_mod._run_gapless_segment_concat(
+        out,
+        parts,
+        "libx264",
+        [],
+        audio_quality="medium",
+        total_duration=4.5,
+    )
 
-        concat_mod._run_segment_concat(
-            video,
-            keep,
-            out,
-            "libx264",
-            [],
-            progress_callback=None,
-            cancel_callback=None,
-            encoder="libx264",
-            video_quality="medium",
-            audio_quality="medium",
-            source_has_audio=True,
-            gapless_concat=True,
-        )
-
-    if expect_gapless:
-        assert seen == ["gapless"]
-    else:
-        assert seen == ["demuxer"]
+    # 5 parts, cap 2 → tree: 2+2+1 joins at L0 (3 leaves), then 1+1 join
+    # at L1 (1 leaf of 2 intermediates), then final. Every leaf ≤ 2.
+    assert recorded_leaf_sizes, "no concat calls recorded"
+    assert max(recorded_leaf_sizes) <= 2, recorded_leaf_sizes
+    # Final call target is the real output path.
+    assert recorded_outputs[-1] == out
 
 
-def test_gapless_concat_real_ffmpeg_long_command_line_fails(tmp_path: Path):
+def test_gapless_real_ffmpeg_long_command_line_fails(tmp_path: Path):
     """Regression test: prove that ffmpeg's concat filter with N inputs and
     an inline filtergraph exceeds the Win32 32K cmdline limit for large N
     (the actual failure: winerror=206). Uses a real ffmpeg spawn.
