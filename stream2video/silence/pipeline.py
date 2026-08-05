@@ -130,7 +130,7 @@ def detect_silence(
     initial_segments: list[SilenceSegment] = []
     resume_from: float | None = None
     if resume_cache_path is not None:
-        loaded = _load_silence_cache_from_path(resume_cache_path, video_path, current_config)
+        loaded = _c._load_silence_cache_from_path(resume_cache_path, video_path, current_config)
         if loaded is not None:
             initial_segments = loaded
             resume_from = initial_segments[-1].end if initial_segments else None
@@ -154,10 +154,10 @@ def detect_silence(
     duration = _c._probe_duration(video_path)
 
     if output_dir is not None:
-        wav_path = _get_wav_cache_path(video_path, output_dir)
-        if _is_wav_cache_valid(wav_path, video_path):
+        wav_path = _c._get_wav_cache_path(video_path, output_dir)
+        if _c._is_wav_cache_valid(wav_path, video_path):
             logger.debug(f"Using cached WAV: {wav_path}")
-            segments = _run_silencedetect(
+            segments = _c._run_silencedetect(
                 wav_path,
                 threshold,
                 min_silence,
@@ -173,7 +173,7 @@ def detect_silence(
                 timeout=effective_timeout,
             )
         else:
-            _extract_audio_wav(video_path, wav_path, cancel_callback, timeout=effective_timeout)
+            _c._extract_audio_wav(video_path, wav_path, cancel_callback, timeout=effective_timeout)
             # The WAV was just (re-)extracted with -copyts — its PTS
             # timeline matches the source video exactly, so the
             # resume context (initial_segments + resume_from) is still
@@ -182,7 +182,7 @@ def detect_silence(
             # from t=0 on a multi-hour source. Both the WAV and the
             # .resume file live in source-time coordinates thanks to
             # -copyts on the extraction side.
-            segments_D = _run_silencedetect(
+            segments_D = _c._run_silencedetect(
                 wav_path,
                 threshold,
                 min_silence,
@@ -203,7 +203,7 @@ def detect_silence(
             # detection (which has no progress callback) just finished.
             # The bar would either freeze at 100% (verify pass) or jump back
             # to 0% on the A-fallback (verify fail). Keep verify invisible.
-            segments_A_sample = _run_silencedetect(
+            segments_A_sample = _c._run_silencedetect(
                 video_path,
                 threshold,
                 min_silence,
@@ -215,7 +215,7 @@ def detect_silence(
                 timeout=effective_timeout,
             )
             segments_D_sample = [s for s in segments_D if s.start < _SAMPLE_VERIFY_DURATION]
-            if _sample_segments_match(
+            if _c._sample_segments_match(
                 segments_D_sample, segments_A_sample, _SEGMENT_MATCH_TOLERANCE
             ):
                 logger.debug(
@@ -233,7 +233,7 @@ def detect_silence(
                     f"detection. WAV cache invalidated."
                 )
                 wav_path.unlink(missing_ok=True)
-                segments = _run_silencedetect(
+                segments = _c._run_silencedetect(
                     video_path,
                     threshold,
                     min_silence,
@@ -249,7 +249,7 @@ def detect_silence(
                     timeout=effective_timeout,
                 )
     else:
-        segments = _run_silencedetect(
+        segments = _c._run_silencedetect(
             video_path,
             threshold,
             min_silence,

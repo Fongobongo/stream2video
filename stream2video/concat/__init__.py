@@ -36,15 +36,17 @@ Layout::
 # Windows error-206 incident). Importing the modules here lets the
 # patch's attribute traversal succeed; the actual runtime work happens
 # inside the submodules below.
-import queue  # noqa: F401
-import subprocess  # noqa: F401
-import threading  # noqa: F401
+import queue
+import subprocess
+import threading
 import time  # noqa: F401
+from collections.abc import Callable
+from typing import IO, Any
 
+from stream2video.concat import constants as _consts
 from stream2video.concat.api import cut_and_concat
 from stream2video.concat.audio import _run_audio_concat_filter, _run_audio_extract
 from stream2video.concat.batch import _run_batch_concat
-from stream2video.concat import constants as _consts
 
 # Surface every constant as an attribute of the package so external
 # callers (and ``patch("stream2video.concat.<CONST>")``) keep working.
@@ -120,7 +122,7 @@ from stream2video.concat.runner import (
 from stream2video.concat.segment import _run_segment_concat
 
 
-def _effective_cancel_callback_shim(cancel_callback):
+def _effective_cancel_callback_shim(cancel_callback: "Callable[[], bool] | None") -> "Callable[[], bool] | None":
     """Pass-through factory so tests patching
     ``stream2video.concat._effective_cancel_callback`` intercept.
 
@@ -152,19 +154,23 @@ def ffprobe_path() -> str:
     return _tools_mod.ffprobe_path()
 
 
-def popen_with_retry(cmd, **kwargs):
+def popen_with_retry(cmd: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
     return _tools_mod.popen_with_retry(cmd, **kwargs)
 
 
-def run_with_retry(cmd, **kwargs):
+def run_with_retry(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
     return _tools_mod.run_with_retry(cmd, **kwargs)
 
 
-def drain_stderr_lines(pipe, sink, on_line=None):
+def drain_stderr_lines(
+    pipe: IO[bytes],
+    sink: list[str],
+    on_line: Callable[[str], None] | None = None,
+) -> Callable[[], None]:
     return _utils_mod.drain_stderr_lines(pipe, sink, on_line=on_line)
 
 
-def read_lines_queue(pipe):
+def read_lines_queue(pipe: IO[bytes]) -> tuple["queue.Queue[bytes | None]", "threading.Thread"]:
     return _utils_mod.read_lines_queue(pipe)
 
 

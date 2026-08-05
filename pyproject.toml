@@ -141,5 +141,8 @@ module = [
     "stream2video.gui_recent_projects",
     "stream2video.gui_sliders",
     "stream2video.gui_waveform",
+    "stream2video.gui_waveform_interactions",
+    "stream2video.gui_waveform_render",
+    "stream2video.gui_waveform_window",
 ]
-disable_error_code = ["attr-defined", "misc"]
+disable_error_code = ["attr-defined", "misc", "has-type"]

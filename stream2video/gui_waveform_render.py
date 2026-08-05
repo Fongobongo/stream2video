@@ -6,6 +6,7 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import customtkinter as ctk
 
@@ -34,6 +35,22 @@ class WaveformRenderMixin:
     state (``_waveform_peaks``, ``_waveform_view_*``, ``_apply_view``
     delegates used by the interactions, etc.).
     """
+
+    # Attributes owned by ``WaveformWindowMixin._init_waveform_state``
+    # that this mixin writes to from outside that initializer. Declaring
+    # them here with matching types keeps mypy's per-mixin inference
+    # consistent across the composed ``WaveformMixin`` (without these,
+    # mypy infers ``int`` from ``img.size[0]`` in ``_apply_view`` and
+    # flags the resulting attribute as conflicting with the
+    # ``int | None`` declaration in ``WaveformWindowMixin``).
+    if TYPE_CHECKING:
+        _waveform_last_render_w: int | None
+        _waveform_last_render_h: int | None
+        _waveform_video_path: Path | None
+        _waveform_output_dir: Path | None
+        _waveform_last_segments: list[SilenceSegment]
+        _waveform_render_token: int
+        _waveform_running: bool
 
     def _render_waveform_preview(self) -> None:
         """Stream audio + silence from the source video via ffmpeg pipes
@@ -293,8 +310,11 @@ class WaveformRenderMixin:
         self._waveform_ctk_image = ctk_img
         self.lbl_wave_image.configure(image=ctk_img, text="")
         self._waveform_image_width = img.size[0]
-        self._waveform_last_render_w = img.size[0]
-        self._waveform_last_render_h = img.size[1]
+        # ``_waveform_last_render_*`` are declared as ``int | None`` in
+        # ``WaveformWindowMixin``; mypy needs a narrow here to keep
+        # the two mixins' definitions compatible.
+        self._waveform_last_render_w = int(img.size[0])
+        self._waveform_last_render_h = int(img.size[1])
 
         self.lbl_wave_status.configure(text=title)
         self._update_waveform_controls()

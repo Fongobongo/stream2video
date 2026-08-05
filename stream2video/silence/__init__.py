@@ -20,6 +20,7 @@ Layout::
 import queue  # noqa: F401
 import subprocess  # noqa: F401
 import time  # noqa: F401
+from pathlib import Path
 
 import stream2video.utils as _utils_mod
 from stream2video.silence.cache import (
@@ -64,7 +65,11 @@ from stream2video.utils import (  # noqa: F401
 )
 
 
-def _probe_duration(video_path):
+def _probe_duration(video_path: Path) -> float | None:
+    """Alias kept for backward compatibility — historically the silence
+    module called ``get_video_duration`` via this name (see the comment
+    block in ``silence_pipeline.py``).
+    """
     return _utils_mod.get_video_duration(video_path)
 
 
