@@ -1,0 +1,304 @@
+"""Segment pipeline: encode each keep segment, join with concat demuxer
+(or concat filter for gapless output)."""
+
+import logging
+import shutil
+from collections.abc import Callable
+from pathlib import Path
+
+from stream2video import concat as _c
+from stream2video.concat.constants import (
+    _FINAL_CONCAT_TIMEOUT,
+    _MIN_PART_BYTES,
+    _SEGMENT_ENCODE_TIMEOUT,
+    _STALL_KILL,
+    _STALL_WARNING,
+)
+from stream2video.memory import MemoryMonitor
+from stream2video.tools import ffmpeg_path
+
+logger = logging.getLogger(__name__)
+
+
+def _run_segment_concat(
+    video_path: Path,
+    keep_segments: list[tuple[float, float]],
+    output_path: Path,
+    vcodec: str,
+    vcodec_opts: list[str],
+    progress_callback: Callable[[float], None] | None = None,
+    cancel_callback: Callable[[], bool] | None = None,
+    encoder: str = "libx264",
+    video_quality: str = "medium",
+    audio_quality: str = "medium",
+    x264_preset: str = "medium",
+    encoder_threads: str | int = "auto",
+    source_has_audio: bool = True,
+    output_fps: str = "source",
+    gapless_concat: bool = False,
+    low_process_priority: bool = False,
+    rlimit_as_mb: int = 0,
+    segment_encode_timeout: int = _SEGMENT_ENCODE_TIMEOUT,
+    final_concat_timeout: int = _FINAL_CONCAT_TIMEOUT,
+    stall_kill: int = _STALL_KILL,
+    stall_warning: int = _STALL_WARNING,
+    min_part_bytes: int = _MIN_PART_BYTES,
+    memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
+) -> None:
+    """Encode each segment, join with concat demuxer (or concat filter for gapless).
+
+    Segments are stored in a dedicated subdirectory.  If a previous run was
+    interrupted, already-encoded segments are reused (resume from where it
+    stopped).  On success all segment files are deleted.
+
+    Resume integrity (P0.6): the work dir contains a ``_manifest.json``
+    snapshot of (source path/size/mtime, encoder, encoder_opts, quality,
+    keep_segments, pipeline_version). A mismatch wipes the work dir so
+    old artifacts from an incompatible run cannot be reused. Each
+    resumed segment is also ffprobe-validated so a partial moov-atom
+    crash artifact is detected and re-encoded.
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    total_duration = sum(e - s for s, e in keep_segments)
+    n_segs = len(keep_segments)
+    logger.info(f"segment: {n_segs} segments, {total_duration:.1f}s output, {vcodec}")
+
+    seg_dir = output_path.parent / f"_{output_path.stem}_segments"
+    manifest = _c._build_manifest(
+        video_path,
+        keep_segments,
+        "segment",
+        encoder,
+        vcodec,
+        vcodec_opts,
+        video_quality,
+        audio_quality,
+        x264_preset,
+        encoder_threads,
+    )
+    _c._ensure_fresh_work_dir(seg_dir, manifest)
+
+    encoded_keep = 0.0
+    skipped = 0
+
+    try:
+        for i, (start, end) in enumerate(keep_segments):
+            if cancel_callback and cancel_callback():
+                raise _c.CancelledError("segment encode cancelled")
+
+            dur = end - start
+            seg_path = seg_dir / f"seg_{i:06d}.mp4"
+
+            # Resume: skip already encoded segments. Require both a
+            # minimum size AND a successful ffprobe read so a crash
+            # artifact (missing moov atom) doesn't get reused and
+            # corrupt the final concat in the middle.
+            if (
+                seg_path.exists()
+                and seg_path.stat().st_size >= min_part_bytes
+                and _c._ffprobe_is_valid_mp4(seg_path)
+            ):
+                skipped += 1
+                encoded_keep += dur
+                if progress_callback and total_duration > 0:
+                    progress_callback(min(encoded_keep / total_duration * 0.9, 0.9))
+                continue
+
+            # Frame-accurate segment encode using a SINGLE input-side seek.
+            #
+            # The earlier pipeline used both an input-side `-ss` (coarse,
+            # keyframe-aligned fast seek) AND an output-side `-ss` for an
+            # additional sub-keyframe correction. Two consecutive seeks on
+            # the same input produce an off-by-~0.5s systematic bias that
+            # cuts the start of every segment after t≈0.5s, and combined
+            # with the `setpts=N/FRAME_RATE/TB` resync it also dropped
+            # frames at the boundary (verified: a 6s/30FPS source with
+            # keep=[(0,2),(3,5)] produced 4.72s/135 frames instead of
+            # the expected 4.00s/120).
+            #
+            # The current approach:
+            #   1. Input-side `-ss {start}` performs the seek. ffmpeg's
+            #      MP4 demuxer decodes from the preceding keyframe and
+            #      drops frames until `start` automatically -- this is
+            #      frame-accurate on modern ffmpeg builds (verified with
+            #      ffmpeg 8.1.1 on a GOP=30 source at a sub-keyframe
+            #      cut: a 1.5s keep returned exactly 1.500s/45 frames).
+            #   2. `-t {dur}` (output-side duration on the WHOLE output)
+            #      limits both video and audio to exactly `dur`. No extra
+            #      `apad`/`atrim` is needed: audio is also bound by
+            #      `-t`, so no per-segment `_AUDIO_PAD` drift accumulates.
+            #   3. setpts/atrim are unnecessary: the input PTS is already
+            #      in source time, and after `-ss`+`-t` the segment's
+            #      output starts at t=0 by ffmpeg's normalisation (genpts
+            #      by the muxer). The concat demuxer handles the join.
+            #
+            # `-copyts` is NOT used: kept off so the per-segment output
+            # timeline starts at 0 (the contract the concat demuxer
+            # expects when ``-fflags +genpts`` (demuxer-side, placed
+            # before ``-i``) rebuilds the final PTS).
+            # Without `-copyts`, timestamps in the segment file are
+            # already normalised to start at 0, so a `setpts=PTS-STARTPTS`
+            # is a no-op here and is omitted for clarity.
+
+            def _seg_prog(seconds: float, _dur: float = dur, _encoded_keep: float = encoded_keep) -> None:
+                # ffmpeg -progress reports `out_time_us` -- the position within
+                # this segment's output, NOT the original video. Map it to
+                # absolute progress across the whole video so the GUI/CLI
+                # bar moves smoothly even when a single segment takes an
+                # hour (e.g. 0 silence segments → 1 keep segment = the
+                # whole video).
+                if progress_callback and total_duration > 0 and _dur > 0:
+                    seg_frac = min(seconds / _dur, 1.0)
+                    abs_time = _encoded_keep + seg_frac * _dur
+                    progress_callback(min(abs_time / total_duration * 0.9, 0.9))
+
+            label_text = f"segment {i} encode"
+            _c._run_ffmpeg(
+                [
+                    ffmpeg_path(),
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-progress",
+                    "pipe:1",
+                    "-ss",
+                    f"{start:.3f}",
+                    "-i",
+                    str(video_path),
+                    "-t",
+                    f"{dur:.3f}",
+                    # Explicit stream mapping (P1.14): pick the first
+                    # video stream and the first audio stream rather
+                    # than letting ffmpeg auto-select. A source with
+                    # multiple audio tracks (e.g. dual-language MKV)
+                    # would otherwise have its track choice depend on
+                    # ffmpeg's stream-order heuristic, which isn't
+                    # stable across versions. When the source has no
+                    # audio, audio mapping and the AAC encoder are
+                    # omitted entirely so the segment encode produces
+                    # a valid video-only MP4 instead of failing with
+                    # "Output file does not contain any stream".
+                    "-map",
+                    "0:v:0",
+                    *(
+                        # P1.17: when the user requests a CFR target
+                        # (output_fps != "source"), apply the ``fps``
+                        # filter on the video stream. Without a filter
+                        # graph the ``-r`` output option would work
+                        # too, but the filter is the documented way
+                        # to do it post-encode PTS normalisation and
+                        # matches the batch path's filter chain shape.
+                        ["-vf", f"fps={output_fps}"] if output_fps != "source" else []
+                    ),
+                    "-c:v",
+                    vcodec,
+                    *vcodec_opts,
+                    *(
+                        [
+                            "-map",
+                            "0:a:0?",
+                            "-c:a",
+                            "aac",
+                            *_c._audio_bitrate_opts(audio_quality),
+                            *_c._audio_opts(audio_quality),
+                        ]
+                        if source_has_audio
+                        else []
+                    ),
+                    str(seg_path),
+                ],
+                progress_callback=_seg_prog,
+                timeout=segment_encode_timeout,
+                label=label_text,
+                cancel_callback=cancel_callback,
+                memory_monitor=_c._new_memory_monitor(memory_monitor_factory, label_text),
+                stall_kill=stall_kill,
+                stall_warning=stall_warning,
+                low_process_priority=low_process_priority,
+                rlimit_as_mb=rlimit_as_mb,
+            )
+
+            encoded_keep += dur
+            if progress_callback and total_duration > 0:
+                progress_callback(min(encoded_keep / total_duration * 0.9, 0.9))
+
+        if skipped:
+            logger.info(
+                f"segment: resumed {skipped}/{n_segs} already encoded, encoded {n_segs - skipped}"
+            )
+
+        # Final join. Two strategies, picked by the ``gapless_concat``
+        # flag and whether the source has audio:
+        #
+        #   * **concat demuxer** (default, or audio-less source) —
+        #     stream-copies per-segment video + audio into one file.
+        #     Fast, lossless for video, but preserves per-segment AAC
+        #     priming (~21ms per segment at 48kHz) which accumulates as
+        #     A/V drift on multi-segment outputs (10 segments → ~170ms).
+        #
+        #   * **concat filter** (``gapless_concat=True`` + audio source)
+        #     — re-encodes through a single PCM pipeline so priming is
+        #     added only once (not per-segment), giving gapless audio.
+        #     Both video and audio are re-encoded (the concat filter's
+        #     ``v=1:a=1`` joins both streams). The trade-off is one
+        #     generation of video quality loss (H.264 → decode → H.264);
+        #     for lossless video + gapless audio, use ``cut_then_encode``
+        #     (one encode pass, but sacrifices frame accuracy via
+        #     keyframe snap).
+        #
+        # Audio-less sources always use the demuxer path: there's no
+        # priming to compensate for, so the concat filter would just
+        # add a pointless re-encode of nothing.
+        part_paths = [seg_dir / f"seg_{i:06d}.mp4" for i in range(n_segs)]
+
+        # Gapless concat path: the tree builder inside
+        # ``_run_gapless_segment_concat`` splits N parts into
+        # max_inputs-sized groups, joins them pairwise through
+        # intermediate files, and finally applies the user-selected
+        # codecs on the last pass. No single-pass command exceeds the
+        # Windows 32K limit no matter how many segments were generated.
+        # The demuxer path is used when ``gapless_concat`` is off, or
+        # when the source has no audio (nothing to re-encode).
+        if gapless_concat and source_has_audio and n_segs > 1:
+            _c._run_gapless_segment_concat(
+                output_path,
+                part_paths,
+                vcodec,
+                vcodec_opts,
+                audio_quality=audio_quality,
+                total_duration=total_duration,
+                progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+                timeout=final_concat_timeout,
+                stall_kill=stall_kill,
+                stall_warning=stall_warning,
+                low_process_priority=low_process_priority,
+                rlimit_as_mb=rlimit_as_mb,
+                memory_monitor_factory=memory_monitor_factory,
+            )
+        else:
+            _c._run_final_concat(
+                seg_dir,
+                output_path,
+                part_paths,
+                total_duration=total_duration,
+                progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+                label="segment concat",
+                timeout=final_concat_timeout,
+                stall_kill=stall_kill,
+                stall_warning=stall_warning,
+                low_process_priority=low_process_priority,
+                rlimit_as_mb=rlimit_as_mb,
+                memory_monitor_factory=memory_monitor_factory,
+            )
+        logger.info(f"Successfully created output: {output_path}")
+
+        # Cleanup on success
+        shutil.rmtree(seg_dir, ignore_errors=True)
+
+    except Exception:
+        # On failure: keep segments for resume
+        logger.info(f"Segments kept in {seg_dir} for resume on next run")
+        raise

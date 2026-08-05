@@ -3,15 +3,10 @@
 import logging
 import shutil
 import signal
-import threading
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import typer
-import yaml
-from rich.console import Console
-from rich.logging import RichHandler
 from rich.progress import (
     BarColumn,
     Progress,
@@ -21,10 +16,20 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from stream2video.cli_config import load_config as _load_config_impl
+from stream2video.cli_helpers import (
+    ParameterSource,
+    _check_ffmpeg,
+    _console_handler,
+    _make_file_handler,
+    _make_sigint_cancel,
+    app,
+    console,
+    logger,
+)
 from stream2video.concat import CancelledError, ConcatError, cut_and_concat
 from stream2video.config import (
     CONFIG_DEFAULTS,
-    CONFIG_RANGES,
     DEFAULT_PRESET,
     PRESET_NAMES,
     VALID_DOWNLOAD_QUALITIES,
@@ -59,207 +64,16 @@ from stream2video.silence import (
     save_silence_cache,
 )
 
-# ``ParameterSource`` tells us whether a CLI flag came from the command
-# line or a default. Its import path has moved across typer/click
-# releases. Use a defensive try/except chain so the module keeps
-# importing on all supported versions.
-ParameterSource: Any = None
-try:
-    from click.core import ParameterSource as _PS  # click >= 8.0
-
-    ParameterSource = _PS
-except ImportError:  # pragma: no cover - legacy fallback
-    try:
-        from typer._click.core import ParameterSource as _PS2
-
-        ParameterSource = _PS2
-    except ImportError:  # pragma: no cover - very old typer
-        pass
-
-# Logging setup is deferred to ``main()`` so importing ``stream2video.cli``
-# (e.g. from tests, or from a host application embedding the library)
-# doesn't reconfigure the root logger. The historical ``basicConfig``
-# at import time would override the host's own logging config, which is
-# especially noisy for GUI embeds and pytest's caplog. See P2.9 in the
-# fix plan.
-_console_handler = RichHandler(rich_tracebacks=True)
-logger = logging.getLogger("stream2video")
-
-console = Console()
-app = typer.Typer(help="Compress stream recordings by removing silence")
-
-
-def _make_sigint_cancel() -> tuple[threading.Event, Callable[[], bool]]:
-    """Wire SIGINT to a cancel event so Ctrl+C aborts running ffmpeg/yt-dlp.
-
-    Returns (event, callback). The callback returns True once SIGINT has been
-    received. The event is set by the signal handler in the main thread, but
-    signal handlers in Python can only safely set an event/flag, not raise.
-
-    When called from a non-main thread (host application embedding the CLI
-    in a worker thread) ``signal.signal`` raises ``ValueError`` — Python only
-    allows signal handling from the interpreter's main thread. In that case
-    the function logs a warning and returns an event that never fires: the
-    embedding host owns Ctrl+C dispatch (e.g. via its own signal handler that
-    sets the returned event), and the CLI run proceeds without a SIGINT hook.
-    The pipeline's ``cancel_callback`` is still polled, so a host that flips
-    the event manually still cancels cleanly.
-    """
-    event = threading.Event()
-
-    def _handler(signum: Any, frame: Any) -> None:
-        event.set()
-
-    try:
-        signal.signal(signal.SIGINT, _handler)
-    except (ValueError, OSError) as e:
-        # ``ValueError`` is raised when called from a non-main thread;
-        # ``OSError`` on some platforms for the same reason. Log and
-        # continue — the embedding host is responsible for wiring Ctrl+C
-        # to the returned event (or to its own cancel mechanism).
-        logger.warning(f"Could not install SIGINT handler (non-main thread?): {e}")
-
-    def _cb() -> bool:
-        return event.is_set()
-
-    return event, _cb
-
-
-def _make_file_handler(path: Path) -> logging.FileHandler:
-    """Create the CLI's per-run file handler with the canonical format.
-
-    DEBUG-level so the file always gets the full trace; the user-facing
-    console level is controlled separately by ``_console_handler.setLevel``.
-    Format: ``%(asctime)s - %(name)s - %(levelname)s - %(message)s`` —
-    matches what stream2video.log has always written so existing log-
-    parsing scripts keep working across upgrades.
-    """
-    # Use UTF-8 explicitly so the log file is consistent across platforms
-    # (Windows OEM codepages are often not UTF-8 and would raise
-    # UnicodeEncodeError on non-ASCII paths/labels mid-run, swallowed
-    # by logging.handleError and lost). Matches the cache writers in
-    # silence.py / config.py.
-    fh = logging.FileHandler(path, encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
-    return fh
-
-
-def _check_ffmpeg() -> None:
-    """Warn if ffmpeg or ffprobe is missing."""
-    for tool in ("ffmpeg", "ffprobe"):
-        if not shutil.which(tool):
-            console.print(f"[red]Error:[/red] {tool} not found in PATH")
-            console.print("  Install: [cyan]winget install Gyan.FFmpeg[/cyan]")
-            console.print("  Or run:  [cyan]setup.ps1[/cyan] (Windows)")
-            raise typer.Exit(1)
-
 
 def load_config(config_file: Path | None) -> dict:
-    """Load and validate configuration file.
+    """Thin wrapper: ``cli_config.load_config`` + the module-level ``console``.
 
-    Validates BOTH numeric ranges (``CONFIG_RANGES``) AND enum keys
-    (``method``, ``encoder``, ``video_quality``, ``download_quality``,
-    ``theme``) against their ``VALID_*`` lists. This is the single
-    chokepoint for config-file validation — the CLI flag-path goes
-    through its own ``_resolved_*`` check downstream, so an invalid
-    YAML value is rejected here regardless of whether the matching
-    CLI flag was passed.
+    Kept as a thin adapter so ``from stream2video.cli import load_config``
+    continues to work, and so a test patching ``stream2video.cli.console``
+    would see the output policy the test configured (the helper has no
+    console of its own).
     """
-    config = CONFIG_DEFAULTS.copy()
-    # Raw YAML dict (before merging into ``config``). Kept so bool-key
-    # validation below can distinguish "user wrote 1 in YAML" (int,
-    # rejected) from "default value absent" (skip). ``file_config`` is
-    # only assigned inside the try/except when the file loads cleanly.
-    file_config: dict = {}
-
-    if config_file:
-        if not config_file.exists():
-            console.print(f"[yellow]Warning:[/yellow] Config file not found: {config_file}")
-        else:
-            try:
-                with open(config_file) as f:
-                    loaded = yaml.safe_load(f) or {}
-
-                if not isinstance(loaded, dict):
-                    raise ValueError("Config file must contain a dictionary")
-
-                file_config = loaded
-                config.update(file_config)
-
-                logger.info(f"Loaded config from {config_file}")
-
-            except yaml.YAMLError as e:
-                console.print(f"[red]Error parsing config file:[/red] {e}")
-                raise typer.Exit(1) from None
-
-            except Exception as e:
-                console.print(f"[red]Error loading config file:[/red] {e}")
-                raise typer.Exit(1) from None
-
-    # Validate numeric ranges.
-    for key, (min_val, max_val) in CONFIG_RANGES.items():
-        if key in config:
-            try:
-                value = float(config[key])
-
-                if not min_val <= value <= max_val:
-                    console.print(
-                        f"[red]Invalid {key}:[/red] {value} not in range [{min_val}, {max_val}]"
-                    )
-                    raise typer.Exit(1)
-
-                config[key] = value
-
-            except (ValueError, TypeError):
-                console.print(f"[red]Invalid {key}:[/red] {config[key]} is not a number")
-                raise typer.Exit(1) from None
-
-    # Validate bool keys. YAML booleans (``force: false``) parse to Python
-    # bool, but quoted strings (``force: "false"``) parse to the string
-    # ``"false"`` which is truthy under ``bool(...)`` — so ``_resolved_bool``
-    # later in the run would read it as ``True`` even though the user wrote
-    # ``false``. Same hazard for ``0``/``1`` ints: PyYAML keeps them as
-    # integers, not bools. Reject any non-bool value the user explicitly
-    # wrote in the YAML so downstream ``bool(value)`` matches intent. Keys
-    # the user didn't write keep their bool default from CONFIG_DEFAULTS.
-    bool_keys = ("force", "delete_after", "per_video_dir")
-    for key in bool_keys:
-        if key in file_config:
-            bool_val = file_config[key]
-            if not isinstance(bool_val, bool):
-                console.print(f"[red]Invalid {key}:[/red] {bool_val!r} must be true or false")
-                raise typer.Exit(1)
-
-    # Validate enum keys against their VALID_* lists. A bad value in
-    # either the YAML or CONFIG_DEFAULTS is rejected here so downstream
-    # code can assume the value is one of the allowed tokens. ``theme`` is
-    # GUI-only — the CLI never reads or applies it — so it's intentionally
-    # excluded from the enum validation here (a bad theme in a YAML config
-    # that the CLI loads shouldn't abort the run).
-    enum_specs = [
-        ("method", VALID_METHODS),
-        ("encoder", VALID_ENCODERS),
-        ("video_quality", VALID_QUALITIES),
-        ("download_quality", VALID_DOWNLOAD_QUALITIES),
-        ("software_fallback", VALID_SOFTWARE_FALLBACKS),
-        ("x264_preset", VALID_X264_PRESETS),
-        ("output_fps", VALID_OUTPUT_FPS),
-        ("output_format", VALID_OUTPUT_FORMATS),
-    ]
-    for key, valid in enum_specs:
-        enum_val: Any = config.get(key)
-        if enum_val is None:
-            continue
-        if enum_val not in valid:
-            console.print(
-                f"[red]Invalid {key}:[/red] {enum_val!r} "
-                f"(use {' or '.join(repr(x) for x in valid)})"
-            )
-            raise typer.Exit(1)
-
-    logger.debug(f"Final config: {config}")
-    return config
+    return _load_config_impl(config_file, console)
 
 
 @app.command()
