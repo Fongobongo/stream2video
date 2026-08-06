@@ -6,16 +6,6 @@ from pathlib import Path
 
 from stream2video import silence as _c
 from stream2video.config import CONFIG_DEFAULTS
-from stream2video.silence.cache import (
-    _get_wav_cache_path,
-    _is_wav_cache_valid,
-    _load_silence_cache_from_path,
-)
-from stream2video.silence.detect import (
-    _extract_audio_wav,
-    _run_silencedetect,
-    _sample_segments_match,
-)
 from stream2video.silence.parser import (
     _SAMPLE_VERIFY_DURATION,
     _SEGMENT_MATCH_TOLERANCE,
@@ -173,7 +163,23 @@ def detect_silence(
                 timeout=effective_timeout,
             )
         else:
-            _c._extract_audio_wav(video_path, wav_path, cancel_callback, timeout=effective_timeout)
+            # Fresh WAV — report extraction as 0..15% of the Silence phase
+            # so the thin bar moves during the 15GB extract (otherwise 0%).
+            def _wav_prog(f: float) -> None:
+                if progress_callback is not None:
+                    progress_callback(max(0.0, min(1.0, f)) * 0.15)
+
+            _c._extract_audio_wav(
+                video_path,
+                wav_path,
+                cancel_callback,
+                timeout=effective_timeout,
+                progress_callback=_wav_prog if progress_callback is not None else None,
+                duration=duration,
+            )
+            if progress_callback is not None:
+                # Keep bar at 15% until silencedetect starts producing
+                progress_callback(0.15)
             # The WAV was just (re-)extracted with -copyts — its PTS
             # timeline matches the source video exactly, so the
             # resume context (initial_segments + resume_from) is still
@@ -182,12 +188,19 @@ def detect_silence(
             # from t=0 on a multi-hour source. Both the WAV and the
             # .resume file live in source-time coordinates thanks to
             # -copyts on the extraction side.
+            # Map WAV silencedetect 0..1 to 15..85% of the Silence phase
+            # (extraction is 0..15 illustration above, sample-verify is
+            # hidden). When resuming, offset already handled by progress_divisor.
+            def _wav_silence_prog(f: float) -> None:
+                if progress_callback is not None:
+                    progress_callback(0.15 + max(0.0, min(1.0, f)) * 0.70)
+
             segments_D = _c._run_silencedetect(
                 wav_path,
                 threshold,
                 min_silence,
                 duration,
-                None,
+                _wav_silence_prog if progress_callback is not None else None,
                 cancel_callback,
                 "WAV",
                 on_segment=on_segment,
@@ -248,6 +261,8 @@ def detect_silence(
                     resume_save_config=current_config,
                     timeout=effective_timeout,
                 )
+            if progress_callback is not None:
+                progress_callback(0.85)
     else:
         segments = _c._run_silencedetect(
             video_path,
@@ -266,6 +281,11 @@ def detect_silence(
         )
 
     segments = apply_margin(segments, margin, duration)
+
+    if progress_callback is not None:
+        # Finish 85..100% slice (verify/fallback already at 85) so bar
+        # hits 100% before the controller flips to Cutting 3/4.
+        progress_callback(1.0)
 
     if not segments:
         logger.info("No silence segments detected (video may have no audio track)")

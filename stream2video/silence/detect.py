@@ -501,6 +501,8 @@ def _extract_audio_wav(
     wav_path: Path,
     cancel_callback: Callable[[], bool] | None = None,
     timeout: int = _SILENCE_TIMEOUT,
+    progress_callback: Callable[[float], None] | None = None,
+    duration: float | None = None,
 ) -> None:
     """Extract audio from `video_path` to a 16kHz mono PCM WAV at `wav_path`.
 
@@ -511,6 +513,10 @@ def _extract_audio_wav(
     The WAV is the cached artifact for the D (audio-only) path. On broken-PTS
     sources the verification pass at the call site detects the mismatch and
     deletes this file.
+
+    When ``progress_callback`` + ``duration`` are given, reports 0..1 via
+    ``-progress pipe:1`` (used for Silence phase thin bar) so the WAV
+    extraction does not look frozen on 15GB sources.
     """
     wav_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -518,6 +524,8 @@ def _extract_audio_wav(
         _c.ffmpeg_path(),
         "-y",
         "-copyts",
+        "-progress",
+        "pipe:1",
         "-i",
         str(video_path),
         "-vn",
@@ -537,7 +545,7 @@ def _extract_audio_wav(
         )
         process = _c.subprocess.Popen(
             cmd,
-            stdout=_c.subprocess.DEVNULL,
+            stdout=_c.subprocess.PIPE,
             stderr=_c.subprocess.PIPE,
             bufsize=-1,
             **no_window_kwargs(),
@@ -545,17 +553,64 @@ def _extract_audio_wav(
     except FileNotFoundError as e:
         raise SilenceDetectionError("ffmpeg not found in PATH") from e
 
+    stdout_pipe = process.stdout
     stderr_pipe = process.stderr
-    assert stderr_pipe is not None
+    assert stdout_pipe is not None and stderr_pipe is not None
     stderr_lines: list[str] = []
     wait_for_drain = drain_stderr_lines(stderr_pipe, stderr_lines)
     drain_done = False
 
     try:
         with registered_process(process), cancel_monitor(process, cancel_callback) as cancelled:
-            if cancelled.is_set():
-                raise SilenceCancelledError("audio extraction cancelled")
-            process.wait(timeout=timeout)
+            if duration is not None and duration > 0 and progress_callback is not None:
+                from stream2video.utils import read_lines_queue as _rlq
+
+                q, _thr = _rlq(stdout_pipe)
+                deadline = None
+                if timeout:
+                    import time as _time
+
+                    deadline = _time.monotonic() + timeout
+                while True:
+                    if deadline is not None:
+                        import time as _time
+
+                        if _time.monotonic() > deadline:
+                            process.kill()
+                            raise SilenceDetectionError(f"ffmpeg extract timeout after {timeout}s")
+                    try:
+                        raw = q.get(timeout=0.2)
+                    except queue.Empty:
+                        if cancelled.is_set() or (cancel_callback and cancel_callback()):
+                            process.kill()
+                            raise SilenceCancelledError("audio extraction cancelled") from None
+                        if process.poll() is not None:
+                            break
+                        continue
+                    if raw is None:
+                        break
+                    if cancelled.is_set():
+                        raise SilenceCancelledError("audio extraction cancelled")
+                    try:
+                        line = raw.decode("utf-8", errors="replace").strip()
+                    except Exception:
+                        continue
+                    if line.startswith("out_time_us="):
+                        try:
+                            us = int(line.split("=", 1)[1])
+                            progress_callback(min(us / 1_000_000 / duration, 1.0))
+                        except Exception:
+                            pass
+                # Ensure process finished
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    raise SilenceDetectionError(f"ffmpeg extract timeout after {timeout}s") from None
+            else:
+                if cancelled.is_set():
+                    raise SilenceCancelledError("audio extraction cancelled")
+                process.wait(timeout=timeout)
             if cancelled.is_set():
                 raise SilenceCancelledError("audio extraction cancelled")
             wait_for_drain()
@@ -579,6 +634,10 @@ def _extract_audio_wav(
     finally:
         if not drain_done:
             wait_for_drain()
+        try:
+            stdout_pipe.close()
+        except Exception:
+            pass
         stderr_pipe.close()
 
 

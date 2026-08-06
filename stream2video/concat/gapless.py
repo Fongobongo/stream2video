@@ -222,11 +222,15 @@ def _run_gapless_segment_concat(
     tree_dir = output_path.parent / f"_gapless_tree_{output_path.stem}"
     tree_dir.mkdir(parents=True, exist_ok=True)
 
+    # Tree uses overall 0.9..1.0 (pipeline_controller: 90% Cutting / 10%
+    # Concatenating). Reserve 0.9..0.98 for tree intermediate groups and
+    # 0.98..1.0 for final pass so the ETA moves during L0. Log ETA heads
+    # up so pipeline_controller can show remaining even when per-group
+    # progress stalls between groups.
     current = list(part_paths)
     level = 0
     completed_groups = 0
     total_groups_est = 0
-    # Pre-count groups so tree 0.9..0.99 maps linearly to groups
     _tc = list(part_paths)
     while len(_tc) > max_inputs:
         total_groups_est += (len(_tc) + max_inputs - 1) // max_inputs
@@ -236,7 +240,28 @@ def _run_gapless_segment_concat(
         if progress_callback is None or total_groups_est == 0 or total_duration <= 0:
             return
         frac = completed_groups / max(1, total_groups_est)
-        progress_callback(0.9 + frac * 0.09)
+        progress_callback(0.9 + frac * 0.08)
+
+    # Estimate per-group duration for intra-group ETA smoothing (so total
+    # ETA ticks even when out_time_us stalls for 1-2 mins inside a group).
+    # Use total_duration / total_groups_est scaled by tree span; clip to
+    # avoid absurd Remaining on tiny files.
+    _tree_group_dur = (total_duration / max(1, total_groups_est)) if total_duration > 0 else 0
+    _tree_group_start: list[float | None] = [None]
+
+    def _tree_group_progress(seconds: float) -> None:
+        if progress_callback is None or total_duration <= 0 or total_groups_est == 0:
+            return
+        # Map this group's seconds/total_duration fraction into its group span.
+        # Groups G0..G1 are 0.9..0.98; final is separate.
+        if _tree_group_start[0] is None:
+            return
+        # frac within this group 0..1
+        group_frac = max(0.0, min(1.0, seconds / max(1, _tree_group_dur)))
+        # Overall Completed already at start of this group; add intra fraction * group span
+        group_span = 0.08 / max(1, total_groups_est)
+        overall = 0.9 + (completed_groups / max(1, total_groups_est)) * 0.08 + group_frac * group_span
+        progress_callback(min(0.98, overall))
 
     while len(current) > max_inputs:
         next_level: list[Path] = []
@@ -271,6 +296,26 @@ def _run_gapless_segment_concat(
             # gens). For true lossless + no disk blowup use
             # ``method=cut_then_encode`` (one encode total, stream-copy
             # cuts). PCM stays sample-accurate via concat filter.
+            # Intra-group out_time_us so 4/4 doesn't freeze 1-2 mins per group.
+            # Use chunk duration for scaling (sum of segment durations).
+            try:
+                _chunk_dur = sum(_c.get_video_duration(p) or 0 for p in chunk)  # type: ignore[arg-type]
+            except Exception:
+                _chunk_dur = _tree_group_dur
+            if _chunk_dur <= 0:
+                _chunk_dur = _tree_group_dur
+
+            def _make_group_prog(base_completed: int, chunk_dur: float) -> object:
+                def _pg(s: float) -> None:
+                    if progress_callback is None or total_groups_est == 0:
+                        return
+                    gf = max(0.0, min(1.0, s / max(1.0, chunk_dur)))
+                    overall = 0.9 + (base_completed / max(1, total_groups_est)) * 0.08 + gf * (0.08 / max(1, total_groups_est))
+                    progress_callback(min(0.98, overall))
+
+                return _pg
+
+            _group_prog = _make_group_prog(completed_groups, _chunk_dur)  # type: ignore[assignment]
             _c._concat_filter_one_pass(
                 chunk,
                 inter,
@@ -278,8 +323,8 @@ def _run_gapless_segment_concat(
                 ["-crf", "18", "-preset", "ultrafast", "-pix_fmt", "yuv420p"],
                 audio_codec="pcm_s16le",
                 audio_opts=[],
-                total_duration=0,  # no per-chunk progress
-                progress_callback=None,
+                total_duration=_chunk_dur,
+                progress_callback=_group_prog,  # type: ignore[arg-type]
                 cancel_callback=cancel_callback,
                 timeout=timeout,
                 label=f"gapless tree L{level} G{g}",
@@ -309,7 +354,8 @@ def _run_gapless_segment_concat(
     def _final_prog(seconds: float) -> None:
         if progress_callback is None or total_duration <= 0:
             return
-        base, span = (0.99, 0.01) if total_groups_est > 0 else (0.9, 0.1)
+        # Tree case reserves 0.9..0.98 for groups, 0.98..1.0 for final
+        base, span = (0.98, 0.02) if total_groups_est > 0 else (0.9, 0.1)
         frac = max(0.0, min(1.0, seconds / total_duration))
         progress_callback(base + frac * span)
 
