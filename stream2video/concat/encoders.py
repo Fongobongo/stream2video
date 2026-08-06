@@ -59,6 +59,18 @@ def _x264_low_memory_opts() -> list[str]:
     ]
 
 
+def _bitrate_for_quality(quality: str, source_bitrate: int | None) -> str:
+    """Resolve effective bitrate string for HW encoders at quality, with source fallback."""
+    if quality == "source" and source_bitrate is not None and source_bitrate > 0:
+        kbps = max(500, min(20000, round(source_bitrate / 1000)))
+        return f"{kbps}k"
+    if quality == "source":
+        # Probe failed — caller logs and chooses fallback before calling us;
+        # but for direct encoder_opts(source) without probe, fall back to high.
+        return _VIDEO_BITRATES["high"]
+    return _VIDEO_BITRATES[quality]
+
+
 def encoder_opts(
     encoder: str,
     quality: str = "medium",
@@ -112,23 +124,26 @@ def encoder_opts(
     threads_opt = _threads_opt(encoder_threads)
 
     if quality == "source":
-        low_mem = _x264_low_memory_opts() if encoder == "libx264" and x264_low_memory else []
+        # Honest source: HW → probed -b:v, libx264 → constrained bitrate too
+        # (not CRF) so quality doesn't depend on encoder. libx264 -b:v is
+        # less efficient than CRF but gives encoder-independent size/quality
+        # at source preset; users wanting quality-per-size should use high/medium.
         if encoder == "libx264":
-            return ["-preset", x264_preset, *threads_opt, *low_mem]
-        # HW source: honest probe bitrate if available
-        if source_bitrate is not None and source_bitrate > 0:
-            kbps = max(500, min(20000, round(source_bitrate / 1000)))
-            bitrate = f"{kbps}k"
-            if encoder == "h264_mf":
-                return ["-b:v", bitrate, "-quality", "100", *threads_opt]
-            if encoder == "h264_amf":
-                return ["-usage", "transcoding", "-quality", "speed", "-b:v", bitrate, *threads_opt]
-            if encoder == "h264_nvenc":
-                return [
-                    "-preset", "p7", "-rc", "vbr", "-b:v", bitrate, "-maxrate", bitrate, "-cq", "18", *threads_opt,
-                ]
-        # No probe: caller will have warned; use high as honest fallback was requested
-        return [*threads_opt]
+            bitrate = _bitrate_for_quality("source", source_bitrate)
+            low_mem = _x264_low_memory_opts() if x264_low_memory else []
+            # Constant bitrate for source parity: use -b:v + -maxrate like HW.
+            # Keep preset for speed trade-off, but cap bitrate to source.
+            return ["-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bitrate, "-preset", x264_preset, *threads_opt, *low_mem]
+        # HW encoders
+        bitrate = _bitrate_for_quality("source", source_bitrate)
+        if encoder == "h264_mf":
+            return ["-b:v", bitrate, "-quality", "100", *threads_opt]
+        if encoder == "h264_amf":
+            return ["-usage", "transcoding", "-quality", "speed", "-b:v", bitrate, *threads_opt]
+        if encoder == "h264_nvenc":
+            return [
+                "-preset", "p7", "-rc", "vbr", "-b:v", bitrate, "-maxrate", bitrate, "-cq", "18", *threads_opt,
+            ]
 
     bitrate = _VIDEO_BITRATES[quality]
     if encoder == "h264_mf":
@@ -163,14 +178,18 @@ def encoder_opts(
             "18",
             *threads_opt,
         ]
-    # libx264 -- CRF-driven, bitrate is ignored. ``-preset`` controls the
-    # speed/size trade-off AND the CPU load (slower presets do more
-    # lookahead/motion search). ``-threads`` caps the encoder's parallel
-    # frame evaluations so an 8-core machine doesn't saturate to 100% on
-    # a long encode.
-    crf = _X264_CRF[quality]
+    # libx264 -- encoder-independent quality: use the same bitrate
+    # targets as HW encoders so high/medium/low give the same size
+    # regardless of encoder. Previously libx264 used CRF 18/23/28 which
+    # is more efficient (better quality per bit) than HW CBR, so the same
+    # preset gave different sizes. For parity we use constrained bitrate
+    # (CBR) with preset still controlling speed/CPU. Users wanting the old
+    # CRF efficiency can still get it via --preset vs --video-quality trade-off;
+    # the visual quality at 10M/7M is already "good" (user request:
+    # "везде одинаково хорошее качество").
+    bitrate = _bitrate_for_quality(quality, source_bitrate)
     low_mem = _x264_low_memory_opts() if x264_low_memory else []
-    return ["-crf", crf, "-preset", x264_preset, *threads_opt, *low_mem]
+    return ["-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bitrate, "-preset", x264_preset, *threads_opt, *low_mem]
 
 
 def _threads_opt(encoder_threads: str | int) -> list[str]:
@@ -295,6 +314,7 @@ def get_video_encoder(
     x264_preset: str = "medium",
     encoder_threads: str | int = "auto",
     x264_low_memory: bool = False,
+    source_bitrate: int | None = None,
 ) -> tuple[str, list[str]]:
     """Resolve the encoder to use for this run.
 
@@ -335,6 +355,7 @@ def get_video_encoder(
             x264_preset=x264_preset,
             encoder_threads=encoder_threads,
             x264_low_memory=x264_low_memory,
+            source_bitrate=source_bitrate,
         )
 
     # HW encoder unavailable -- apply fallback policy.
@@ -346,6 +367,7 @@ def get_video_encoder(
             x264_preset=x264_preset,
             encoder_threads=encoder_threads,
             x264_low_memory=x264_low_memory,
+            source_bitrate=source_bitrate,
         )
     if software_fallback == "ask":
         if on_unavailable is None:
@@ -362,6 +384,7 @@ def get_video_encoder(
                 x264_preset=x264_preset,
                 encoder_threads=encoder_threads,
                 x264_low_memory=x264_low_memory,
+                source_bitrate=source_bitrate,
             )
         raise EncoderUnavailableError(f"{preferred} not available; user declined libx264 fallback")
     # software_fallback == "disabled"
