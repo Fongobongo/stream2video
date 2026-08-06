@@ -106,7 +106,6 @@ class MainWindowBuildMixin:
 
         # ── Center: Controls ──
         ctrl_frame = ctk.CTkScrollableFrame(self)
-        ctrl_frame.grid(row=0, column=1, sticky="nsew", padx=3, pady=4)
 
         ctk.CTkLabel(
             ctrl_frame, text="Controls", anchor="w", font=ctk.CTkFont(size=12, weight="bold")
@@ -430,11 +429,9 @@ class MainWindowBuildMixin:
         action_frame = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
         action_frame.pack(fill="x", padx=5, pady=(0, 6))
 
-        # Action row: single-row pack in a left cluster.
-        #   [Start] [Cancel] [Step / Complete ...]   — left-aligned, Step
-        #   has a fixed max width (no fill/expand) so the text caps out
-        #   instead of stretching across the whole row. Step sits
-        #   immediately to the right of Cancel (4 px gap).
+        # Action row: [Start] [Cancel] only. The Step/Complete status and
+        # the progress block moved to the bottom of this column (fixed
+        # strip at grid row 1, built below).
         left_cluster = ctk.CTkFrame(action_frame, fg_color="transparent")
         left_cluster.pack(side="left", fill="x", expand=True)
 
@@ -459,55 +456,9 @@ class MainWindowBuildMixin:
         )
         self.btn_cancel.pack(side="left")
 
-        # Step / Complete label, left-anchored, immediately after Cancel.
-        # Fixed max width (no fill/expand) so the text caps out instead of
-        # stretching across the whole row.
-        self.lbl_status = ctk.CTkLabel(left_cluster, text="", anchor="w", width=220)
-        self.lbl_status.pack(side="left", padx=(4, 0))
-
-        self.bottom_frame = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
-        self.bottom_frame.pack(fill="x", padx=5, pady=(0, 6))
-        # Fixed compact bar: CTkProgressBar defaults to ~200px, so set
-        # an explicit width about one third smaller and do not stretch it.
-        # Row 0 holds the bar, explicit overall percent, and live
-        # Elapsed/Remaining label.
-        # Row 1 holds the Total wall-clock label, full width.
-        self.bottom_frame.grid_columnconfigure(0, weight=1)
-        self.bottom_frame.grid_columnconfigure(1, weight=0)
-        self.bottom_frame.grid_columnconfigure(2, weight=8)
-        self.progress = ctk.CTkProgressBar(
-            self.bottom_frame,
-            mode="determinate",
-            height=10,
-            width=135,
-        )
-        self.progress.set(0)
-        self.progress.grid(row=0, column=0, sticky="w", padx=(0, 6))
-        self.lbl_progress_pct = ctk.CTkLabel(
-            self.bottom_frame,
-            text="0%",
-            anchor="w",
-            width=42,
-            text_color=("gray40", "gray60"),
-        )
-        self.lbl_progress_pct.grid(row=0, column=1, sticky="w", padx=(0, 6))
-        # Live Elapsed/Remaining for the current phase. Same row as the
-        # bar, left-anchored, immediately to the right of the bar.
-        self.lbl_overall = ctk.CTkLabel(
-            self.bottom_frame,
-            text="",
-            anchor="w",
-            text_color=("gray40", "gray60"),
-        )
-        self.lbl_overall.grid(row=0, column=2, sticky="w", padx=(2, 0))
-        # Total pipeline wall-clock, updated in real time. Row 1, full width.
-        self.lbl_total = ctk.CTkLabel(
-            self.bottom_frame,
-            text="",
-            anchor="w",
-            text_color=("gray40", "gray60"),
-        )
-        self.lbl_total.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(2, 0))
+        # Pin the Controls column to the top of the window (it no longer
+        # stretches: the progress block moved to the Log column below).
+        ctrl_frame.grid(row=0, column=1, sticky="new", padx=3, pady=4)
 
         # ── Right: Log panel + Waveform button ──
         # The waveform preview is opened in its own Toplevel window when
@@ -536,5 +487,55 @@ class MainWindowBuildMixin:
         # (which may have been pre-filled from saved config).
         self._update_waveform_button_state()
 
-        self.txt_log = ctk.CTkTextbox(right_frame, wrap="word", state="disabled")
-        self.txt_log.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
+        self.txt_log = ctk.CTkTextbox(right_frame, wrap="word", state="disabled", height=150)
+        self.txt_log.grid(row=2, column=0, sticky="ew", padx=4, pady=4)
+
+        # Progress block: moved from the bottom of the Controls column.
+        # Compact two-row layout under a fixed-height log so the log no
+        # longer swallows the whole column and the pipeline status stays
+        # visible on the right.
+        prog_frame = ctk.CTkFrame(right_frame, fg_color="transparent")
+        prog_frame.grid(row=3, column=0, sticky="ew", padx=4, pady=(0, 4))
+        prog_frame.grid_columnconfigure(0, weight=0)  # Step status
+        prog_frame.grid_columnconfigure(1, weight=0)  # bar: fixed width
+        prog_frame.grid_columnconfigure(2, weight=0)  # percent
+        prog_frame.grid_columnconfigure(3, weight=1)  # Elapsed/Remaining (takes slack)
+        prog_frame.grid_columnconfigure(4, weight=0)  # Total wall-clock
+
+        # Step / Complete status (was next to the Start/Cancel buttons).
+        self.lbl_status = ctk.CTkLabel(prog_frame, text="", anchor="w", width=200)
+        self.lbl_status.grid(row=0, column=0, columnspan=5, sticky="w", pady=(0, 2))
+
+        # Progress bar.
+        self.progress = ctk.CTkProgressBar(
+            prog_frame,
+            mode="determinate",
+            height=10,
+            width=160,
+        )
+        self.progress.set(0)
+        self.progress.grid(row=1, column=1, sticky="w", padx=(0, 6))
+        self.lbl_progress_pct = ctk.CTkLabel(
+            prog_frame,
+            text="0%",
+            anchor="w",
+            width=42,
+            text_color=("gray40", "gray60"),
+        )
+        self.lbl_progress_pct.grid(row=1, column=2, sticky="w", padx=(0, 6))
+        # Live Elapsed/Remaining for the current phase.
+        self.lbl_overall = ctk.CTkLabel(
+            prog_frame,
+            text="",
+            anchor="w",
+            text_color=("gray40", "gray60"),
+        )
+        self.lbl_overall.grid(row=1, column=3, sticky="w", padx=(2, 0))
+        # Total pipeline wall-clock, updated in real time.
+        self.lbl_total = ctk.CTkLabel(
+            prog_frame,
+            text="",
+            anchor="e",
+            text_color=("gray40", "gray60"),
+        )
+        self.lbl_total.grid(row=1, column=4, sticky="e")
