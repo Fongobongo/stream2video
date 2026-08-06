@@ -21,11 +21,11 @@ from stream2video.gui_helpers import (
     STATUS_MAX,
     TOTAL_ETA_MIN_PROGRESS,
     EtaSmoother,
+    _wrap_status_lines,
     build_eta_tail,
     build_overall_line,
     build_total_line,
     should_update_status,
-    truncate_status,
 )
 
 # Refresh period of the throttled Overall line + total-ETA (seconds).
@@ -235,8 +235,10 @@ class ProgressUiMixin:
         if not should_update_status(self._last_status_update, now, force=force):
             return
         self._last_status_update = now
-        text = truncate_status(text, self._STATUS_MAX)
-        self._tk_after(0, lambda: self.lbl_status.configure(text=text))
+        lines = _wrap_status_lines(text)
+        line1 = lines[0] if len(lines) > 0 else ""
+        line2 = lines[1] if len(lines) > 1 else ""
+        self._tk_after(0, lambda t1=line1, t2=line2: (self.lbl_status.configure(text=t1), getattr(self, "lbl_status2", None) and self.lbl_status2.configure(text=t2)))
 
     def _ui_info(self, text: str) -> None:
         self._tk_after(0, lambda t=text: self.lbl_silence.configure(text=t))

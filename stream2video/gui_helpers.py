@@ -18,10 +18,15 @@ from pathlib import Path
 
 from stream2video.formatters import fmt_clock_time, fmt_size, fmt_speed, fmt_time
 
-# Maximum length of the GUI's status-line text. Kept as a module-level
-# constant so tests can pin it and the GUI can import it without a
-# circular dependency on the class.
+# Maximum length of the GUI's status-line text (per line when wrapped).
+# Kept as a module-level constant so tests can pin it and the GUI can
+# import it without a circular dependency on the class. The two-line
+# status label (row 0 + row 1 in prog_frame) wraps via _wrap_status_lines,
+# so per-line budget stays 50 but total visible chars double.
 STATUS_MAX = 50
+# Two-line status uses STATUS_MAX per line, so wrap budgets are separate
+# but truncation keeps total within 2*STATUS_MAX.
+STATUS_MAX_LINES = 2
 
 # Throttle for ``_ui_status``: subsequent updates closer than this many
 # seconds apart are dropped (unless ``force=True``). Keeps the status
@@ -190,6 +195,57 @@ def truncate_status(text: str, max_len: int = STATUS_MAX) -> str:
     if len(text) <= max_len:
         return text
     return text[: max_len - 1] + "…"
+
+
+def _wrap_status_lines(text: str, max_len: int = STATUS_MAX, max_lines: int = STATUS_MAX_LINES) -> list[str]:
+    """Wrap a status string into up to *max_lines* lines of *max_len* each.
+
+    Word-aware where possible (breaks on space); hard-breaks when a
+    single token exceeds max_len. Truncates with an ellipsis on the last
+    line if the budget is exhausted. Pure helper for the two-line status
+    label — avoids widening the window to show full progress digits.
+    """
+    if not text:
+        return [""] * max_lines
+    # Truncate total budget first to avoid runaway wrapping on very long errors
+    total_max = max_len * max_lines
+    # Use truncation with ellipsis if over budget, but wrap then truncate last line
+    words = text.split(" ")
+    lines: list[str] = []
+    cur = ""
+    for w in words:
+        if not w:
+            continue
+        # Handle tokens longer than max_len by hard-splitting
+        while len(w) > max_len:
+            if cur:
+                lines.append(cur)
+                cur = ""
+                if len(lines) >= max_lines:
+                    break
+            lines.append(w[:max_len])
+            w = w[max_len:]
+            if len(lines) >= max_lines:
+                break
+        if len(lines) >= max_lines:
+            break
+        sep = " " if cur else ""
+        if len(cur) + len(sep) + len(w) <= max_len:
+            cur = cur + sep + w
+        else:
+            lines.append(cur)
+            cur = w
+            if len(lines) >= max_lines:
+                break
+    if cur and len(lines) < max_lines:
+        lines.append(cur)
+    # Truncate overflow with ellipsis on last line if needed
+    if len(" ".join(text.split())) > total_max and lines and len(lines[-1]) == max_len:
+        lines[-1] = lines[-1][: max_len - 1] + "…"
+    # Pad to max_lines with empty strings for callers that expect two entries
+    while len(lines) < max_lines:
+        lines.append("")
+    return lines[:max_lines]
 
 
 def build_download_status(
