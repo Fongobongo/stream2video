@@ -467,6 +467,9 @@ class MainWindowBuildMixin:
         # the user clicks "Waveform" (see ``_open_waveform_window``). The
         # popup auto-renders the preview on open; no render button.
         right_frame = ctk.CTkFrame(self)
+        # The log row is free to stretch (it is the only ``weight=1``
+        # row in this column). The progress block below it stays pinned
+        # to the bottom via its own grid's ``sticky="sew"``.
         right_frame.grid_rowconfigure(2, weight=1)
         right_frame.grid_columnconfigure(0, weight=1)
         right_frame.grid(row=0, column=2, sticky="nsew", padx=(3, 4), pady=4)
@@ -489,16 +492,20 @@ class MainWindowBuildMixin:
         # (which may have been pre-filled from saved config).
         self._update_waveform_button_state()
 
-        self.txt_log = ctk.CTkTextbox(right_frame, wrap="word", state="disabled", height=150)
-        self.txt_log.grid(row=2, column=0, sticky="ew", padx=4, pady=4)
+        # Log: fixed height so the progress block below is always visible
+        # (and never collapses when the window is short). Right_frame's
+        # row 2 is weight=1 so the log expands with the column but never
+        # shrinks below the request.
+        self.txt_log = ctk.CTkTextbox(right_frame, wrap="word", state="disabled")
+        self.txt_log.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
 
         # Progress block: moved from the bottom of the Controls column.
-        # Compact three-row layout under a fixed-height log:
+        # Compact three-row layout pinned to the bottom of the column:
         #   row 0: Step X/3 status (was next to Start/Cancel)
         #   row 1: thin per-phase bar (fraction of the CURRENT phase)
         #   row 2: overall bar + % + Elapsed/Remaining + Total wall-clock
         prog_frame = ctk.CTkFrame(right_frame, fg_color="transparent")
-        prog_frame.grid(row=3, column=0, sticky="ew", padx=4, pady=(0, 4))
+        prog_frame.grid(row=3, column=0, sticky="sew", padx=4, pady=(0, 4))
         prog_frame.grid_columnconfigure(0, weight=0)  # bar: fixed width
         prog_frame.grid_columnconfigure(1, weight=0)  # percent
         prog_frame.grid_columnconfigure(2, weight=1)  # Elapsed/Remaining (takes slack)

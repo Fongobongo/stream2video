@@ -68,7 +68,11 @@ class ProgressUiMixin:
         # the progress-UI improvement plan).
         self._phase_eta_smoother = EtaSmoother()
         self._overall_progress: float = 0.0
-        self._default_progress_color: object | None = None
+        # Theme default cached at widget-build time (``_build_ui``) so a
+        # success/failure tint can be restored on the next run. Optional
+        # tuple type holds ``str`` colours too (customtkinter returns a
+        # tuple for themed values, a plain str once overridden).
+        self._default_progress_color: str | tuple | None = None
         self._last_overall_update: float = 0.0
         # Tracks which "Step X/3" status line we're on so the ETA
         # smoother + thin per-phase bar reset at each phase boundary
@@ -115,7 +119,12 @@ class ProgressUiMixin:
         if color is None:
             if self._default_progress_color is None:
                 return
-            color = self._default_progress_color  # type: ignore[assignment]
+            restore: object = self._default_progress_color
+            self._tk_after(
+                0,
+                lambda c=restore: self.progress.configure(progress_color=c),
+            )
+            return
         self._tk_after(0, lambda c=color: self.progress.configure(progress_color=c))
 
     def _ui_progress(self, value: float) -> None:
@@ -206,26 +215,27 @@ class ProgressUiMixin:
         )
 
     def _ui_status(self, text: str, force: bool = False) -> None:
-        now = time.monotonic()
-        if not should_update_status(self._last_status_update, now, force=force):
-            return
-        self._last_status_update = now
-        text = truncate_status(text, self._STATUS_MAX)
-        self._tk_after(0, lambda: self.lbl_status.configure(text=text))
-        # Detect the phase switch and reset the per-phase bars. The
-        # status lines the phases emit are exactly prefixed ("Step 1/3:" /
-        # "Step 2/3:" / "Step 3/3:"). A change resets the phase ETA
-        # smoother and the thin per-phase bar, so the previous phase's
-        # estimate doesn't bleed into the new one.
-        if text.startswith("Step ") and "/" in text:
+        # Phase-switch detection runs unconditionally (NOT throttled):
+        # even when the status-line redraw is rate-limited, dropping the
+        # reset of the ETA smoother + the per-phase bar would leak the
+        # previous phase's ETA into the new one.
+        if text.startswith("Step "):
+            parts = text.split(":", 1)[0].split("/")
             try:
-                step = int(text.split("Step ", 1)[1].split("/", 1)[0])
+                step = int(parts[0][5:])  # after "Step "
             except (IndexError, ValueError):
                 step = None
             if step is not None and step != self._current_step:
                 self._current_step = step
                 self._phase_eta_smoother.reset()
                 self._set_phase_progress(0.0)
+
+        now = time.monotonic()
+        if not should_update_status(self._last_status_update, now, force=force):
+            return
+        self._last_status_update = now
+        text = truncate_status(text, self._STATUS_MAX)
+        self._tk_after(0, lambda: self.lbl_status.configure(text=text))
 
     def _ui_info(self, text: str) -> None:
         self._tk_after(0, lambda t=text: self.lbl_silence.configure(text=t))
