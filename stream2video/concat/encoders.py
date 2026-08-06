@@ -65,14 +65,17 @@ def encoder_opts(
     x264_preset: str = "medium",
     encoder_threads: str | int = "auto",
     x264_low_memory: bool = False,
+    source_bitrate: int | None = None,
 ) -> list[str]:
     """Return the ffmpeg encoder options for ``encoder`` at ``quality`` preset.
 
     quality: ``source`` / ``high`` / ``medium`` / ``low``. ``high``/
     ``medium``/``low`` affect bitrate (HW encoders) and CRF (libx264).
-    ``source`` omits the project bitrate/CRF policy and lets ffmpeg's
-    encoder defaults apply. ``medium`` reproduces the previously hard-coded
-    options exactly so existing output is unchanged.
+    ``source`` means "keep source bitrate" — for HW encoders the probed
+    source bit_rate is passed via ``source_bitrate`` and emitted as
+    ``-b:v``; for libx264 it still omits CRF (defaults apply). ``medium``
+    reproduces the previously hard-coded options exactly so existing
+    output is unchanged.
 
     ``x264_preset`` (libx264 only): one of ``VALID_X264_PRESETS``. Default
     ``medium`` preserves historical behaviour; users with unstable /
@@ -90,6 +93,10 @@ def encoder_opts(
     encoder's frame-buffer footprint. Useful on memory-constrained
     machines (4-8 GB RAM) where a default-medium encode of a long
     stream could push the process into swap.
+
+    ``source_bitrate``: bits/s probed from source (ffprobe stream
+    bit_rate). Only used when quality=="source" and encoder is HW
+    (h264_mf/amf/nvenc); caller decides fallback when None.
     """
     if encoder not in VALID_ENCODERS:
         raise ConcatError(f"Unknown encoder {encoder!r} (known: {', '.join(VALID_ENCODERS)})")
@@ -108,6 +115,19 @@ def encoder_opts(
         low_mem = _x264_low_memory_opts() if encoder == "libx264" and x264_low_memory else []
         if encoder == "libx264":
             return ["-preset", x264_preset, *threads_opt, *low_mem]
+        # HW source: honest probe bitrate if available
+        if source_bitrate is not None and source_bitrate > 0:
+            kbps = max(500, min(20000, round(source_bitrate / 1000)))
+            bitrate = f"{kbps}k"
+            if encoder == "h264_mf":
+                return ["-b:v", bitrate, "-quality", "100", *threads_opt]
+            if encoder == "h264_amf":
+                return ["-usage", "transcoding", "-quality", "speed", "-b:v", bitrate, *threads_opt]
+            if encoder == "h264_nvenc":
+                return [
+                    "-preset", "p7", "-rc", "vbr", "-b:v", bitrate, "-maxrate", bitrate, "-cq", "18", *threads_opt,
+                ]
+        # No probe: caller will have warned; use high as honest fallback was requested
         return [*threads_opt]
 
     bitrate = _VIDEO_BITRATES[quality]

@@ -110,16 +110,42 @@ def cut_and_concat(
         )
         return output_path
 
+    # Honest source bitrate probe for HW encoders when quality==source.
+    # ffprobe stream bit_rate may be N/A; fallback to high preset with a warning.
+    source_bitrate: int | None = None
+    effective_opts_quality = video_quality
+    if video_quality == "source" and encoder != "libx264":
+        from stream2video.utils import get_video_bitrate as _gvb
+
+        source_bitrate = _gvb(video_path)
+        if source_bitrate is None or source_bitrate <= 0:
+            logger.warning(
+                f"source bitrate probe failed for {video_path.name} "
+                f"(ffprobe returned N/A) — falling back to high quality "
+                f"({ _c._VIDEO_BITRATES['high'] if hasattr(_c, '_VIDEO_BITRATES') else '10000k'}) "
+                f"for {encoder}. File will be larger than source; "
+                f"consider probing manually or using high/medium."
+            )
+            effective_opts_quality = "high"
+        else:
+            logger.info(f"Probed source video bitrate: {source_bitrate/1000:.0f}k for {encoder} source")
     vcodec, vcodec_opts = _c.get_video_encoder(
         encoder,
-        video_quality,
+        effective_opts_quality,
         software_fallback=software_fallback,
         on_unavailable=fallback_consent,
         x264_preset=x264_preset,
         encoder_threads=encoder_threads,
         x264_low_memory=x264_low_memory,
+        source_bitrate=source_bitrate,
     )
-    logger.info(f"Encoder: {vcodec} {vcodec_opts} (quality={video_quality})")
+    # If probe failed we already fell back via effective_opts_quality; for
+    # the HW source case where probe succeeded, get_video_encoder used
+    # source_bitrate to emit -b:v. Log final choice.
+    if video_quality == "source" and encoder != "libx264" and source_bitrate is None:
+        logger.info(f"Encoder: {vcodec} {vcodec_opts} (quality=source→{effective_opts_quality} fallback)")
+    else:
+        logger.info(f"Encoder: {vcodec} {vcodec_opts} (quality={video_quality})")
 
     # Detect whether the source has an audio stream ONCE. Probing per
     # segment would be wasteful; passing the flag down lets the

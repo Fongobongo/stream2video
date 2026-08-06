@@ -75,6 +75,38 @@ def cancel_monitor(
         cancelled.set()
 
 
+def get_video_bitrate(video_path: Path) -> int | None:
+    """Probe video stream bit_rate in bits/s via ffprobe (None on failure)."""
+    cmd = [
+        ffprobe_path(),
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=bit_rate",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(video_path),
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+            **no_window_kwargs(),
+        )
+        raw = result.stdout.strip()
+        if not raw or raw == "N/A":
+            return None
+        return int(float(raw))
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError, FileNotFoundError, OSError) as e:
+        logger.warning(f"Could not determine video bitrate for {video_path}: {e}")
+        return None
+
+
 def get_video_duration(video_path: Path) -> float | None:
     """Get video duration in seconds via ffprobe."""
     cmd = [
