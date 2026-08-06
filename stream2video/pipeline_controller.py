@@ -209,17 +209,27 @@ class PipelineUnexpectedError(PipelineError):
 # Default progress-bar fractions. Individual runs may shrink cheap
 # phases (local input / silence cache) and give the remaining span to
 # cut+concat, but these values remain the conservative fallback profile.
+# Cutting gets 90% of the concat span (per-segment encodes), concatenating
+# 10% (final join / gapless tree) — mirrors the 0.9 split in
+# stream2video.concat.segment._run_segment_concat.
 PROG_DOWNLOAD_END = 0.05
 PROG_SILENCE_END = 0.40
+PROG_CUT_END = 0.94
 PROG_CONCAT_END = 1.00
 
 
 @dataclass(frozen=True)
 class ProgressPlan:
-    """Per-run overall progress mapping for the three heavy phases."""
+    """Per-run overall progress mapping for the heavy phases.
+
+    Historical three-phase view (download / silence / concat) is kept via
+    ``weights_percent`` for backward compat, but the concat span is now
+    exposed atomically as cutting (0..0.9) + concatenating (0.9..1.0).
+    """
 
     download_end: float = PROG_DOWNLOAD_END
     silence_end: float = PROG_SILENCE_END
+    cut_end: float = PROG_CUT_END
     concat_end: float = PROG_CONCAT_END
 
     @property
@@ -231,20 +241,43 @@ class ProgressPlan:
         return self.silence_end - self.download_end
 
     @property
+    def cut_span(self) -> float:
+        return self.cut_end - self.silence_end
+
+    @property
     def concat_span(self) -> float:
+        return self.concat_end - self.cut_end
+
+    @property
+    def total_concat_span(self) -> float:
         return self.concat_end - self.silence_end
 
     def map_silence(self, fraction: float) -> float:
         return self.download_end + _clamp_fraction(fraction) * self.silence_span
 
-    def map_concat(self, fraction: float) -> float:
-        return self.silence_end + _clamp_fraction(fraction) * self.concat_span
+    def map_cut(self, fraction: float) -> float:
+        return self.silence_end + _clamp_fraction(fraction) * self.cut_span
 
-    def weights_percent(self) -> tuple[int, int, int]:
+    def map_concat(self, fraction: float) -> float:
+        return self.cut_end + _clamp_fraction(fraction) * self.concat_span
+
+    def map_concat_legacy(self, fraction: float) -> float:
+        """Legacy linear mapping over the whole concat span (0..1)."""
+        return self.silence_end + _clamp_fraction(fraction) * self.total_concat_span
+
+    def weights_percent(self) -> tuple[int, int, int, int]:
         return (
             round(self.download_span * 100),
             round(self.silence_span * 100),
+            round(self.cut_span * 100),
             round(self.concat_span * 100),
+        )
+
+    def weights_percent_legacy(self) -> tuple[int, int, int]:
+        return (
+            round(self.download_span * 100),
+            round(self.silence_span * 100),
+            round(self.total_concat_span * 100),
         )
 
 
@@ -273,7 +306,11 @@ def _build_progress_plan(
     download_end = 0.0 if not is_downloaded else PROG_DOWNLOAD_END
     silence_span = _estimate_silence_span(src_duration, cache_hit=silence_cache_hit)
     silence_end = min(0.75, download_end + silence_span)
-    return ProgressPlan(download_end=download_end, silence_end=silence_end)
+    # Cutting gets 90% of the remaining span (mirrors 0.9 in segment/batch),
+    # concatenating the final 10% (gapless tree / concat demuxer).
+    remaining = max(0.0, PROG_CONCAT_END - silence_end)
+    cut_end = silence_end + remaining * 0.9
+    return ProgressPlan(download_end=download_end, silence_end=silence_end, cut_end=cut_end)
 
 
 @dataclass
@@ -497,9 +534,11 @@ class PipelineController:
             src_duration=src_duration,
             silence_cache_hit=False,
         )
-        dl_w, silence_w, concat_w = self._progress_plan.weights_percent()
+        dl_w, silence_w, cut_w, concat_w = self._progress_plan.weights_percent()
+        concat_l = self._progress_plan.weights_percent_legacy()[2]
         self.cb.on_log(
-            f"Progress weights: download {dl_w}%, silence {silence_w}%, concat {concat_w}%"
+            f"Progress weights: download {dl_w}%, silence {silence_w}%, cutting {cut_w}%, concatenating {concat_w}% "
+            f"[concat total {concat_l}%]"
         )
         self.cb.on_log(f"Size: {fmt_size(src_size_bytes)}")
 
@@ -563,10 +602,12 @@ class PipelineController:
                 silence_cache_hit=True,
             )
             self.cb.on_log(f"Loaded {len(cache)} silence segments from cache")
-            dl_w, silence_w, concat_w = self._progress_plan.weights_percent()
+            dl_w, silence_w, cut_w, concat_w = self._progress_plan.weights_percent()
+            concat_l = self._progress_plan.weights_percent_legacy()[2]
             self.cb.on_log(
                 f"Progress weights adjusted: download {dl_w}%, "
-                f"silence {silence_w}%, concat {concat_w}%"
+                f"silence {silence_w}%, cutting {cut_w}%, concatenating {concat_w}% "
+                f"[concat total {concat_l}%]"
             )
             # Point 4: make the cache hit visible — a flash-through
             # otherwise looks like the phase didn't run.
@@ -633,10 +674,10 @@ class PipelineController:
         """
         output_dir = getattr(self, "_output_dir_resolved", self.cfg.output_dir)
         self.cb.on_progress(self._progress_plan.silence_end)
-        self._set_phase_progress(0.0)
-        self._set_status("Step 3/3: Cutting and concatenating...", force=True)
+        # Keep a legacy announce for log tail grep compatibility, then
+        # immediately enter the atomic split.
         self.cb.on_log(
-            f"Step 3/3: Cutting & concatenating "
+            f"Step 3/4: Cutting & concatenating "
             f"(method={self.cfg.method}, encoder={self.cfg.encoder}, "
             f"video_quality={self.cfg.video_quality}, "
             f"output_format={self.cfg.output_format})..."
@@ -665,31 +706,92 @@ class PipelineController:
         self._output_path = output_path
 
         cut_start = time.monotonic()
+        concat_start: float | None = None
+        current_phase = "cutting"
         controller = self
 
-        def concat_prog(f: float) -> None:
-            elapsed = time.monotonic() - cut_start
-            controller._set_phase_progress(f)
-            if f > 0.01:
-                remaining = elapsed / f - elapsed
-                controller.cb.on_progress(controller._progress_plan.map_concat(f))
-                controller._set_status(
-                    f"Step 3/3: Cutting... {f * 100:.0f}% "
-                    f"({fmt_time(elapsed)}/{fmt_time(remaining)})"
-                )
-                controller.cb.on_overall(elapsed, remaining, False)
+        def _set_phase(name: str, *, force: bool = False) -> None:
+            nonlocal current_phase, concat_start
+            if name == current_phase:
+                return
+            current_phase = name
+            if name == "concatenating":
+                concat_start = time.monotonic()
+                controller._set_phase_progress(0.0)
+                controller._set_status("Step 3b/4: Concatenating...", force=True)
+                controller.cb.on_log("Step 3b/4: Concatenating segments...")
+                controller.cb.on_progress(controller._progress_plan.cut_end)
+
+        def _on_phase(name: str, f: float) -> None:
+            # Atomic dispatch: cutting 0..1 → silence_end..cut_end,
+            # concatenating 0..1 → cut_end..concat_end. Each phase gets
+            # its own thin bar + ETA so a stall in gapless tree L0 is
+            # distinguishable from segment encodes.
+            if name == "cutting":
+                if current_phase != "cutting":
+                    _set_phase("cutting")
+                elapsed = time.monotonic() - cut_start
+                controller._set_phase_progress(f)
+                if f > 0.01:
+                    remaining = elapsed / f - elapsed
+                    controller.cb.on_progress(controller._progress_plan.map_cut(f))
+                    controller._set_status(
+                        f"Step 3a/4: Cutting... {f * 100:.0f}% "
+                        f"({fmt_time(elapsed)}/{fmt_time(remaining)})"
+                    )
+                    controller.cb.on_overall(elapsed, remaining, False)
+                else:
+                    controller.cb.on_progress(controller._progress_plan.silence_end)
+                    controller._set_status(
+                        f"Step 3a/4: Cutting... {fmt_time(elapsed)} (calculating ETA)"
+                    )
+                    controller.cb.on_overall(elapsed, None, False)
             else:
-                controller.cb.on_progress(controller._progress_plan.silence_end)
-                controller._set_status(
-                    f"Step 3/3: Cutting... {fmt_time(elapsed)} (calculating ETA)"
-                )
-                controller.cb.on_overall(elapsed, None, False)
+                if current_phase != "concatenating":
+                    _set_phase("concatenating", force=True)
+                assert concat_start is not None
+                elapsed = time.monotonic() - concat_start
+                controller._set_phase_progress(f)
+                if f > 0.01:
+                    remaining = elapsed / f - elapsed
+                    controller.cb.on_progress(controller._progress_plan.map_concat(f))
+                    controller._set_status(
+                        f"Step 3b/4: Concatenating... {f * 100:.0f}% "
+                        f"({fmt_time(elapsed)}/{fmt_time(remaining)})"
+                    )
+                    controller.cb.on_overall(elapsed, remaining, False)
+                else:
+                    controller.cb.on_progress(controller._progress_plan.cut_end)
+                    controller._set_status(
+                        f"Step 3b/4: Concatenating... {fmt_time(elapsed)} (calculating ETA)"
+                    )
+                    controller.cb.on_overall(elapsed, None, False)
+
+        # Legacy fallback for callers without on_phase (tests mocking
+        # cut_and_concat with progress_callback). Keep the old single-phase
+        # shape but map it onto 3a so back-compat tests see 3a.
+        def concat_prog(f: float) -> None:
+            _on_phase("cutting" if f < 0.9 else "concatenating", f / 0.9 if f < 0.9 else (f - 0.9) / 0.1)
+
+        # Announce atomic split in logs so the user's report shows
+        # [16:13:43] Step 3a/4 Cutting + [16:14:xx] Step 3b/4 Concatenating
+        # instead of the monolithic "[16:14:14] [ERROR] gapless tree L0 G0".
+        self.cb.on_progress(self._progress_plan.silence_end)
+        self._set_phase_progress(0.0)
+        self._set_status("Step 3a/4: Cutting...", force=True)
+        self.cb.on_log(
+            f"Step 3a/4: Cutting "
+            f"(method={self.cfg.method}, encoder={self.cfg.encoder}, "
+            f"video_quality={self.cfg.video_quality}, "
+            f"output_format={self.cfg.output_format})..."
+        )
 
         cut_and_concat(
             video_path,
             silence_segments,
             output_path,
             progress_callback=concat_prog,
+            on_phase=_on_phase,
             method=self.cfg.method,
             encoder=self.cfg.encoder,
             video_quality=self.cfg.video_quality,

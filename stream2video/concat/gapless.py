@@ -50,7 +50,8 @@ def _concat_filter_one_pass(
     caller picks. Used by :func:`_run_gapless_segment_concat` both for
     the final output (user codecs) and for intermediate levels when the
     input count exceeds the per-call command-line budget (lossless PCM
-    audio + ``-c:v copy`` on intermediates).
+    audio + lossless ``ffv1`` video on intermediates — ``-c:v copy``
+    cannot be used with ``-filter_complex``).
     """
     n = len(part_paths)
     inputs: list[str] = []
@@ -63,6 +64,11 @@ def _concat_filter_one_pass(
         if progress_callback and total_duration > 0:
             progress_callback(min(seconds / total_duration, 1.0))
 
+    # ``-movflags +faststart`` is MP4-only; intermediates are MKV
+    # (ffv1+pcm) and must not carry it.
+    _movflags: list[str] = (
+        ["-movflags", "+faststart"] if output_path.suffix.lower() == ".mp4" else []
+    )
     _c._run_ffmpeg(
         [
             ffmpeg_path(),
@@ -84,8 +90,7 @@ def _concat_filter_one_pass(
             "-c:a",
             audio_codec,
             *audio_opts,
-            "-movflags",
-            "+faststart",
+            *_movflags,
             str(output_path),
         ],
         progress_callback=_prog,
@@ -152,13 +157,16 @@ def _run_gapless_segment_concat(
     command approaches the limit, we cascade the joins into a tree:
     groups of at most ``max_inputs`` parts are joined into
     intermediates, then the intermediates are joined again, etc.
-    Intermediates use lossless PCM audio (no priming is ever written)
-    and ``-c:v copy`` on the video, so intermediates cost no re-encode.
-    Only the final pass to ``output_path`` applies the user's
-    ``audio_quality`` / video codec — the output is identical to what a
-    single-pass would have produced, except the concat filter now runs
-    2·log(N)-ish times instead of once (lossless intermediates make the
-    extra passes free of quality loss).
+     Intermediates use lossless PCM audio (no priming is ever written)
+     and lossless ``ffv1`` video (``-c:v copy`` is illegal with a
+     ``-filter_complex`` graph — ffmpeg rejects the combination with
+     "Streamcopy requested for output stream fed from a complex
+     filtergraph"). ``ffv1`` is bit-exact and fast enough for the
+     intermediates; only the final pass to ``output_path`` applies the
+     user's ``audio_quality`` / video codec — the output is identical to
+     what a single-pass would have produced, except the concat filter
+     now runs 2·log(N)-ish times instead of once (lossless intermediates
+     make the extra passes free of quality loss).
 
     Tree intermediates are kept in ``output_path.parent /
     _gapless_tree_<stem>`` so an interrupted run keeps the working
@@ -227,14 +235,20 @@ def _run_gapless_segment_concat(
                 f"gapless tree L{level}: joining group {g + 1}/{n_groups} "
                 f"({len(chunk)} parts) -> {inter.name}"
             )
-            # Intermediates: video stream-copied (no re-encode), audio
-            # decoded to PCM in MKV (lossless, no priming). The concat
-            # filter still runs and rewrites PTS across chunk
-            # boundaries, so PCM stays sample-accurate.
+            # Intermediates: video + audio both lossless so the extra
+            # tree passes are quality-free.  Audio is decoded to PCM
+            # in MKV (no AAC priming ever written); video uses ``ffv1``
+            # (bit-exact, intra-only).  ``-c:v copy`` is NOT valid here:
+            # ffmpeg refuses "Streamcopy requested for output stream fed
+            # from a complex filtergraph" when the concat filter feeds
+            # "[outv]" and ``-c:v copy`` is set — this was the
+            # 2026-08-06 failure on 380-segment gapless runs (v278...
+            # L0 G0).  The concat filter still rewrites PTS across chunk
+            # boundaries so PCM stays sample-accurate.
             _c._concat_filter_one_pass(
                 chunk,
                 inter,
-                "copy",  # video: no re-encode in intermediates
+                "ffv1",
                 [],
                 audio_codec="pcm_s16le",
                 audio_opts=[],

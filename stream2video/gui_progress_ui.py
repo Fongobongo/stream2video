@@ -74,10 +74,10 @@ class ProgressUiMixin:
         # tuple for themed values, a plain str once overridden).
         self._default_progress_color: str | tuple | None = None
         self._last_overall_update: float = 0.0
-        # Tracks which "Step X/3" status line we're on so the ETA
-        # smoother + thin per-phase bar reset at each phase boundary
-        # (``_ui_status`` parses the prefix).
-        self._current_step: int | None = None
+        # Tracks which "Step X/3" (or atomic "Step 3a/3b") status line
+        # we're on so the ETA smoother + thin per-phase bar reset at each
+        # phase boundary (``_ui_status`` parses the prefix).
+        self._current_step: str | None = None
 
     def _cancel_pipeline(self) -> None:
         if self.running:
@@ -219,14 +219,17 @@ class ProgressUiMixin:
         # even when the status-line redraw is rate-limited, dropping the
         # reset of the ETA smoother + the per-phase bar would leak the
         # previous phase's ETA into the new one.
+        # Step tokens may be "Step 3", "Step 3a" (atomic Cutting) or
+        # "Step 3b" (atomic Concatenating) — parse the full prefix.
+        import re as _re
+
         if text.startswith("Step "):
             parts = text.split(":", 1)[0].split("/")
-            try:
-                step = int(parts[0][5:])  # after "Step "
-            except (IndexError, ValueError):
-                step = None
-            if step is not None and step != self._current_step:
-                self._current_step = step
+            raw = parts[0][5:] if len(parts) > 0 and len(parts[0]) > 5 else ""
+            m = _re.match(r"(\d+[a-z]?)", raw)
+            step_token = m.group(1) if m else None
+            if step_token is not None and step_token != self._current_step:
+                self._current_step = step_token  # type: ignore[assignment]
                 self._phase_eta_smoother.reset()
                 self._set_phase_progress(0.0)
 

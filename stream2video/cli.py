@@ -872,14 +872,34 @@ def main(
                 logger.exception("Silence detection error")
                 raise typer.Exit(1) from None
 
-            # Step 3: Cut and concatenate (with progress bar)
-            task3 = progress.add_task(
-                "[cyan]Cutting and concatenating video...",
-                total=100,
-            )
+            # Step 3: Cut + 4: Concatenate — atomic phases so the
+            # CLI's bar/label shows which one stalled (e.g. gapless tree
+            # L0 G0 vs segment encodes). The 0.9/0.1 split mirrors the
+            # 0..0.9 cutting / 0.9..1.0 concatenating convention in
+            # pipeline_controller + concat/segment.py.
+            task_cut = progress.add_task("[cyan]Cutting segments...", total=100)
+            task_concat: int | None = None
+
+            def _on_phase_cli(name: str, f: float) -> None:
+                nonlocal task_concat
+                if name == "cutting":
+                    progress.update(task_cut, completed=min(f * 100, 100))
+                else:
+                    if task_concat is None:
+                        progress.update(task_cut, completed=100, description="[green]+[/green] Cutting done")
+                        task_concat = progress.add_task("[cyan]Concatenating...", total=100)
+                    progress.update(task_concat, completed=min(f * 100, 100))
 
             def update_progress(fraction: float) -> None:
-                progress.update(task3, completed=min(fraction * 100, 100))
+                # Legacy 0..1 path (cut 0..0.9, concat 0.9..1.0)
+                nonlocal task_concat
+                if fraction < 0.9:
+                    progress.update(task_cut, completed=min(fraction / 0.9 * 100, 100))
+                else:
+                    if task_concat is None:
+                        progress.update(task_cut, completed=100, description="[green]+[/green] Cutting done")
+                        task_concat = progress.add_task("[cyan]Concatenating...", total=100)
+                    progress.update(task_concat, completed=min((fraction - 0.9) / 0.1 * 100, 100))
 
             try:
                 if not check_memory_reserve(resolved_memory_reserve_mb, "concat phase"):
@@ -895,6 +915,7 @@ def main(
                     silence_segments,
                     output_video,
                     progress_callback=update_progress,
+                    on_phase=_on_phase_cli,
                     method=method,
                     encoder=encoder,
                     video_quality=video_quality,
@@ -919,9 +940,14 @@ def main(
                     min_part_bytes=min_part_bytes,
                 )
 
-                progress.update(
-                    task3, completed=100, description="[green]+[/green] Video compressed"
-                )
+                # Mark whichever task is live as done
+                if task_concat is not None:
+                    progress.update(task_concat, completed=100, description="[green]+[/green] Concatenating done")
+                else:
+                    progress.update(task_cut, completed=100, description="[green]+[/green] Cutting done")
+                    # No concat phase (e.g. single segment) — still show it
+                    tc = progress.add_task("[cyan]Concatenating...", total=100)
+                    progress.update(tc, completed=100, description="[green]+[/green] Concatenating done")
 
             except CancelledError:
                 # ``CancelledError`` is a subclass of ``ConcatError`` so

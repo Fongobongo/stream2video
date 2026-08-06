@@ -324,10 +324,10 @@ class TestPipelineControllerRun:
         assert isinstance(result, PipelineResult)
         assert result.video_path == fake_video
         assert calls.get("info") == ["Silence: 0 segments\nKeep: 1 segments (1s)"]
-        # Status updates were called
+        # Status updates were called — 3/4 is the atomic split
         assert any("Step 1/3" in s for s in calls["status"])
         assert any("Step 2/3" in s for s in calls["status"])
-        assert any("Step 3/3" in s for s in calls["status"])
+        assert any("Step 3a/4" in s or "Step 3b/4" in s or "Step 3/4" in s for s in calls["status"])
         # Progress was reported
         assert len(calls["progress"]) > 0
         # Completion callback was called
@@ -378,9 +378,11 @@ class TestPipelineControllerRun:
         assert isinstance(result, PipelineResult)
         assert "Step 1/3: Local file ready" in calls["status"]
         assert not any(s == "Step 1/3: Download complete" for s in calls["status"])
-        # Local input skips downloading, so download gets 0%,
-        # silence detection gets 25%, and concat receives the remaining 75%.
-        assert any("download 0%, silence 25%, concat 75%" in s for s in calls["log"])
+        # Local input skips downloading, so download 0%, silence 25%,
+        # cutting 68%, concatenating 7% (concat total 75%).
+        assert any("download 0%, silence 25%" in s for s in calls["log"])
+        assert any("cutting 68%" in s for s in calls["log"])
+        assert any("[concat total 75%]" in s for s in calls["log"])
         assert any(pytest.approx(v, abs=1e-6) == 0.0 for v in calls["progress"])
         assert any(pytest.approx(v, abs=1e-6) == 0.125 for v in calls["progress"])
         assert any(pytest.approx(v, abs=1e-6) == 0.25 for v in calls["progress"])
@@ -432,8 +434,10 @@ class TestPipelineControllerRun:
 
         assert isinstance(result, PipelineResult)
         detect_mock.assert_not_called()
-        # Cache hit makes silence a 10% phase, so concat gets 85%.
-        assert any("download 5%, silence 10%, concat 85%" in s for s in calls["log"])
+        # Cache hit makes silence 10%, cutting 76%, concatenating 8% (concat total 85%).
+        assert any("download 5%, silence 10%" in s for s in calls["log"])
+        assert any("cutting 76%" in s for s in calls["log"])
+        assert any("[concat total 85%]" in s for s in calls["log"])
         assert any(pytest.approx(v, abs=1e-6) == 0.05 for v in calls["progress"])
         assert any(pytest.approx(v, abs=1e-6) == 0.15 for v in calls["progress"])
         assert any(pytest.approx(v, abs=1e-6) == 0.575 for v in calls["progress"])

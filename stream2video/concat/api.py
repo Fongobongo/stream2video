@@ -27,6 +27,12 @@ def cut_and_concat(
     silence_segments: "list[SilenceSegment]",
     output_path: Path,
     progress_callback: Callable[[float], None] | None = None,
+    # Atomic phase callback: receives "cutting" (0.0..1.0) or "concatenating"
+    # (0.0..1.0). When provided, the outer progress_callback is NOT used
+    # (the caller maps the two phases to distinct spans). This mirrors the
+    # 0.9/0.1 split inside segment/batch/cut_encode but surfaces it atomically
+    # so UI can show Step 3a/3b instead of a monolithic 3/3.
+    on_phase: Callable[[str, float], None] | None = None,
     method: str = "batch",
     encoder: str = "libx264",
     video_quality: str = "medium",
@@ -125,6 +131,24 @@ def cut_and_concat(
     if not source_has_audio:
         logger.info(f"Source {video_path.name} has no audio stream -- encoding video-only")
 
+    # Wrap progress so inner methods can report atomically via on_phase.
+    # When the caller provided on_phase, split 0..0.9 → cutting and 0.9..1.0 →
+    # concatenating and dispatch to on_phase instead of the legacy 0..1
+    # progress_callback. Keep legacy path for tests/CLI without on_phase.
+    inner_progress = progress_callback
+    if on_phase is not None:
+
+        def _wrap(f: float) -> None:
+            f = max(0.0, min(1.0, f))
+            if f < 0.9:
+                on_phase("cutting", f / 0.9 if 0.9 > 0 else 1.0)
+            elif f < 1.0:
+                on_phase("concatenating", (f - 0.9) / 0.1)
+            else:
+                on_phase("concatenating", 1.0)
+
+        inner_progress = _wrap
+
     _c._run_with_fallback(
         video_path,
         keep_segments,
@@ -132,7 +156,7 @@ def cut_and_concat(
         vcodec,
         vcodec_opts,
         method,
-        progress_callback,
+        inner_progress,
         cancel_callback,
         video_quality=video_quality,
         audio_quality=audio_quality,
