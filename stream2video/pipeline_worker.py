@@ -237,7 +237,7 @@ def build_download_progress_callback(
         gui.ui_phase_progress(frac)
         pct = 100.0 * (p.downloaded_bytes or 0.0) / p.total_bytes if p.total_bytes else 0.0
         gui.ui_status(
-            f"Step 1/3: Downloading {pct:.0f}% "
+            f"Step 1/4: Downloading {pct:.0f}% "
             f"({fmt_size(int(p.downloaded_bytes or 0))}/{fmt_size(int(p.total_bytes or 0))}) "
             f"at {fmt_speed(p.speed)} ETA {fmt_time(p.eta) if p.eta else '?'}",
             force=True,

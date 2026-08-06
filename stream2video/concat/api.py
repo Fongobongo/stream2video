@@ -31,7 +31,7 @@ def cut_and_concat(
     # (0.0..1.0). When provided, the outer progress_callback is NOT used
     # (the caller maps the two phases to distinct spans). This mirrors the
     # 0.9/0.1 split inside segment/batch/cut_encode but surfaces it atomically
-    # so UI can show Step 3a/3b instead of a monolithic 3/3.
+    # so UI can show Step 3/4 + 4/4 instead of a monolithic 3/3.
     on_phase: Callable[[str, float], None] | None = None,
     method: str = "batch",
     encoder: str = "libx264",

@@ -475,8 +475,8 @@ class PipelineController:
         """
         self.cb.on_progress(0.0)
         self._set_phase_progress(0.0)
-        self._set_status("Step 1/3: Resolving input...", force=True)
-        self.cb.on_log("Step 1/3: Downloading / resolving video...")
+        self._set_status("Step 1/4: Resolving input...", force=True)
+        self.cb.on_log("Step 1/4: Downloading / resolving video...")
 
         try:
             download_result = download(
@@ -552,11 +552,11 @@ class PipelineController:
 
         if download_result.is_downloaded:
             self._set_phase_progress(1.0)
-            self._set_status("Step 1/3: Download complete", force=True)
+            self._set_status("Step 1/4: Download complete", force=True)
             self.cb.on_log(f"Downloaded: {self.cfg.input_raw} -> {video_path}")
         else:
             self._set_phase_progress(1.0)
-            self._set_status("Step 1/3: Local file ready", force=True)
+            self._set_status("Step 1/4: Local file ready", force=True)
             self.cb.on_log(f"Download skipped (file already on disk): {video_path}")
 
         return video_path, src_size_bytes, src_duration
@@ -573,9 +573,9 @@ class PipelineController:
         output_dir = getattr(self, "_output_dir_resolved", self.cfg.output_dir)
         self.cb.on_progress(self._progress_plan.download_end)
         self._set_phase_progress(0.0)
-        self._set_status("Step 2/3: Detecting silence...", force=True)
+        self._set_status("Step 2/4: Detecting silence...", force=True)
         self.cb.on_log(
-            f"Step 2/3: Detecting silence "
+            f"Step 2/4: Detecting silence "
             f"(threshold={self.cfg.threshold}dB, "
             f"min_silence={self.cfg.min_silence}s, "
             f"margin={self.cfg.margin}s)..."
@@ -613,7 +613,7 @@ class PipelineController:
             # Point 4: make the cache hit visible — a flash-through
             # otherwise looks like the phase didn't run.
             self._set_phase_progress(1.0)
-            self._set_status("Step 2/3: Silence (cached)", force=True)
+            self._set_status("Step 2/4: Silence (cached)", force=True)
             self.cb.on_progress(self._progress_plan.silence_end)
             return cache
 
@@ -627,14 +627,14 @@ class PipelineController:
                 remaining = elapsed / f - elapsed
                 controller.cb.on_progress(controller._progress_plan.map_silence(f))
                 controller._set_status(
-                    f"Step 2/3: Silence... {f * 100:.0f}% "
+                    f"Step 2/4: Silence... {f * 100:.0f}% "
                     f"({fmt_time(elapsed)}/{fmt_time(remaining)})"
                 )
                 controller.cb.on_overall(elapsed, remaining, True)
             else:
                 controller.cb.on_progress(controller._progress_plan.download_end)
                 controller._set_status(
-                    f"Step 2/3: Silence... {fmt_time(elapsed)} (calculating ETA)"
+                    f"Step 2/4: Silence... {fmt_time(elapsed)} (calculating ETA)"
                 )
                 controller.cb.on_overall(elapsed, None, True)
 
@@ -675,14 +675,6 @@ class PipelineController:
         """
         output_dir = getattr(self, "_output_dir_resolved", self.cfg.output_dir)
         self.cb.on_progress(self._progress_plan.silence_end)
-        # Keep a legacy announce for log tail grep compatibility, then
-        # immediately enter the atomic split.
-        self.cb.on_log(
-            f"Step 3/4: Cutting & concatenating "
-            f"(method={self.cfg.method}, encoder={self.cfg.encoder}, "
-            f"video_quality={self.cfg.video_quality}, "
-            f"output_format={self.cfg.output_format})..."
-        )
 
         # Output filename extension follows the chosen output_format.
         # ``video`` keeps the historical ``_compressed.mp4`` name; the
@@ -764,8 +756,8 @@ class PipelineController:
             if name == "concatenating":
                 concat_start = time.monotonic()
                 controller._set_phase_progress(0.0)
-                controller._set_status("Step 3b/4: Concatenating...", force=True)
-                controller.cb.on_log("Step 3b/4: Concatenating segments...")
+                controller._set_status("Step 4/4: Concatenating...", force=True)
+                controller.cb.on_log("Step 4/4: Concatenating segments...")
                 controller.cb.on_progress(controller._progress_plan.cut_end)
 
         def _on_phase(name: str, f: float) -> None:
@@ -782,14 +774,14 @@ class PipelineController:
                     remaining = elapsed / f - elapsed
                     controller.cb.on_progress(controller._progress_plan.map_cut(f))
                     controller._set_status(
-                        f"Step 3a/4: Cutting... {f * 100:.0f}% "
+                        f"Step 3/4: Cutting... {f * 100:.0f}% "
                         f"({fmt_time(elapsed)}/{fmt_time(remaining)})"
                     )
                     controller.cb.on_overall(elapsed, remaining, False)
                 else:
                     controller.cb.on_progress(controller._progress_plan.silence_end)
                     controller._set_status(
-                        f"Step 3a/4: Cutting... {fmt_time(elapsed)} (calculating ETA)"
+                        f"Step 3/4: Cutting... {fmt_time(elapsed)} (calculating ETA)"
                     )
                     controller.cb.on_overall(elapsed, None, False)
             else:
@@ -802,31 +794,31 @@ class PipelineController:
                     remaining = elapsed / f - elapsed
                     controller.cb.on_progress(controller._progress_plan.map_concat(f))
                     controller._set_status(
-                        f"Step 3b/4: Concatenating... {f * 100:.0f}% "
+                        f"Step 4/4: Concatenating... {f * 100:.0f}% "
                         f"({fmt_time(elapsed)}/{fmt_time(remaining)})"
                     )
                     controller.cb.on_overall(elapsed, remaining, False)
                 else:
                     controller.cb.on_progress(controller._progress_plan.cut_end)
                     controller._set_status(
-                        f"Step 3b/4: Concatenating... {fmt_time(elapsed)} (calculating ETA)"
+                        f"Step 4/4: Concatenating... {fmt_time(elapsed)} (calculating ETA)"
                     )
                     controller.cb.on_overall(elapsed, None, False)
 
         # Legacy fallback for callers without on_phase (tests mocking
         # cut_and_concat with progress_callback). Keep the old single-phase
-        # shape but map it onto 3a so back-compat tests see 3a.
+        # shape but map it onto 3 so back-compat tests see 3.
         def concat_prog(f: float) -> None:
             _on_phase("cutting" if f < 0.9 else "concatenating", f / 0.9 if f < 0.9 else (f - 0.9) / 0.1)
 
         # Announce atomic split in logs so the user's report shows
-        # [16:13:43] Step 3a/4 Cutting + [16:14:xx] Step 3b/4 Concatenating
+        # [16:13:43] Step 3/4 Cutting + [16:14:xx] Step 4/4 Concatenating
         # instead of the monolithic "[16:14:14] [ERROR] gapless tree L0 G0".
         self.cb.on_progress(self._progress_plan.silence_end)
         self._set_phase_progress(0.0)
-        self._set_status("Step 3a/4: Cutting...", force=True)
+        self._set_status("Step 3/4: Cutting...", force=True)
         self.cb.on_log(
-            f"Step 3a/4: Cutting "
+            f"Step 3/4: Cutting "
             f"(method={self.cfg.method}, encoder={self.cfg.encoder}, "
             f"video_quality={self.cfg.video_quality}, "
             f"output_format={self.cfg.output_format})..."

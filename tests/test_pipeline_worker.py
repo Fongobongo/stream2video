@@ -203,7 +203,7 @@ class TestBuildDownloadProgressCallback:
         cb(DownloadProgress(downloaded_bytes=0, total_bytes=100_000_000, speed=0, eta=0))
         assert gui.progress_values[0] == 0.0
         assert "0%" in gui.status_texts[0]
-        assert "Step 1/3: Downloading" in gui.status_texts[0]
+        assert "Step 1/4: Downloading" in gui.status_texts[0]
 
     def test_scales_progress_bar_to_5_percent_max(self):
         # Download lives in 0..5% of the overall bar (silence + concat

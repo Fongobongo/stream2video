@@ -324,10 +324,10 @@ class TestPipelineControllerRun:
         assert isinstance(result, PipelineResult)
         assert result.video_path == fake_video
         assert calls.get("info") == ["Silence: 0 segments\nKeep: 1 segments (1s)"]
-        # Status updates were called — 3/4 is the atomic split
-        assert any("Step 1/3" in s for s in calls["status"])
-        assert any("Step 2/3" in s for s in calls["status"])
-        assert any("Step 3a/4" in s or "Step 3b/4" in s or "Step 3/4" in s for s in calls["status"])
+        # Status updates were called — now 1/4..4/4
+        assert any("Step 1/4" in s for s in calls["status"])
+        assert any("Step 2/4" in s for s in calls["status"])
+        assert any("Step 3/4" in s or "Step 4/4" in s for s in calls["status"])
         # Progress was reported
         assert len(calls["progress"]) > 0
         # Completion callback was called
@@ -376,8 +376,8 @@ class TestPipelineControllerRun:
             result = controller.run()
 
         assert isinstance(result, PipelineResult)
-        assert "Step 1/3: Local file ready" in calls["status"]
-        assert not any(s == "Step 1/3: Download complete" for s in calls["status"])
+        assert "Step 1/4: Local file ready" in calls["status"]
+        assert not any(s == "Step 1/4: Download complete" for s in calls["status"])
         # Local input skips downloading, so download 0%, silence 25%,
         # cutting 68%, concatenating 7% (concat total 75%).
         assert any("download 0%, silence 25%" in s for s in calls["log"])
