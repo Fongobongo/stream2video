@@ -106,6 +106,32 @@ class MainWindowBuildMixin:
 
         # ── Center: Controls ──
         ctrl_frame = ctk.CTkScrollableFrame(self)
+        # Auto-hide scrollbar when content fits (no overflow). CTkScrollableFrame
+        # always shows the bar even when yview == (0.0, 1.0); hide it then.
+        try:
+            _orig_set = ctrl_frame._scrollbar.set  # type: ignore[attr-defined]
+
+            def _auto_hide_set(first: str | float, last: str | float) -> None:
+                _orig_set(first, last)  # type: ignore[misc]
+                try:
+                    is_idle = float(first) == 0.0 and float(last) == 1.0
+                except Exception:
+                    is_idle = False
+                try:
+                    is_mapped = bool(ctrl_frame._scrollbar.winfo_manager())  # type: ignore[attr-defined]
+                except Exception:
+                    is_mapped = True
+                if is_idle and is_mapped:
+                    ctrl_frame._scrollbar.grid_remove()  # type: ignore[attr-defined]
+                elif not is_idle and not is_mapped:
+                    # grid_remove remembers options, so plain grid() restores
+                    ctrl_frame._scrollbar.grid()  # type: ignore[attr-defined]
+
+                # Also suppress xs/croll when idle? keep as-is.
+            ctrl_frame._scrollbar.set = _auto_hide_set  # type: ignore[attr-defined]
+            ctrl_frame._parent_canvas.configure(yscrollcommand=_auto_hide_set)  # type: ignore[attr-defined]
+        except Exception:
+            pass
 
         ctk.CTkLabel(
             ctrl_frame, text="Controls", anchor="w", font=ctk.CTkFont(size=12, weight="bold")
