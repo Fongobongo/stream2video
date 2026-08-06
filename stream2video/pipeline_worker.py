@@ -105,7 +105,13 @@ class PipelineGuiCallbacks(Protocol):
         self, phase_elapsed: float, phase_remaining: float | None, more_phases: bool
     ) -> None: ...
 
-    def ui_total(self, total_elapsed: float) -> None: ...
+    def ui_total(self, total_elapsed: float, *, overall_est: float | None = ...) -> None: ...
+
+    def ui_phase_progress(self, fraction: float) -> None: ...
+
+    def ui_set_success_style(self) -> None: ...
+
+    def ui_set_failure_style(self) -> None: ...
 
     def ui_update_output(self, out_dir: Path) -> None: ...
 
@@ -226,7 +232,9 @@ def build_download_progress_callback(
             frac = min(1.0, (p.downloaded_bytes or 0.0) / p.total_bytes)
             gui.ui_progress(0.05 * frac)
         else:
+            frac = min(1.0, 0.1 * elapsed)  # unknown size: cap at the synthetic bar
             gui.ui_progress(min(0.04, 0.005 * elapsed))
+        gui.ui_phase_progress(frac)
         pct = 100.0 * (p.downloaded_bytes or 0.0) / p.total_bytes if p.total_bytes else 0.0
         gui.ui_status(
             f"Step 1/3: Downloading {pct:.0f}% "
@@ -255,6 +263,8 @@ def build_completion_callback(
     from stream2video.gui_helpers import build_completion_summary
 
     def _on_pipeline_complete(summary: dict) -> None:
+        from stream2video.gui_helpers import build_compact_done_line
+
         result = build_completion_summary(
             src_size_bytes=summary["src_size_bytes"],
             src_duration=summary["src_duration"],
@@ -266,8 +276,19 @@ def build_completion_callback(
         gui.ui_status(result["status"], force=True)
         for line in result["log_lines"]:
             gui.log(line)
+        # Point 5: one-line summary stays visible under the log after
+        # the status line flips to "Complete!" — it shows durations +
+        # compression percent + wall-clock at a glance.
         gui.clear_overall_label()
-        gui.ui_total(summary["pipeline_seconds"])
+        gui.ui_info(
+            build_compact_done_line(
+                summary["src_duration"],
+                summary["keep_duration"],
+                summary["pipeline_seconds"],
+            )
+        )
+        gui.ui_set_success_style()  # green bar on completion (point 6)
+        gui.ui_total(summary["pipeline_seconds"], overall_est=summary["pipeline_seconds"])
         gui.show_complete_popup(result["popup"])
         warning = play_completion_sound(enabled=completion_sound)
         if warning is not None:
@@ -342,6 +363,7 @@ class PipelineWorker:
             on_info=self._gui.ui_info,
             on_overall=self._gui.ui_overall,
             on_total=self._gui.ui_total,
+            on_phase_progress=self._gui.ui_phase_progress,
             on_download_progress=build_download_progress_callback(self._gui, download_start),
             on_pipeline_complete=build_completion_callback(
                 self._gui,
@@ -374,23 +396,28 @@ class PipelineWorker:
                 self._gui.pop_live_segments(video_path_ref[0])
             self._gui.log("Pipeline cancelled")
             self._gui.ui_status("Cancelled", force=True)
+            self._gui.ui_set_failure_style()
             self._play_completion_sound("attention")
         except PipelineDownloadError as e:
             self._gui.log(f"[ERROR] Download failed: {e}")
             self._gui.ui_status(f"Failed: {e}", force=True)
+            self._gui.ui_set_failure_style()
             self._play_completion_sound("attention")
         except PipelineSilenceError as e:
             self._gui.log(f"[ERROR] Silence detection failed: {e}")
             self._gui.ui_status(f"Failed: {e}", force=True)
+            self._gui.ui_set_failure_style()
             self._play_completion_sound("attention")
         except PipelineConcatError as e:
             self._gui.log(f"[ERROR] {e}")
             self._gui.ui_status(f"Failed: {e}", force=True)
+            self._gui.ui_set_failure_style()
             self._play_completion_sound("attention")
         except PipelineUnexpectedError as e:
             self._gui.log(f"[ERROR] Unexpected: {e}")
             logger.exception("Pipeline error")
             self._gui.ui_status(f"Error: {e}", force=True)
+            self._gui.ui_set_failure_style()
             self._play_completion_sound("attention")
         finally:
             self._gui.set_running(False)

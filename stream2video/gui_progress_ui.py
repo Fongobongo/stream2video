@@ -17,14 +17,32 @@ import time
 from pathlib import Path
 from typing import ClassVar
 
-from stream2video.formatters import fmt_total_label
 from stream2video.gui_helpers import (
     STATUS_MAX,
+    TOTAL_ETA_MIN_PROGRESS,
+    EtaSmoother,
     build_eta_tail,
     build_overall_line,
+    build_total_line,
     should_update_status,
     truncate_status,
 )
+
+# Refresh period of the throttled Overall line + total-ETA (seconds).
+# The phases emit on_progress/on_overall bursts (multiple updates per
+# second during a fast phase); redrawing the labels at that rate would
+# just flicker — once a second is enough for a wall-clock readout.
+OVERALL_UPDATE_INTERVAL = 1.0
+
+# Progress-bar colours for the pipeline outcome (point 6 of the
+# progress-UI improvements). The running bar keeps the theme accent.
+_BAR_SUCCESS = "#2e7d32"
+_BAR_FAILURE = "#d32f2f"
+
+# Progress-bar colour used when the bar holds partial-progress after a
+# failure/cancel — visually distinct from the "live" running bar and the
+# final all-green success bar.
+_PCT_FAILURE_COLOR = ("gray50", "gray50")
 
 
 class ProgressUiMixin:
@@ -44,6 +62,18 @@ class ProgressUiMixin:
         self._pipeline_start: float | None = None
         self._output_path: Path | None = None
         self._download_path: Path | None = None
+        # ETA smoother + overall-progress snapshot used by ``_ui_overall``
+        # to render the whole-pipeline ETA (``Total: X / ~Y``). Smoothed
+        # so the readout doesn't jitter second-to-second (P1.1/P1.2 of
+        # the progress-UI improvement plan).
+        self._phase_eta_smoother = EtaSmoother()
+        self._overall_progress: float = 0.0
+        self._default_progress_color: object | None = None
+        self._last_overall_update: float = 0.0
+        # Tracks which "Step X/3" status line we're on so the ETA
+        # smoother + thin per-phase bar reset at each phase boundary
+        # (``_ui_status`` parses the prefix).
+        self._current_step: int | None = None
 
     def _cancel_pipeline(self) -> None:
         if self.running:
@@ -55,6 +85,17 @@ class ProgressUiMixin:
         if state:
             self.btn_start.configure(state="disabled", text="Running...")
             self.btn_cancel.configure(state="normal")
+            self._phase_eta_smoother.reset()
+            self._current_step = None
+            self._overall_progress = 0.0
+            self._set_progress_bar_color(None)
+            self._tk_after(
+                0,
+                lambda: self.lbl_progress_pct.configure(
+                    text_color=("gray40", "gray60")
+                ),
+            )
+            self._set_phase_progress(0.0)
         else:
             self.btn_start.configure(state="normal", text="Start")
             self.btn_cancel.configure(state="disabled")
@@ -64,10 +105,56 @@ class ProgressUiMixin:
             self._tk_after(0, lambda: self.lbl_overall.configure(text=""))
             self._tk_after(0, lambda: self.lbl_total.configure(text=""))
 
+    def _set_progress_bar_color(self, color: str | None) -> None:
+        """Recolor the main progress bar; ``None`` restores the default.
+
+        Worker-thread safe: dispatches the ``configure`` to the Tk main
+        loop. Green on success / red on failure; the bar value itself is
+        left untouched so a partial failure still shows how far it got.
+        """
+        if color is None:
+            if self._default_progress_color is None:
+                return
+            color = self._default_progress_color  # type: ignore[assignment]
+        self._tk_after(0, lambda c=color: self.progress.configure(progress_color=c))
+
     def _ui_progress(self, value: float) -> None:
         clamped = max(0.0, min(1.0, value))
+        self._overall_progress = clamped
         self._tk_after(0, lambda: self.progress.set(clamped))
         self._tk_after(0, lambda: self.lbl_progress_pct.configure(text=f"{clamped * 100:.0f}%"))
+        self._update_progress_tooltip(
+            f"Overall: {clamped * 100:.0f}% — pipeline progress; hover during a run for ETA"
+        )
+
+    def _ui_set_failure_style(self) -> None:
+        """Paint the progress bar + percent label with the failure colours.
+
+        Called on Pipeline*Error / cancel. Leaves the bar value alone —
+        the user sees how far the pipeline got before the failure.
+        """
+        self._set_progress_bar_color(_BAR_FAILURE)
+        self._tk_after(
+            0,
+            lambda: self.lbl_progress_pct.configure(text_color=_PCT_FAILURE_COLOR),
+        )
+
+    def _ui_set_success_style(self) -> None:
+        """Green bar on pipeline completion (``on_pipeline_complete``)."""
+        self._set_progress_bar_color(_BAR_SUCCESS)
+
+    def _set_phase_progress(self, value: float) -> None:
+        """Update the thin per-phase bar (point 3 of the improvement plan).
+
+        ``value`` is a fraction within the CURRENT phase (0..1) — the
+        segment inside the phase's span of the overall bar. Called from
+        the phase-progress callbacks; no-op when the widget isn't built
+        yet (tests, partial init).
+        """
+        if not hasattr(self, "phase_progress"):
+            return
+        clamped = max(0.0, min(1.0, value))
+        self._tk_after(0, lambda: self.phase_progress.set(clamped))
 
     def _ui_overall(
         self,
@@ -78,17 +165,44 @@ class ProgressUiMixin:
         """Update the live Elapsed/Remaining line + the Total wall-clock label."""
         if self._pipeline_start is None:
             return
-        total_elapsed = time.monotonic() - self._pipeline_start
-        tail = build_eta_tail(phase_remaining, more_phases)
-        text = build_overall_line(total_elapsed, tail)
-        self._tk_after(0, lambda: self.lbl_overall.configure(text=text))
-        self._ui_total(total_elapsed)
+        now = time.monotonic()
+        if not should_update_status(
+            self._last_overall_update, now, interval=OVERALL_UPDATE_INTERVAL
+        ):
+            return
+        self._last_overall_update = now
+        total_elapsed = now - self._pipeline_start
 
-    def _ui_total(self, total_elapsed: float) -> None:
+        # Smoothed per-phase ETA (kills the second-to-second jitter).
+        smoothed_phase = self._phase_eta_smoother.update(phase_remaining)
+        tail = build_eta_tail(smoothed_phase, more_phases)
+        self._tk_after(0, lambda: self.lbl_overall.configure(text=build_overall_line(total_elapsed, tail)))
+
+        # Whole-pipeline ETA: overall_elapsed / overall_progress, gated
+        # on overall progress being past the noisy-bootstrap threshold.
+        overall_est: float | None = None
+        if self._overall_progress >= TOTAL_ETA_MIN_PROGRESS:
+            overall_est = total_elapsed / self._overall_progress
+        self._ui_total(total_elapsed, overall_est=overall_est)
+
+        # Live tooltip on the bar with the raw + smoothed numbers.
+        tip = (
+            f"Overall: {self._overall_progress * 100:.0f}% | "
+            f"Phase ETA: {tail} | Total: {build_total_line(total_elapsed, overall_est)[7:]}"
+        )
+        self._update_progress_tooltip(tip)
+
+    def _update_progress_tooltip(self, text: str) -> None:
+        """Refresh the hover tooltip on the progress bar. No-op when the
+        widget (or its tooltip) hasn't been built yet."""
+        if hasattr(self, "progress_tooltip"):
+            self.progress_tooltip.text = text
+
+    def _ui_total(self, total_elapsed: float, *, overall_est: float | None = None) -> None:
         """Update the Total wall-clock label below the progress bar."""
         self._tk_after(
             0,
-            lambda: self.lbl_total.configure(text=fmt_total_label(total_elapsed)),
+            lambda: self.lbl_total.configure(text=build_total_line(total_elapsed, overall_est)),
         )
 
     def _ui_status(self, text: str, force: bool = False) -> None:
@@ -98,6 +212,20 @@ class ProgressUiMixin:
         self._last_status_update = now
         text = truncate_status(text, self._STATUS_MAX)
         self._tk_after(0, lambda: self.lbl_status.configure(text=text))
+        # Detect the phase switch and reset the per-phase bars. The
+        # status lines the phases emit are exactly prefixed ("Step 1/3:" /
+        # "Step 2/3:" / "Step 3/3:"). A change resets the phase ETA
+        # smoother and the thin per-phase bar, so the previous phase's
+        # estimate doesn't bleed into the new one.
+        if text.startswith("Step ") and "/" in text:
+            try:
+                step = int(text.split("Step ", 1)[1].split("/", 1)[0])
+            except (IndexError, ValueError):
+                step = None
+            if step is not None and step != self._current_step:
+                self._current_step = step
+                self._phase_eta_smoother.reset()
+                self._set_phase_progress(0.0)
 
     def _ui_info(self, text: str) -> None:
         self._tk_after(0, lambda t=text: self.lbl_silence.configure(text=t))

@@ -419,8 +419,17 @@ class _PipelineGuiCallbacksAdapter:
     ) -> None:
         self._gui._ui_overall(phase_elapsed, phase_remaining, more_phases)
 
-    def ui_total(self, total_elapsed: float) -> None:
-        self._gui._ui_total(total_elapsed)
+    def ui_total(self, total_elapsed: float, *, overall_est: float | None = None) -> None:
+        self._gui._ui_total(total_elapsed, overall_est=overall_est)
+
+    def ui_phase_progress(self, fraction: float) -> None:
+        self._gui._set_phase_progress(fraction)
+
+    def ui_set_success_style(self) -> None:
+        self._gui._ui_set_success_style()
+
+    def ui_set_failure_style(self) -> None:
+        self._gui._ui_set_failure_style()
 
     def ui_update_output(self, out_dir: Path) -> None:
         self._gui._ui_update_output(out_dir)

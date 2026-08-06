@@ -28,6 +28,45 @@ STATUS_MAX = 50
 # line readable during fast yt-dlp progress bursts.
 STATUS_UPDATE_INTERVAL = 0.5
 
+# Overall-ETA is hidden until the whole pipeline's progress fraction
+# reaches this value. Below it the estimate (elapsed / progress) is so
+# noisy it would show absurd values like "5h" after 30 seconds.
+TOTAL_ETA_MIN_PROGRESS = 0.02
+
+# EMA factor applied to each raw ETA sample. 0.25 gives a responsive
+# but visibly stable readout when the callbacks fire once per second.
+_ETA_SMOOTHING = 0.25
+
+
+class EtaSmoother:
+    """Exponential moving average for a stream of ETA samples (seconds).
+
+    The pipeline's ETA callbacks (``elapsed / fraction - elapsed``)
+    jitter hectically second-to-second early in a phase. ``update()``
+    returns a smoothed value that converges to the raw estimate with a
+    ~4-sample time constant. ``update(None)`` pauses sampling and just
+    replays the last smoothed value (used when a callback has no ETA
+    yet); ``reset()`` clears the filter at phase boundaries so the
+    previous phase's estimate doesn't bleed into the next one.
+    """
+
+    def __init__(self, alpha: float = _ETA_SMOOTHING) -> None:
+        self._alpha = alpha
+        self._smoothed: float | None = None
+
+    def reset(self) -> None:
+        self._smoothed = None
+
+    def update(self, raw: float | None) -> float | None:
+        if raw is None:
+            return self._smoothed
+        raw = max(0.0, raw)
+        if self._smoothed is None:
+            self._smoothed = raw
+        else:
+            self._smoothed = self._smoothed + self._alpha * (raw - self._smoothed)
+        return self._smoothed
+
 
 def build_cli_command(
     input_raw: str,
@@ -210,6 +249,38 @@ def build_eta_tail(
 def build_overall_line(total_elapsed: float, eta_tail: str) -> str:
     """Format the full ``Elapsed: X | Remaining: Y`` line."""
     return f"Elapsed: {fmt_time(total_elapsed)} | Remaining: {eta_tail}"
+
+
+def build_total_line(total_elapsed: float, overall_est: float | None) -> str:
+    """Format the ``Total:`` wall-clock label with an optional ETA.
+
+    ``overall_est`` is the estimated total wall-clock of the whole
+    pipeline (``elapsed / overall_progress``); None when the estimate
+    is still too noisy — the label then shows elapsed only.
+    """
+    if overall_est is not None and overall_est > total_elapsed:
+        return f"Total: {fmt_time(total_elapsed)} / ~{fmt_time(overall_est)}"
+    return f"Total: {fmt_time(total_elapsed)}"
+
+
+def build_compact_done_line(
+    src_duration: float | None,
+    keep_duration: float,
+    pipeline_seconds: float,
+) -> str:
+    """One-line post-run summary shown under the log: durations +
+    compression percent + wall-clock, e.g.
+    ``Done: 42:10 → 12:30 (-70%) in 8:15``.
+
+    The compression percent is omitted when the source duration is
+    unknown (failed probe) or non-positive.
+    """
+    src_s = fmt_clock_time(src_duration)
+    keep_s = fmt_clock_time(keep_duration)
+    if src_duration is not None and src_duration > 0:
+        pct = max(0, min(100, round(100 * (1 - keep_duration / src_duration))))
+        return f"Done: {src_s} → {keep_s} (-{pct}%) in {fmt_time(pipeline_seconds)}"
+    return f"Done: {src_s} → {keep_s} in {fmt_time(pipeline_seconds)}"
 
 
 def build_silence_info_line(

@@ -156,6 +156,12 @@ class PipelineCallbacks:
     on_total: Callable[[float], None]
     on_download_progress: Callable[[DownloadProgress], None]
     on_pipeline_complete: Callable[[dict], None]
+    # Fraction (0..1) within the CURRENT phase — drives the thin
+    # per-phase bar under the log. Optional so existing callers (GUI
+    # smoke tests, the CLI's silent-callback bundle) keep working
+    # without change; a None-able ``lambda f: None`` would also work but
+    # an Optional avoids a stray no-op closure in the default case.
+    on_phase_progress: Callable[[float], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -316,6 +322,12 @@ class PipelineController:
         except TypeError:
             self.cb.on_status(text)
 
+    def _set_phase_progress(self, fraction: float) -> None:
+        """Dispatch the per-phase bar update (no-op when the callback
+        isn't wired — CLI / tests). Frac clamped to [0, 1]."""
+        if self.cb.on_phase_progress is not None:
+            self.cb.on_phase_progress(max(0.0, min(1.0, fraction)))
+
     def _cleanup_download_path(self) -> None:
         """Delete the downloaded source file if this run actually downloaded it.
 
@@ -424,6 +436,7 @@ class PipelineController:
         and ``PipelineCancelled`` on user cancel.
         """
         self.cb.on_progress(0.0)
+        self._set_phase_progress(0.0)
         self._set_status("Step 1/3: Resolving input...", force=True)
         self.cb.on_log("Step 1/3: Downloading / resolving video...")
 
@@ -498,9 +511,11 @@ class PipelineController:
             )
 
         if download_result.is_downloaded:
+            self._set_phase_progress(1.0)
             self._set_status("Step 1/3: Download complete", force=True)
             self.cb.on_log(f"Downloaded: {self.cfg.input_raw} -> {video_path}")
         else:
+            self._set_phase_progress(1.0)
             self._set_status("Step 1/3: Local file ready", force=True)
             self.cb.on_log(f"Download skipped (file already on disk): {video_path}")
 
@@ -517,6 +532,7 @@ class PipelineController:
         """
         output_dir = getattr(self, "_output_dir_resolved", self.cfg.output_dir)
         self.cb.on_progress(self._progress_plan.download_end)
+        self._set_phase_progress(0.0)
         self._set_status("Step 2/3: Detecting silence...", force=True)
         self.cb.on_log(
             f"Step 2/3: Detecting silence "
@@ -552,6 +568,10 @@ class PipelineController:
                 f"Progress weights adjusted: download {dl_w}%, "
                 f"silence {silence_w}%, concat {concat_w}%"
             )
+            # Point 4: make the cache hit visible — a flash-through
+            # otherwise looks like the phase didn't run.
+            self._set_phase_progress(1.0)
+            self._set_status("Step 2/3: Silence (cached)", force=True)
             self.cb.on_progress(self._progress_plan.silence_end)
             return cache
 
@@ -560,6 +580,7 @@ class PipelineController:
 
         def silence_prog(f: float) -> None:
             elapsed = time.monotonic() - silence_start
+            controller._set_phase_progress(f)
             if f > 0.01:
                 remaining = elapsed / f - elapsed
                 controller.cb.on_progress(controller._progress_plan.map_silence(f))
@@ -593,6 +614,7 @@ class PipelineController:
         except OSError as e:
             self.cb.on_log(f"[WARN] Could not clean up resume cache: {e}")
         self.cb.on_progress(self._progress_plan.silence_end)
+        self._set_phase_progress(1.0)
         self.cb.on_log(f"Detected {len(silence_segments)} silence segments")
         return silence_segments
 
@@ -611,6 +633,7 @@ class PipelineController:
         """
         output_dir = getattr(self, "_output_dir_resolved", self.cfg.output_dir)
         self.cb.on_progress(self._progress_plan.silence_end)
+        self._set_phase_progress(0.0)
         self._set_status("Step 3/3: Cutting and concatenating...", force=True)
         self.cb.on_log(
             f"Step 3/3: Cutting & concatenating "
@@ -646,6 +669,7 @@ class PipelineController:
 
         def concat_prog(f: float) -> None:
             elapsed = time.monotonic() - cut_start
+            controller._set_phase_progress(f)
             if f > 0.01:
                 remaining = elapsed / f - elapsed
                 controller.cb.on_progress(controller._progress_plan.map_concat(f))
@@ -691,6 +715,7 @@ class PipelineController:
         )
 
         self._output_path = None
+        self._set_phase_progress(1.0)
         return output_path
 
     # ── Phase 4: Finish ──────────────────────────────────────────

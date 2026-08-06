@@ -187,6 +187,8 @@ class TestBuildDownloadProgressCallback:
         def ui_progress(self, value: float) -> None:
             self.progress_values.append(value)
 
+        def ui_phase_progress(self, fraction: float) -> None: ...
+
         def ui_status(self, text: str, *, force: bool = False) -> None:
             self.status_texts.append(text)
 
@@ -249,7 +251,10 @@ class TestBuildCompletionCallback:
             self.log_lines: list[str] = []
             self.cleared_overall = False
             self.popup_texts: list[str] = []
-            self.total_calls: list[float] = []
+            self.total_calls: list[tuple[float, float | None]] = []
+            self.info_texts: list[str] = []
+            self.success_styled = False
+            self.failure_styled = False
 
         def ui_status(self, text: str, *, force: bool = False) -> None:
             self.status_texts.append(text)
@@ -257,14 +262,23 @@ class TestBuildCompletionCallback:
         def log(self, message: str) -> None:
             self.log_lines.append(message)
 
+        def ui_info(self, text: str) -> None:
+            self.info_texts.append(text)
+
         def clear_overall_label(self) -> None:
             self.cleared_overall = True
 
         def show_complete_popup(self, text: str) -> None:
             self.popup_texts.append(text)
 
-        def ui_total(self, elapsed: float) -> None:
-            self.total_calls.append(elapsed)
+        def ui_set_success_style(self) -> None:
+            self.success_styled = True
+
+        def ui_set_failure_style(self) -> None:
+            self.failure_styled = True
+
+        def ui_total(self, elapsed: float, *, overall_est: float | None = None) -> None:
+            self.total_calls.append((elapsed, overall_est))
 
     def _summary(self) -> dict[str, Any]:
         return {
@@ -285,7 +299,12 @@ class TestBuildCompletionCallback:
         assert gui.log_lines  # summary's log lines forwarded
         assert gui.popup_texts  # one popup shown
         assert gui.cleared_overall is True  # bar's eta line cleared
-        assert gui.total_calls == [12.5]  # pipeline_seconds
+        # ui_total fired with the final figure (no ETA — the pipeline
+        # is done, so an estimate would be vacuous).
+        assert gui.total_calls == [(12.5, 12.5)]  # (elapsed, overall_est)
+        # Green bar + Done line under the log (points 5 and 6).
+        assert gui.success_styled is True
+        assert any(line.startswith("Done:") for line in gui.info_texts)
         sound.assert_called_once_with(enabled=True)
 
     def test_completion_sound_warning_is_logged(self):
@@ -357,7 +376,13 @@ class _FakeGuiCallbacks:
         self, phase_elapsed: float, phase_remaining: float | None, more_phases: bool
     ) -> None: ...
 
-    def ui_total(self, total_elapsed: float) -> None: ...
+    def ui_total(self, total_elapsed: float, *, overall_est: float | None = None) -> None: ...
+
+    def ui_phase_progress(self, fraction: float) -> None: ...
+
+    def ui_set_success_style(self) -> None: ...
+
+    def ui_set_failure_style(self) -> None: ...
 
     def ui_update_output(self, out_dir: Path) -> None: ...
 

@@ -13,12 +13,16 @@ from pathlib import Path
 from stream2video.gui_helpers import (
     STATUS_MAX,
     STATUS_UPDATE_INTERVAL,
+    TOTAL_ETA_MIN_PROGRESS,
+    EtaSmoother,
     build_cli_command,
+    build_compact_done_line,
     build_completion_summary,
     build_download_status,
     build_eta_tail,
     build_overall_line,
     build_silence_info_line,
+    build_total_line,
     build_waveform_view_label,
     should_update_status,
     truncate_status,
@@ -304,6 +308,84 @@ class TestBuildOverallLine:
         assert "Elapsed:" in line
         assert "Remaining:" in line
         assert "~2m" in line
+
+
+class TestEtaSmoother:
+    def test_first_sample_is_raw(self):
+        s = EtaSmoother(alpha=0.25)
+        assert s.update(100.0) == 100.0
+
+    def test_smooths_jittery_samples_towards_mean(self):
+        s = EtaSmoother(alpha=0.25)
+        # Alternating raw samples should converge near their mean, not
+        # bounce between extremes.
+        values = [s.update(v) for v in (60, 140, 60, 140, 60, 140)]
+        assert 60 <= values[-1] <= 140
+        # Second half of the series is strictly less jittery than raw
+        # (each new smoothed value moves by at most alpha * range).
+        from itertools import pairwise
+
+        raw_jump = 140 - 60
+        deltas = [abs(b - a) for a, b in pairwise(values)]
+        assert max(deltas[-2:]) <= 0.25 * raw_jump
+
+    def test_none_pauses_and_replays_last_value(self):
+        s = EtaSmoother(alpha=0.25)
+        s.update(50.0)
+        assert s.update(None) == 50.0
+        assert s.update(None) == 50.0
+
+    def test_none_before_any_sample_returns_none(self):
+        s = EtaSmoother()
+        assert s.update(None) is None
+
+    def test_reset_clears_state(self):
+        s = EtaSmoother(alpha=0.25)
+        s.update(100.0)
+        s.reset()
+        # Next sample after a phase switch starts from raw again
+        # (no bleed-through of the old phase's estimate).
+        assert s.update(10.0) == 10.0
+
+    def test_negative_raw_is_clamped_to_zero(self):
+        s = EtaSmoother()
+        assert s.update(-5.0) == 0.0
+
+
+class TestBuildTotalLine:
+    def test_elapsed_only_when_no_estimate(self):
+        assert build_total_line(75.0, None) == "Total: 1m 15s"
+
+    def test_estimate_appended_when_above_elapsed(self):
+        line = build_total_line(75.0, 300.0)
+        assert line == "Total: 1m 15s / ~5m 0s"
+
+    def test_estimate_below_elapsed_is_hidden(self):
+        # Can happen on a spiky progress estimate (progress > the real
+        # fraction would imply the pipeline "already finished").
+        assert build_total_line(300.0, 100.0) == "Total: 5m 0s"
+
+    def test_min_progress_threshold_constant(self):
+        # Pinned: the GUI hides the overall ETA until the pipeline's
+        # progress reaches 2 %. Bump deliberately if the UX changes.
+        assert TOTAL_ETA_MIN_PROGRESS == 0.02
+
+
+class TestBuildCompactDoneLine:
+    def test_typical_compression(self):
+        line = build_compact_done_line(2530.0, 750.0, 495.0)
+        assert line.startswith("Done: 00:42:10")
+        assert "00:12:30" in line
+        assert "70%" in line  # 750/2530 ≈ 30 % kept → 70 % cut
+        assert "8m 15s" in line
+
+    def test_unknown_source_duration_drops_percent(self):
+        line = build_compact_done_line(None, 750.0, 495.0)
+        assert "Done:" in line
+        assert "%" not in line
+
+    def test_zero_source_duration_drops_percent(self):
+        assert "%" not in build_compact_done_line(0.0, 0.0, 5.0)
 
 
 class TestBuildSilenceInfoLine:
