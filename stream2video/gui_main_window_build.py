@@ -456,9 +456,11 @@ class MainWindowBuildMixin:
         )
         self.btn_cancel.pack(side="left")
 
-        # Pin the Controls column to the top of the window (it no longer
-        # stretches: the progress block moved to the Log column below).
-        ctrl_frame.grid(row=0, column=1, sticky="new", padx=3, pady=4)
+        # Controls column stretches to the full window height again
+        # (the progress block moved to the Log column, so after the
+        # action row the column is just empty space inside the scroll
+        # area rather than a dead band under a top-pinned widget).
+        ctrl_frame.grid(row=0, column=1, sticky="nsew", padx=3, pady=4)
 
         # ── Right: Log panel + Waveform button ──
         # The waveform preview is opened in its own Toplevel window when
