@@ -252,6 +252,59 @@ class Stream2VideoGUI(
         per_video_dir = bool(self.chk_per_video_dir.get())
         delete_after = bool(self.chk_delete.get())
 
+        # Pre-flight disk space warning on Start click (before any work).
+        # Uses the same estimator as the in-pipeline check so the numbers
+        # match. Best-effort: if the input is a local file we can stat it
+        # and ffprobe its duration; for URLs or missing files skip the popup.
+        try:
+            from stream2video.formatters import fmt_size as _fmt
+            from stream2video.utils import check_disk_space as _cds
+            from stream2video.utils import estimate_disk_need as _edn
+            from stream2video.utils import get_video_duration as _gvd
+
+            disk_input = Path(input_raw) if input_raw else None
+            is_local = disk_input is not None and disk_input.exists() and disk_input.is_file()
+            if is_local and disk_input is not None:
+                src_size = disk_input.stat().st_size
+                src_dur = _gvd(disk_input)
+                # Without silence cache we don't know keep_dur — use worst
+                # by passing None so estimate assumes keep_ratio=1.
+                typ, worst = _edn(src_size, src_dur, None, method)
+                probe = output_dir if output_dir.exists() else disk_input.parent
+                ok_typ, free = _cds(probe, typ)
+                ok_worst, _ = _cds(probe, worst)
+                if free is not None and (not ok_worst or not ok_typ):
+                    need = worst if not ok_worst else typ
+                    short = max(0, need - free)
+                    msg = (
+                        f"Free space on {probe} is {_fmt(free)}.\n\n"
+                        f"Estimated need for this file ({_fmt(src_size)}, "
+                        f"method={method}):\n"
+                        f"  typical peak ~{_fmt(typ)}\n"
+                        f"  worst-case peak ~{_fmt(worst)}\n\n"
+                        f"{'WORST-CASE: ' if not ok_worst else ''}"
+                        f"Need ~{_fmt(short)} more or the run may fail "
+                        f"with 'No space left on device' during "
+                        f"cutting/concatenating.\n\n"
+                        f"Free up space or use a different output drive?\n\n"
+                        f"Press OK to continue anyway, Cancel to abort."
+                    )
+                    self._log(
+                        f"[WARN] Start pre-flight: free {_fmt(free)} < "
+                        f"{'worst ' + _fmt(worst) if not ok_worst else 'typical ' + _fmt(typ)} "
+                        f"(need ~{_fmt(short)} more)"
+                    )
+                    if not messagebox.askokcancel(
+                        "Low disk space — may fail", msg, icon="warning"
+                    ):
+                        self._log("Start cancelled — low disk space")
+                        self._set_running(False)
+                        return
+        except Exception:
+            import logging as _logging
+
+            _logging.getLogger("stream2video.gui").debug("start disk preflight failed", exc_info=True)
+
         self._ui_update_output(output_dir)
 
         self._log(

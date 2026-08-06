@@ -49,9 +49,10 @@ def _concat_filter_one_pass(
     re-encodes once — exact gapless semantics for whichever codecs the
     caller picks. Used by :func:`_run_gapless_segment_concat` both for
     the final output (user codecs) and for intermediate levels when the
-    input count exceeds the per-call command-line budget (lossless PCM
-    audio + lossless ``ffv1`` video on intermediates — ``-c:v copy``
-    cannot be used with ``-filter_complex``).
+    input count exceeds the per-call command-line budget (PCM audio +
+    libx264 CRF 18 video on intermediates — ``-c:v copy`` and ``ffv1``
+    cannot be used with ``-filter_complex``: copy is rejected, ffv1
+    blows up disk 10-30x).
     """
     n = len(part_paths)
     inputs: list[str] = []
@@ -168,10 +169,13 @@ def _run_gapless_segment_concat(
      now runs 2·log(N)-ish times instead of once (lossless intermediates
      make the extra passes free of quality loss).
 
-    Tree intermediates are kept in ``output_path.parent /
-    _gapless_tree_<stem>`` so an interrupted run keeps the working
-    set for the next attempt; the dir is deleted on success.
-    """
+     Tree intermediates are kept in ``output_path.parent /
+     _gapless_tree_<stem>`` so an interrupted run keeps the working
+     set for the next attempt; the dir is deleted on success.
+     Intermediates use libx264 CRF 18 (visually lossless, ~source
+     size) + PCM — ffv1 would be 10-30x larger (disk blowup on 15GB
+     sources → -28 ENOSPC).
+     """
     n = len(part_paths)
     if n == 0:
         raise _c.ConcatError("gapless concat: no parts to join")
@@ -251,21 +255,27 @@ def _run_gapless_segment_concat(
                 f"gapless tree L{level}: joining group {g + 1}/{n_groups} "
                 f"({len(chunk)} parts) -> {inter.name}"
             )
-            # Intermediates: video + audio both lossless so the extra
-            # tree passes are quality-free.  Audio is decoded to PCM
-            # in MKV (no AAC priming ever written); video uses ``ffv1``
-            # (bit-exact, intra-only).  ``-c:v copy`` is NOT valid here:
+            # Intermediates: video re-encoded, audio PCM (no AAC priming).
+            # ``-c:v copy`` is NOT valid with ``-filter_complex``:
             # ffmpeg refuses "Streamcopy requested for output stream fed
-            # from a complex filtergraph" when the concat filter feeds
-            # "[outv]" and ``-c:v copy`` is set — this was the
-            # 2026-08-06 failure on 380-segment gapless runs (v278...
-            # L0 G0).  The concat filter still rewrites PTS across chunk
-            # boundaries so PCM stays sample-accurate.
+            # from a complex filtergraph" (2026-08-06 failure on 380
+            # segments L0 G0). Previous fix used lossless ``ffv1`` which
+            # is bit-exact but blows up disk: raw 1080p30 ~90MB/s,
+            # ffv1 ~30MB/s (~240 Mbps, 30x source 5-8 Mbps). Your 15.2GB
+            # source -> L0 intermediate ~300GB -> -28 No space left on
+            # device (your 18:50 error). Switch to visually-lossless
+            # ``libx264 -crf 18 -preset ultrafast``: ~5-10 Mbps similar
+            # to source, 3-5x smaller than ffv1, still near-lossless.
+            # Trade-off: one extra lossy generation vs single-pass
+            # gapless (lossless intermediates would be 1 gen, this is 2
+            # gens). For true lossless + no disk blowup use
+            # ``method=cut_then_encode`` (one encode total, stream-copy
+            # cuts). PCM stays sample-accurate via concat filter.
             _c._concat_filter_one_pass(
                 chunk,
                 inter,
-                "ffv1",
-                [],
+                "libx264",
+                ["-crf", "18", "-preset", "ultrafast", "-pix_fmt", "yuv420p"],
                 audio_codec="pcm_s16le",
                 audio_opts=[],
                 total_duration=0,  # no per-chunk progress

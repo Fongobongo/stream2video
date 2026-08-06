@@ -156,6 +156,58 @@ def get_video_start_time(video_path: Path) -> float:
         return 0.0
 
 
+def estimate_disk_need(
+    src_size: int,
+    src_duration: float | None,
+    keep_duration: float | None,
+    method: str,
+) -> tuple[int, int]:
+    """Estimate typical and worst-case peak disk need for a concat run.
+
+    Extracted from pipeline_controller so the GUI can pre-flight on Start
+    click (P1.10 — widget reads are main-thread-only; the controller's
+    estimate runs too late, after cutting already started). Returns
+    (typical_bytes, worst_bytes) including a headroom buffer (20% or 512MB).
+    Pure — no I/O except the caller's size/duration.
+    """
+    keep_ratio = 1.0
+    if src_duration and src_duration > 0 and keep_duration and keep_duration > 0:
+        keep_ratio = min(1.0, keep_duration / src_duration)
+    keep_bytes = int(src_size * keep_ratio) if src_size else 0
+    if method == "segment":
+        typical = max(keep_bytes, src_size // 4)
+        worst = int(keep_bytes * 2.5) if keep_bytes else int(src_size * 0.9)
+        worst = max(worst, int(src_size * 0.6))
+    elif method == "batch":
+        typical = int(keep_bytes * 1.2) if keep_bytes else int(src_size * 0.4)
+        worst = int(keep_bytes * 2.0) if keep_bytes else int(src_size * 0.7)
+    else:  # cut_then_encode
+        typical = int(keep_bytes * 1.1) if keep_bytes else int(src_size * 0.35)
+        worst = int(keep_bytes * 1.6) if keep_bytes else int(src_size * 0.6)
+    headroom = max(int(typical * 0.2), 512 * 1024 * 1024)
+    return typical + headroom, worst + headroom
+
+
+def check_disk_space(
+    path: Path,
+    required_bytes: int,
+    label: str = "disk space",
+) -> tuple[bool, int | None]:
+    """Check free disk space at *path* against *required_bytes*.
+
+    Returns (ok, free_bytes) — free_bytes is None when shutil.disk_usage
+    fails (e.g. permission / path not mounted).
+    """
+    import shutil
+
+    try:
+        usage = shutil.disk_usage(path)
+    except OSError as e:
+        logger.warning("Could not check free space at %s: %s", path, e)
+        return True, None
+    return usage.free >= required_bytes, usage.free
+
+
 def has_audio_stream(video_path: Path) -> bool:
     """Return True if ``video_path`` has at least one audio stream.
 

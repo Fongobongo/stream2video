@@ -61,6 +61,7 @@ from stream2video.silence import (
     load_silence_cache,
     save_silence_cache,
 )
+from stream2video.utils import check_disk_space as _check_disk_space
 from stream2video.utils import get_video_duration
 
 logger = logging.getLogger(__name__)
@@ -704,6 +705,51 @@ class PipelineController:
             output_suffix = f"compressed.{spec['ext']}"
         output_path = output_dir / f"{video_path.stem}_{output_suffix}"
         self._output_path = output_path
+
+        # Pre-flight disk space estimate (warning only — does not cancel,
+        # matches memory_reserve warning semantics). Shared estimator also
+        # used for the Start-button popup (utils.estimate_disk_need).
+        try:
+            from stream2video.utils import estimate_disk_need as _estimate_need
+
+            src_size = video_path.stat().st_size if video_path.exists() else 0
+            required_typical, required_worst = _estimate_need(
+                src_size, self._src_duration, keep_dur, self.cfg.method
+            )
+
+            # Disk check: use output_dir (project dir is inside it). Warn only,
+            # same as memory_reserve_mb — don't cancel, just log so user sees
+            # “No space left” coming and can abort early.
+            disk_probe = output_dir if output_dir.exists() else video_path.parent
+            ok_typ, free = _check_disk_space(disk_probe, required_typical)
+            ok_worst, _ = _check_disk_space(disk_probe, required_worst)
+            if free is not None:
+                if not ok_worst:
+                    self.cb.on_log(
+                        f"[WARN] Free space {fmt_size(free)} < worst-case peak "
+                        f"{fmt_size(required_worst)} (method={self.cfg.method}, "
+                        f"typical ~{fmt_size(required_typical)}). "
+                        f"Need ~{fmt_size(required_worst - free)} more — may hit "
+                        f"'No space left' during gapless tree L0."
+                    )
+                elif not ok_typ:
+                    self.cb.on_log(
+                        f"[WARN] Free space {fmt_size(free)} < typical peak "
+                        f"{fmt_size(required_typical)} (worst ~{fmt_size(required_worst)}). "
+                        f"Will likely succeed but free ~{fmt_size(required_typical - free)} more."
+                    )
+                else:
+                    self.cb.on_log(
+                        f"Disk check: free {fmt_size(free)}, need typical "
+                        f"{fmt_size(required_typical)} / worst {fmt_size(required_worst)} — OK"
+                    )
+            else:
+                self.cb.on_log(
+                    f"Disk estimate: need typical {fmt_size(required_typical)} / "
+                    f"worst {fmt_size(required_worst)} (free unknown)"
+                )
+        except Exception:
+            logger.debug("disk estimate failed", exc_info=True)
 
         cut_start = time.monotonic()
         concat_start: float | None = None
