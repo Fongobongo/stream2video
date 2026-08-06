@@ -220,6 +220,20 @@ def _run_gapless_segment_concat(
 
     current = list(part_paths)
     level = 0
+    completed_groups = 0
+    total_groups_est = 0
+    # Pre-count groups so tree 0.9..0.99 maps linearly to groups
+    _tc = list(part_paths)
+    while len(_tc) > max_inputs:
+        total_groups_est += (len(_tc) + max_inputs - 1) // max_inputs
+        _tc = [None] * ((len(_tc) + max_inputs - 1) // max_inputs)  # type: ignore[list-item]
+
+    def _report_tree_progress() -> None:
+        if progress_callback is None or total_groups_est == 0 or total_duration <= 0:
+            return
+        frac = completed_groups / max(1, total_groups_est)
+        progress_callback(0.9 + frac * 0.09)
+
     while len(current) > max_inputs:
         next_level: list[Path] = []
         n_groups = (len(current) + max_inputs - 1) // max_inputs
@@ -230,6 +244,8 @@ def _run_gapless_segment_concat(
                 raise _c.CancelledError(f"gapless tree L{level} cancelled")
             if inter.exists() and inter.stat().st_size >= _MIN_PART_BYTES:
                 next_level.append(inter)
+                completed_groups += 1
+                _report_tree_progress()
                 continue
             logger.info(
                 f"gapless tree L{level}: joining group {g + 1}/{n_groups} "
@@ -263,17 +279,30 @@ def _run_gapless_segment_concat(
                 rlimit_as_mb=rlimit_as_mb,
                 memory_monitor_factory=memory_monitor_factory,
             )
+            completed_groups += 1
+            _report_tree_progress()
             next_level.append(inter)
         current = next_level
         level += 1
 
     # Final pass: encode video + audio with user settings, full priming
     # fix happens here (audiodec=re-encode), progress callback mapped to
-    # the last 10% of the bar.
+    # the last 10% of the bar — but tree already consumed 0.9..0.99, so
+    # map final encode to 0.99..1.0 via _prog wrapper below, or directly
+    # to 0.9..1.0 when there's no tree (n <= max_inputs). For tree case
+    # we remap to the tail slice to keep overall monotonic.
     logger.info(
         f"gapless tree: {n} parts -> {len(current)} intermediates after "
         f"{level + 1} level(s); final join with encode"
     )
+
+    def _final_prog(seconds: float) -> None:
+        if progress_callback is None or total_duration <= 0:
+            return
+        base, span = (0.99, 0.01) if total_groups_est > 0 else (0.9, 0.1)
+        frac = max(0.0, min(1.0, seconds / total_duration))
+        progress_callback(base + frac * span)
+
     _c._concat_filter_one_pass(
         current,
         output_path,
@@ -282,11 +311,7 @@ def _run_gapless_segment_concat(
         audio_codec="aac",
         audio_opts=[*_c._audio_bitrate_opts(audio_quality), *_c._audio_opts(audio_quality)],
         total_duration=total_duration,
-        progress_callback=(
-            (lambda s: progress_callback(min(s / total_duration * 0.1, 0.1) + 0.9))
-            if progress_callback and total_duration > 0
-            else None
-        ),
+        progress_callback=_final_prog if progress_callback and total_duration > 0 else None,
         cancel_callback=cancel_callback,
         timeout=timeout,
         label="gapless segment concat (final)",
