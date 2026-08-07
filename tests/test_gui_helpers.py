@@ -28,6 +28,7 @@ from stream2video.gui_helpers import (
     build_waveform_view_label,
     phase_weight_percent,
     should_update_status,
+    strip_status_step_prefix,
     truncate_status,
 )
 
@@ -571,3 +572,20 @@ class TestBuildPctPair:
 
     def test_rounds(self):
         assert build_pct_pair(99.6, 33.4) == "100% · 33%"
+
+
+class TestStripStatusStepPrefix:
+    def test_strips_step_marker(self):
+        assert strip_status_step_prefix("Step 2/4: Detecting silence 45%") == "Detecting silence 45%"
+
+    def test_leaves_non_step_text_unchanged(self):
+        assert strip_status_step_prefix("Complete! (23m 5s)") == "Complete! (23m 5s)"
+
+    def test_two_digit_step(self):
+        assert strip_status_step_prefix("Step 10/12: Some long phase") == "Some long phase"
+
+    def test_download_callback_text(self):
+        # The download-progress callback prefixes its status with the
+        # step marker too; the display must drop it.
+        s = "Step 1/4: Downloading 42% (100 MB / 238 MB) at 5.2 MiB/s ETA 1m"
+        assert strip_status_step_prefix(s).startswith("Downloading 42%")

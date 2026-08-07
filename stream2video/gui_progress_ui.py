@@ -29,6 +29,7 @@ from stream2video.gui_helpers import (
     build_total_line,
     phase_weight_percent,
     should_update_status,
+    strip_status_step_prefix,
 )
 
 # Refresh period of the throttled Overall line + total-ETA (seconds).
@@ -316,7 +317,10 @@ class ProgressUiMixin:
         if not should_update_status(self._last_status_update, now, force=force):
             return
         self._last_status_update = now
-        lines = _wrap_status_lines(text)
+        # Strip the "Step N/4:" prefix for display — the phase indicator
+        # (lbl_phase) already renders the current stage, so repeating it
+        # in the status line would duplicate the information.
+        lines = _wrap_status_lines(strip_status_step_prefix(text))
         line1 = lines[0] if len(lines) > 0 else ""
         line2 = lines[1] if len(lines) > 1 else ""
         self._tk_after(0, lambda t1=line1, t2=line2: (self.lbl_status.configure(text=t1), getattr(self, "lbl_status2", None) and self.lbl_status2.configure(text=t2)))

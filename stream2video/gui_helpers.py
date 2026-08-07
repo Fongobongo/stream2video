@@ -13,6 +13,7 @@ clipboard stays in ``gui.py`` — only pure transformations live here.
 
 from __future__ import annotations
 
+import re
 import shlex
 from pathlib import Path
 
@@ -453,6 +454,28 @@ def build_completion_summary(
 # (inside gui.py and any downstream code) keep working during the
 # incremental refactor.
 _build_completion_summary = build_completion_summary
+
+
+# Prefix the pipeline emits on every status update to mark the current
+# stage ("Step 2/4: Detecting silence..."). The GUI's phase indicator
+# (``lbl_phase``) already renders the stage, so the status line strips
+# the prefix to avoid duplicating it; the log lines keep it for
+# grep-ability in the transcript.
+_STEP_PREFIX_RE = re.compile(r"^Step \d+/\d+:\s*")
+
+
+def strip_status_step_prefix(text: str) -> str:
+    """Remove the leading ``"Step N/4: "`` marker from a status line.
+
+    ``PipelineController._set_status`` prefixes every status update with
+    the current phase index. ``ProgressUiMixin._ui_status`` needs that
+    prefix to detect phase switches (ETA reset + indicator), but
+    displaying it next to the dedicated phase-indicator label would
+    repeat the same information. Pure: given ``"Step 2/4: Silence... 45%"``
+    returns ``"Silence... 45%"``; lines without the marker are returned
+    unchanged.
+    """
+    return _STEP_PREFIX_RE.sub("", text, count=1)
 
 
 # Short phase names keyed by the "Step X/4" token the pipeline emits in
