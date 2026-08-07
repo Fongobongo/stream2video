@@ -107,16 +107,20 @@ class MainWindowBuildMixin:
         ctk.CTkButton(info_frame, text="Copy CLI command", command=self._copy_cli_command).pack(
             fill="x", padx=5, pady=(0, 4)
         )
+        proxy_row = ctk.CTkFrame(info_frame, fg_color="transparent")
+        proxy_row.pack(fill="x", padx=5, pady=(0, 4))
+        proxy_row.grid_columnconfigure(0, weight=0)
+        proxy_row.grid_columnconfigure(1, weight=1)
         self.chk_proxy = ctk.CTkCheckBox(
-            info_frame, text="Use proxy", command=self._on_proxy_toggle
+            proxy_row, text="Use proxy", command=self._on_proxy_toggle
         )
-        self.chk_proxy.pack(fill="x", padx=5, pady=(0, 2))
+        self.chk_proxy.grid(row=0, column=0, sticky="w")
         if self.config.get("proxy_active", False):
             self.chk_proxy.select()
         self.btn_proxy = ctk.CTkButton(
-            info_frame, text="Set proxy…", command=self._set_proxy
+            proxy_row, text="Set proxy…", command=self._set_proxy
         )
-        self.btn_proxy.pack(fill="x", padx=5, pady=(0, 4))
+        self.btn_proxy.grid(row=0, column=1, sticky="e")
 
         # ── Center: Controls ──
         ctrl_frame = ctk.CTkScrollableFrame(self)
