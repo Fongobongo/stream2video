@@ -544,10 +544,12 @@ class MainWindowBuildMixin:
         self.txt_log.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
 
         # Progress block: moved from the bottom of the Controls column.
-        # Layout pinned to the bottom of the column — just two rows so
-        # the whole progress area stays compact:
+        # Layout pinned to the bottom of the column — three compact rows:
         #   row 0: Step status (grows to two wrapped lines when needed)
-        #   row 1: overall bar + % + Elapsed/Remaining/Total on one line
+        #   row 1: overall bar + %
+        #   row 2: Elapsed/Remaining/Total on one full-width line (the
+        #          bar row was too narrow — the meta line overflows the
+        #          default window width there)
         prog_frame = ctk.CTkFrame(right_frame, fg_color="transparent")
         prog_frame.grid(row=3, column=0, sticky="sew", padx=4, pady=(0, 4))
         prog_frame.grid_columnconfigure(0, weight=0)  # bar: fixed width
@@ -616,8 +618,9 @@ class MainWindowBuildMixin:
             text_color=("gray40", "gray60"),
         )
         self.lbl_progress_pct.grid(row=1, column=1, sticky="w", padx=(0, 6))
-        # One-line Elapsed/Remaining/Total readout on the bar's row, so
-        # the progress area stays two rows (status line + bar row).
+        # One-line Elapsed/Remaining/Total readout on its own row under
+        # the bar — putting it on the bar row overflowed the default
+        # window width, so it gets a full-width row of its own.
         self.lbl_progress_meta = ctk.CTkLabel(
             prog_frame,
             text="",
@@ -625,5 +628,5 @@ class MainWindowBuildMixin:
             text_color=("gray40", "gray60"),
         )
         self.lbl_progress_meta.grid(
-            row=1, column=2, columnspan=2, sticky="w", padx=(8, 0)
+            row=2, column=0, columnspan=4, sticky="w", pady=(2, 0)
         )
