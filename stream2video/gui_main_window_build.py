@@ -544,11 +544,11 @@ class MainWindowBuildMixin:
         self.txt_log.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
 
         # Progress block: moved from the bottom of the Controls column.
-        # Four-row layout pinned to the bottom of the column:
+        # Layout pinned to the bottom of the column:
         #   row 0-1: Step status (two lines so Cutting 50% (0:10/0:10) fits)
-        #   row 2: thin per-phase bar (fraction of the CURRENT phase)
-        #   row 3: overall bar + %
-        #   row 4: Elapsed/Remaining | Total (second line under bar, frees space)
+        #   row 2: overall bar + %
+        #   row 3: Elapsed/Remaining (own line under the bar)
+        #   row 4: Total wall-clock (own line below Elapsed/Remaining)
         prog_frame = ctk.CTkFrame(right_frame, fg_color="transparent")
         prog_frame.grid(row=3, column=0, sticky="sew", padx=4, pady=(0, 4))
         prog_frame.grid_columnconfigure(0, weight=0)  # bar: fixed width
@@ -563,23 +563,6 @@ class MainWindowBuildMixin:
         self.lbl_status2 = ctk.CTkLabel(prog_frame, text="", anchor="w", width=200)
         self.lbl_status2.grid(row=1, column=0, columnspan=4, sticky="w", pady=(0, 2))
 
-        # Per-phase bar (0..1 within the current phase). Thin so it
-        # reads as a sub-bar of the overall progress below it. Updated via
-        # ``_set_phase_progress`` which ``PipelineCallbacks.on_phase_progress``
-        # buffers into.
-        self.phase_progress = ctk.CTkProgressBar(
-            prog_frame,
-            mode="determinate",
-            height=4,
-            width=160,
-        )
-        self.phase_progress.set(0)
-        self.phase_progress.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(0, 2))
-        _Tooltip(
-            self.phase_progress,
-            "Current phase progress (0-100% within the active step)",
-        )
-
         # Overall pipeline progress bar.
         self.progress = ctk.CTkProgressBar(
             prog_frame,
@@ -588,7 +571,7 @@ class MainWindowBuildMixin:
             width=160,
         )
         self.progress.set(0)
-        self.progress.grid(row=3, column=0, sticky="w", padx=(0, 6))
+        self.progress.grid(row=2, column=0, sticky="w", padx=(0, 6))
         # Live tooltip on the bar (updated on every overall tick with the
         # smoothed ETA + total estimate). Initial text is a static hint.
         self.progress_tooltip = _Tooltip(
@@ -606,21 +589,21 @@ class MainWindowBuildMixin:
             width=42,
             text_color=("gray40", "gray60"),
         )
-        self.lbl_progress_pct.grid(row=3, column=1, sticky="w", padx=(0, 6))
-        # Reserve two spots on bar row for legacy layout (unused now but keeps grid)
-        # Live Elapsed/Remaining for the current phase — now on its own line under bar.
+        self.lbl_progress_pct.grid(row=2, column=1, sticky="w", padx=(0, 6))
+        # Live Elapsed/Remaining for the current phase.
         self.lbl_overall = ctk.CTkLabel(
             prog_frame,
             text="",
             anchor="w",
             text_color=("gray40", "gray60"),
         )
-        self.lbl_overall.grid(row=4, column=0, columnspan=3, sticky="w", pady=(2, 0))
-        # Total pipeline wall-clock, updated in real time — also on line 2.
+        self.lbl_overall.grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        # Total pipeline wall-clock, updated in real time — on its own line
+        # below Elapsed/Remaining so both don't fight for horizontal space.
         self.lbl_total = ctk.CTkLabel(
             prog_frame,
             text="",
-            anchor="e",
+            anchor="w",
             text_color=("gray40", "gray60"),
         )
-        self.lbl_total.grid(row=4, column=3, sticky="e")
+        self.lbl_total.grid(row=4, column=0, columnspan=4, sticky="w", pady=(0, 0))

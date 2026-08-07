@@ -153,12 +153,11 @@ class ProgressUiMixin:
         self._set_progress_bar_color(_BAR_SUCCESS)
 
     def _set_phase_progress(self, value: float) -> None:
-        """Update the thin per-phase bar (point 3 of the improvement plan).
+        """No-op — the thin per-phase bar was removed from the layout.
 
-        ``value`` is a fraction within the CURRENT phase (0..1) — the
-        segment inside the phase's span of the overall bar. Called from
-        the phase-progress callbacks; no-op when the widget isn't built
-        yet (tests, partial init).
+        Kept as a callable so the pipeline's ``on_phase_progress``
+        callback chain still resolves without an ``AttributeError``;
+        the overall bar alone conveys the phase fraction now.
         """
         if not hasattr(self, "phase_progress"):
             return
