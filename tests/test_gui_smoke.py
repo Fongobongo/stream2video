@@ -90,6 +90,7 @@ class TestGuiInstantiation:
             "lbl_duration",
             "lbl_encoder",
             "log_queue",
+            "btn_proxy",
         ):
             assert hasattr(gui, attr), f"GUI missing widget attribute {attr!r}"
 

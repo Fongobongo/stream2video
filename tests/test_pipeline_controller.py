@@ -122,6 +122,7 @@ class TestPipelineConfig:
             "waveform_timeout",
             "batch_chunk_size",
             "min_part_bytes",
+            "proxy",
         }
         assert set(cfg.__dataclass_fields__.keys()) == expected
 

@@ -319,6 +319,7 @@ def download(
     download_timeout: int = _DOWNLOAD_TIMEOUT,
     connect_timeout: int = _CONNECT_TIMEOUT,
     no_progress_timeout: int = _NO_PROGRESS_TIMEOUT,
+    proxy: str = "",
 ) -> DownloadResult:
     """
     Download video from URL via yt-dlp CLI, or pass through a local file.
@@ -404,6 +405,9 @@ def download(
         "after_move:filepath",
         url,
     ]
+
+    if proxy:
+        cmd.extend(["--proxy", proxy])
 
     logger.info(f"Downloading: {url}")
     try:

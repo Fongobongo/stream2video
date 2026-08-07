@@ -270,6 +270,13 @@ def main(
         "connection watchdog). Default 1800s (30 min). Increase for very "
         "slow / unstable links where mid-download pauses are normal.",
     ),
+    proxy: str = typer.Option(
+        CONFIG_DEFAULTS["proxy"],
+        "--proxy",
+        help="Proxy server to use for downloads, e.g. http://127.0.0.1:8080 "
+        "or socks5://user:pass@host:1080. Empty (default) = direct "
+        "connection. Passed to yt-dlp.",
+    ),
     memory_limit_mb: str = typer.Option(
         str(CONFIG_DEFAULTS["memory_limit_mb"]),
         "--memory-limit-mb",
@@ -720,6 +727,7 @@ def main(
                     download_timeout=download_timeout,
                     connect_timeout=connect_timeout,
                     no_progress_timeout=no_progress_timeout,
+                    proxy=proxy,
                 )
                 video_path = download_result.path
                 if download_result.is_downloaded:

@@ -96,6 +96,7 @@ class TestBuildSaveSettingsSnapshot:
             "low_process_priority",
             "preset",
             "theme",
+            "proxy",
             "window_geometry",
         )
         # Use a sentinel dict so the test catches a missing / extra key
@@ -126,6 +127,7 @@ class TestBuildSaveSettingsSnapshot:
             "low_process_priority": True,
             "preset": "low_memory",
             "theme": "dark",
+            "proxy": "",
             "window_geometry": "1000x600+10+20",
         }
         snapshot = build_save_settings_snapshot(widgets)
@@ -174,6 +176,7 @@ class TestBuildUserDefaultsSnapshot:
             "low_process_priority": True,
             "preset": "maximum_performance",
             "theme": "light",
+            "proxy": "http://127.0.0.1:8080",
         }
         snapshot = build_user_defaults_snapshot(widgets)
         assert snapshot["threshold"] == -30.0

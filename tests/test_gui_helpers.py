@@ -83,6 +83,32 @@ class TestBuildCliCommand:
         assert "--output-fps" not in cmd
         assert "--use-crf" not in cmd
 
+    def test_proxy_flag_omitted_by_default(self):
+        # No proxy set → the copied command stays compact (no --proxy).
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+        )
+        assert "--proxy" not in cmd
+
+    def test_proxy_flag_appended_when_set(self):
+        # A proxy set via the GUI's proxy button must land in the
+        # copied CLI command so a paste runs through the same proxy.
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+            proxy="http://127.0.0.1:8080",
+        )
+        assert "--proxy http://127.0.0.1:8080" in cmd
+
     def test_non_default_advanced_flags_appended(self):
         cmd = build_cli_command(
             "x",

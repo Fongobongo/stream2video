@@ -105,6 +105,7 @@ def build_cli_command(
     force: bool = False,
     delete_after: bool = False,
     config_path: Path | None = None,
+    proxy: str = "",
 ) -> str:
     """Build the equivalent CLI invocation for the current GUI settings.
 
@@ -135,6 +136,8 @@ def build_cli_command(
     parts.extend(["--method", method, "--encoder", encoder])
     parts.extend(["--video-quality", video_quality])
     parts.extend(["--download-quality", download_quality])
+    if proxy:
+        parts.extend(["--proxy", proxy])
     # Newer flags — only append when they're not the default so the
     # copied command stays compact. The defaults match CONFIG_DEFAULTS
     # so a user who hasn't touched the advanced panel gets a clean

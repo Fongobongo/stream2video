@@ -53,6 +53,7 @@ SAVE_SETTINGS_KEYS: tuple[str, ...] = (
     "low_process_priority",
     "preset",
     "theme",
+    "proxy",
     "window_geometry",
 )
 
@@ -81,6 +82,7 @@ USER_DEFAULTS_KEYS: tuple[str, ...] = (
     "low_process_priority",
     "preset",
     "theme",
+    "proxy",
 )
 
 

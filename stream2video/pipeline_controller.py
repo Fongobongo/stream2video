@@ -129,6 +129,10 @@ class PipelineConfig:
     download_timeout: int
     connect_timeout: int
     no_progress_timeout: int
+    # Proxy server used for the download phase ("http://host:port",
+    # "socks5://..."). Empty string = direct connection. Passed to
+    # yt-dlp as --proxy; ignored for local files.
+    proxy: str = ""
     # Pipeline phase timeouts + tuning (P3.4). Plumbed into
     # detect_silence / cut_and_concat / read_peaks_from_stream; module-
     # level constants in concat.py / silence.py / waveform.py remain
@@ -510,6 +514,7 @@ class PipelineController:
                 download_timeout=self.cfg.download_timeout,
                 connect_timeout=self.cfg.connect_timeout,
                 no_progress_timeout=self.cfg.no_progress_timeout,
+                proxy=self.cfg.proxy,
             )
         except DownloadCancelledError as e:
             raise PipelineCancelled(str(e)) from e

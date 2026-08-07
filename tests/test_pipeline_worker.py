@@ -140,6 +140,7 @@ class TestBuildPipelineConfigFromSnapshot:
         assert cfg.download_timeout == 28800
         assert cfg.connect_timeout == 300
         assert cfg.no_progress_timeout == 1800
+        assert cfg.proxy == ""
         assert cfg.segment_encode_timeout == 600
         assert cfg.final_concat_timeout == 86400
         assert cfg.silence_timeout == 36000

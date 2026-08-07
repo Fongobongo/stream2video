@@ -68,6 +68,7 @@ class LifecycleMixin:
             "low_process_priority": bool(self.chk_low_process_priority.get()),
             "preset": self.combo_preset.get(),
             "theme": self.combo_theme.get(),
+            "proxy": str(self.config.get("proxy", "")),
             "window_geometry": self.geometry(),
         }
         self.config.update(build_save_settings_snapshot(widgets))
@@ -127,6 +128,8 @@ class LifecycleMixin:
         self.lbl_duration.configure(text="Duration: —")
         self.lbl_silence.configure(text="Silence: —")
         self.lbl_encoder.configure(text="Encoder: —")
+        if hasattr(self, "btn_proxy"):
+            self.btn_proxy.configure(text=self._proxy_button_text())
         self._save_settings()
         self._log("Settings restored to defaults")
 
@@ -142,6 +145,38 @@ class LifecycleMixin:
     def _fit_to_screen(sw: int, sh: int) -> tuple[int, int]:
         """Delegates to gui_platform.fit_to_screen (pure, testable)."""
         return fit_to_screen(sw, sh)
+
+    def _proxy_button_text(self) -> str:
+        """Label for the proxy button: shows the active proxy or 'off'."""
+        proxy = str(self.config.get("proxy", "")).strip()
+        return f"Proxy: {proxy}" if proxy else "Proxy: off"
+
+    def _set_proxy(self) -> None:
+        """Open a dialog to set the proxy server used for downloads.
+
+        The value (empty = no proxy) is stored in ``self.config["proxy"]``
+        and passed to yt-dlp as ``--proxy`` on the next run. Also saved
+        to settings.json so it survives restarts (the widgets dict in
+        ``_save_settings`` includes ``proxy``).
+        """
+        current = str(self.config.get("proxy", "")).strip()
+        dialog = ctk.CTkInputDialog(
+            title="Download proxy",
+            text=(
+                "Proxy server for downloads (empty = no proxy).\n"
+                "Examples: http://127.0.0.1:8080 or "
+                "socks5://user:pass@host:1080.\n\n"
+                f"Current: {current or 'off'}"
+            ),
+        )
+        value = dialog.get_input()
+        if value is None:
+            return  # cancelled
+        value = value.strip()
+        self.config["proxy"] = value
+        if hasattr(self, "btn_proxy"):
+            self.btn_proxy.configure(text=self._proxy_button_text())
+        self._log(f"Download proxy set to: {value or 'off (direct connection)'}")
 
     def _save_user_defaults(self) -> None:
         """Snapshot the current tunable GUI values to user_defaults.json."""
@@ -169,6 +204,7 @@ class LifecycleMixin:
             "low_process_priority": bool(self.chk_low_process_priority.get()),
             "preset": self.combo_preset.get(),
             "theme": self.combo_theme.get(),
+            "proxy": str(self.config.get("proxy", "")),
         }
         snapshot = build_user_defaults_snapshot(widgets)
         try:
@@ -233,6 +269,7 @@ class LifecycleMixin:
             batch_chunk_size=self.config.get("batch_chunk_size", 40),
             min_part_bytes=self.config.get("min_part_bytes", 1024),
             config_path=config_path,
+            proxy=self.config.get("proxy", ""),
         )
         self.clipboard_clear()
         self.clipboard_append(cmd)

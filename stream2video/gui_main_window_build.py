@@ -107,6 +107,10 @@ class MainWindowBuildMixin:
         ctk.CTkButton(info_frame, text="Copy CLI command", command=self._copy_cli_command).pack(
             fill="x", padx=5, pady=(0, 4)
         )
+        self.btn_proxy = ctk.CTkButton(
+            info_frame, text=self._proxy_button_text(), command=self._set_proxy
+        )
+        self.btn_proxy.pack(fill="x", padx=5, pady=(0, 4))
 
         # ── Center: Controls ──
         ctrl_frame = ctk.CTkScrollableFrame(self)
