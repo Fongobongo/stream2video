@@ -513,7 +513,7 @@ def strip_phase_status_verb(text: str) -> str:
 
 # Short phase names keyed by the "Step X/4" token the pipeline emits in
 # its status lines (see PipelineController._run_*_phase). Used by the
-# GUI's merged status line to render "Phase 2/4 · Silence (35%)" instead
+# GUI's merged status line to render "Step 2/4 · Silence (35%)" instead
 # of a bare number.
 PHASE_LABELS: dict[str, str] = {
     "1": "Download",
@@ -546,7 +546,7 @@ def build_phase_line(step: str | None, weight_pct: int | None = None) -> str:
 
     ``None`` step (no phase running yet) yields an empty string. A known
     weight appends the phase's share of the bar, e.g.
-    ``"Phase 2/4 · Silence (35%)"``. The concrete phase detail
+    ``"Step 2/4 · Silence (35%)"``. The concrete phase detail
     (e.g. ``"45% (12s/20s)"``) is appended by
     :func:`build_phase_status_line`.
     """
@@ -554,8 +554,8 @@ def build_phase_line(step: str | None, weight_pct: int | None = None) -> str:
         return ""
     name = PHASE_LABELS[step]
     if weight_pct is not None:
-        return f"Phase {step}/4 · {name} ({weight_pct}%)"
-    return f"Phase {step}/4 · {name}"
+        return f"Step {step}/4 · {name} ({weight_pct}%)"
+    return f"Step {step}/4 · {name}"
 
 
 def build_phase_status_line(
@@ -567,7 +567,7 @@ def build_phase_status_line(
 
     ``ProgressUiMixin._ui_status`` renders stage + detail as a single
     status line (there is no separate phase-indicator label), e.g.
-    ``"Phase 2/4 · Silence (35%) · 45% (12s/20s)"``. ``detail`` is the
+    ``"Step 2/4 · Silence (35%) · 45% (12s/20s)"``. ``detail`` is the
     ``strip_phase_status_verb``-stripped tail so the phase name isn't
     repeated. Returns ``detail`` alone when there's no phase prefix yet.
     """

@@ -212,8 +212,8 @@ class ProgressUiMixin:
 
     def _update_phase_indicator(self) -> None:
         """Refresh the merged status line from the current step + plan
-        boundaries. The phase info ("Phase 2/4 · Silence (35%)") and the
-        in-phase detail ("45% (12s/20s)") share one line — the phase
+        boundaries. The step info ("Step 2/4 · Silence (35%)") and the
+        in-step detail ("45% (12s/20s)") share one line — the phase
         indicator was merged into ``lbl_status`` so a separate
         ``lbl_phase`` label is gone. No-op when no step is running yet.
         """

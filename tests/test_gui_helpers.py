@@ -549,10 +549,10 @@ class TestPhaseWeightPercent:
 
 class TestBuildPhaseLine:
     def test_known_step_with_weight(self):
-        assert build_phase_line("2", 35) == "Phase 2/4 · Silence (35%)"
+        assert build_phase_line("2", 35) == "Step 2/4 · Silence (35%)"
 
     def test_known_step_without_weight(self):
-        assert build_phase_line("3") == "Phase 3/4 · Cutting"
+        assert build_phase_line("3") == "Step 3/4 · Cutting"
 
     def test_none_step_is_empty(self):
         assert build_phase_line(None) == ""
@@ -561,8 +561,8 @@ class TestBuildPhaseLine:
         assert build_phase_line("7") == ""
 
     def test_all_labels_present(self):
-        assert build_phase_line("1", 5) == "Phase 1/4 · Download (5%)"
-        assert build_phase_line("4", 6) == "Phase 4/4 · Concat (6%)"
+        assert build_phase_line("1", 5) == "Step 1/4 · Download (5%)"
+        assert build_phase_line("4", 6) == "Step 4/4 · Concat (6%)"
 
 
 class TestBuildPctPair:
@@ -612,11 +612,11 @@ class TestBuildPhaseStatusLine:
     def test_phase_with_detail(self):
         assert (
             build_phase_status_line("2", 35, "45% (12s/20s)")
-            == "Phase 2/4 · Silence (35%) · 45% (12s/20s)"
+            == "Step 2/4 · Silence (35%) · 45% (12s/20s)"
         )
 
     def test_phase_without_detail(self):
-        assert build_phase_status_line("3", 54, "") == "Phase 3/4 · Cutting (54%)"
+        assert build_phase_status_line("3", 54, "") == "Step 3/4 · Cutting (54%)"
 
     def test_no_phase_returns_detail(self):
         assert build_phase_status_line(None, None, "Starting...") == "Starting..."
@@ -624,7 +624,7 @@ class TestBuildPhaseStatusLine:
     def test_download_phase_with_detail(self):
         assert (
             build_phase_status_line("1", 5, "42% (100 MB / 238 MB) at 5.2 MiB/s")
-            == "Phase 1/4 · Download (5%) · 42% (100 MB / 238 MB) at 5.2 MiB/s"
+            == "Step 1/4 · Download (5%) · 42% (100 MB / 238 MB) at 5.2 MiB/s"
         )
 
 
