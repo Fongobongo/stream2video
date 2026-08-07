@@ -615,18 +615,6 @@ class MainWindowBuildMixin:
             text_color=("gray40", "gray60"),
         )
         self.lbl_progress_pct.grid(row=2, column=1, sticky="w", padx=(0, 6))
-        # Phase indicator ("Phase 2/4 · Cutting (54%)") — the weight in
-        # parentheses is the phase's share of the whole pipeline bar
-        # (from the per-run ProgressPlan), so the user sees not just
-        # WHERE we are but HOW BIG the current phase is.
-        self.lbl_phase = ctk.CTkLabel(
-            prog_frame,
-            text="",
-            anchor="w",
-            width=200,
-            text_color=("gray40", "gray60"),
-        )
-        self.lbl_phase.grid(row=3, column=0, columnspan=4, sticky="w", pady=(2, 0))
         # Live Elapsed/Remaining for the current phase.
         self.lbl_overall = ctk.CTkLabel(
             prog_frame,
@@ -634,7 +622,7 @@ class MainWindowBuildMixin:
             anchor="w",
             text_color=("gray40", "gray60"),
         )
-        self.lbl_overall.grid(row=4, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        self.lbl_overall.grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 0))
         # Total pipeline wall-clock, updated in real time — on its own line
         # below Elapsed/Remaining so both don't fight for horizontal space.
         self.lbl_total = ctk.CTkLabel(
@@ -643,4 +631,4 @@ class MainWindowBuildMixin:
             anchor="w",
             text_color=("gray40", "gray60"),
         )
-        self.lbl_total.grid(row=5, column=0, columnspan=4, sticky="w", pady=(0, 0))
+        self.lbl_total.grid(row=4, column=0, columnspan=4, sticky="w", pady=(0, 0))

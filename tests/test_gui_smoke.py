@@ -82,7 +82,6 @@ class TestGuiInstantiation:
             "progress",
             "lbl_progress_pct",
             "lbl_status",
-            "lbl_phase",
             "lbl_overall",
             "lbl_total",
             "lbl_silence",

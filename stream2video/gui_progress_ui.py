@@ -25,10 +25,11 @@ from stream2video.gui_helpers import (
     build_eta_tail,
     build_overall_line,
     build_pct_pair,
-    build_phase_line,
+    build_phase_status_line,
     build_total_line,
     phase_weight_percent,
     should_update_status,
+    strip_phase_status_verb,
     strip_status_step_prefix,
 )
 
@@ -84,12 +85,17 @@ class ProgressUiMixin:
         # tuple type holds ``str`` colours too (customtkinter returns a
         # tuple for themed values, a plain str once overridden).
         self._default_progress_color: str | tuple | None = None
-        self._default_progress_color: str | tuple | None = None
         self._last_overall_update: float = 0.0
         # Tracks which "Step X/4" status line we're on so the ETA
         # smoother + thin per-phase bar reset at each phase boundary
         # (``_ui_status`` parses the prefix).
         self._current_step: str | None = None
+        # The ``strip_phase_status_verb``-stripped detail of the latest
+        # "Step X/4" status ("45% (12s/20s)"). Stored unconditionally so
+        # ``_update_phase_indicator`` (plan/weight arrival) can re-render
+        # the merged line with the freshest detail even when the
+        # throttled status redraw was dropped.
+        self._last_phase_detail: str = ""
         # Per-run phase boundaries (``_ui_progress_plan``) + the current
         # in-phase fraction (``_set_phase_progress``) that together drive
         # the bar's segment tick marks, the "Phase N/4" indicator, and
@@ -114,6 +120,7 @@ class ProgressUiMixin:
             self.btn_cancel.configure(state="normal")
             self._phase_eta_smoother.reset()
             self._current_step = None
+            self._last_phase_detail = ""
             self._overall_progress = 0.0
             self._phase_bounds = _DEFAULT_PHASE_BOUNDS
             self._phase_progress = 0.0
@@ -134,7 +141,6 @@ class ProgressUiMixin:
             self._pipeline_start = None
             self._tk_after(0, lambda: self.lbl_overall.configure(text=""))
             self._tk_after(0, lambda: self.lbl_total.configure(text=""))
-            self._tk_after(0, lambda: self.lbl_phase.configure(text=""))
 
     def _set_progress_bar_color(self, color: str | None) -> None:
         """Recolor the main progress bar; ``None`` restores the default.
@@ -205,14 +211,18 @@ class ProgressUiMixin:
         self._tk_after(0, _place)
 
     def _update_phase_indicator(self) -> None:
-        """Refresh the "Phase N/4 · Name (weight%)" line from the current
-        step + plan boundaries. No-op when no step is running yet."""
+        """Refresh the merged status line from the current step + plan
+        boundaries. The phase info ("Phase 2/4 · Silence (35%)") and the
+        in-phase detail ("45% (12s/20s)") share one line — the phase
+        indicator was merged into ``lbl_status`` so a separate
+        ``lbl_phase`` label is gone. No-op when no step is running yet.
+        """
         if not hasattr(self, "_current_step") or self._current_step is None:
             return
         step = self._current_step
         weight = phase_weight_percent(self._phase_bounds, step)
-        text = build_phase_line(step, weight)
-        self._tk_after(0, lambda t=text: self.lbl_phase.configure(text=t))
+        text = build_phase_status_line(step, weight, self._last_phase_detail)
+        self._set_static_status(text)
 
     def _ui_set_failure_style(self) -> None:
         """Paint the progress bar + percent label with the failure colours.
@@ -295,6 +305,20 @@ class ProgressUiMixin:
             lambda: self.lbl_total.configure(text=build_total_line(total_elapsed, overall_est)),
         )
 
+    def _set_static_status(self, text: str) -> None:
+        """Render ``text`` on the two-line status label (wrapped)."""
+        lines = _wrap_status_lines(text)
+        line1 = lines[0] if len(lines) > 0 else ""
+        line2 = lines[1] if len(lines) > 1 else ""
+        self._tk_after(
+            0,
+            lambda t1=line1, t2=line2: (
+                self.lbl_status.configure(text=t1),
+                getattr(self, "lbl_status2", None)
+                and self.lbl_status2.configure(text=t2),
+            ),
+        )
+
     def _ui_status(self, text: str, force: bool = False) -> None:
         # Phase-switch detection runs unconditionally (NOT throttled):
         # even when the status-line redraw is rate-limited, dropping the
@@ -311,19 +335,25 @@ class ProgressUiMixin:
                 self._current_step = step_token
                 self._phase_eta_smoother.reset()
                 self._set_phase_progress(0.0)
-                self._update_phase_indicator()
+            # Stash the verb-stripped detail ("45% (12s/20s)") so the
+            # merged line can re-render even when this redraw is throttled.
+            self._last_phase_detail = strip_phase_status_verb(
+                strip_status_step_prefix(text)
+            )
 
         now = time.monotonic()
         if not should_update_status(self._last_status_update, now, force=force):
             return
         self._last_status_update = now
-        # Strip the "Step N/4:" prefix for display — the phase indicator
-        # (lbl_phase) already renders the current stage, so repeating it
-        # in the status line would duplicate the information.
-        lines = _wrap_status_lines(strip_status_step_prefix(text))
-        line1 = lines[0] if len(lines) > 0 else ""
-        line2 = lines[1] if len(lines) > 1 else ""
-        self._tk_after(0, lambda t1=line1, t2=line2: (self.lbl_status.configure(text=t1), getattr(self, "lbl_status2", None) and self.lbl_status2.configure(text=t2)))
+        if self._current_step is not None and text.startswith("Step "):
+            # The phase indicator lives ON the status line now: stage,
+            # its bar share, and the in-phase detail in one string.
+            text = build_phase_status_line(
+                self._current_step,
+                phase_weight_percent(self._phase_bounds, self._current_step),
+                self._last_phase_detail,
+            )
+        self._set_static_status(text)
 
     def _ui_info(self, text: str) -> None:
         self._tk_after(0, lambda t=text: self.lbl_silence.configure(text=t))

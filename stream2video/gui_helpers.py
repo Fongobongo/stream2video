@@ -457,10 +457,9 @@ _build_completion_summary = build_completion_summary
 
 
 # Prefix the pipeline emits on every status update to mark the current
-# stage ("Step 2/4: Detecting silence..."). The GUI's phase indicator
-# (``lbl_phase``) already renders the stage, so the status line strips
-# the prefix to avoid duplicating it; the log lines keep it for
-# grep-ability in the transcript.
+# stage ("Step 2/4: Detecting silence..."). The GUI's merged status line
+# renders its own phase indicator, so the prefix is stripped to avoid
+# duplication; the log lines keep it for grep-ability in the transcript.
 _STEP_PREFIX_RE = re.compile(r"^Step \d+/\d+:\s*")
 
 
@@ -469,19 +468,53 @@ def strip_status_step_prefix(text: str) -> str:
 
     ``PipelineController._set_status`` prefixes every status update with
     the current phase index. ``ProgressUiMixin._ui_status`` needs that
-    prefix to detect phase switches (ETA reset + indicator), but
-    displaying it next to the dedicated phase-indicator label would
-    repeat the same information. Pure: given ``"Step 2/4: Silence... 45%"``
+    prefix to detect phase switches (ETA reset + indicator), but the
+    status line renders its own merged phase indicator, so repeating the
+    marker would duplicate it. Pure: given ``"Step 2/4: Silence... 45%"``
     returns ``"Silence... 45%"``; lines without the marker are returned
     unchanged.
     """
     return _STEP_PREFIX_RE.sub("", text, count=1)
 
 
+# Leading verb/phrase the pipeline's per-phase status details start with
+# ("Silence... 45%", "Cutting... 55%", "Concatenating... 12%",
+# "Downloading 42% ..."). The merged status line already carries the
+# short phase name ("Phase 2/4 · Silence (35%)"), so the detail must
+# drop its own leading verb to avoid "Silence ... Silence". Longest
+# first so "Downloading" wins over "Download" etc.
+_PHASE_STATUS_VERBS = (
+    "Detecting silence",
+    "Downloading",
+    "Concatenating",
+    "Silence",
+    "Cutting",
+    "Resolving input",
+    "Download",
+    "Local file",
+)
+
+
+def strip_phase_status_verb(text: str) -> str:
+    """Remove the leading phase-name verb from a per-phase status detail.
+
+    Pure: given ``"Silence... 45% (12s/20s)"`` returns ``"45% (12s/20s)"``,
+    ``"Silence (cached)"`` → ``"(cached)"``, ``"Detecting silence..."`` →
+    ``""``. Text that doesn't start with a known verb is returned
+    unchanged (e.g. ``"Complete! (23m 5s)"``).
+    """
+    stripped = text.strip()
+    for verb in _PHASE_STATUS_VERBS:
+        if stripped.startswith(verb):
+            tail = stripped[len(verb) :].lstrip(".").strip()
+            return tail
+    return stripped
+
+
 # Short phase names keyed by the "Step X/4" token the pipeline emits in
 # its status lines (see PipelineController._run_*_phase). Used by the
-# GUI's phase-indicator line (``lbl_phase``) to render "Phase 2/4 ·
-# Silence" instead of a bare number.
+# GUI's merged status line to render "Phase 2/4 · Silence (35%)" instead
+# of a bare number.
 PHASE_LABELS: dict[str, str] = {
     "1": "Download",
     "2": "Silence",
@@ -509,11 +542,13 @@ def phase_weight_percent(
 
 
 def build_phase_line(step: str | None, weight_pct: int | None = None) -> str:
-    """Render the phase-indicator line for ``lbl_phase``.
+    """Render the phase-indicator prefix of the status line.
 
     ``None`` step (no phase running yet) yields an empty string. A known
     weight appends the phase's share of the bar, e.g.
-    ``"Phase 2/4 · Silence (35%)"``.
+    ``"Phase 2/4 · Silence (35%)"``. The concrete phase detail
+    (e.g. ``"45% (12s/20s)"``) is appended by
+    :func:`build_phase_status_line`.
     """
     if step is None or step not in PHASE_LABELS:
         return ""
@@ -521,6 +556,27 @@ def build_phase_line(step: str | None, weight_pct: int | None = None) -> str:
     if weight_pct is not None:
         return f"Phase {step}/4 · {name} ({weight_pct}%)"
     return f"Phase {step}/4 · {name}"
+
+
+def build_phase_status_line(
+    step: str | None,
+    weight_pct: int | None,
+    detail: str,
+) -> str:
+    """Merge the phase indicator and its status detail into one line.
+
+    ``ProgressUiMixin._ui_status`` renders stage + detail as a single
+    status line (there is no separate phase-indicator label), e.g.
+    ``"Phase 2/4 · Silence (35%) · 45% (12s/20s)"``. ``detail`` is the
+    ``strip_phase_status_verb``-stripped tail so the phase name isn't
+    repeated. Returns ``detail`` alone when there's no phase prefix yet.
+    """
+    base = build_phase_line(step, weight_pct)
+    if not base:
+        return detail
+    if not detail:
+        return base
+    return f"{base} · {detail}"
 
 
 def build_pct_pair(phase_pct: float, overall_pct: float) -> str:
