@@ -97,6 +97,7 @@ class TestBuildSaveSettingsSnapshot:
             "preset",
             "theme",
             "proxy",
+            "proxy_active",
             "window_geometry",
         )
         # Use a sentinel dict so the test catches a missing / extra key
@@ -128,6 +129,7 @@ class TestBuildSaveSettingsSnapshot:
             "preset": "low_memory",
             "theme": "dark",
             "proxy": "",
+            "proxy_active": False,
             "window_geometry": "1000x600+10+20",
         }
         snapshot = build_save_settings_snapshot(widgets)
@@ -177,6 +179,7 @@ class TestBuildUserDefaultsSnapshot:
             "preset": "maximum_performance",
             "theme": "light",
             "proxy": "http://127.0.0.1:8080",
+            "proxy_active": True,
         }
         snapshot = build_user_defaults_snapshot(widgets)
         assert snapshot["threshold"] == -30.0

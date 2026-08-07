@@ -104,9 +104,13 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     "connect_timeout": 300,  # 5 min pre-first-byte
     "no_progress_timeout": 1800,  # 30 min mid-download stall
     # Proxy server used for downloads, e.g. "http://127.0.0.1:8080" or
-    # "socks5://user:pass@host:1080". Empty string = direct connection
-    # (yt-dlp default). Passed to yt-dlp as --proxy.
+    # "socks5://user:pass@host:1080". Empty string = no proxy address.
+    # Passed to yt-dlp as --proxy when "proxy_active" is enabled.
     "proxy": "",
+    # Whether the configured proxy is actually used for downloads. The
+    # address in "proxy" is always kept (so it's not lost when the proxy
+    # is temporarily disabled; the dialog re-opens prefilled).
+    "proxy_active": False,
     # Pipeline phase timeouts (P3.4). Exposed via CLI flags
     # (--segment-timeout / --final-concat-timeout / --silence-timeout
     # / --stall-timeout) and plumbed through PipelineConfig; module-
@@ -383,6 +387,7 @@ USER_DEFAULT_KEYS: list[str] = [
     "connect_timeout",
     "no_progress_timeout",
     "proxy",
+    "proxy_active",
     # Pipeline phase timeouts + tuning (P3.4)
     "segment_encode_timeout",
     "final_concat_timeout",

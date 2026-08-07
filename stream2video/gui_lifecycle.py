@@ -38,6 +38,25 @@ from stream2video.utils import get_active_process
 _logger = logging.getLogger("stream2video.gui")
 
 
+class _ProxyInputDialog(ctk.CTkInputDialog):
+    """CTkInputDialog with the previous proxy address already inserted.
+
+    The value is inserted after the stock dialog builds its widgets
+    (so ``_entry`` exists) and the whole text is selected for quick
+    overwrite while still allowing in-place editing.
+    """
+
+    def __init__(self, initial: str = "", **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._initial = initial
+
+    def _create_widgets(self) -> None:
+        super()._create_widgets()
+        if self._initial:
+            self._entry.insert(0, self._initial)
+            self._entry.select_range(0, "end")
+
+
 class LifecycleMixin:
     """Settings persistence + window lifecycle (close / restore / save)."""
 
@@ -69,6 +88,7 @@ class LifecycleMixin:
             "preset": self.combo_preset.get(),
             "theme": self.combo_theme.get(),
             "proxy": str(self.config.get("proxy", "")),
+            "proxy_active": bool(self.config.get("proxy_active", False)),
             "window_geometry": self.geometry(),
         }
         self.config.update(build_save_settings_snapshot(widgets))
@@ -128,8 +148,11 @@ class LifecycleMixin:
         self.lbl_duration.configure(text="Duration: —")
         self.lbl_silence.configure(text="Silence: —")
         self.lbl_encoder.configure(text="Encoder: —")
-        if hasattr(self, "btn_proxy"):
-            self.btn_proxy.configure(text=self._proxy_button_text())
+        if hasattr(self, "chk_proxy"):
+            if self.config.get("proxy_active", False):
+                self.chk_proxy.select()
+            else:
+                self.chk_proxy.deselect()
         self._save_settings()
         self._log("Settings restored to defaults")
 
@@ -146,27 +169,28 @@ class LifecycleMixin:
         """Delegates to gui_platform.fit_to_screen (pure, testable)."""
         return fit_to_screen(sw, sh)
 
-    def _proxy_button_text(self) -> str:
-        """Label for the proxy button: shows the active proxy or 'off'."""
-        proxy = str(self.config.get("proxy", "")).strip()
-        return f"Proxy: {proxy}" if proxy else "Proxy: off"
+    def _on_proxy_toggle(self) -> None:
+        """Checkbox handler: persist the proxy on/off state."""
+        self.config["proxy_active"] = bool(self.chk_proxy.get())
+        self._save_settings()
 
     def _set_proxy(self) -> None:
         """Open a dialog to set the proxy server used for downloads.
 
-        The value (empty = no proxy) is stored in ``self.config["proxy"]``
-        and passed to yt-dlp as ``--proxy`` on the next run. Also saved
-        to settings.json so it survives restarts (the widgets dict in
-        ``_save_settings`` includes ``proxy``).
+        The entry is prefilled with the previously entered address so
+        it can be edited. Empty = no proxy address; the value is always
+        kept in ``self.config["proxy"]`` (even while the proxy is
+        disabled) so it isn't lost. Setting a non-empty address
+        auto-enables the proxy checkbox; the address is passed to
+        yt-dlp as ``--proxy`` only while ``proxy_active`` is on.
         """
-        current = str(self.config.get("proxy", "")).strip()
-        dialog = ctk.CTkInputDialog(
+        dialog = _ProxyInputDialog(
+            initial=str(self.config.get("proxy", "")),
             title="Download proxy",
             text=(
                 "Proxy server for downloads (empty = no proxy).\n"
                 "Examples: http://127.0.0.1:8080 or "
-                "socks5://user:pass@host:1080.\n\n"
-                f"Current: {current or 'off'}"
+                "socks5://user:pass@host:1080."
             ),
         )
         value = dialog.get_input()
@@ -174,8 +198,11 @@ class LifecycleMixin:
             return  # cancelled
         value = value.strip()
         self.config["proxy"] = value
-        if hasattr(self, "btn_proxy"):
-            self.btn_proxy.configure(text=self._proxy_button_text())
+        if value and not self.config.get("proxy_active", False):
+            self.config["proxy_active"] = True
+            if hasattr(self, "chk_proxy"):
+                self.chk_proxy.select()
+        self._save_settings()
         self._log(f"Download proxy set to: {value or 'off (direct connection)'}")
 
     def _save_user_defaults(self) -> None:
@@ -205,6 +232,7 @@ class LifecycleMixin:
             "preset": self.combo_preset.get(),
             "theme": self.combo_theme.get(),
             "proxy": str(self.config.get("proxy", "")),
+            "proxy_active": bool(self.config.get("proxy_active", False)),
         }
         snapshot = build_user_defaults_snapshot(widgets)
         try:
@@ -269,7 +297,7 @@ class LifecycleMixin:
             batch_chunk_size=self.config.get("batch_chunk_size", 40),
             min_part_bytes=self.config.get("min_part_bytes", 1024),
             config_path=config_path,
-            proxy=self.config.get("proxy", ""),
+            proxy=self.config.get("proxy", "") if self.config.get("proxy_active", False) else "",
         )
         self.clipboard_clear()
         self.clipboard_append(cmd)

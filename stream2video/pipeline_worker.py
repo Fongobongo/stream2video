@@ -193,7 +193,9 @@ def build_pipeline_config_from_snapshot(
         no_progress_timeout=config.get(
             "no_progress_timeout", CONFIG_DEFAULTS["no_progress_timeout"]
         ),
-        proxy=config.get("proxy", CONFIG_DEFAULTS["proxy"]),
+        proxy=(
+            config.get("proxy", "") if config.get("proxy_active", CONFIG_DEFAULTS["proxy_active"]) else ""
+        ),
         segment_encode_timeout=config.get(
             "segment_encode_timeout", CONFIG_DEFAULTS["segment_encode_timeout"]
         ),

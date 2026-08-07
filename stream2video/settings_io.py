@@ -54,6 +54,7 @@ SAVE_SETTINGS_KEYS: tuple[str, ...] = (
     "preset",
     "theme",
     "proxy",
+    "proxy_active",
     "window_geometry",
 )
 
@@ -83,6 +84,7 @@ USER_DEFAULTS_KEYS: tuple[str, ...] = (
     "preset",
     "theme",
     "proxy",
+    "proxy_active",
 )
 
 

@@ -107,8 +107,14 @@ class MainWindowBuildMixin:
         ctk.CTkButton(info_frame, text="Copy CLI command", command=self._copy_cli_command).pack(
             fill="x", padx=5, pady=(0, 4)
         )
+        self.chk_proxy = ctk.CTkCheckBox(
+            info_frame, text="Use proxy", command=self._on_proxy_toggle
+        )
+        self.chk_proxy.pack(fill="x", padx=5, pady=(0, 2))
+        if self.config.get("proxy_active", False):
+            self.chk_proxy.select()
         self.btn_proxy = ctk.CTkButton(
-            info_frame, text=self._proxy_button_text(), command=self._set_proxy
+            info_frame, text="Set proxy…", command=self._set_proxy
         )
         self.btn_proxy.pack(fill="x", padx=5, pady=(0, 4))
 

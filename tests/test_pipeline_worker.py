@@ -180,6 +180,34 @@ class TestBuildPipelineConfigFromSnapshot:
         assert cfg.use_crf is True
         assert cfg.gapless_concat is True
 
+    def test_proxy_used_only_when_active(self):
+        # The GUI keeps the proxy address even when the proxy is
+        # disabled (so the dialog can re-open prefilled); the factory
+        # must forward it to yt-dlp ONLY while proxy_active is on.
+        params = self._params()
+        cfg_off = build_pipeline_config_from_snapshot(
+            params,
+            {
+                "threshold": -30.0,
+                "min_silence": 2.0,
+                "margin": 0.0,
+                "proxy": "http://127.0.0.1:8080",
+                "proxy_active": False,
+            },
+        )
+        assert cfg_off.proxy == ""
+        cfg_on = build_pipeline_config_from_snapshot(
+            params,
+            {
+                "threshold": -30.0,
+                "min_silence": 2.0,
+                "margin": 0.0,
+                "proxy": "http://127.0.0.1:8080",
+                "proxy_active": True,
+            },
+        )
+        assert cfg_on.proxy == "http://127.0.0.1:8080"
+
 
 class TestBuildDownloadProgressCallback:
     class _FakeGui:
