@@ -612,9 +612,9 @@ class MainWindowBuildMixin:
         ]
         self.lbl_progress_pct = ctk.CTkLabel(
             prog_frame,
-            text="0% · 0%",
+            text="0%",
             anchor="w",
-            width=92,
+            width=48,
             text_color=("gray40", "gray60"),
         )
         self.lbl_progress_pct.grid(row=1, column=1, sticky="w", padx=(0, 6))

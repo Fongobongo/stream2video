@@ -21,7 +21,6 @@ from stream2video.gui_helpers import (
     build_download_status,
     build_eta_tail,
     build_overall_line,
-    build_pct_pair,
     build_phase_line,
     build_progress_meta_line,
     build_silence_info_line,
@@ -563,10 +562,10 @@ class TestPhaseWeightPercent:
 
 
 class TestBuildPhaseLine:
-    def test_known_step_with_weight(self):
+    def test_known_step_with_percent(self):
         assert build_phase_line("2", 35) == "Step 2/4 · Silence (35%)"
 
-    def test_known_step_without_weight(self):
+    def test_known_step_without_percent(self):
         assert build_phase_line("3") == "Step 3/4 · Cutting"
 
     def test_none_step_is_empty(self):
@@ -578,14 +577,3 @@ class TestBuildPhaseLine:
     def test_all_labels_present(self):
         assert build_phase_line("1", 5) == "Step 1/4 · Download (5%)"
         assert build_phase_line("4", 6) == "Step 4/4 · Concat (6%)"
-
-
-class TestBuildPctPair:
-    def test_compact_pair(self):
-        assert build_pct_pair(63.0, 42.0) == "63% · 42%"
-
-    def test_zeroes(self):
-        assert build_pct_pair(0.0, 0.0) == "0% · 0%"
-
-    def test_rounds(self):
-        assert build_pct_pair(99.6, 33.4) == "100% · 33%"

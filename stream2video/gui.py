@@ -213,7 +213,7 @@ class Stream2VideoGUI(
         self._set_running(True)
         self._cancel_event.clear()
         self.progress.set(0)
-        self.lbl_progress_pct.configure(text="0% · 0%")
+        self.lbl_progress_pct.configure(text="0%")
         self.lbl_status.configure(text="Starting...")
 
         # Sync slider entries → config (in case FocusOut didn't fire)

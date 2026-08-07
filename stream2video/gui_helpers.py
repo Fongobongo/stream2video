@@ -505,26 +505,17 @@ def phase_weight_percent(
     return round(span * 100)
 
 
-def build_phase_line(step: str | None, weight_pct: int | None = None) -> str:
+def build_phase_line(step: str | None, pct: int | None = None) -> str:
     """Render the status line's step indicator.
 
     ``None`` step (no phase running yet) yields an empty string. A known
-    weight appends the step's share of the bar, e.g.
-    ``"Step 2/4 · Silence (35%)"``.
+    ``pct`` appends the LIVE in-phase progress (0..100), e.g.
+    ``"Step 2/4 · Silence (35%)"``. Pure so the GUI's worker-thread
+    dispatchers can unit-test the formatting.
     """
     if step is None or step not in PHASE_LABELS:
         return ""
     name = PHASE_LABELS[step]
-    if weight_pct is not None:
-        return f"Step {step}/4 · {name} ({weight_pct}%)"
+    if pct is not None:
+        return f"Step {step}/4 · {name} ({pct}%)"
     return f"Step {step}/4 · {name}"
-
-
-def build_pct_pair(phase_pct: float, overall_pct: float) -> str:
-    """Compact "phase % · overall %" label for the bar's percent readout.
-
-    The first number is the progress WITHIN the current phase, the
-    second the whole-pipeline progress — e.g. ``"63% · 42%"``. Pure so
-    the GUI's worker-thread dispatchers can unit-test the formatting.
-    """
-    return f"{phase_pct:.0f}% · {overall_pct:.0f}%"

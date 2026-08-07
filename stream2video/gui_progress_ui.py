@@ -23,7 +23,6 @@ from stream2video.gui_helpers import (
     EtaSmoother,
     _wrap_status_lines,
     build_eta_tail,
-    build_pct_pair,
     build_phase_line,
     build_progress_meta_line,
     build_total_line,
@@ -159,8 +158,13 @@ class ProgressUiMixin:
         )
 
     def _update_pct_label(self) -> None:
-        """Render the dual percent readout: in-phase % · overall %."""
-        text = build_pct_pair(self._phase_progress * 100, self._overall_progress * 100)
+        """Render the overall-percent readout next to the bar.
+
+        The in-phase percent now lives in the status line (see
+        ``_refresh_step_status``), so this label stays only the
+        whole-pipeline progress — e.g. ``"42%"``.
+        """
+        text = f"{self._overall_progress * 100:.0f}%"
         self._tk_after(0, lambda t=text: self.lbl_progress_pct.configure(text=t))
 
     def _ui_progress_plan(self, bounds: tuple[float, float, float, float]) -> None:
@@ -200,15 +204,18 @@ class ProgressUiMixin:
         self._tk_after(0, _place)
 
     def _update_phase_indicator(self) -> None:
-        """Refresh the stage indicator status line from the current step
-        (e.g. "Step 3/4 · Cutting"). The live percent sits next to the
-        bar and the timing in the meta line — this label must NOT show
-        the static plan weight, or it reads as frozen progress. No-op
-        when no step is running yet.
+        """Refresh the stage indicator status line from the current step,
+        with the LIVE in-phase percent appended (e.g.
+        "Step 3/4 · Cutting (63%)"). The number ticks as
+        ``_set_phase_progress`` refreshes it — the status line is the
+        only place the in-phase fraction is shown, so a static label
+        would read as frozen. No-op when no step is running yet.
         """
         if not hasattr(self, "_current_step") or self._current_step is None:
             return
-        self._set_static_status(build_phase_line(self._current_step))
+        self._set_static_status(
+            build_phase_line(self._current_step, round(self._phase_progress * 100))
+        )
 
     def _ui_set_failure_style(self) -> None:
         """Paint the progress bar + percent label with the failure colours.
@@ -227,20 +234,38 @@ class ProgressUiMixin:
         self._set_progress_bar_color(_BAR_SUCCESS)
 
     def _set_phase_progress(self, value: float) -> None:
-        """Record the in-phase fraction and refresh the dual percent label.
+        """Record the in-phase fraction and refresh the step indicator.
 
         The thin per-phase bar was removed from the layout, but the
         pipeline still broadcasts its per-phase fraction via
-        ``on_phase_progress`` — it now feeds the "phase % · overall %"
-        readout. ``phase_progress`` (the removed widget) is still
-        guarded with a hasattr so a stale callback chain can't crash.
+        ``on_phase_progress`` — it now drives the LIVE percent in the
+        status line ("Step 3/4 · Cutting (63%)"). The refresh is
+        throttled by the same status clock as ``_ui_status`` so a busy
+        phase ticks the number instead of flickering the label.
+        ``phase_progress`` (the removed widget) is still guarded with a
+        hasattr so a stale callback chain can't crash.
         """
         clamped = max(0.0, min(1.0, value))
         self._phase_progress = clamped
         if not hasattr(self, "phase_progress"):
             self._update_pct_label()
+            self._refresh_step_status()
             return
         self._tk_after(0, lambda: self.phase_progress.set(clamped))
+
+    def _refresh_step_status(self) -> None:
+        """Re-render the step indicator with the current in-phase
+        percent, throttled so phase-progress bursts don't flicker.
+        No-op when no step is running yet."""
+        if not hasattr(self, "_current_step") or self._current_step is None:
+            return
+        now = time.monotonic()
+        if not should_update_status(self._last_status_update, now):
+            return
+        self._last_status_update = now
+        self._set_static_status(
+            build_phase_line(self._current_step, round(self._phase_progress * 100))
+        )
 
     def _ui_overall(
         self,
@@ -334,12 +359,12 @@ class ProgressUiMixin:
             return
         self._last_status_update = now
         if self._current_step is not None and text.startswith("Step "):
-            # Status line carries ONLY the stage indicator — the live
-            # percent sits next to the bar ("63% · 42%") and the timing
-            # lives in the meta line, so repeating them here would
-            # duplicate the readout. The plan weight is also left out:
-            # it's static per step and would read as frozen progress.
-            text = build_phase_line(self._current_step)
+            # Status line shows the live in-phase percent
+            # ("Step 3/4 · Cutting (63%)"); the timing lives in the meta
+            # line and the overall percent is next to the bar. The plan
+            # weight is left out — it's static per step and would read
+            # as frozen progress.
+            text = build_phase_line(self._current_step, round(self._phase_progress * 100))
         self._set_static_status(text)
 
     def _ui_info(self, text: str) -> None:
