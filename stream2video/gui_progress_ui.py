@@ -27,7 +27,6 @@ from stream2video.gui_helpers import (
     build_phase_line,
     build_progress_meta_line,
     build_total_line,
-    phase_weight_percent,
     should_update_status,
 )
 
@@ -202,17 +201,14 @@ class ProgressUiMixin:
 
     def _update_phase_indicator(self) -> None:
         """Refresh the stage indicator status line from the current step
-        + plan boundaries (e.g. "Step 2/4 · Silence (35%)"). The live
-        numbers (percent, timing) are rendered by the bar's % label and
-        the meta line, not here — they'd otherwise duplicate. No-op when
-        no step is running yet.
+        (e.g. "Step 3/4 · Cutting"). The live percent sits next to the
+        bar and the timing in the meta line — this label must NOT show
+        the static plan weight, or it reads as frozen progress. No-op
+        when no step is running yet.
         """
         if not hasattr(self, "_current_step") or self._current_step is None:
             return
-        step = self._current_step
-        weight = phase_weight_percent(self._phase_bounds, step)
-        text = build_phase_line(step, weight)
-        self._set_static_status(text)
+        self._set_static_status(build_phase_line(self._current_step))
 
     def _ui_set_failure_style(self) -> None:
         """Paint the progress bar + percent label with the failure colours.
@@ -341,11 +337,9 @@ class ProgressUiMixin:
             # Status line carries ONLY the stage indicator — the live
             # percent sits next to the bar ("63% · 42%") and the timing
             # lives in the meta line, so repeating them here would
-            # duplicate the readout.
-            text = build_phase_line(
-                self._current_step,
-                phase_weight_percent(self._phase_bounds, self._current_step),
-            )
+            # duplicate the readout. The plan weight is also left out:
+            # it's static per step and would read as frozen progress.
+            text = build_phase_line(self._current_step)
         self._set_static_status(text)
 
     def _ui_info(self, text: str) -> None:
