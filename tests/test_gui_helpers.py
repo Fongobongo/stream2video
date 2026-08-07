@@ -21,9 +21,12 @@ from stream2video.gui_helpers import (
     build_download_status,
     build_eta_tail,
     build_overall_line,
+    build_pct_pair,
+    build_phase_line,
     build_silence_info_line,
     build_total_line,
     build_waveform_view_label,
+    phase_weight_percent,
     should_update_status,
     truncate_status,
 )
@@ -516,3 +519,55 @@ class TestBuildCompletionSummary:
         # Should not crash; the popup just shows "—" or similar for
         # the source duration.
         assert "Source:" in s["popup"]
+
+
+class TestPhaseWeightPercent:
+    _BOUNDS = (0.05, 0.40, 0.94, 1.0)
+
+    def test_default_profile_weights(self):
+        # The classic conservative profile: download 5 %, silence 35 %,
+        # cutting 54 %, concat 6 % (mirrors PROG_* constants).
+        assert phase_weight_percent(self._BOUNDS, "1") == 5
+        assert phase_weight_percent(self._BOUNDS, "2") == 35
+        assert phase_weight_percent(self._BOUNDS, "3") == 54
+        assert phase_weight_percent(self._BOUNDS, "4") == 6
+
+    def test_unknown_step_is_none(self):
+        assert phase_weight_percent(self._BOUNDS, "9") is None
+
+    def test_local_file_download_zero(self):
+        # Local file: download span is 0, silence gets its own slice.
+        assert phase_weight_percent((0.0, 0.35, 0.955, 1.0), "1") == 0
+        assert phase_weight_percent((0.0, 0.35, 0.955, 1.0), "2") == 35
+
+    def test_bad_bounds_tuple_is_none(self):
+        assert phase_weight_percent((0.05, 0.40), "1") is None
+
+
+class TestBuildPhaseLine:
+    def test_known_step_with_weight(self):
+        assert build_phase_line("2", 35) == "Phase 2/4 · Silence (35%)"
+
+    def test_known_step_without_weight(self):
+        assert build_phase_line("3") == "Phase 3/4 · Cutting"
+
+    def test_none_step_is_empty(self):
+        assert build_phase_line(None) == ""
+
+    def test_unknown_step_is_empty(self):
+        assert build_phase_line("7") == ""
+
+    def test_all_labels_present(self):
+        assert build_phase_line("1", 5) == "Phase 1/4 · Download (5%)"
+        assert build_phase_line("4", 6) == "Phase 4/4 · Concat (6%)"
+
+
+class TestBuildPctPair:
+    def test_compact_pair(self):
+        assert build_pct_pair(63.0, 42.0) == "63% · 42%"
+
+    def test_zeroes(self):
+        assert build_pct_pair(0.0, 0.0) == "0% · 0%"
+
+    def test_rounds(self):
+        assert build_pct_pair(99.6, 33.4) == "100% · 33%"

@@ -82,6 +82,7 @@ class TestGuiInstantiation:
             "progress",
             "lbl_progress_pct",
             "lbl_status",
+            "lbl_phase",
             "lbl_overall",
             "lbl_total",
             "lbl_silence",
@@ -122,6 +123,13 @@ class TestGuiPureHelpersWired:
         # (it should call ``truncate_status`` and ``should_update_status``
         # from gui_helpers).
         gui._ui_status("test status", force=True)
+
+    def test_ui_progress_plan_positions_ticks(self, gui):
+        # The pipeline broadcasts per-run phase boundaries; the GUI must
+        # accept them without raising (tick placement is main-thread via
+        # _tk_after, so just verify the state + indicator wiring).
+        gui._ui_progress_plan((0.05, 0.40, 0.94, 1.0))
+        assert gui._phase_bounds == (0.05, 0.40, 0.94, 1.0)
 
     def test_log_queue_accepts_messages(self, gui):
         # The pipeline worker and many helpers call self._log(str);

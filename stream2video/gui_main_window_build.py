@@ -563,15 +563,28 @@ class MainWindowBuildMixin:
         self.lbl_status2 = ctk.CTkLabel(prog_frame, text="", anchor="w", width=200)
         self.lbl_status2.grid(row=1, column=0, columnspan=4, sticky="w", pady=(0, 2))
 
-        # Overall pipeline progress bar.
-        self.progress = ctk.CTkProgressBar(
+        # Overall pipeline progress bar. A wrapper frame (same fixed
+        # size as the bar) hosts the bar + thin segment tick marks so
+        # the phase boundaries can be overlaid WITHOUT a canvas hack:
+        # the wrapper is gridded, the bar is placed inside it, and the
+        # ticks are placed at ``relx=phase_boundary`` positions (set by
+        # ``ProgressUiMixin._reposition_phase_ticks`` when the per-run
+        # ProgressPlan arrives).
+        self.progress_wrap = ctk.CTkFrame(
             prog_frame,
+            fg_color="transparent",
+            width=160,
+            height=10,
+        )
+        self.progress_wrap.grid(row=2, column=0, sticky="w", padx=(0, 6))
+        self.progress = ctk.CTkProgressBar(
+            self.progress_wrap,
             mode="determinate",
             height=10,
             width=160,
         )
         self.progress.set(0)
-        self.progress.grid(row=2, column=0, sticky="w", padx=(0, 6))
+        self.progress.place(x=0, y=0)
         # Live tooltip on the bar (updated on every overall tick with the
         # smoothed ETA + total estimate). Initial text is a static hint.
         self.progress_tooltip = _Tooltip(
@@ -582,14 +595,38 @@ class MainWindowBuildMixin:
         # ``ProgressUiMixin._set_progress_bar_color(None)`` can restore
         # it at the start of the next run (after a success/failure tint).
         self._default_progress_color = self.progress.cget("progress_color")
+        # Segment tick marks at the phase boundaries. Three markers for
+        # the download/silence/cut boundaries; the concat boundary is the
+        # bar's own right rim. Positioned by ``_reposition_phase_ticks``
+        # as soon as the per-run plan is broadcast.
+        self._phase_ticks = [
+            ctk.CTkFrame(
+                self.progress_wrap,
+                width=1,
+                fg_color=("gray45", "gray55"),
+            )
+            for _ in range(3)
+        ]
         self.lbl_progress_pct = ctk.CTkLabel(
             prog_frame,
-            text="0%",
+            text="0% · 0%",
             anchor="w",
-            width=42,
+            width=92,
             text_color=("gray40", "gray60"),
         )
         self.lbl_progress_pct.grid(row=2, column=1, sticky="w", padx=(0, 6))
+        # Phase indicator ("Phase 2/4 · Cutting (54%)") — the weight in
+        # parentheses is the phase's share of the whole pipeline bar
+        # (from the per-run ProgressPlan), so the user sees not just
+        # WHERE we are but HOW BIG the current phase is.
+        self.lbl_phase = ctk.CTkLabel(
+            prog_frame,
+            text="",
+            anchor="w",
+            width=200,
+            text_color=("gray40", "gray60"),
+        )
+        self.lbl_phase.grid(row=3, column=0, columnspan=4, sticky="w", pady=(2, 0))
         # Live Elapsed/Remaining for the current phase.
         self.lbl_overall = ctk.CTkLabel(
             prog_frame,
@@ -597,7 +634,7 @@ class MainWindowBuildMixin:
             anchor="w",
             text_color=("gray40", "gray60"),
         )
-        self.lbl_overall.grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        self.lbl_overall.grid(row=4, column=0, columnspan=3, sticky="w", pady=(2, 0))
         # Total pipeline wall-clock, updated in real time — on its own line
         # below Elapsed/Remaining so both don't fight for horizontal space.
         self.lbl_total = ctk.CTkLabel(
@@ -606,4 +643,4 @@ class MainWindowBuildMixin:
             anchor="w",
             text_color=("gray40", "gray60"),
         )
-        self.lbl_total.grid(row=4, column=0, columnspan=4, sticky="w", pady=(0, 0))
+        self.lbl_total.grid(row=5, column=0, columnspan=4, sticky="w", pady=(0, 0))

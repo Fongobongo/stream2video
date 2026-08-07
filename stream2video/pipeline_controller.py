@@ -168,6 +168,14 @@ class PipelineCallbacks:
     # without change; a None-able ``lambda f: None`` would also work but
     # an Optional avoids a stray no-op closure in the default case.
     on_phase_progress: Callable[[float], None] | None = None
+    # The per-run ``ProgressPlan`` boundary fractions — the tuple
+    # ``(download_end, silence_end, cut_end, concat_end)`` in overall
+    # 0..1 space. Sent on EVERY plan (re)build so the GUI can draw
+    # phase tick marks on the overall bar that match the adaptive
+    # weights (local files / cached silence shrink cheap spans). The
+    # GUI converts these to per-phase weight percents itself; the CLI
+    # and tests that don't draw segments simply omit the callback.
+    on_progress_plan: Callable[[tuple[float, float, float, float]], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -371,6 +379,15 @@ class PipelineController:
         if self.cb.on_phase_progress is not None:
             self.cb.on_phase_progress(max(0.0, min(1.0, fraction)))
 
+    def _emit_progress_plan(self) -> None:
+        """Broadcast the current plan's phase boundaries in overall
+        0..1 space so the GUI can draw adaptive segment tick marks."""
+        if self.cb.on_progress_plan is not None:
+            plan = self._progress_plan
+            self.cb.on_progress_plan(
+                (plan.download_end, plan.silence_end, plan.cut_end, plan.concat_end)
+            )
+
     def _cleanup_download_path(self) -> None:
         """Delete the downloaded source file if this run actually downloaded it.
 
@@ -542,6 +559,7 @@ class PipelineController:
         )
         dl_w, silence_w, cut_w, concat_w = self._progress_plan.weights_percent()
         concat_l = self._progress_plan.weights_percent_legacy()[2]
+        self._emit_progress_plan()
         self.cb.on_log(
             f"Progress weights: download {dl_w}%, silence {silence_w}%, cutting {cut_w}%, concatenating {concat_w}% "
             f"[concat total {concat_l}%]"
@@ -610,6 +628,7 @@ class PipelineController:
             self.cb.on_log(f"Loaded {len(cache)} silence segments from cache")
             dl_w, silence_w, cut_w, concat_w = self._progress_plan.weights_percent()
             concat_l = self._progress_plan.weights_percent_legacy()[2]
+            self._emit_progress_plan()
             self.cb.on_log(
                 f"Progress weights adjusted: download {dl_w}%, "
                 f"silence {silence_w}%, cutting {cut_w}%, concatenating {concat_w}% "

@@ -453,3 +453,58 @@ def build_completion_summary(
 # (inside gui.py and any downstream code) keep working during the
 # incremental refactor.
 _build_completion_summary = build_completion_summary
+
+
+# Short phase names keyed by the "Step X/4" token the pipeline emits in
+# its status lines (see PipelineController._run_*_phase). Used by the
+# GUI's phase-indicator line (``lbl_phase``) to render "Phase 2/4 ·
+# Silence" instead of a bare number.
+PHASE_LABELS: dict[str, str] = {
+    "1": "Download",
+    "2": "Silence",
+    "3": "Cutting",
+    "4": "Concat",
+}
+
+
+def phase_weight_percent(
+    bounds: tuple[float, float, float, float], step: str
+) -> int | None:
+    """Share (percent) the phase ``step`` ("1".."4") occupies of the
+    whole pipeline bar, from the plan's boundary fractions
+    ``(download_end, silence_end, cut_end, concat_end)``.
+
+    E.g. ``(0.05, 0.40, 0.94, 1.0)`` → download 5, silence 35, cutting
+    54, concat 6. Returns None for an unknown step.
+    """
+    if step not in PHASE_LABELS or len(bounds) != 4:
+        return None
+    starts = (0.0, bounds[0], bounds[1], bounds[2])
+    idx = int(step) - 1
+    span = max(0.0, bounds[idx] - starts[idx])
+    return round(span * 100)
+
+
+def build_phase_line(step: str | None, weight_pct: int | None = None) -> str:
+    """Render the phase-indicator line for ``lbl_phase``.
+
+    ``None`` step (no phase running yet) yields an empty string. A known
+    weight appends the phase's share of the bar, e.g.
+    ``"Phase 2/4 · Silence (35%)"``.
+    """
+    if step is None or step not in PHASE_LABELS:
+        return ""
+    name = PHASE_LABELS[step]
+    if weight_pct is not None:
+        return f"Phase {step}/4 · {name} ({weight_pct}%)"
+    return f"Phase {step}/4 · {name}"
+
+
+def build_pct_pair(phase_pct: float, overall_pct: float) -> str:
+    """Compact "phase % · overall %" label for the bar's percent readout.
+
+    The first number is the progress WITHIN the current phase, the
+    second the whole-pipeline progress — e.g. ``"63% · 42%"``. Pure so
+    the GUI's worker-thread dispatchers can unit-test the formatting.
+    """
+    return f"{phase_pct:.0f}% · {overall_pct:.0f}%"

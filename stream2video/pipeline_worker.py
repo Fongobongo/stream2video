@@ -109,6 +109,8 @@ class PipelineGuiCallbacks(Protocol):
 
     def ui_phase_progress(self, fraction: float) -> None: ...
 
+    def ui_progress_plan(self, bounds: tuple[float, float, float, float]) -> None: ...
+
     def ui_set_success_style(self) -> None: ...
 
     def ui_set_failure_style(self) -> None: ...
@@ -365,6 +367,7 @@ class PipelineWorker:
             on_overall=self._gui.ui_overall,
             on_total=self._gui.ui_total,
             on_phase_progress=self._gui.ui_phase_progress,
+            on_progress_plan=self._gui.ui_progress_plan,
             on_download_progress=build_download_progress_callback(self._gui, download_start),
             on_pipeline_complete=build_completion_callback(
                 self._gui,

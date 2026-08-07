@@ -213,7 +213,7 @@ class Stream2VideoGUI(
         self._set_running(True)
         self._cancel_event.clear()
         self.progress.set(0)
-        self.lbl_progress_pct.configure(text="0%")
+        self.lbl_progress_pct.configure(text="0% · 0%")
         self.lbl_status.configure(text="Starting...")
 
         # Sync slider entries → config (in case FocusOut didn't fire)
@@ -481,6 +481,9 @@ class _PipelineGuiCallbacksAdapter:
 
     def ui_phase_progress(self, fraction: float) -> None:
         self._gui._set_phase_progress(fraction)
+
+    def ui_progress_plan(self, bounds: tuple[float, float, float, float]) -> None:
+        self._gui._ui_progress_plan(bounds)
 
     def ui_set_success_style(self) -> None:
         self._gui._ui_set_success_style()

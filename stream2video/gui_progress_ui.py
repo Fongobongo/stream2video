@@ -24,7 +24,10 @@ from stream2video.gui_helpers import (
     _wrap_status_lines,
     build_eta_tail,
     build_overall_line,
+    build_pct_pair,
+    build_phase_line,
     build_total_line,
+    phase_weight_percent,
     should_update_status,
 )
 
@@ -43,6 +46,13 @@ _BAR_FAILURE = "#d32f2f"
 # failure/cancel — visually distinct from the "live" running bar and the
 # final all-green success bar.
 _PCT_FAILURE_COLOR = ("gray50", "gray50")
+
+# Fallback phase boundaries used until the pipeline broadcasts its
+# per-run ``ProgressPlan`` (``_ui_progress_plan``). Mirrors the default
+# profile in pipeline_controller (PROG_DOWNLOAD_END / PROG_SILENCE_END /
+# PROG_CUT_END / PROG_CONCAT_END) without importing that module into the
+# GUI layer. Kept in sync with the controller's conservative defaults.
+_DEFAULT_PHASE_BOUNDS: tuple[float, float, float, float] = (0.05, 0.40, 0.94, 1.0)
 
 
 class ProgressUiMixin:
@@ -73,11 +83,23 @@ class ProgressUiMixin:
         # tuple type holds ``str`` colours too (customtkinter returns a
         # tuple for themed values, a plain str once overridden).
         self._default_progress_color: str | tuple | None = None
+        self._default_progress_color: str | tuple | None = None
         self._last_overall_update: float = 0.0
         # Tracks which "Step X/4" status line we're on so the ETA
         # smoother + thin per-phase bar reset at each phase boundary
         # (``_ui_status`` parses the prefix).
         self._current_step: str | None = None
+        # Per-run phase boundaries (``_ui_progress_plan``) + the current
+        # in-phase fraction (``_set_phase_progress``) that together drive
+        # the bar's segment tick marks, the "Phase N/4" indicator, and
+        # the dual percent readout.
+        self._phase_bounds = _DEFAULT_PHASE_BOUNDS
+        self._phase_progress: float = 0.0
+        # Height of the main progress bar — the segment tick separators
+        # stretch the full bar height. Kept on self so the tick layout
+        # survives a widget rebuild (10 = ctk.CTkProgressBar height in
+        # gui_main_window_build).
+        self.phase_progress_height: int = 10
 
     def _cancel_pipeline(self) -> None:
         if self.running:
@@ -92,7 +114,10 @@ class ProgressUiMixin:
             self._phase_eta_smoother.reset()
             self._current_step = None
             self._overall_progress = 0.0
+            self._phase_bounds = _DEFAULT_PHASE_BOUNDS
+            self._phase_progress = 0.0
             self._set_progress_bar_color(None)
+            self._reposition_phase_ticks()
             self._tk_after(
                 0,
                 lambda: self.lbl_progress_pct.configure(
@@ -108,6 +133,7 @@ class ProgressUiMixin:
             self._pipeline_start = None
             self._tk_after(0, lambda: self.lbl_overall.configure(text=""))
             self._tk_after(0, lambda: self.lbl_total.configure(text=""))
+            self._tk_after(0, lambda: self.lbl_phase.configure(text=""))
 
     def _set_progress_bar_color(self, color: str | None) -> None:
         """Recolor the main progress bar; ``None`` restores the default.
@@ -131,10 +157,61 @@ class ProgressUiMixin:
         clamped = max(0.0, min(1.0, value))
         self._overall_progress = clamped
         self._tk_after(0, lambda: self.progress.set(clamped))
-        self._tk_after(0, lambda: self.lbl_progress_pct.configure(text=f"{clamped * 100:.0f}%"))
+        self._update_pct_label()
         self._update_progress_tooltip(
             f"Overall: {clamped * 100:.0f}% — pipeline progress; hover during a run for ETA"
         )
+
+    def _update_pct_label(self) -> None:
+        """Render the dual percent readout: in-phase % · overall %."""
+        text = build_pct_pair(self._phase_progress * 100, self._overall_progress * 100)
+        self._tk_after(0, lambda t=text: self.lbl_progress_pct.configure(text=t))
+
+    def _ui_progress_plan(self, bounds: tuple[float, float, float, float]) -> None:
+        """Store the per-run phase boundaries broadcast by the pipeline
+        and refresh the bar's segment tick marks + phase indicator."""
+        self._phase_bounds = bounds
+        self._reposition_phase_ticks()
+        self._update_phase_indicator()
+
+    def _reposition_phase_ticks(self) -> None:
+        """Move the thin segment separators on the progress bar to the
+        phase boundaries. No-op when the bar is in its pre-build state
+        (the widget list only exists after ``_build_ui``)."""
+        if not hasattr(self, "_phase_ticks") or not self._phase_ticks:
+            return
+        bounds = self._phase_bounds
+
+        def _place() -> None:
+            for i, (tick, b) in enumerate(zip(self._phase_ticks, bounds)):
+                # First (download) boundary may be 0 for a local file;
+                # skip it so the marker doesn't sit on the bar's left rim.
+                if b <= 1e-9:
+                    tick.place_forget()
+                    continue
+                try:
+                    tick.place(
+                        relx=b,
+                        y=0,
+                        width=1,
+                        height=self.phase_progress_height,
+                        bordermode="outside",
+                    )
+                except Exception:
+                    # Don't crash a run on a layout quirk (unknown Tk).
+                    pass
+
+        self._tk_after(0, _place)
+
+    def _update_phase_indicator(self) -> None:
+        """Refresh the "Phase N/4 · Name (weight%)" line from the current
+        step + plan boundaries. No-op when no step is running yet."""
+        if not hasattr(self, "_current_step") or self._current_step is None:
+            return
+        step = self._current_step
+        weight = phase_weight_percent(self._phase_bounds, step)
+        text = build_phase_line(step, weight)
+        self._tk_after(0, lambda t=text: self.lbl_phase.configure(text=t))
 
     def _ui_set_failure_style(self) -> None:
         """Paint the progress bar + percent label with the failure colours.
@@ -153,15 +230,19 @@ class ProgressUiMixin:
         self._set_progress_bar_color(_BAR_SUCCESS)
 
     def _set_phase_progress(self, value: float) -> None:
-        """No-op — the thin per-phase bar was removed from the layout.
+        """Record the in-phase fraction and refresh the dual percent label.
 
-        Kept as a callable so the pipeline's ``on_phase_progress``
-        callback chain still resolves without an ``AttributeError``;
-        the overall bar alone conveys the phase fraction now.
+        The thin per-phase bar was removed from the layout, but the
+        pipeline still broadcasts its per-phase fraction via
+        ``on_phase_progress`` — it now feeds the "phase % · overall %"
+        readout. ``phase_progress`` (the removed widget) is still
+        guarded with a hasattr so a stale callback chain can't crash.
         """
-        if not hasattr(self, "phase_progress"):
-            return
         clamped = max(0.0, min(1.0, value))
+        self._phase_progress = clamped
+        if not hasattr(self, "phase_progress"):
+            self._update_pct_label()
+            return
         self._tk_after(0, lambda: self.phase_progress.set(clamped))
 
     def _ui_overall(
@@ -229,6 +310,7 @@ class ProgressUiMixin:
                 self._current_step = step_token
                 self._phase_eta_smoother.reset()
                 self._set_phase_progress(0.0)
+                self._update_phase_indicator()
 
         now = time.monotonic()
         if not should_update_status(self._last_status_update, now, force=force):
