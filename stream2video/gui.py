@@ -507,7 +507,7 @@ class _PipelineGuiCallbacksAdapter:
         )
 
     def clear_overall_label(self) -> None:
-        self._gui._tk_after(0, lambda: self._gui.lbl_overall.configure(text=""))
+        self._gui._tk_after(0, lambda: self._gui.lbl_progress_meta.configure(text=""))
 
     def show_complete_popup(self, text: str) -> None:
         self._gui._tk_after(0, lambda: messagebox.showinfo("Complete", text))

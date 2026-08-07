@@ -24,6 +24,7 @@ from stream2video.gui_helpers import (
     build_pct_pair,
     build_phase_line,
     build_phase_status_line,
+    build_progress_meta_line,
     build_silence_info_line,
     build_total_line,
     build_waveform_view_label,
@@ -339,6 +340,23 @@ class TestBuildOverallLine:
         assert "Elapsed:" in line
         assert "Remaining:" in line
         assert "~2m" in line
+
+
+class TestBuildProgressMetaLine:
+    def test_overall_and_total_combined(self):
+        line = build_progress_meta_line(125.0, "~2m", 300.0)
+        assert "Elapsed:" in line
+        assert "Remaining: ~2m" in line
+        assert "Total: 2m 5s / ~5m 0s" in line
+
+    def test_no_total_when_estimate_missing(self):
+        line = build_progress_meta_line(75.0, "?", None)
+        assert "Total" not in line
+        assert "Elapsed:" in line
+
+    def test_no_total_when_estimate_below_elapsed(self):
+        line = build_progress_meta_line(300.0, "~1m", 100.0)
+        assert "Total" not in line
 
 
 class TestEtaSmoother:

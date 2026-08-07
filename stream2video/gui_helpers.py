@@ -323,6 +323,25 @@ def build_total_line(total_elapsed: float, overall_est: float | None) -> str:
     return f"Total: {fmt_time(total_elapsed)}"
 
 
+def build_progress_meta_line(
+    total_elapsed: float,
+    eta_tail: str,
+    overall_est: float | None,
+) -> str:
+    """One-line Elapsed/Remaining/Total readout for the bar row.
+
+    Collapses the former two-row readout (Elapsed/Remaining on one line,
+    Total on another) into a single string so the progress frame stays
+    two rows tall: the status line + the bar row. ``eta_tail`` comes
+    from :func:`build_eta_tail`; ``overall_est`` is the estimated
+    whole-run wall-clock (None while still too noisy — omitted).
+    """
+    parts = [build_overall_line(total_elapsed, eta_tail)]
+    if overall_est is not None and overall_est > total_elapsed:
+        parts.append(build_total_line(total_elapsed, overall_est))
+    return " | ".join(parts)
+
+
 def build_compact_done_line(
     src_duration: float | None,
     keep_duration: float,

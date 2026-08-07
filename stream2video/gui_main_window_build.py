@@ -544,11 +544,10 @@ class MainWindowBuildMixin:
         self.txt_log.grid(row=2, column=0, sticky="nsew", padx=4, pady=4)
 
         # Progress block: moved from the bottom of the Controls column.
-        # Layout pinned to the bottom of the column:
-        #   row 0-1: Step status (two lines so Cutting 50% (0:10/0:10) fits)
-        #   row 2: overall bar + %
-        #   row 3: Elapsed/Remaining (own line under the bar)
-        #   row 4: Total wall-clock (own line below Elapsed/Remaining)
+        # Layout pinned to the bottom of the column — just two rows so
+        # the whole progress area stays compact:
+        #   row 0: Step status (grows to two wrapped lines when needed)
+        #   row 1: overall bar + % + Elapsed/Remaining/Total on one line
         prog_frame = ctk.CTkFrame(right_frame, fg_color="transparent")
         prog_frame.grid(row=3, column=0, sticky="sew", padx=4, pady=(0, 4))
         prog_frame.grid_columnconfigure(0, weight=0)  # bar: fixed width
@@ -617,20 +616,14 @@ class MainWindowBuildMixin:
             text_color=("gray40", "gray60"),
         )
         self.lbl_progress_pct.grid(row=1, column=1, sticky="w", padx=(0, 6))
-        # Live Elapsed/Remaining for the current phase.
-        self.lbl_overall = ctk.CTkLabel(
+        # One-line Elapsed/Remaining/Total readout on the bar's row, so
+        # the progress area stays two rows (status line + bar row).
+        self.lbl_progress_meta = ctk.CTkLabel(
             prog_frame,
             text="",
             anchor="w",
             text_color=("gray40", "gray60"),
         )
-        self.lbl_overall.grid(row=2, column=0, columnspan=3, sticky="w", pady=(2, 0))
-        # Total pipeline wall-clock, updated in real time — on its own line
-        # below Elapsed/Remaining so both don't fight for horizontal space.
-        self.lbl_total = ctk.CTkLabel(
-            prog_frame,
-            text="",
-            anchor="w",
-            text_color=("gray40", "gray60"),
+        self.lbl_progress_meta.grid(
+            row=1, column=2, columnspan=2, sticky="w", padx=(8, 0)
         )
-        self.lbl_total.grid(row=3, column=0, columnspan=4, sticky="w", pady=(0, 0))

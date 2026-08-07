@@ -23,9 +23,9 @@ from stream2video.gui_helpers import (
     EtaSmoother,
     _wrap_status_lines,
     build_eta_tail,
-    build_overall_line,
     build_pct_pair,
     build_phase_status_line,
+    build_progress_meta_line,
     build_total_line,
     phase_weight_percent,
     should_update_status,
@@ -139,8 +139,7 @@ class ProgressUiMixin:
             # Clear the time labels so a stale state is not shown on the
             # next pipeline's idle state.
             self._pipeline_start = None
-            self._tk_after(0, lambda: self.lbl_overall.configure(text=""))
-            self._tk_after(0, lambda: self.lbl_total.configure(text=""))
+            self._tk_after(0, lambda: self.lbl_progress_meta.configure(text=""))
 
     def _set_progress_bar_color(self, color: str | None) -> None:
         """Recolor the main progress bar; ``None`` restores the default.
@@ -262,7 +261,7 @@ class ProgressUiMixin:
         phase_remaining: float | None,
         more_phases: bool,
     ) -> None:
-        """Update the live Elapsed/Remaining line + the Total wall-clock label."""
+        """Update the single Elapsed/Remaining/Total readout on the bar row."""
         if self._pipeline_start is None:
             return
         now = time.monotonic()
@@ -276,14 +275,18 @@ class ProgressUiMixin:
         # Smoothed per-phase ETA (kills the second-to-second jitter).
         smoothed_phase = self._phase_eta_smoother.update(phase_remaining)
         tail = build_eta_tail(smoothed_phase, more_phases)
-        self._tk_after(0, lambda: self.lbl_overall.configure(text=build_overall_line(total_elapsed, tail)))
 
         # Whole-pipeline ETA: overall_elapsed / overall_progress, gated
         # on overall progress being past the noisy-bootstrap threshold.
         overall_est: float | None = None
         if self._overall_progress >= TOTAL_ETA_MIN_PROGRESS:
             overall_est = total_elapsed / self._overall_progress
-        self._ui_total(total_elapsed, overall_est=overall_est)
+        self._tk_after(
+            0,
+            lambda: self.lbl_progress_meta.configure(
+                text=build_progress_meta_line(total_elapsed, tail, overall_est)
+            ),
+        )
 
         # Live tooltip on the bar with the raw + smoothed numbers.
         tip = (
@@ -299,10 +302,12 @@ class ProgressUiMixin:
             self.progress_tooltip.text = text
 
     def _ui_total(self, total_elapsed: float, *, overall_est: float | None = None) -> None:
-        """Update the Total wall-clock label below the progress bar."""
+        """Update the Total wall-clock readout on the bar row (completion)."""
         self._tk_after(
             0,
-            lambda: self.lbl_total.configure(text=build_total_line(total_elapsed, overall_est)),
+            lambda: self.lbl_progress_meta.configure(
+                text=build_total_line(total_elapsed, overall_est)
+            ),
         )
 
     def _set_static_status(self, text: str) -> None:
