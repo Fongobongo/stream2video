@@ -41,6 +41,9 @@ class _FakeTexbox:
         self.buffer: list[str] = []
         self.state = "normal"
         self.crashed = False
+        self.see_calls: list[str] = []
+        self.tag_configs: list[tuple[str, dict[str, Any]]] = []
+        self.tag_adds: list[tuple[str, str, str]] = []
 
     def configure(self, **kwargs: Any) -> None:
         if self.crashed:
@@ -56,6 +59,25 @@ class _FakeTexbox:
     def see(self, index: str) -> None:
         if self.crashed:
             raise RuntimeError("textbox gone")
+        self.see_calls.append(index)
+
+    def index(self, index: str) -> str:
+        if self.crashed:
+            raise RuntimeError("textbox gone")
+        # Each queued line lives at ``L.D`` line indices; the full text
+        # is one line per message, so this gives the cursor a stable
+        # ``line.col`` address to tag against.
+        return f"{len(self.buffer) + 1}.0"
+
+    def tag_config(self, tag: str, **kwargs: Any) -> None:
+        if self.crashed:
+            raise RuntimeError("textbox gone")
+        self.tag_configs.append((tag, dict(kwargs)))
+
+    def tag_add(self, tag: str, index1: str, index2: str) -> None:
+        if self.crashed:
+            raise RuntimeError("textbox gone")
+        self.tag_adds.append((tag, index1, index2))
 
     def crash(self) -> None:
         """Make every subsequent call raise — used to simulate a
@@ -152,9 +174,73 @@ class TestLogQueuePoller:
         assert len(textbox.buffer) == 2
         assert textbox.buffer[0].startswith("[") and textbox.buffer[0].endswith(" one\n")
         assert textbox.buffer[1].endswith(" two\n")
+        # Auto-scroll: ``see("end")`` fired exactly once, after the whole
+        # batch was inserted, so the log view pins to the newest line.
+        assert textbox.see_calls == ["end"]
         # Poller reschedules itself for the next drain.
         assert len(dispatcher_calls) == 1
         assert dispatcher_calls[0][0] == 100
+
+    def test_poll_tags_error_and_warn_lines(self):
+        textbox = _FakeTexbox()
+        dispatcher_calls: list[tuple[int, Callable[..., Any]]] = []
+
+        class _RecordingDispatcher(TkDispatcher):
+            def __init__(self) -> None:
+                super().__init__(_FakeDeadRoot())
+
+            def schedule(self, ms: int, func: Callable[..., Any]) -> None:
+                dispatcher_calls.append((ms, func))
+
+        poller = LogQueuePoller(
+            textbox=textbox,
+            dispatcher=_RecordingDispatcher(),
+            log_queue=queue.Queue(),
+        )
+        poller.log("plain info")
+        poller.log("[WARN] disk nearly full")
+        poller.log("[ERROR] encode failed")
+        poller.poll()
+
+        # The [] marker comes from the queue message, so warn/error lines
+        # must be tagged with their severity tag; plain info stays untagged.
+        tags = [t for t, _, _ in textbox.tag_adds]
+        assert tags == ["warn", "error"]
+        # Both tags are fresh per poll; only one see for the batch.
+        assert textbox.see_calls == ["end"]
+
+    def test_poll_configures_theme_tags_on_first_severity_line(self):
+        textbox = _FakeTexbox()
+        poller = LogQueuePoller(
+            textbox=textbox,
+            dispatcher=TkDispatcher(_FakeDeadRoot()),
+            log_queue=queue.Queue(),
+        )
+        poller.log("[ERROR] boom")
+        poller.poll()  # swallowed TclError on the dead root is fine
+        # Tags are configured lazily the first time a severity line is
+        # drained (not at __init__), and the line itself gets tagged.
+        assert {cfg[0] for cfg in textbox.tag_configs} == {"error", "warn"}
+        # First drained message is log line 1.
+        assert textbox.tag_adds == [("error", "1.0", "1.0 lineend")]
+
+    def test_set_theme_forces_tag_reset(self):
+        textbox = _FakeTexbox()
+        poller = LogQueuePoller(
+            textbox=textbox,
+            dispatcher=TkDispatcher(_FakeDeadRoot()),
+            log_queue=queue.Queue(),
+        )
+        assert poller._tags_configured is False
+        poller.log("[ERROR] boom")
+        poller.poll()
+        assert poller._tags_configured is True
+        poller.set_theme("light")
+        assert poller._tags_configured is False
+        # Next tagged line re-configures with the new theme's colours.
+        poller.log("[WARN] hi")
+        poller.poll()
+        assert "error" in {cfg[0] for cfg in textbox.tag_configs}
 
     def test_poll_stops_when_textbox_destroyed(self):
         textbox = _FakeTexbox()
@@ -208,6 +294,19 @@ class TestLogQueuePoller:
             poller.setup_logging()  # idempotent
         assert len(fake_logger.handlers) == 1
         assert isinstance(fake_logger.handlers[0], logging.Handler)
+
+    def test_queue_handler_prefixes_warn_and_error_levels(self):
+        from stream2video.gui_log_handler import QueueHandler
+
+        q: queue.Queue[str] = queue.Queue()
+        handler = QueueHandler(q)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+        handler.emit(logging.LogRecord("n", logging.WARNING, "", 0, "careful", None, None))
+        handler.emit(logging.LogRecord("n", logging.ERROR, "", 0, "boom", None, None))
+        handler.emit(logging.LogRecord("n", logging.INFO, "", 0, "fine", None, None))
+        assert q.get_nowait() == "[WARN] careful"
+        assert q.get_nowait() == "[ERROR] boom"
+        assert q.get_nowait() == "fine"
 
     def test_log_after_setup_winds_up_in_queue(self):
         # Integration-lite: setup_logging wires a handler that pushes

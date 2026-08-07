@@ -43,4 +43,14 @@ class QueueHandler(logging.Handler):
         # — we don't override it, so a formatter that raises (e.g. a
         # bad %-format string in a custom Formatter) logs to stderr
         # instead of crashing the worker thread that emitted the record.
-        self.log_queue.put(self.format(record))
+        #
+        # WARNING/ERROR records get a ``[WARN]``/``[ERROR]`` marker so
+        # the GUI's log poller can colour those lines (it keys off the
+        # same markers the GUI's manual ``[WARN]``/``[ERROR]`` prefixes
+        # use). DEBUG/INFO stay unprefixed.
+        prefix = ""
+        if record.levelno >= logging.ERROR:
+            prefix = "[ERROR] "
+        elif record.levelno >= logging.WARNING:
+            prefix = "[WARN] "
+        self.log_queue.put(prefix + self.format(record))

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import re
 import time
 from collections.abc import Callable
 from typing import Any, Protocol
@@ -37,6 +38,19 @@ from typing import Any, Protocol
 from stream2video.gui_log_handler import QueueHandler
 
 logger = logging.getLogger(__name__)
+
+# Severity markers the pipeline prefixes to log lines (``[WARN]``,
+# ``[ERROR]``). The poller re-reads them so it can color the whole
+# matching line in the textbox.
+_SEVERITY_RE = re.compile(r"\[(ERROR|WARN|INFO|DEBUG)\]")
+
+# Theme-aware colours for warn/error log lines. ``see()`` keeps the
+# log pinned to the newest line; these colours are chosen to stay
+# readable on both the dark and light CTk themes.
+_TAG_FG = {
+    "error": {"dark": "#ff6b6b", "light": "#c62828"},
+    "warn": {"dark": "#ffb300", "light": "#b26a00"},
+}
 
 
 class TkRoot(Protocol):
@@ -84,6 +98,12 @@ class TkTextbox(Protocol):
 
     def see(self, index: str) -> None: ...
 
+    def index(self, index: str) -> str: ...
+
+    def tag_config(self, tag: str, **kwargs: Any) -> None: ...
+
+    def tag_add(self, tag: str, index1: str, index2: str) -> None: ...
+
 
 class LogQueuePoller:
     """Owns the GUI's log queue: workers push via ``log`` and the Tk
@@ -107,6 +127,7 @@ class LogQueuePoller:
         textbox: TkTextbox,
         dispatcher: TkDispatcher,
         log_queue: queue.Queue[str] | None = None,
+        theme: str = "dark",
     ):
         self._textbox = textbox
         self._dispatcher = dispatcher
@@ -116,6 +137,15 @@ class LogQueuePoller:
         # — only one QueueHandler per GUI instance). Tests can also peek
         # to confirm wiring.
         self._handler: QueueHandler | None = None
+        # Theme name ("dark"/"light") selects the warn/error tag colours.
+        self._theme = theme
+        self._tags_configured = False
+        # Running count of log lines already written into the textbox.
+        # Tk index arithmetic with CTkTextbox is fragile (a phantom
+        # trailing newline shifts ``index("end")``), so we track line
+        # numbers ourselves — the log is append-only and every message
+        # is one line, which makes this exact.
+        self._line_count = 0
 
     @property
     def queue(self) -> queue.Queue[str]:
@@ -126,6 +156,49 @@ class LogQueuePoller:
         timestamp = time.strftime("%H:%M:%S")
         self._queue.put(f"[{timestamp}] {message}")
 
+    @staticmethod
+    def _severity_tag(message: str) -> str | None:
+        """Map a log line's ``[WARN]``/``[ERROR]`` marker to a tag name.
+
+        Returns ``"error"`` for ``[ERROR]``, ``"warn"`` for ``[WARN]``,
+        and ``None`` for anything else (including ``[INFO]``/``[DEBUG]``,
+        which keep the default text colour). Mirrors the GUI's manual
+        ``[WARN]``/``[ERROR]`` prefixes in ``gui_lifecycle``,
+        ``pipeline_controller`` etc., plus the logging-handler path.
+        """
+        m = _SEVERITY_RE.search(message)
+        if m is None:
+            return None
+        level = m.group(1)
+        if level == "ERROR":
+            return "error"
+        if level == "WARN":
+            return "warn"
+        return None
+
+    def _ensure_tags(self) -> None:
+        """Configure the warn/error text tags once (theme-aware)."""
+        if self._tags_configured:
+            return
+        for tag, colours in _TAG_FG.items():
+            self._textbox.tag_config(tag, foreground=colours.get(self._theme, colours["dark"]))
+        self._tags_configured = True
+
+    def _apply_tag(self, tag: str, start: str, end: str) -> None:
+        """Colour the line ``start..end`` with ``tag``; set up the tag on first use."""
+        self._ensure_tags()
+        self._textbox.tag_add(tag, start, end)
+
+    def set_theme(self, theme: str) -> None:
+        """Switch the warn/error tag colours to a new CTk theme.
+
+        ``tags`` are configured lazily on first use, so a theme change
+        can't re-skin already-configured tags — force a re-setup (old
+        lines keep their colour, new lines use the new theme's palette).
+        """
+        self._theme = theme
+        self._tags_configured = False
+
     def poll(self) -> None:
         """Drain the queue into the textbox; reschedule the next poll.
 
@@ -134,15 +207,38 @@ class LogQueuePoller:
         the poller would re-raise ``TclError`` forever.
         """
         try:
+            inserted = False
+            # Flip to ``normal`` once for the whole batch and back to
+            # ``disabled`` after — avoids the per-message state toggle
+            # flicker problem when dozens of lines arrive in one poll
+            # (Tk re-lays out the widget on each ``insert``, and toggling
+            # state around every line makes the auto-scroll fight the
+            # pending redraw).
+            self._textbox.configure(state="normal")
             while True:
                 try:
                     msg = self._queue.get_nowait()
                 except queue.Empty:
                     break
-                self._textbox.configure(state="normal")
                 self._textbox.insert("end", msg + "\n")
+                self._line_count += 1
+                tag = self._severity_tag(msg)
+                if tag is not None:
+                    # The log is append-only and every message is exactly
+                    # one line, so line ``_line_count`` is the line just
+                    # written. Tag the whole line (excluding the trailing
+                    # newline, which Tk owns).
+                    self._apply_tag(
+                        tag, f"{self._line_count}.0", f"{self._line_count}.0 lineend"
+                    )
+                inserted = True
+            if inserted:
+                # Auto-scroll to the bottom once the whole batch is in.
+                # ``see("end")`` scrolls to the last line; calling it
+                # after all inserts (instead of after each one) keeps the
+                # view pinned to the tail while the log grows.
                 self._textbox.see("end")
-                self._textbox.configure(state="disabled")
+            self._textbox.configure(state="disabled")
         except Exception:
             # Root destroyed (TclError) or textbox gone — stop the poller
             # quietly. Logging the exception would loop forever through

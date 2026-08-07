@@ -32,6 +32,10 @@ class MainWindowBuildMixin:
     def _on_theme_change(self, choice: str) -> None:
         ctk.set_appearance_mode(choice)
         self.config["theme"] = choice
+        # Re-skin the log's warn/error tag colours to match the new theme.
+        poller = getattr(self, "_log_poller", None)
+        if poller is not None:
+            poller.set_theme(choice)
 
     def _build_ui(self) -> None:
         self.grid_columnconfigure(0, weight=0, minsize=210)

@@ -153,10 +153,12 @@ class Stream2VideoGUI(
         self._build_ui()
 
         # Wire the log queue → textbox poller once ``txt_log`` exists.
+        # ``theme`` selects the warn/error tag colours for the log text.
         self._log_poller = LogQueuePoller(
             textbox=self.txt_log,
             dispatcher=self._dispatcher,
             log_queue=self.log_queue,
+            theme=self.config["theme"],
         )
         self._log_poller.setup_logging()
         self.after(100, self._log_poller.poll)
