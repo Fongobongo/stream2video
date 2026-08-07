@@ -661,7 +661,16 @@ class TestEncoderQualityPresets:
                 "-cq",
                 "18",
             ],
-            "libx264": ["-crf", "23", "-preset", "medium"],
+            "libx264": [
+                "-b:v",
+                "7000k",
+                "-maxrate",
+                "7000k",
+                "-bufsize",
+                "7000k",
+                "-preset",
+                "medium",
+            ],
         }
         for enc in ("h264_mf", "h264_amf", "h264_nvenc", "libx264"):
             assert encoder_opts(enc, "medium") == legacy[enc], (
@@ -674,11 +683,11 @@ class TestEncoderQualityPresets:
         for enc in ("h264_mf", "h264_amf", "h264_nvenc", "libx264"):
             assert ENCODER_OPTS[enc] == encoder_opts(enc, "medium")
 
-    def test_hw_bitrate_tracks_quality(self):
+    def test_bitrate_mode_tracks_quality_for_all_encoders(self):
         from stream2video.concat import _VIDEO_BITRATES
 
         assert _VIDEO_BITRATES == {"high": "10000k", "medium": "7000k", "low": "3500k"}
-        for enc in ("h264_mf", "h264_amf", "h264_nvenc"):
+        for enc in ("h264_mf", "h264_amf", "h264_nvenc", "libx264"):
             for q, br in _VIDEO_BITRATES.items():
                 opts = encoder_opts(enc, q)
                 assert "-b:v" in opts
@@ -689,24 +698,46 @@ class TestEncoderQualityPresets:
                     m_idx = opts.index("-maxrate")
                     assert opts[m_idx + 1] == br, f"{enc} {q}: -maxrate must be {br}"
 
-    def test_libx264_crf_tracks_quality(self):
+    def test_use_crf_tracks_quality_for_all_encoders(self):
         from stream2video.concat import _X264_CRF
 
         assert _X264_CRF == {"high": "18", "medium": "23", "low": "28"}
         for q, crf in _X264_CRF.items():
-            opts = encoder_opts("libx264", q)
+            opts = encoder_opts("libx264", q, use_crf=True)
             idx = opts.index("-crf")
             assert opts[idx + 1] == crf
-            # libx264 ignores bitrate, so -b:v must NOT be present
             assert "-b:v" not in opts
 
-    def test_source_video_quality_uses_encoder_defaults(self):
-        for enc in ("h264_mf", "h264_amf", "h264_nvenc", "libx264"):
-            opts = encoder_opts(enc, "source")
+            nvenc = encoder_opts("h264_nvenc", q, use_crf=True)
+            assert "-cq" in nvenc
+            assert nvenc[nvenc.index("-cq") + 1] == crf
+            assert "-b:v" not in nvenc
+
+            amf = encoder_opts("h264_amf", q, use_crf=True)
+            assert "-qp_i" in amf
+            assert amf[amf.index("-qp_i") + 1] == crf
+            assert "-qp_p" in amf
+            assert amf[amf.index("-qp_p") + 1] == crf
+            assert "-qp_b" in amf
+            assert amf[amf.index("-qp_b") + 1] == crf
+            assert "-b:v" not in amf
+
+    def test_use_crf_maps_mf_to_quality_scale(self):
+        expected = {"high": "100", "medium": "75", "low": "50"}
+        for q, quality in expected.items():
+            opts = encoder_opts("h264_mf", q, use_crf=True)
+            assert "-rate_control" in opts
+            assert opts[opts.index("-rate_control") + 1] == "quality"
+            assert "-quality" in opts
+            assert opts[opts.index("-quality") + 1] == quality
             assert "-b:v" not in opts
-            assert "-maxrate" not in opts
+
+    def test_source_video_quality_uses_source_bitrate_in_bitrate_mode(self):
+        for enc in ("h264_mf", "h264_amf", "h264_nvenc", "libx264"):
+            opts = encoder_opts(enc, "source", source_bitrate=5_432_100)
+            assert "-b:v" in opts
+            assert opts[opts.index("-b:v") + 1] == "5432k"
             assert "-crf" not in opts
-            assert "-cq" not in opts
 
     def test_source_video_quality_keeps_operational_x264_opts(self):
         opts = encoder_opts(
@@ -715,11 +746,26 @@ class TestEncoderQualityPresets:
             x264_preset="veryfast",
             encoder_threads=2,
             x264_low_memory=True,
+            source_bitrate=5_432_100,
         )
-        assert opts[:2] == ["-preset", "veryfast"]
+        assert opts[opts.index("-b:v") + 1] == "5432k"
+        assert opts[opts.index("-preset") + 1] == "veryfast"
         assert "-threads" in opts
         assert "2" in opts
         assert "-x264-params" in opts
+
+    def test_source_video_quality_maps_to_high_in_crf_mode(self):
+        for enc in ("h264_mf", "h264_amf", "h264_nvenc", "libx264"):
+            opts = encoder_opts(enc, "source", use_crf=True)
+            assert "-b:v" not in opts
+            if enc == "libx264":
+                assert opts[opts.index("-crf") + 1] == "18"
+            elif enc == "h264_nvenc":
+                assert opts[opts.index("-cq") + 1] == "18"
+            elif enc == "h264_amf":
+                assert opts[opts.index("-qp_i") + 1] == "18"
+            else:
+                assert opts[opts.index("-quality") + 1] == "100"
 
     def test_unknown_encoder_raises(self):
         with pytest.raises(ConcatError, match="Unknown encoder"):
@@ -759,6 +805,7 @@ class TestEncoderQualityPresets:
                 None,
                 video_quality="low",
                 software_fallback="enabled",
+                use_crf=True,
             )
 
         # Two attempts: first h264_nvenc (fails), then libx264 (succeeds).

@@ -114,6 +114,83 @@ class TestLoadConfigBoolValidation:
         with pytest.raises(typer.Exit):
             load_config(cfg)
 
+    def test_quoted_use_crf_false_rejected(self, tmp_path: Path):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text('use_crf: "false"\n')
+        with pytest.raises(typer.Exit):
+            load_config(cfg)
+
+
+class TestCliUseCrf:
+    def test_use_crf_flag_reaches_cut_and_concat(self, tmp_path: Path):
+        from typer.testing import CliRunner
+
+        from stream2video.cli import app
+        from stream2video.download import DownloadResult
+
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"source")
+        out_dir = tmp_path / "out"
+        received: dict = {}
+
+        def fake_cut_and_concat(video_path, silence_segments, output_path, **kwargs):
+            received.update(kwargs)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"out")
+            return output_path
+
+        with (
+            patch("stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)),
+            patch("stream2video.cli.load_silence_cache", return_value=[]),
+            patch("stream2video.cli.cut_and_concat", side_effect=fake_cut_and_concat),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    str(src),
+                    "-o",
+                    str(out_dir),
+                    "--no-per-video-dir",
+                    "--use-crf",
+                ],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert received["use_crf"] is True
+
+    def test_use_crf_yaml_reaches_cut_and_concat(self, tmp_path: Path):
+        from typer.testing import CliRunner
+
+        from stream2video.cli import app
+        from stream2video.download import DownloadResult
+
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"source")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("use_crf: true\nper_video_dir: false\n", encoding="utf-8")
+        received: dict = {}
+
+        def fake_cut_and_concat(video_path, silence_segments, output_path, **kwargs):
+            received.update(kwargs)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"out")
+            return output_path
+
+        with (
+            patch("stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)),
+            patch("stream2video.cli.load_silence_cache", return_value=[]),
+            patch("stream2video.cli.cut_and_concat", side_effect=fake_cut_and_concat),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [str(src), "-o", str(tmp_path / "out"), "-c", str(cfg)],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert received["use_crf"] is True
+
 
 class TestCliLoggingSetup:
     """cli.py must apply the user's --log-level to the console handler, not

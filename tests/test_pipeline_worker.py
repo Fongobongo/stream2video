@@ -133,6 +133,7 @@ class TestBuildPipelineConfigFromSnapshot:
         assert cfg.memory_limit_mb == "auto"
         assert cfg.memory_reserve_mb == 2048
         assert cfg.x264_low_memory is False
+        assert cfg.use_crf is False
         # gapless_concat defaults to True (A/V drift fix) since 0.3.
         assert cfg.gapless_concat is True
         # Timeout / batch size / min-part defaults
@@ -165,6 +166,7 @@ class TestBuildPipelineConfigFromSnapshot:
                 "memory_limit_mb": 1024,
                 "batch_chunk_size": 10,
                 "output_format": "mp3",
+                "use_crf": True,
                 "gapless_concat": True,
             },
         )
@@ -174,6 +176,7 @@ class TestBuildPipelineConfigFromSnapshot:
         assert cfg.memory_limit_mb == 1024
         assert cfg.batch_chunk_size == 10
         assert cfg.output_format == "mp3"
+        assert cfg.use_crf is True
         assert cfg.gapless_concat is True
 
 

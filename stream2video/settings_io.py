@@ -48,6 +48,7 @@ SAVE_SETTINGS_KEYS: tuple[str, ...] = (
     "per_video_dir",
     "completion_sound",
     "x264_low_memory",
+    "use_crf",
     "gapless_concat",
     "low_process_priority",
     "preset",
@@ -75,6 +76,7 @@ USER_DEFAULTS_KEYS: tuple[str, ...] = (
     "per_video_dir",
     "completion_sound",
     "x264_low_memory",
+    "use_crf",
     "gapless_concat",
     "low_process_priority",
     "preset",
@@ -101,6 +103,7 @@ def build_save_settings_snapshot(widgets: dict[str, Any]) -> dict[str, Any]:
             "per_video_dir":     bool,  # bool(chk_per_video_dir.get())
             "completion_sound":  bool,  # bool(chk_completion_sound.get())
             "x264_low_memory":   bool,  # bool(chk_x264_low_memory.get())
+            "use_crf":           bool,  # bool(chk_use_crf.get())
             "gapless_concat":    bool,  # bool(chk_gapless_concat.get())
             "low_process_priority": bool,  # bool(chk_low_process_priority.get())
             "preset":            str,   # combo_preset.get()

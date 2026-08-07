@@ -105,6 +105,11 @@ class PipelineConfig:
     memory_limit_mb: str | int
     memory_reserve_mb: int
     x264_low_memory: bool
+    # Quality-fixed mode for video encoders. libx264 uses CRF, NVENC/AMF
+    # use CQ/QP-style modes, and MF uses quality mode. Default False keeps
+    # bitrate parity across encoders.
+    use_crf: bool
+
     # Gapless concat (AAC priming fix). When True, the segment path's
     # final join uses the ``concat`` filter (re-encode) instead of the
     # concat demuxer (stream copy) so per-segment AAC priming doesn't
@@ -843,6 +848,7 @@ class PipelineController:
             memory_limit_mb=self.cfg.memory_limit_mb,
             memory_reserve_mb=self.cfg.memory_reserve_mb,
             x264_low_memory=self.cfg.x264_low_memory,
+            use_crf=self.cfg.use_crf,
             gapless_concat=self.cfg.gapless_concat,
             low_process_priority=self.cfg.low_process_priority,
             rlimit_as_mb=self.cfg.rlimit_as_mb,

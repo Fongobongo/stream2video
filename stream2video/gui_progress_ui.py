@@ -227,7 +227,7 @@ class ProgressUiMixin:
             m = _re.match(r"(\d+)", raw)
             step_token = m.group(1) if m else None
             if step_token is not None and step_token != self._current_step:
-                self._current_step = step_token  # type: ignore[assignment]
+                self._current_step = step_token
                 self._phase_eta_smoother.reset()
                 self._set_phase_progress(0.0)
 

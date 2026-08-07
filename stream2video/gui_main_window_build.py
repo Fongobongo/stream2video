@@ -109,27 +109,27 @@ class MainWindowBuildMixin:
         # Auto-hide scrollbar when content fits (no overflow). CTkScrollableFrame
         # always shows the bar even when yview == (0.0, 1.0); hide it then.
         try:
-            _orig_set = ctrl_frame._scrollbar.set  # type: ignore[attr-defined]
+            _orig_set = ctrl_frame._scrollbar.set
 
             def _auto_hide_set(first: str | float, last: str | float) -> None:
-                _orig_set(first, last)  # type: ignore[misc]
+                _orig_set(first, last)
                 try:
                     is_idle = float(first) == 0.0 and float(last) == 1.0
                 except Exception:
                     is_idle = False
                 try:
-                    is_mapped = bool(ctrl_frame._scrollbar.winfo_manager())  # type: ignore[attr-defined]
+                    is_mapped = bool(ctrl_frame._scrollbar.winfo_manager())
                 except Exception:
                     is_mapped = True
                 if is_idle and is_mapped:
-                    ctrl_frame._scrollbar.grid_remove()  # type: ignore[attr-defined]
+                    ctrl_frame._scrollbar.grid_remove()
                 elif not is_idle and not is_mapped:
                     # grid_remove remembers options, so plain grid() restores
-                    ctrl_frame._scrollbar.grid()  # type: ignore[attr-defined]
+                    ctrl_frame._scrollbar.grid()
 
                 # Also suppress xs/croll when idle? keep as-is.
-            ctrl_frame._scrollbar.set = _auto_hide_set  # type: ignore[attr-defined]
-            ctrl_frame._parent_canvas.configure(yscrollcommand=_auto_hide_set)  # type: ignore[attr-defined]
+            ctrl_frame._scrollbar.set = _auto_hide_set
+            ctrl_frame._parent_canvas.configure(yscrollcommand=_auto_hide_set)
         except Exception:
             pass
 
@@ -412,6 +412,20 @@ class MainWindowBuildMixin:
             "constrained machines (4-8 GB).",
         )
 
+        self.chk_use_crf = ctk.CTkCheckBox(
+            advanced_toggle_frame,
+            text="Use CRF",
+        )
+        if self.config.get("use_crf", False):
+            self.chk_use_crf.select()
+        self.chk_use_crf.grid(row=1, column=1, sticky="w", padx=(0, 0), pady=(1, 2))
+        _Tooltip(
+            self.chk_use_crf,
+            "Use quality-fixed video encoding instead of fixed bitrate. "
+            "libx264 uses CRF; NVENC/AMF use CQ/QP modes; MF uses quality mode. "
+            "Files may be smaller or larger depending on content.",
+        )
+
         self.chk_gapless_concat = ctk.CTkCheckBox(
             advanced_toggle_frame,
             text="Gapless audio concat",
@@ -436,7 +450,9 @@ class MainWindowBuildMixin:
         )
         if self.config.get("low_process_priority", False):
             self.chk_low_process_priority.select()
-        self.chk_low_process_priority.grid(row=1, column=0, columnspan=2, sticky="w", pady=(1, 2))
+        self.chk_low_process_priority.grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(1, 2)
+        )
         _Tooltip(
             self.chk_low_process_priority,
             "Spawns ffmpeg at a lower scheduling priority so a "

@@ -299,13 +299,13 @@ def _run_gapless_segment_concat(
             # Intra-group out_time_us so 4/4 doesn't freeze 1-2 mins per group.
             # Use chunk duration for scaling (sum of segment durations).
             try:
-                _chunk_dur = sum(_c.get_video_duration(p) or 0 for p in chunk)  # type: ignore[arg-type]
+                _chunk_dur = sum(_c.get_video_duration(p) or 0 for p in chunk)
             except Exception:
                 _chunk_dur = _tree_group_dur
             if _chunk_dur <= 0:
                 _chunk_dur = _tree_group_dur
 
-            def _make_group_prog(base_completed: int, chunk_dur: float) -> object:
+            def _make_group_prog(base_completed: int, chunk_dur: float) -> Callable[[float], None]:
                 def _pg(s: float) -> None:
                     if progress_callback is None or total_groups_est == 0:
                         return
@@ -315,7 +315,7 @@ def _run_gapless_segment_concat(
 
                 return _pg
 
-            _group_prog = _make_group_prog(completed_groups, _chunk_dur)  # type: ignore[assignment]
+            _group_prog = _make_group_prog(completed_groups, _chunk_dur)
             _c._concat_filter_one_pass(
                 chunk,
                 inter,
@@ -324,7 +324,7 @@ def _run_gapless_segment_concat(
                 audio_codec="pcm_s16le",
                 audio_opts=[],
                 total_duration=_chunk_dur,
-                progress_callback=_group_prog,  # type: ignore[arg-type]
+                    progress_callback=_group_prog,
                 cancel_callback=cancel_callback,
                 timeout=timeout,
                 label=f"gapless tree L{level} G{g}",

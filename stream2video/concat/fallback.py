@@ -44,6 +44,8 @@ def _run_with_fallback(
     source_has_audio: bool = True,
     output_fps: str = "source",
     x264_low_memory: bool = False,
+    use_crf: bool = False,
+    source_bitrate: int | None = None,
     gapless_concat: bool = False,
     low_process_priority: bool = False,
     rlimit_as_mb: int = 0,
@@ -183,6 +185,8 @@ def _run_with_fallback(
         x264_preset=x264_preset,
         encoder_threads=encoder_threads,
         x264_low_memory=x264_low_memory,
+        use_crf=use_crf,
+        source_bitrate=source_bitrate,
     )
 
 
@@ -199,6 +203,8 @@ def _with_libx264_fallback(
     x264_preset: str = "medium",
     encoder_threads: str | int = "auto",
     x264_low_memory: bool = False,
+    use_crf: bool = False,
+    source_bitrate: int | None = None,
 ) -> None:
     """Run ``try_fn(primary_codec, primary_opts)``; on failure, retry once with libx264.
 
@@ -255,5 +261,7 @@ def _with_libx264_fallback(
                     x264_preset=x264_preset,
                     encoder_threads=encoder_threads,
                     x264_low_memory=x264_low_memory,
+                    use_crf=use_crf,
+                    source_bitrate=source_bitrate,
                 ),
             )

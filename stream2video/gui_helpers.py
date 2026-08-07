@@ -88,6 +88,7 @@ def build_cli_command(
     output_fps: str = "source",
     output_format: str = "video",
     x264_low_memory: bool = False,
+    use_crf: bool = False,
     gapless_concat: bool = False,
     low_process_priority: bool = False,
     preset: str = "balanced",
@@ -151,6 +152,8 @@ def build_cli_command(
         parts.extend(["--output-format", output_format])
     if x264_low_memory:
         parts.append("--x264-low-memory")
+    if use_crf:
+        parts.append("--use-crf")
     if gapless_concat:
         parts.append("--gapless-concat")
     if low_process_priority:

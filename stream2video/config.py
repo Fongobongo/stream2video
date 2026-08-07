@@ -54,6 +54,11 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     # (4-8 GB RAM) where a long libx264 encode would otherwise push the
     # process into swap.
     "x264_low_memory": False,
+    # Use quality-fixed video encoding instead of bitrate-fixed targets.
+    # libx264 uses CRF, NVENC/AMF use CQ/QP-style modes, and MF uses its
+    # quality rate-control mode. Default False preserves bitrate parity
+    # across encoders (10M/7M/3.5M or source bitrate).
+    "use_crf": False,
     # Gapless concat (AAC priming fix). When True, the segment path's
     # final join uses the ``concat`` filter (re-encode) instead of the
     # concat demuxer (stream copy). The concat demuxer preserves per-
@@ -366,6 +371,7 @@ USER_DEFAULT_KEYS: list[str] = [
     "memory_limit_mb",
     "memory_reserve_mb",
     "x264_low_memory",
+    "use_crf",
     "gapless_concat",
     "low_process_priority",
     "rlimit_as_mb",

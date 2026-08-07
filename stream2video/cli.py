@@ -10,6 +10,7 @@ import typer
 from rich.progress import (
     BarColumn,
     Progress,
+    TaskID,
     TaskProgressColumn,
     TextColumn,
     TimeElapsedColumn,
@@ -170,6 +171,14 @@ def main(
         help="Reduce x264's frame-buffer footprint via rc-lookahead=10, ref=1, "
         "bframes=0. Produces slightly larger files but uses significantly less "
         "RAM during encode. Useful on memory-constrained machines (4-8 GB).",
+    ),
+    use_crf: bool = typer.Option(
+        False,
+        "--use-crf/--no-use-crf",
+        help="Use quality-fixed encoding instead of bitrate-fixed "
+        "(-b:v source/10000k/7000k/3500k). libx264 uses CRF, NVENC/AMF use "
+        "CQ/QP-style modes, and MF uses quality mode. File size varies by "
+        "content and encoder. Default off (bitrate parity between encoders).",
     ),
     gapless_concat: bool = typer.Option(
         False,
@@ -581,6 +590,16 @@ def main(
 
         resolved_x264_low_memory: bool = _resolved_x264_low_memory(x264_low_memory)
 
+        def _resolved_use_crf(flag_value: bool) -> bool:
+            if ParameterSource is None:
+                return bool(config.get("use_crf", False))
+            src = ctx.get_parameter_source("use_crf")
+            if src == ParameterSource.COMMANDLINE:
+                return flag_value
+            return bool(config.get("use_crf", False))
+
+        resolved_use_crf: bool = _resolved_use_crf(use_crf)
+
         def _resolved_gapless_concat(flag_value: bool) -> bool:
             if ParameterSource is None:
                 return bool(config.get("gapless_concat", False))
@@ -878,7 +897,7 @@ def main(
             # 0..0.9 cutting / 0.9..1.0 concatenating convention in
             # pipeline_controller + concat/segment.py.
             task_cut = progress.add_task("[cyan]Cutting segments...", total=100)
-            task_concat: int | None = None
+            task_concat: TaskID | None = None
 
             def _on_phase_cli(name: str, f: float) -> None:
                 nonlocal task_concat
@@ -929,6 +948,7 @@ def main(
                     memory_limit_mb=resolved_memory_limit_mb,
                     memory_reserve_mb=resolved_memory_reserve_mb,
                     x264_low_memory=resolved_x264_low_memory,
+                    use_crf=resolved_use_crf,
                     gapless_concat=resolved_gapless_concat,
                     low_process_priority=resolved_low_process_priority,
                     rlimit_as_mb=resolved_rlimit_as_mb,

@@ -78,6 +78,7 @@ class TestBuildCliCommand:
         assert "--x264-preset" not in cmd
         assert "--encoder-threads" not in cmd
         assert "--output-fps" not in cmd
+        assert "--use-crf" not in cmd
 
     def test_non_default_advanced_flags_appended(self):
         cmd = build_cli_command(
@@ -148,6 +149,30 @@ class TestBuildCliCommand:
             x264_low_memory=False,
         )
         assert "--x264-low-memory" not in cmd
+
+    def test_use_crf_appended_when_true(self):
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+            use_crf=True,
+        )
+        assert "--use-crf" in cmd
+
+    def test_use_crf_omitted_when_false(self):
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+            use_crf=False,
+        )
+        assert "--use-crf" not in cmd
 
     def test_memory_limit_flags_omitted_at_defaults(self):
         cmd = build_cli_command(

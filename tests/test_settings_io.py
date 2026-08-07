@@ -51,6 +51,7 @@ class TestSaveSettingsKeys:
             "per_video_dir",
             "completion_sound",
             "x264_low_memory",
+            "use_crf",
             "theme",
         ):
             assert k in SAVE_SETTINGS_KEYS
@@ -90,6 +91,7 @@ class TestBuildSaveSettingsSnapshot:
             "per_video_dir",
             "completion_sound",
             "x264_low_memory",
+            "use_crf",
             "gapless_concat",
             "low_process_priority",
             "preset",
@@ -119,6 +121,7 @@ class TestBuildSaveSettingsSnapshot:
             "per_video_dir": True,
             "completion_sound": True,
             "x264_low_memory": False,
+            "use_crf": True,
             "gapless_concat": True,
             "low_process_priority": True,
             "preset": "low_memory",
@@ -131,6 +134,7 @@ class TestBuildSaveSettingsSnapshot:
         assert snapshot["per_video_dir"] is True
         assert snapshot["completion_sound"] is True
         assert snapshot["x264_low_memory"] is False
+        assert snapshot["use_crf"] is True
         assert snapshot["preset"] == "low_memory"
         assert snapshot["theme"] == "dark"
 
@@ -165,6 +169,7 @@ class TestBuildUserDefaultsSnapshot:
             "per_video_dir": False,
             "completion_sound": True,
             "x264_low_memory": True,
+            "use_crf": True,
             "gapless_concat": False,
             "low_process_priority": True,
             "preset": "maximum_performance",
@@ -175,6 +180,7 @@ class TestBuildUserDefaultsSnapshot:
         assert snapshot["margin"] == 0.5
         assert snapshot["completion_sound"] is True
         assert snapshot["x264_low_memory"] is True
+        assert snapshot["use_crf"] is True
         assert snapshot["preset"] == "maximum_performance"
 
 

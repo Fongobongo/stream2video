@@ -47,6 +47,10 @@ def cut_and_concat(
     memory_limit_mb: str | int = "auto",
     memory_reserve_mb: int = 2048,
     x264_low_memory: bool = False,
+    # CRF mode: quality-fixed encoding instead of bitrate-fixed (-b:v).
+    # libx264 uses CRF, NVENC/AMF use CQ/QP-style modes, and MF uses
+    # quality mode. Default False keeps bitrate parity across encoders.
+    use_crf: bool = False,
     gapless_concat: bool = False,
     low_process_priority: bool = False,
     rlimit_as_mb: int = 0,
@@ -110,11 +114,11 @@ def cut_and_concat(
         )
         return output_path
 
-    # Honest source bitrate probe for HW encoders when quality==source.
+    # Honest source bitrate probe when quality==source in bitrate mode.
     # ffprobe stream bit_rate may be N/A; fallback to high preset with a warning.
     source_bitrate: int | None = None
     effective_opts_quality = video_quality
-    if video_quality == "source" and encoder != "libx264":
+    if video_quality == "source" and not use_crf:
         from stream2video.utils import get_video_bitrate as _gvb
 
         source_bitrate = _gvb(video_path)
@@ -138,11 +142,12 @@ def cut_and_concat(
         encoder_threads=encoder_threads,
         x264_low_memory=x264_low_memory,
         source_bitrate=source_bitrate,
+        use_crf=use_crf,
     )
     # If probe failed we already fell back via effective_opts_quality; for
     # the HW source case where probe succeeded, get_video_encoder used
     # source_bitrate to emit -b:v. Log final choice.
-    if video_quality == "source" and encoder != "libx264" and source_bitrate is None:
+    if video_quality == "source" and not use_crf and source_bitrate is None:
         logger.info(f"Encoder: {vcodec} {vcodec_opts} (quality=source→{effective_opts_quality} fallback)")
     else:
         logger.info(f"Encoder: {vcodec} {vcodec_opts} (quality={video_quality})")
@@ -193,6 +198,8 @@ def cut_and_concat(
         source_has_audio=source_has_audio,
         output_fps=output_fps,
         x264_low_memory=x264_low_memory,
+        use_crf=use_crf,
+        source_bitrate=source_bitrate,
         gapless_concat=gapless_concat,
         low_process_priority=low_process_priority,
         rlimit_as_mb=rlimit_as_mb,

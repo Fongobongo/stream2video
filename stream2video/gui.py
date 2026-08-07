@@ -247,6 +247,7 @@ class Stream2VideoGUI(
         self.config["gapless_concat"] = bool(self.chk_gapless_concat.get())
         self.config["low_process_priority"] = bool(self.chk_low_process_priority.get())
         self.config["x264_low_memory"] = bool(self.chk_x264_low_memory.get())
+        self.config["use_crf"] = bool(self.chk_use_crf.get())
         self.config["completion_sound"] = bool(self.chk_completion_sound.get())
         force = bool(self.chk_force.get())
         per_video_dir = bool(self.chk_per_video_dir.get())
@@ -312,6 +313,7 @@ class Stream2VideoGUI(
             f"method={method}, encoder={encoder}, "
             f"video_quality={video_quality}, download_quality={download_quality}, "
             f"output_format={self.config['output_format']}, "
+            f"use_crf={self.config['use_crf']}, "
             f"force={force}, "
             f"threshold={self.config['threshold']}, "
             f"min_silence={self.config['min_silence']}, "

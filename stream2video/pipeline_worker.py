@@ -180,6 +180,7 @@ def build_pipeline_config_from_snapshot(
         memory_limit_mb=config.get("memory_limit_mb", CONFIG_DEFAULTS["memory_limit_mb"]),
         memory_reserve_mb=config.get("memory_reserve_mb", CONFIG_DEFAULTS["memory_reserve_mb"]),
         x264_low_memory=config.get("x264_low_memory", CONFIG_DEFAULTS["x264_low_memory"]),
+        use_crf=config.get("use_crf", CONFIG_DEFAULTS["use_crf"]),
         gapless_concat=config.get("gapless_concat", CONFIG_DEFAULTS["gapless_concat"]),
         low_process_priority=config.get(
             "low_process_priority", CONFIG_DEFAULTS["low_process_priority"]

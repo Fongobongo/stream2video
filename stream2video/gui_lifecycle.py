@@ -63,6 +63,7 @@ class LifecycleMixin:
             "per_video_dir": bool(self.chk_per_video_dir.get()),
             "completion_sound": bool(self.chk_completion_sound.get()),
             "x264_low_memory": bool(self.chk_x264_low_memory.get()),
+            "use_crf": bool(self.chk_use_crf.get()),
             "gapless_concat": bool(self.chk_gapless_concat.get()),
             "low_process_priority": bool(self.chk_low_process_priority.get()),
             "preset": self.combo_preset.get(),
@@ -101,6 +102,7 @@ class LifecycleMixin:
         self._set_checkbox(self.chk_per_video_dir, self.config["per_video_dir"])
         self._set_checkbox(self.chk_completion_sound, self.config.get("completion_sound", False))
         self._set_checkbox(self.chk_x264_low_memory, self.config.get("x264_low_memory", False))
+        self._set_checkbox(self.chk_use_crf, self.config.get("use_crf", False))
         self._set_checkbox(self.chk_gapless_concat, self.config.get("gapless_concat", False))
         self._set_checkbox(
             self.chk_low_process_priority, self.config.get("low_process_priority", False)
@@ -162,6 +164,7 @@ class LifecycleMixin:
             "per_video_dir": bool(self.chk_per_video_dir.get()),
             "completion_sound": bool(self.chk_completion_sound.get()),
             "x264_low_memory": bool(self.chk_x264_low_memory.get()),
+            "use_crf": bool(self.chk_use_crf.get()),
             "gapless_concat": bool(self.chk_gapless_concat.get()),
             "low_process_priority": bool(self.chk_low_process_priority.get()),
             "preset": self.combo_preset.get(),
@@ -187,6 +190,7 @@ class LifecycleMixin:
         force = bool(self.chk_force.get())
         delete_after = bool(self.chk_delete.get())
         x264_low_memory = bool(self.chk_x264_low_memory.get())
+        use_crf = bool(self.chk_use_crf.get())
         gapless_concat = bool(self.chk_gapless_concat.get())
         low_process_priority = bool(self.chk_low_process_priority.get())
         preset = self.combo_preset.get()
@@ -215,6 +219,7 @@ class LifecycleMixin:
             force=force,
             delete_after=delete_after,
             x264_low_memory=x264_low_memory,
+            use_crf=use_crf,
             gapless_concat=gapless_concat,
             low_process_priority=low_process_priority,
             preset=preset,

@@ -97,7 +97,16 @@ def load_config(config_file: Path | None, console: Any) -> dict:
     # integers, not bools. Reject any non-bool value the user explicitly
     # wrote in the YAML so downstream ``bool(value)`` matches intent. Keys
     # the user didn't write keep their bool default from CONFIG_DEFAULTS.
-    bool_keys = ("force", "delete_after", "per_video_dir")
+    bool_keys = (
+        "force",
+        "delete_after",
+        "per_video_dir",
+        "completion_sound",
+        "x264_low_memory",
+        "use_crf",
+        "gapless_concat",
+        "low_process_priority",
+    )
     for key in bool_keys:
         if key in file_config:
             bool_val = file_config[key]
