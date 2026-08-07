@@ -556,12 +556,14 @@ class MainWindowBuildMixin:
         prog_frame.grid_columnconfigure(2, weight=1)  # filler
         prog_frame.grid_columnconfigure(3, weight=0)  # spare
 
-        # Step / Complete status — two lines so Cutting 50% (0:10/0:10) fits
-        # without widening the window. lbl_status is line 1, lbl_status2 line 2.
-        self.lbl_status = ctk.CTkLabel(prog_frame, text="", anchor="w", width=200)
+        # Step / Complete status — one label that grows to two lines when
+        # the wrapping helper emits a second line. No dedicated second row,
+        # so no blank line sits between the status text and the bar when a
+        # short message ("Starting...") is shown.
+        self.lbl_status = ctk.CTkLabel(
+            prog_frame, text="", anchor="w", width=200, justify="left"
+        )
         self.lbl_status.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 1))
-        self.lbl_status2 = ctk.CTkLabel(prog_frame, text="", anchor="w", width=200)
-        self.lbl_status2.grid(row=1, column=0, columnspan=4, sticky="w", pady=(0, 2))
 
         # Overall pipeline progress bar. A wrapper frame (same fixed
         # size as the bar) hosts the bar + thin segment tick marks so
@@ -576,7 +578,7 @@ class MainWindowBuildMixin:
             width=160,
             height=10,
         )
-        self.progress_wrap.grid(row=2, column=0, sticky="w", padx=(0, 6))
+        self.progress_wrap.grid(row=1, column=0, sticky="w", padx=(0, 6))
         self.progress = ctk.CTkProgressBar(
             self.progress_wrap,
             mode="determinate",
@@ -614,7 +616,7 @@ class MainWindowBuildMixin:
             width=92,
             text_color=("gray40", "gray60"),
         )
-        self.lbl_progress_pct.grid(row=2, column=1, sticky="w", padx=(0, 6))
+        self.lbl_progress_pct.grid(row=1, column=1, sticky="w", padx=(0, 6))
         # Live Elapsed/Remaining for the current phase.
         self.lbl_overall = ctk.CTkLabel(
             prog_frame,
@@ -622,7 +624,7 @@ class MainWindowBuildMixin:
             anchor="w",
             text_color=("gray40", "gray60"),
         )
-        self.lbl_overall.grid(row=3, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        self.lbl_overall.grid(row=2, column=0, columnspan=3, sticky="w", pady=(2, 0))
         # Total pipeline wall-clock, updated in real time — on its own line
         # below Elapsed/Remaining so both don't fight for horizontal space.
         self.lbl_total = ctk.CTkLabel(
@@ -631,4 +633,4 @@ class MainWindowBuildMixin:
             anchor="w",
             text_color=("gray40", "gray60"),
         )
-        self.lbl_total.grid(row=4, column=0, columnspan=4, sticky="w", pady=(0, 0))
+        self.lbl_total.grid(row=3, column=0, columnspan=4, sticky="w", pady=(0, 0))

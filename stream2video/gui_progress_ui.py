@@ -306,17 +306,18 @@ class ProgressUiMixin:
         )
 
     def _set_static_status(self, text: str) -> None:
-        """Render ``text`` on the two-line status label (wrapped)."""
-        lines = _wrap_status_lines(text)
-        line1 = lines[0] if len(lines) > 0 else ""
-        line2 = lines[1] if len(lines) > 1 else ""
+        """Render ``text`` on the multiline status label, wrapped.
+
+        The two wrapped lines (from ``_wrap_status_lines``) are joined
+        with a newline into a single label so the row height comes only
+        from the actual content — a one-line status keeps the label one
+        line tall instead of reserving a fixed second row.
+        """
+        lines = [ln for ln in _wrap_status_lines(text) if ln]
+        display = "\n".join(lines)
         self._tk_after(
             0,
-            lambda t1=line1, t2=line2: (
-                self.lbl_status.configure(text=t1),
-                getattr(self, "lbl_status2", None)
-                and self.lbl_status2.configure(text=t2),
-            ),
+            lambda t=display: self.lbl_status.configure(text=t),
         )
 
     def _ui_status(self, text: str, force: bool = False) -> None:
