@@ -450,9 +450,7 @@ class MainWindowBuildMixin:
         )
         if self.config.get("low_process_priority", False):
             self.chk_low_process_priority.select()
-        self.chk_low_process_priority.grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=(1, 2)
-        )
+        self.chk_low_process_priority.grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(1, 2))
         _Tooltip(
             self.chk_low_process_priority,
             "Spawns ffmpeg at a lower scheduling priority so a "
