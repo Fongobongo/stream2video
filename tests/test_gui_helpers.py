@@ -23,15 +23,12 @@ from stream2video.gui_helpers import (
     build_overall_line,
     build_pct_pair,
     build_phase_line,
-    build_phase_status_line,
     build_progress_meta_line,
     build_silence_info_line,
     build_total_line,
     build_waveform_view_label,
     phase_weight_percent,
     should_update_status,
-    strip_phase_status_verb,
-    strip_status_step_prefix,
     truncate_status,
 )
 
@@ -592,72 +589,3 @@ class TestBuildPctPair:
 
     def test_rounds(self):
         assert build_pct_pair(99.6, 33.4) == "100% · 33%"
-
-
-class TestStripPhaseStatusVerb:
-    def test_silence_progress_detail(self):
-        assert strip_phase_status_verb("Silence... 45% (12s/20s)") == "45% (12s/20s)"
-
-    def test_silence_cached_detail(self):
-        assert strip_phase_status_verb("Silence (cached)") == "(cached)"
-
-    def test_cutting_progress_detail(self):
-        assert strip_phase_status_verb("Cutting... 55% (12s/20s)") == "55% (12s/20s)"
-
-    def test_concatenating_progress_detail(self):
-        assert strip_phase_status_verb("Concatenating... 12% (12s/20s)") == "12% (12s/20s)"
-
-    def test_downloading_progress_detail(self):
-        assert (
-            strip_phase_status_verb("Downloading 42% (100 MB / 238 MB) at 5.2 MiB/s")
-            == "42% (100 MB / 238 MB) at 5.2 MiB/s"
-        )
-
-    def test_detecting_silence_becomes_empty(self):
-        assert strip_phase_status_verb("Detecting silence...") == ""
-
-    def test_download_complete_detail(self):
-        assert strip_phase_status_verb("Download complete") == "complete"
-
-    def test_local_file_ready_detail(self):
-        assert strip_phase_status_verb("Local file ready") == "ready"
-
-    def test_non_phase_text_unchanged(self):
-        assert strip_phase_status_verb("Complete! (23m 5s)") == "Complete! (23m 5s)"
-
-
-class TestBuildPhaseStatusLine:
-    def test_phase_with_detail(self):
-        assert (
-            build_phase_status_line("2", 35, "45% (12s/20s)")
-            == "Step 2/4 · Silence (35%) · 45% (12s/20s)"
-        )
-
-    def test_phase_without_detail(self):
-        assert build_phase_status_line("3", 54, "") == "Step 3/4 · Cutting (54%)"
-
-    def test_no_phase_returns_detail(self):
-        assert build_phase_status_line(None, None, "Starting...") == "Starting..."
-
-    def test_download_phase_with_detail(self):
-        assert (
-            build_phase_status_line("1", 5, "42% (100 MB / 238 MB) at 5.2 MiB/s")
-            == "Step 1/4 · Download (5%) · 42% (100 MB / 238 MB) at 5.2 MiB/s"
-        )
-
-
-class TestStripStatusStepPrefix:
-    def test_strips_step_marker(self):
-        assert strip_status_step_prefix("Step 2/4: Detecting silence 45%") == "Detecting silence 45%"
-
-    def test_leaves_non_step_text_unchanged(self):
-        assert strip_status_step_prefix("Complete! (23m 5s)") == "Complete! (23m 5s)"
-
-    def test_two_digit_step(self):
-        assert strip_status_step_prefix("Step 10/12: Some long phase") == "Some long phase"
-
-    def test_download_callback_text(self):
-        # The download-progress callback prefixes its status with the
-        # step marker too; the display must drop it.
-        s = "Step 1/4: Downloading 42% (100 MB / 238 MB) at 5.2 MiB/s ETA 1m"
-        assert strip_status_step_prefix(s).startswith("Downloading 42%")

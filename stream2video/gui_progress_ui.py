@@ -24,13 +24,11 @@ from stream2video.gui_helpers import (
     _wrap_status_lines,
     build_eta_tail,
     build_pct_pair,
-    build_phase_status_line,
+    build_phase_line,
     build_progress_meta_line,
     build_total_line,
     phase_weight_percent,
     should_update_status,
-    strip_phase_status_verb,
-    strip_status_step_prefix,
 )
 
 # Refresh period of the throttled Overall line + total-ETA (seconds).
@@ -90,12 +88,6 @@ class ProgressUiMixin:
         # smoother + thin per-phase bar reset at each phase boundary
         # (``_ui_status`` parses the prefix).
         self._current_step: str | None = None
-        # The ``strip_phase_status_verb``-stripped detail of the latest
-        # "Step X/4" status ("45% (12s/20s)"). Stored unconditionally so
-        # ``_update_phase_indicator`` (plan/weight arrival) can re-render
-        # the merged line with the freshest detail even when the
-        # throttled status redraw was dropped.
-        self._last_phase_detail: str = ""
         # Per-run phase boundaries (``_ui_progress_plan``) + the current
         # in-phase fraction (``_set_phase_progress``) that together drive
         # the bar's segment tick marks, the "Phase N/4" indicator, and
@@ -120,7 +112,6 @@ class ProgressUiMixin:
             self.btn_cancel.configure(state="normal")
             self._phase_eta_smoother.reset()
             self._current_step = None
-            self._last_phase_detail = ""
             self._overall_progress = 0.0
             self._phase_bounds = _DEFAULT_PHASE_BOUNDS
             self._phase_progress = 0.0
@@ -210,17 +201,17 @@ class ProgressUiMixin:
         self._tk_after(0, _place)
 
     def _update_phase_indicator(self) -> None:
-        """Refresh the merged status line from the current step + plan
-        boundaries. The step info ("Step 2/4 · Silence (35%)") and the
-        in-step detail ("45% (12s/20s)") share one line — the phase
-        indicator was merged into ``lbl_status`` so a separate
-        ``lbl_phase`` label is gone. No-op when no step is running yet.
+        """Refresh the stage indicator status line from the current step
+        + plan boundaries (e.g. "Step 2/4 · Silence (35%)"). The live
+        numbers (percent, timing) are rendered by the bar's % label and
+        the meta line, not here — they'd otherwise duplicate. No-op when
+        no step is running yet.
         """
         if not hasattr(self, "_current_step") or self._current_step is None:
             return
         step = self._current_step
         weight = phase_weight_percent(self._phase_bounds, step)
-        text = build_phase_status_line(step, weight, self._last_phase_detail)
+        text = build_phase_line(step, weight)
         self._set_static_status(text)
 
     def _ui_set_failure_style(self) -> None:
@@ -341,23 +332,19 @@ class ProgressUiMixin:
                 self._current_step = step_token
                 self._phase_eta_smoother.reset()
                 self._set_phase_progress(0.0)
-            # Stash the verb-stripped detail ("45% (12s/20s)") so the
-            # merged line can re-render even when this redraw is throttled.
-            self._last_phase_detail = strip_phase_status_verb(
-                strip_status_step_prefix(text)
-            )
 
         now = time.monotonic()
         if not should_update_status(self._last_status_update, now, force=force):
             return
         self._last_status_update = now
         if self._current_step is not None and text.startswith("Step "):
-            # The phase indicator lives ON the status line now: stage,
-            # its bar share, and the in-phase detail in one string.
-            text = build_phase_status_line(
+            # Status line carries ONLY the stage indicator — the live
+            # percent sits next to the bar ("63% · 42%") and the timing
+            # lives in the meta line, so repeating them here would
+            # duplicate the readout.
+            text = build_phase_line(
                 self._current_step,
                 phase_weight_percent(self._phase_bounds, self._current_step),
-                self._last_phase_detail,
             )
         self._set_static_status(text)
 
