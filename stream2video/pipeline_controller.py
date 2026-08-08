@@ -389,7 +389,7 @@ class PipelineController:
             )
 
     def _cleanup_download_path(self) -> None:
-        """Delete the downloaded source file if this run actually downloaded it.
+        """Remove the downloaded source file (when we downloaded one).
 
         ``_download_path`` is only set when the download phase wrote a
         fresh file (``download_result.is_downloaded``). For local files
@@ -402,6 +402,29 @@ class PipelineController:
             except OSError:
                 pass
         self._download_path = None
+
+    def _cleanup_partial_output(self) -> None:
+        """Remove a partially-written output file on failure/cancel.
+
+        ``_output_path`` is stamped by ``_run_concat_phase`` before the
+        cut+concat subprocess runs, so an exception (``PipelineConcatError``,
+        ``PipelineCancelled``, or an unexpected crash) leaves a partially
+        muxed ``*_compressed.*`` file on disk that looks like a completed
+        output (a bare ``ffmpeg -i`` inside the concat step writes the
+        container header at t=0 — the file plays, but it's truncated
+        mid-stream). Deleting it here catches the same file the GUI's
+        on-close cleanup never reaches, but located in the controller
+        (the only place that actually knows the resolved path).
+        """
+        if self._output_path is not None and self._output_path.exists():
+            try:
+                self._output_path.unlink()
+                self.cb.on_log(f"Deleted incomplete output: {self._output_path}")
+            except OSError as e:
+                self.cb.on_log(f"[WARN] Could not delete incomplete output: {e}")
+        # Always clear the slot so a subsequent run (or the GUI's on-close
+        # cleanup) can't chase a stale path.
+        self._output_path = None
 
     def run(self) -> PipelineResult:
         """Run the three-phase pipeline. Raises ``PipelineError`` on failure.
@@ -468,22 +491,28 @@ class PipelineController:
             # Clean up the incomplete download so a failed run doesn't
             # leave a stale file on disk.
             self._cleanup_download_path()
+            self._cleanup_partial_output()
             raise
         except (CancelledError, SilenceCancelledError, DownloadCancelledError) as e:
             self._cleanup_download_path()
+            self._cleanup_partial_output()
             raise PipelineCancelled(str(e)) from e
         except (DownloadError, URLValidationError) as e:
             self._cleanup_download_path()
+            self._cleanup_partial_output()
             raise PipelineDownloadError(str(e)) from e
         except SilenceDetectionError as e:
             self._cleanup_download_path()
+            self._cleanup_partial_output()
             raise PipelineSilenceError(str(e)) from e
         except ConcatError as e:
             self._cleanup_download_path()
+            self._cleanup_partial_output()
             raise PipelineConcatError(str(e)) from e
         except Exception as e:
             logger.exception("Pipeline unexpected error")
             self._cleanup_download_path()
+            self._cleanup_partial_output()
             raise PipelineUnexpectedError(str(e)) from e
 
     # ── Phase 1: Download / resolve ──────────────────────────────

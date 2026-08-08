@@ -65,6 +65,10 @@ def detect_silence_stream(
     """
     if on_segment is None:
         # Fast path: reuse the existing batch parser (production code).
+        # IMPORTANT: forward ``timeout`` — a hung ffmpeg in the preview
+        # otherwise sits on ``_run_silencedetect``'s default
+        # ``_SILENCE_TIMEOUT`` (10h) because the progressive path's
+        # deadline loop is the only place the parameter is honoured.
         return _run_silencedetect(
             input_path,
             threshold=threshold,
@@ -74,6 +78,7 @@ def detect_silence_stream(
             cancel_callback=None,
             label="video (preview)",
             duration_limit=None,
+            timeout=timeout,
         )
 
     # Progressive path: parse stderr line-by-line and fire the callback.
@@ -520,23 +525,35 @@ def _extract_audio_wav(
     """
     wav_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # P0: only add ``-progress pipe:1`` when a caller actually consumes
+    # stdout (progress_callback + duration known). When we don't read
+    # stdout the pipe buffer fills (~64KB on Windows) and ffmpeg blocks
+    # mid-write — the else-branch below would deadlock until the
+    # ``timeout`` fires (~7min in a real 4:1 source observed).
+    _progressive_wav = (
+        duration is not None and duration > 0 and progress_callback is not None
+    )
     cmd = [
         _c.ffmpeg_path(),
         "-y",
         "-copyts",
-        "-progress",
-        "pipe:1",
-        "-i",
-        str(video_path),
-        "-vn",
-        "-ar",
-        "16000",
-        "-ac",
-        "1",
-        "-c:a",
-        "pcm_s16le",
-        str(wav_path),
     ]
+    if _progressive_wav:
+        cmd.extend(["-progress", "pipe:1"])
+    cmd.extend(
+        [
+            "-i",
+            str(video_path),
+            "-vn",
+            "-ar",
+            "16000",
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            str(wav_path),
+        ]
+    )
 
     try:
         logger.info(
@@ -545,7 +562,12 @@ def _extract_audio_wav(
         )
         process = _c.subprocess.Popen(
             cmd,
-            stdout=_c.subprocess.PIPE,
+            # stdout=DEVNULL when nobody consumes -progress; otherwise the
+            # 64KB OS pipe buffers fill and ffmpeg blocks on write → hang
+            # until timeout (see _progressive_wav above).
+            stdout=(
+                _c.subprocess.PIPE if _progressive_wav else _c.subprocess.DEVNULL
+            ),
             stderr=_c.subprocess.PIPE,
             bufsize=-1,
             **no_window_kwargs(),
@@ -555,14 +577,15 @@ def _extract_audio_wav(
 
     stdout_pipe = process.stdout
     stderr_pipe = process.stderr
-    assert stdout_pipe is not None and stderr_pipe is not None
+    assert stderr_pipe is not None
     stderr_lines: list[str] = []
     wait_for_drain = drain_stderr_lines(stderr_pipe, stderr_lines)
     drain_done = False
 
     try:
         with registered_process(process), cancel_monitor(process, cancel_callback) as cancelled:
-            if duration is not None and duration > 0 and progress_callback is not None:
+            if _progressive_wav:
+                assert stdout_pipe is not None
                 from stream2video.utils import read_lines_queue as _rlq
 
                 q, _thr = _rlq(stdout_pipe)
@@ -635,7 +658,8 @@ def _extract_audio_wav(
         if not drain_done:
             wait_for_drain()
         try:
-            stdout_pipe.close()
+            if stdout_pipe is not None:
+                stdout_pipe.close()
         except Exception:
             pass
         stderr_pipe.close()

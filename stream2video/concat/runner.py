@@ -64,6 +64,10 @@ def _run_ffmpeg(
     (no progress for _STALL_KILL seconds -> kill) only runs in the
     track_progress=True branch: per-segment encodes get their progress
     implicitly from the segment index, so per-byte stalls aren't meaningful.
+    The wall-clock ``timeout`` is enforced as a deadline from spawn, both in
+    the progress-read loop (track_progress=True) and via
+    ``_wait_with_cancel`` — so a healthy-but-slow encode also dies at the
+    configured ceiling, not only after stdout EOF.
 
     ``memory_monitor`` (optional, P1.17): when provided, the monitor's
     daemon thread is started AFTER the subprocess is spawned and stopped
@@ -142,6 +146,7 @@ def _run_ffmpeg(
         wait_for_drain = drain_stderr_lines(stderr_pipe, stderr_lines)
         drain_done = False
         last_progress_time = time.monotonic()
+        process_start = time.monotonic()
 
         # P1.5: stall watchdog. The ``track_progress=True`` branch checks
         # ``elapsed_since_progress`` inside its readline loop, but readline
@@ -194,6 +199,19 @@ def _run_ffmpeg(
                     # check run even when no new lines arrive.
                     line_queue, _reader_thread = read_lines_queue(stdout_pipe)
                     while True:
+                        # P0: enforce the wall-clock timeout from spawn, not
+                        # only after stdout EOF. Previously an encode that
+                        # kept emitting progress lines past ``timeout``
+                        # would never hit the deadline — only the stall
+                        # watchdog guarded it, and that one measures
+                        # *progress gaps*, not the total elapsed.
+                        elapsed_total = time.monotonic() - process_start
+                        if timeout > 0 and elapsed_total > timeout:
+                            process.kill()
+                            raise FFmpegError(
+                                f"{label} timeout after {int(elapsed_total)}s "
+                                f"(limit {timeout}s — killed mid-encode)"
+                            ) from None
                         try:
                             raw_line = line_queue.get(timeout=CANCEL_POLL_INTERVAL)
                         except queue.Empty:

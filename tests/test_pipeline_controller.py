@@ -535,6 +535,61 @@ class TestPipelineControllerRun:
         ):
             controller.run()
 
+    def test_concat_failure_deletes_partial_output(self, tmp_path: Path):
+        # P0: a failed cut_and_concat previously left a partially muxed
+        # *_compressed.mp4 on disk (the runner kills ffmpeg mid-encode,
+        # but nothing unlinked the in-progress output). The user then saw
+        # a "finished-looking" file that is actually truncated.
+        # The controller must delete the partial output on error.
+        cfg = _valid_config(output_dir=tmp_path, input_raw=str(tmp_path / "src.mp4"))
+        cb, _calls = self._make_callbacks()
+        cancel = __import__("threading").Event()
+        controller = PipelineController(cfg=cfg, cb=cb, cancel_event=cancel)
+
+        fake_video = tmp_path / "src.mp4"
+        fake_video.write_text("dummy")
+        partial_output = tmp_path / "src_compressed.mp4"
+
+        def fake_download(url, out_dir, **kwargs):
+            from stream2video.download import DownloadResult
+
+            return DownloadResult(path=fake_video, is_downloaded=False)
+
+        from stream2video.concat import ConcatError
+
+        def fake_cut_and_concat(*args, **kwargs):
+            # The concat phase stamps _output_path before running ffmpeg
+            # (it must, so the GUI's Cancel button knows what to delete).
+            # Simulate ffmpeg writing a partial file then dying.
+            partial_output.write_text("partial")
+            raise ConcatError("encode fail")
+
+        with (
+            patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+            patch("stream2video.pipeline_controller.detect_silence", return_value=[]),
+            patch("stream2video.pipeline_controller.save_silence_cache"),
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=None),
+            patch(
+                "stream2video.pipeline_controller.cut_and_concat",
+                side_effect=fake_cut_and_concat,
+            ),
+            patch(
+                "stream2video.pipeline_controller.generate_keep_segments", return_value=[(0.0, 1.0)]
+            ),
+            patch("stream2video.pipeline_controller.get_video_duration", return_value=10.0),
+            patch(
+                "stream2video.pipeline_controller.apply_per_video_dir",
+                return_value=(tmp_path, fake_video),
+            ),
+            patch.object(Path, "stat", return_value=MagicMock(st_size=100)),
+            pytest.raises(PipelineConcatError, match="encode fail"),
+        ):
+            controller.run()
+
+        assert not partial_output.exists(), (
+            "partial output file left on disk after PipelineConcatError"
+        )
+
     def test_cancel_before_silence_raises_pipeline_cancelled(self, tmp_path: Path):
         cfg = _valid_config(output_dir=tmp_path, input_raw=str(tmp_path / "src.mp4"))
         cb, _calls = self._make_callbacks()
