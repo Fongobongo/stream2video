@@ -124,6 +124,7 @@ def load_config(config_file: Path | None, console: Any) -> dict:
         ("method", VALID_METHODS),
         ("encoder", VALID_ENCODERS),
         ("video_quality", VALID_QUALITIES),
+        ("audio_quality", VALID_QUALITIES),
         ("download_quality", VALID_DOWNLOAD_QUALITIES),
         ("software_fallback", VALID_SOFTWARE_FALLBACKS),
         ("x264_preset", VALID_X264_PRESETS),

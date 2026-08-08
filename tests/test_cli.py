@@ -120,6 +120,17 @@ class TestLoadConfigBoolValidation:
         with pytest.raises(typer.Exit):
             load_config(cfg)
 
+    def test_invalid_audio_quality_rejected(self, tmp_path: Path):
+        # Regression: enum validation must cover ``audio_quality`` —
+        # YAML ``audio_quality: garbage`` previously slipped past
+        # ``load_config`` and crashed late in ``_audio_bitrate_opts``
+        # with an opaque KeyError. ``video_quality`` was already in the
+        # list (asymmetry flagged by the v0.4 audit).
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("audio_quality: garbage\n")
+        with pytest.raises(typer.Exit):
+            load_config(cfg)
+
 
 class TestCliUseCrf:
     def test_use_crf_flag_reaches_cut_and_concat(self, tmp_path: Path):

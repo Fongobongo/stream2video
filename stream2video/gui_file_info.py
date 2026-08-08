@@ -30,7 +30,11 @@ class FileInfoMixin:
         def _get_dur() -> None:
             dur = get_video_duration(path)
             if dur:
-                self.after(
+                # P1.10: tkinter is not thread-safe. ``self.after`` from a
+                # worker thread can race with the main loop's widget
+                # teardown; ``_tk_after`` is the project's only safe entry
+                # point for cross-thread widget writes.
+                self._tk_after(
                     0,
                     lambda d=dur: self.lbl_duration.configure(text=f"Duration: {fmt_time(d)}"),
                 )
