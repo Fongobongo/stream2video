@@ -279,10 +279,6 @@ class ProgressPlan:
     def map_concat(self, fraction: float) -> float:
         return self.cut_end + _clamp_fraction(fraction) * self.concat_span
 
-    def map_concat_legacy(self, fraction: float) -> float:
-        """Legacy linear mapping over the whole concat span (0..1)."""
-        return self.silence_end + _clamp_fraction(fraction) * self.total_concat_span
-
     def weights_percent(self) -> tuple[int, int, int, int]:
         return (
             round(self.download_span * 100),

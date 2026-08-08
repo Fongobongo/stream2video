@@ -18,6 +18,13 @@ from rich.progress import (
 )
 
 from stream2video.cli_config import load_config as _load_config_impl
+from stream2video.pipeline_controller import (
+    PipelineConfig as _PipelineConfig,
+)
+from stream2video.pipeline_controller import (
+    validate_pipeline_config as _validate_pipeline_config,
+)
+from stream2video.pipeline_controller import validate_pipeline_config as _validate_pipeline_config
 from stream2video.cli_helpers import (
     ParameterSource,
     _check_ffmpeg,
@@ -663,6 +670,50 @@ def main(
         # rlimit_as_mb is also a preset-tunable (well, CLI-only, but
         # the same fallback semantics apply).
         resolved_rlimit_as_mb: int = _resolved_int("rlimit_as_mb", rlimit_as_mb)
+
+        # Defensive re-validation through the shared pipeline validator.
+        # ``_resolved_*`` + ``load_config`` already rejected every
+        # CLI-visible bad key; this second pass runs the final resolved
+        # values through the same ``validate_pipeline_config`` the GUI's
+        # worker uses, so a value that bypasses the per-key checks here
+        # (future config key, regression in ``_resolved_*``) still fails
+        # early with a clear message instead of mid-pipeline.
+        _pcfg = _PipelineConfig(
+            input_raw=input_video,
+            output_dir=output_dir,
+            method=method,
+            encoder=encoder,
+            video_quality=video_quality,
+            audio_quality=audio_quality,
+            download_quality=download_quality,
+            software_fallback=software_fallback,
+            x264_preset=x264_preset,
+            encoder_threads=resolved_encoder_threads,
+            output_fps=output_fps,
+            output_format=output_format,
+            force=force,
+            delete_after=delete_after,
+            per_video_dir=per_video_dir_resolved,
+            threshold=float(config["threshold"]),
+            min_silence=float(config["min_silence"]),
+            margin=float(config["margin"]),
+            memory_limit_mb=resolved_memory_limit_mb,
+            memory_reserve_mb=resolved_memory_reserve_mb,
+            x264_low_memory=resolved_x264_low_memory,
+            use_crf=resolved_use_crf,
+            gapless_concat=resolved_gapless_concat,
+            low_process_priority=resolved_low_process_priority,
+            rlimit_as_mb=resolved_rlimit_as_mb,
+            download_timeout=download_timeout,
+            connect_timeout=connect_timeout,
+            no_progress_timeout=no_progress_timeout,
+            proxy=proxy,
+        )
+        _cfg_errors = _validate_pipeline_config(_pcfg)
+        if _cfg_errors:
+            for _err in _cfg_errors:
+                console.print(f"[red]Invalid configuration:[/red] {_err}")
+            raise typer.Exit(1)
 
         progress_columns = [
             TextColumn("[progress.description]{task.description}"),

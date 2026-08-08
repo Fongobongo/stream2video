@@ -142,10 +142,6 @@ class RecentProjectsMixin:
         ]
         self._render_recent_projects()
 
-    def _dir_size_mb(self, path: Path) -> float:
-        """Delegates to gui_platform.dir_size_mb (pure, testable)."""
-        return dir_size_mb(path)
-
     def _open_in_explorer(self, path_str: str) -> None:
         """Open the project directory in the platform's file manager."""
         path = Path(path_str)

@@ -10,7 +10,6 @@ from stream2video.formatters import (
     fmt_size,
     fmt_speed,
     fmt_time,
-    fmt_total_label,
     fmt_zoom_text,
 )
 
@@ -127,26 +126,6 @@ class TestFmtClockTime:
         src = 6 * 3600 + 4 * 60 + 12
         dst = 34 * 60 + 11
         assert f"{fmt_clock_time(src)} -> {fmt_clock_time(dst)}" == "06:04:12 -> 00:34:11"
-
-
-class TestFmtTotalLabel:
-    """fmt_total_label — formats the Total wall-clock label that lives
-    below the progress bar."""
-
-    def test_short_pipeline(self):
-        assert fmt_total_label(23 * 60 + 5) == "Total: 23m 5s"
-
-    def test_zero_seconds(self):
-        assert fmt_total_label(0) == "Total: 0s"
-
-    def test_subsecond_rounds_down(self):
-        assert fmt_total_label(0.4) == "Total: 0s"
-
-    def test_multi_day(self):
-        assert fmt_total_label(86400 + 3600 + 60) == "Total: 1d 1h 1m 0s"
-
-    def test_seconds_only(self):
-        assert fmt_total_label(42) == "Total: 42s"
 
 
 class TestFmtZoomText:

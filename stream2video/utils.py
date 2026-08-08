@@ -509,9 +509,11 @@ def cancel_process(owner: str, timeout: float = 2.0) -> bool:
 def list_active_owners() -> list[str]:
     """Return the owner strings currently holding a live subprocess.
 
-    Useful for diagnostics and for the GUI's shutdown handler to make
-    sure every spawned ffmpeg has been cleaned up before the interpreter
-    exits.
+    Diagnostics-only public API (paired with ``cancel_process`` for a
+    future "kill every leftover subprocess" shutdown path — see the GUI's
+    ``_on_close`` which currently only kills the default owner). Not yet
+    called by production code; kept because removing it would shrink the
+    scoped-registry API surface the shutdown path is expected to build on.
     """
     with _proc_registry_lock:
         return [owner for owner, proc in _proc_registry.items() if proc.poll() is None]
@@ -676,9 +678,14 @@ def looks_like_oom(returncode: int | None, stderr_text: str) -> bool:
 # site; the runner just eliminates the boilerplate that was identical
 # everywhere.
 #
-# Not yet wired into all call sites — the existing ones still use their
-# inline patterns. New code should use this runner so the next refactor
-# doesn't have to repeat the dedup.
+# Not yet wired into the legacy call sites — the existing ones still use
+# their inline patterns (some legitimately diverge: the concat runner adds
+# a stall watchdog + memory monitor, silence detection overlays a
+# progressive parser, download streams yt-dlp's stdout). Retrofitting them
+# is intentionally out of scope: each migration risks re-introducing the
+# exact lifecycle bugs the inline versions encode fixes for (P1.5 stall
+# watchdog, P1.13 decimal comma, P1.11 scoped registry). New code should
+# use this runner so the next refactor doesn't have to repeat the dedup.
 
 
 class SubprocessRunner:

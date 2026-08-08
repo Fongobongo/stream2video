@@ -121,16 +121,6 @@ from stream2video.concat.runner import (
 )
 from stream2video.concat.segment import _run_segment_concat
 
-
-def _effective_cancel_callback_shim(cancel_callback: "Callable[[], bool] | None") -> "Callable[[], bool] | None":
-    """Pass-through factory so tests patching
-    ``stream2video.concat._effective_cancel_callback`` intercept.
-
-    Outside of tests this is the identity function — the runner imports
-    the helper directly and calls it once per run.
-    """
-    return cancel_callback
-
 # ------------------------------------------------------------------
 # Indirection layer preserved for monkey-patching tests.
 #

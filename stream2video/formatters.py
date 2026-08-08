@@ -77,9 +77,3 @@ def fmt_zoom_text(zoom_level: float) -> str:
     if rounded_1dp < 10:
         return f"{zoom_level:.1f}x"
     return f"{round(zoom_level)}x"
-
-
-def fmt_total_label(total_elapsed: float) -> str:
-    """Format the Total label — 'Total: X' where X is the wall-clock
-    pipeline duration. Pure helper, easy to unit-test."""
-    return f"Total: {fmt_time(total_elapsed)}"

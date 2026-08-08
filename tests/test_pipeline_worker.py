@@ -366,11 +366,13 @@ class _FakePipelineController:
     records the args and runs side-effect-free (don't call callbacks)."""
 
     last_instance: _FakePipelineController | None = None
+    instantiations: int = 0
     _download_path: Path | None = None
 
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
         _FakePipelineController.last_instance = self
+        _FakePipelineController.instantiations += 1
 
     def run(self) -> None:
         # No-op — the real controller drives the callbacks; here we just
@@ -393,6 +395,7 @@ class _FakeGuiCallbacks:
         self.live_segments_pops: list[Path] = []
         self.recent_added: list[Path] = []
         self.encoder_labels: list[tuple[str, str]] = []
+        self.failure_style_count = 0
 
     def log(self, message: str) -> None:
         self.logs.append(message)
@@ -416,7 +419,8 @@ class _FakeGuiCallbacks:
 
     def ui_set_success_style(self) -> None: ...
 
-    def ui_set_failure_style(self) -> None: ...
+    def ui_set_failure_style(self) -> None:
+        self.failure_style_count += 1
 
     def ui_update_output(self, out_dir: Path) -> None: ...
 
@@ -603,6 +607,37 @@ class TestPipelineWorkerRun:
             worker.run(self._params())
         assert any("Unexpected" in m and "boom" in m for m in gui.logs)
         assert any(text == "Error: boom" and force is True for text, force in gui.status_calls)
+
+    def test_invalid_config_aborts_before_controller_is_created(self):
+        # Guard: ``validate_pipeline_config`` must run BEFORE the
+        # controller is instantiated, so a bad value (threshold outside
+        # [-60, -5], unknown method, ...) surfaces as a clear status +
+        # log line rather than a mid-pipeline ``PipelineConcatError``
+        # or ffmpeg crash. The controller must never be constructed.
+        gui = _FakeGuiCallbacks()
+        worker = PipelineWorker(gui, {"threshold": -999, "min_silence": 2, "margin": 0})
+        _FakePipelineController.instantiations = 0
+
+        with (
+            patch(
+                "stream2video.pipeline_controller.PipelineCallbacks",
+                new=_FakePipelineCallbacks,
+            ),
+            patch(
+                "stream2video.pipeline_controller.PipelineController",
+                new=_FakePipelineController,
+            ),
+            patch("stream2video.pipeline_worker.play_completion_sound", return_value=None) as sound,
+        ):
+            worker.run(self._params())
+
+        assert _FakePipelineController.instantiations == 0
+        assert any("Invalid configuration" in m and "threshold" in m for m in gui.logs)
+        assert any("threshold" in text and force is True for text, force in gui.status_calls)
+        assert gui.failure_style_count == 1
+        sound.assert_called_once_with(enabled=False, kind="attention")
+        # ``finally`` still releases the Start button.
+        assert gui.running_state_changes[-1] is False
 
     def test_delete_after_unlinks_download_path(self, tmp_path: Path):
         # ``delete_after=True`` — the controller's ``_finish`` owns the

@@ -340,9 +340,34 @@ class PipelineWorker:
             PipelineDownloadError,
             PipelineSilenceError,
             PipelineUnexpectedError,
+            validate_pipeline_config,
         )
 
         cfg = build_pipeline_config_from_snapshot(params, self._config)
+
+        # Pre-flight config validation — must stay BEFORE any phase work
+        # starts. ``validate_pipeline_config`` is pure, so calling it here
+        # costs nothing; a bad combo/threshold (e.g. stale settings.json
+        # value outside the GUI slider range) now surfaces as a clear
+        # status line instead of a ``PipelineConcatError`` mid-pipeline.
+        cfg_errors = validate_pipeline_config(cfg)
+        if cfg_errors:
+            for err in cfg_errors:
+                self._gui.log(f"[ERROR] Invalid configuration: {err}")
+            first = cfg_errors[0]
+            self._gui.ui_status(
+                f"Invalid configuration: {first}"
+                + (f" (+{len(cfg_errors) - 1} more)" if len(cfg_errors) > 1 else ""),
+                force=True,
+            )
+            self._gui.ui_set_failure_style()
+            self._play_completion_sound("attention")
+            # ``gui.py._pipeline_worker`` owns the per-run cleanup in its
+            # own ``finally``; we only release the Start button here (the
+            # normal return path does this in the shared ``finally``
+            # below, but this early exit bypasses it).
+            self._gui.set_running(False)
+            return
 
         # Mutable holder for the resolved video path — the
         # ``on_output_resolved`` callback fills it and ``_on_live_segment``

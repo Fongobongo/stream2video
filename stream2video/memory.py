@@ -286,14 +286,3 @@ def auto_budget_mb() -> float | None:
     except Exception:
         logger.debug("psutil.virtual_memory failed in auto_budget_mb", exc_info=True)
         return None
-
-
-def has_psutil() -> bool:
-    """True if psutil is importable — callers can branch on this."""
-    return _HAS_PSUTIL
-
-
-# Sleep helper for tests that want to control the timing without
-# importing threading at module top (kept here to avoid circular imports).
-def _sleep(seconds: float) -> None:
-    time.sleep(seconds)

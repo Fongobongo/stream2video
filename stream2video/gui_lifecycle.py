@@ -20,7 +20,6 @@ import customtkinter as ctk
 from stream2video.config import (
     effective_defaults,
     save_user_defaults,
-    settings_path,
     user_defaults_path,
 )
 from stream2video.gui_helpers import build_cli_command
@@ -306,9 +305,6 @@ class LifecycleMixin:
         else:
             self._log(f"CLI command copied (config NOT written — see warning): {cmd}")
         self._log(f"  {cmd}")
-
-    def _settings_path(self) -> Path:
-        return settings_path()
 
     def _on_close(self) -> None:
         if self.running:

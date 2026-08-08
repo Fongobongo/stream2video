@@ -242,26 +242,10 @@ def _run_gapless_segment_concat(
         frac = completed_groups / max(1, total_groups_est)
         progress_callback(0.9 + frac * 0.08)
 
-    # Estimate per-group duration for intra-group ETA smoothing (so total
-    # ETA ticks even when out_time_us stalls for 1-2 mins inside a group).
-    # Use total_duration / total_groups_est scaled by tree span; clip to
-    # avoid absurd Remaining on tiny files.
+    # Estimate per-group duration so the batch map below can budget the
+    # whole tree (groups G0..Gn are 0.9..0.98). The per-group figure is
+    # read by ``for_each_input``-style ETA smoothing inside the loop.
     _tree_group_dur = (total_duration / max(1, total_groups_est)) if total_duration > 0 else 0
-    _tree_group_start: list[float | None] = [None]
-
-    def _tree_group_progress(seconds: float) -> None:
-        if progress_callback is None or total_duration <= 0 or total_groups_est == 0:
-            return
-        # Map this group's seconds/total_duration fraction into its group span.
-        # Groups G0..G1 are 0.9..0.98; final is separate.
-        if _tree_group_start[0] is None:
-            return
-        # frac within this group 0..1
-        group_frac = max(0.0, min(1.0, seconds / max(1, _tree_group_dur)))
-        # Overall Completed already at start of this group; add intra fraction * group span
-        group_span = 0.08 / max(1, total_groups_est)
-        overall = 0.9 + (completed_groups / max(1, total_groups_est)) * 0.08 + group_frac * group_span
-        progress_callback(min(0.98, overall))
 
     while len(current) > max_inputs:
         next_level: list[Path] = []

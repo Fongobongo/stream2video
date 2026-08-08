@@ -116,11 +116,6 @@ class SilenceParser:
         return list(self._segments)
 
     @property
-    def has_pending_start(self) -> bool:
-        """True if a ``silence_start`` is awaiting its matching ``silence_end``."""
-        return self._pending_start is not None
-
-    @property
     def pending_start(self) -> float | None:
         """The timestamp of the unmatched ``silence_start``, if any."""
         return self._pending_start

@@ -13,7 +13,6 @@ clipboard stays in ``gui.py`` — only pure transformations live here.
 
 from __future__ import annotations
 
-import re
 import shlex
 from pathlib import Path
 
@@ -189,19 +188,6 @@ def build_cli_command(
     if delete_after:
         parts.append("--delete-after")
     return " ".join(parts)
-
-
-def truncate_status(text: str, max_len: int = STATUS_MAX) -> str:
-    """Truncate a status-line string to ``max_len`` chars.
-
-    Adds an ellipsis when truncating so the user can see the line was
-    cut. A string at or under the limit is returned unchanged. The
-    GUI's status bar has a fixed width; without truncation a long
-    download URL or ffmpeg error would push the layout around.
-    """
-    if len(text) <= max_len:
-        return text
-    return text[: max_len - 1] + "…"
 
 
 def _wrap_status_lines(text: str, max_len: int = STATUS_MAX, max_lines: int = STATUS_MAX_LINES) -> list[str]:
@@ -385,21 +371,6 @@ def build_silence_info_line(
     return f"Silence: {num_silence} segments\nKeep: {num_keep} segments"
 
 
-def build_waveform_view_label(
-    *,
-    view_start: float,
-    view_end: float,
-    zoom: float,
-) -> str:
-    """Format the waveform popup's view-range label.
-
-    Renders as ``"00:00:00 - 00:01:30  |  15x"`` so the user can see
-    both the visible window and the zoom level at a glance. Pure: takes
-    the view bounds and zoom multiplier, returns the display string.
-    """
-    return f"{fmt_clock_time(view_start)} - {fmt_clock_time(view_end)}  |  {zoom:.1f}x"
-
-
 def should_update_status(
     last_update_monotonic: float,
     now_monotonic: float,
@@ -488,24 +459,6 @@ PHASE_LABELS: dict[str, str] = {
     "3": "Cutting",
     "4": "Concat",
 }
-
-
-def phase_weight_percent(
-    bounds: tuple[float, float, float, float], step: str
-) -> int | None:
-    """Share (percent) the phase ``step`` ("1".."4") occupies of the
-    whole pipeline bar, from the plan's boundary fractions
-    ``(download_end, silence_end, cut_end, concat_end)``.
-
-    E.g. ``(0.05, 0.40, 0.94, 1.0)`` → download 5, silence 35, cutting
-    54, concat 6. Returns None for an unknown step.
-    """
-    if step not in PHASE_LABELS or len(bounds) != 4:
-        return None
-    starts = (0.0, bounds[0], bounds[1], bounds[2])
-    idx = int(step) - 1
-    span = max(0.0, bounds[idx] - starts[idx])
-    return round(span * 100)
 
 
 def build_phase_line(step: str | None, pct: int | None = None) -> str:

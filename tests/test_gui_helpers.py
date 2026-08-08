@@ -25,10 +25,7 @@ from stream2video.gui_helpers import (
     build_progress_meta_line,
     build_silence_info_line,
     build_total_line,
-    build_waveform_view_label,
-    phase_weight_percent,
     should_update_status,
-    truncate_status,
 )
 
 
@@ -274,24 +271,6 @@ class TestBuildCliCommand:
         assert "--min-part-bytes 2048" in cmd
 
 
-class TestTruncateStatus:
-    def test_short_string_unchanged(self):
-        assert truncate_status("hello", 50) == "hello"
-
-    def test_exact_length_unchanged(self):
-        s = "x" * STATUS_MAX
-        assert truncate_status(s) == s
-
-    def test_long_string_truncated_with_ellipsis(self):
-        s = "x" * (STATUS_MAX + 10)
-        out = truncate_status(s)
-        assert len(out) == STATUS_MAX
-        assert out.endswith("…")
-
-    def test_custom_max_len(self):
-        assert truncate_status("abcdefgh", 5) == "abcd…"
-
-
 class TestBuildDownloadStatus:
     def test_with_total_bytes_shows_percent(self):
         s = build_download_status(
@@ -474,14 +453,6 @@ class TestBuildSilenceInfoLine:
         assert "(" not in line
 
 
-class TestBuildWaveformViewLabel:
-    def test_format(self):
-        label = build_waveform_view_label(view_start=0.0, view_end=90.0, zoom=1.5)
-        assert "00:00:00" in label
-        assert "00:01:30" in label
-        assert "1.5x" in label
-
-
 class TestShouldUpdateStatus:
     def test_force_always_true(self):
         assert should_update_status(100.0, 100.0, force=True) is True
@@ -562,29 +533,6 @@ class TestBuildCompletionSummary:
         # Should not crash; the popup just shows "—" or similar for
         # the source duration.
         assert "Source:" in s["popup"]
-
-
-class TestPhaseWeightPercent:
-    _BOUNDS = (0.05, 0.40, 0.94, 1.0)
-
-    def test_default_profile_weights(self):
-        # The classic conservative profile: download 5 %, silence 35 %,
-        # cutting 54 %, concat 6 % (mirrors PROG_* constants).
-        assert phase_weight_percent(self._BOUNDS, "1") == 5
-        assert phase_weight_percent(self._BOUNDS, "2") == 35
-        assert phase_weight_percent(self._BOUNDS, "3") == 54
-        assert phase_weight_percent(self._BOUNDS, "4") == 6
-
-    def test_unknown_step_is_none(self):
-        assert phase_weight_percent(self._BOUNDS, "9") is None
-
-    def test_local_file_download_zero(self):
-        # Local file: download span is 0, silence gets its own slice.
-        assert phase_weight_percent((0.0, 0.35, 0.955, 1.0), "1") == 0
-        assert phase_weight_percent((0.0, 0.35, 0.955, 1.0), "2") == 35
-
-    def test_bad_bounds_tuple_is_none(self):
-        assert phase_weight_percent((0.05, 0.40), "1") is None
 
 
 class TestBuildPhaseLine:

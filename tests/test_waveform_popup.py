@@ -111,37 +111,6 @@ class TestLiveSegmentsStorePop:
         assert store.pop(path) is None
 
 
-class TestLiveSegmentsStoreIsKnown:
-    def test_never_set_is_not_known(self) -> None:
-        store = LiveSegmentsStore()
-        assert store.is_known(Path("v")) is False
-
-    def test_set_marks_known(self) -> None:
-        store = LiveSegmentsStore()
-        path = Path("v")
-        store.set(path, [])
-        assert store.is_known(path) is True
-
-    def test_pop_unmarks_known(self) -> None:
-        # Once the producer pops (e.g., pipeline succeeded), the store
-        # forgets the path so a re-open of the popup falls through to
-        # the disk cache.
-        store = LiveSegmentsStore()
-        path = Path("v")
-        store.set(path, [_seg(0, 5)])
-        store.pop(path)
-        assert store.is_known(path) is False
-
-    def test_known_after_empty_set(self) -> None:
-        # ``set(p, [])`` should mark the path known — distinguishing
-        # "detection started, zero silence so far" from "never
-        # started" (see the take_snapshot contract above).
-        store = LiveSegmentsStore()
-        path = Path("v")
-        store.set(path, [])
-        assert store.is_known(path) is True
-
-
 class TestLiveSegmentsStoreConcurrency:
     def test_concurrent_set_and_snapshot_dont_raise(self) -> None:
         # Smoke: hammer the store from two threads (one producer, one

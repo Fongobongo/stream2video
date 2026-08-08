@@ -120,8 +120,9 @@ class TestGuiPureHelpersWired:
     def test_ui_status_doesnt_crash_with_force(self, gui):
         # ``_ui_status`` is called frequently from worker threads via
         # ``self._tk_after``. Verify a force=True update doesn't raise
-        # (it should call ``truncate_status`` and ``should_update_status``
-        # from gui_helpers).
+        # (it goes through ``should_update_status`` from gui_helpers,
+        # then ``_set_static_status`` wraps the text via
+        # ``_wrap_status_lines`` before configuring the label).
         gui._ui_status("test status", force=True)
 
     def test_ui_progress_plan_positions_ticks(self, gui):
@@ -205,7 +206,7 @@ class TestToolkitCallbackDispatch:
     def test_pipelinecallbacks_on_status_does_not_raise(self, gui):
         """A realistic status string must flow through the GUI's on_status
         wrapper without raising — this exercises the _tk_after dispatch +
-        the truncate_status helper."""
+        the waveform status label setter."""
         gui._tk_after(0, lambda: gui._safe_status_set("Step 1/3: Downloading... 50%"))
         gui.update()
 

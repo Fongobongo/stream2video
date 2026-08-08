@@ -99,15 +99,3 @@ class LiveSegmentsStore:
         """
         with self._lock:
             return self._segments.pop(video_path, None)
-
-    def is_known(self, video_path: Path) -> bool:
-        """True iff the producer has ever published state for the path.
-
-        Useful for the waveform popup, which uses this to short-circuit
-        an ``is None`` ``take_snapshot`` (something may be set but the
-        user opened a popup before the first ``silence_*`` line —
-        subtly different from "never published") without holding the
-        lock twice.
-        """
-        with self._lock:
-            return video_path in self._segments
