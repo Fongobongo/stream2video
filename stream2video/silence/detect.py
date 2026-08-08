@@ -8,6 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from stream2video import silence as _c
+from stream2video.concat.constants import _OOM_HINT
 from stream2video.silence.cache import _save_cache
 from stream2video.silence.parser import (
     _RESUME_THROTTLE_N,
@@ -132,9 +133,15 @@ def detect_silence_stream(
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    # Force the wait() / TimeoutExpired path now; the loop
-                    # below raises SilenceDetectionError on timeout.
-                    break
+                    # Kill immediately: falling through to
+                    # ``proc.wait(timeout=timeout)`` would block up to a
+                    # SECOND full timeout (~10h by default) on an ffmpeg
+                    # that has already proven itself hung.
+                    proc.kill()
+                    proc.wait()
+                    raise SilenceDetectionError(
+                        f"ffmpeg timeout after {timeout}s (no stderr output)"
+                    ) from None
                 try:
                     raw = line_queue.get(timeout=CANCEL_POLL_INTERVAL)
                 except queue.Empty:
@@ -153,7 +160,7 @@ def detect_silence_stream(
                 if looks_like_oom(proc.returncode, ""):
                     raise SilenceOutOfMemoryError(
                         f"ffmpeg silencedetect OOM (rc={proc.returncode}); "
-                        "try --preset low_memory / lowering --memory-limit-mb"
+                        f"{_OOM_HINT}"
                     )
                 raise SilenceDetectionError(f"ffmpeg silencedetect failed (rc={proc.returncode})")
             # ``detect_silence_stream`` is a preview-only helper that
@@ -269,13 +276,17 @@ def _run_silencedetect(
     cmd.extend(["-f", "null", "-"])
 
     # Progress is reported relative to the portion of the input ffmpeg
-    # will actually decode — i.e. after any seek, the elapsed time
-    # reported by ffmpeg starts from the seek point, so the divisor
-    # must exclude the seeked-out head.
+    # will actually decode. NOTE: ``-copyts`` (added above for resume so
+    # silencedetect timestamps stay in source PTS) also makes ffmpeg's
+    # ``-progress`` out_time_us an ABSOLUTE source timestamp that starts
+    # at ``resume_from``, not at 0 — so the resume offset must be
+    # subtracted from the reported value as well as from the divisor.
     base_divisor = duration_limit if duration_limit is not None else duration
     progress_divisor: float | None
+    progress_offset_us: float = 0.0
     if base_divisor is not None and resume_from is not None:
         progress_divisor = max(0.0, base_divisor - resume_from)
+        progress_offset_us = resume_from * 1_000_000
     else:
         progress_divisor = base_divisor
     if progress_callback is not None and (progress_divisor is None or progress_divisor <= 0):
@@ -420,7 +431,8 @@ def _run_silencedetect(
                     try:
                         us = int(line.split("=", 1)[1])
                         if progress_callback and progress_divisor and progress_divisor > 0:
-                            progress_callback(min(us / 1_000_000 / progress_divisor, 1.0))
+                            rel_us = max(0, us - int(progress_offset_us))
+                            progress_callback(min(rel_us / 1_000_000 / progress_divisor, 1.0))
                     except (ValueError, IndexError):
                         pass
                 if cancelled.is_set():
@@ -438,7 +450,7 @@ def _run_silencedetect(
                 if looks_like_oom(process.returncode, stderr_text):
                     raise SilenceOutOfMemoryError(
                         f"ffmpeg silencedetect OOM (rc={process.returncode}); "
-                        "try --preset low_memory / lowering --memory-limit-mb"
+                        f"{_OOM_HINT}"
                     )
                 error_msg = stderr_text or "Unknown error"
                 raise SilenceDetectionError(f"ffmpeg silencedetect failed: {error_msg}")
@@ -471,8 +483,7 @@ def _run_silencedetect(
                             f"duration {duration:.3f}s"
                         )
                         progressive_segments.append(SilenceSegment(clamped_start, duration))
-                        if on_segment is not None:
-                            on_segment(list(progressive_segments))
+                        on_segment(list(progressive_segments))
                     else:
                         logger.debug(
                             f"Trailing silence_start at t={pending_start_t:.3f}s "
@@ -584,26 +595,26 @@ def _extract_audio_wav(
     stderr_lines: list[str] = []
     wait_for_drain = drain_stderr_lines(stderr_pipe, stderr_lines)
     drain_done = False
+    # Track non-clean exits so the partial WAV artifact is always removed.
+    # A cancel / deadline-kill / wait-timeout raises BEFORE the unlink at
+    # the rc!=0 branch; without this a fresh-mtime truncated WAV stays on
+    # disk and ``_is_wav_cache_valid`` (mtime-only) treats it as a valid
+    # cache on the next run — silently truncating every subsequent
+    # silence-detection result until the user deletes the file by hand.
+    completed = False
 
     try:
         with registered_process(process), cancel_monitor(process, cancel_callback) as cancelled:
             if _progressive_wav:
                 assert stdout_pipe is not None
-                from stream2video.utils import read_lines_queue as _rlq
-
-                q, _thr = _rlq(stdout_pipe)
+                q, _thr = read_lines_queue(stdout_pipe)
                 deadline = None
                 if timeout:
-                    import time as _time
-
-                    deadline = _time.monotonic() + timeout
+                    deadline = time.monotonic() + timeout
                 while True:
-                    if deadline is not None:
-                        import time as _time
-
-                        if _time.monotonic() > deadline:
-                            process.kill()
-                            raise SilenceDetectionError(f"ffmpeg extract timeout after {timeout}s")
+                    if deadline is not None and time.monotonic() > deadline:
+                        process.kill()
+                        raise SilenceDetectionError(f"ffmpeg extract timeout after {timeout}s")
                     try:
                         raw = q.get(timeout=0.2)
                     except queue.Empty:
@@ -648,11 +659,13 @@ def _extract_audio_wav(
                     wav_path.unlink(missing_ok=True)
                     raise SilenceOutOfMemoryError(
                         f"ffmpeg extract OOM (rc={process.returncode}); "
-                        "try --preset low_memory / lowering --memory-limit-mb"
+                        f"{_OOM_HINT}"
                     )
                 error_msg = stderr_text or "Unknown error"
                 wav_path.unlink(missing_ok=True)
                 raise SilenceDetectionError(f"ffmpeg extract failed: {error_msg}")
+            # rc == 0 and no cancel: the WAV is complete and cacheable.
+            completed = True
     except subprocess.TimeoutExpired as e:
         process.kill()
         wav_path.unlink(missing_ok=True)
@@ -666,6 +679,15 @@ def _extract_audio_wav(
         except Exception:
             pass
         stderr_pipe.close()
+        if not completed:
+            # Poisoned-cache guard: drop the partial WAV left behind by a
+            # cancel / deadline kill / wait timeout. unlink() is a no-op
+            # when the file was never created (e.g. Popen succeeded but
+            # ffmpeg failed before opening the output).
+            try:
+                wav_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _sample_segments_match(

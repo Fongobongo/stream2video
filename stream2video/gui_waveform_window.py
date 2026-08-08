@@ -42,9 +42,6 @@ class WaveformWindowMixin:
         self._waveform_ctk_image: ctk.CTkImage | None = None
         self._waveform_render_token = 0
         self._waveform_running = False
-        # PID of the waveform preview ffmpeg process (read_peaks_from_stream).
-        # Set during preview; killed on popup close via os.kill.
-        self._preview_proc_pid: int | None = None
         # Waveform view state — populated by the renderer when peaks
         # arrive, modified by the zoom/pan controls. Cleared when the
         # popup closes (see ``_on_waveform_close``).
@@ -270,7 +267,11 @@ class WaveformWindowMixin:
 
         # Auto-render. The render method no-ops gracefully if the input
         # is missing (logs an error and exits without crashing the GUI).
-        self.after(50, self._render_waveform_preview)
+        # ``_tk_after`` (not bare ``self.after``) so the callback is a
+        # no-op when the main window is destroyed within the 50 ms window
+        # — a bare ``after`` would fire ``_render_waveform_preview`` on a
+        # torn-down root and raise an unhandled TclError.
+        self._tk_after(50, self._render_waveform_preview)
 
     def _on_waveform_close(self) -> None:
         """Destroy the waveform popup and null its refs."""

@@ -57,15 +57,16 @@ def _run_with_fallback(
     min_part_bytes: int = _MIN_PART_BYTES,
     memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
 ) -> None:
-    """Run segment or batch concat with the primary encoder; fall back to libx264 on failure.
+    """Run the picked concat method with the primary encoder; fall back to libx264 on failure.
 
     On encoder fallback the per-method working directory (``_<stem>_segments``
-    or ``_<stem>_batch``) is wiped -- the chunks written by the failing
-    encoder may be corrupt (e.g. h264_mf produces MP4s without a moov atom
-    on some Windows builds) and the resume-skip check in the inner method
-    would otherwise reuse them on the libx264 retry.
+    / ``_<stem>_batch`` / ``_<stem>_cut``) is wiped -- the chunks written by
+    the failing encoder may be corrupt (e.g. h264_mf produces MP4s without a
+    moov atom on some Windows builds) and the resume-skip check in the inner
+    method would otherwise reuse them on the libx264 retry.
 
-    ``method`` is "segment" or "batch"; anything else raises ConcatError.
+    ``method`` is one of ``VALID_METHODS`` ("segment", "batch",
+    "cut_then_encode"); anything else raises ConcatError.
     ``video_quality`` / ``audio_quality`` are forwarded to the libx264
     fallback so the retry uses the same bitrate/CRF/AAC preset the user
     requested. ``software_fallback`` / ``fallback_consent`` gate the

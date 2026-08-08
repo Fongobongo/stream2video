@@ -30,6 +30,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from stream2video.config import CONFIG_DEFAULTS as _CONFIG_DEFAULTS
+from stream2video.config import USER_DEFAULT_KEYS
+
 # Canonical key order for ``settings.json`` — session-only state
 # (``window_geometry``, ``recent_projects``) is included; pure tunables
 # (threshold / min_silence / margin) come from ``self.config`` (slider
@@ -63,29 +66,13 @@ SAVE_SETTINGS_KEYS: tuple[str, ...] = (
 # defaults; session-only state (input_path, output_dir, recent_projects,
 # window_geometry) is intentionally excluded so a fresh GUI start on
 # another machine doesn't inherit a previous session's paths.
-USER_DEFAULTS_KEYS: tuple[str, ...] = (
-    "threshold",
-    "min_silence",
-    "margin",
-    "method",
-    "encoder",
-    "video_quality",
-    "audio_quality",
-    "download_quality",
-    "output_format",
-    "force",
-    "delete_after",
-    "per_video_dir",
-    "completion_sound",
-    "x264_low_memory",
-    "use_crf",
-    "gapless_concat",
-    "low_process_priority",
-    "preset",
-    "theme",
-    "proxy",
-    "proxy_active",
-)
+#
+# Single source of truth is ``config.USER_DEFAULT_KEYS`` — a second
+# hand-maintained list here previously drifted and silently dropped the
+# 18 tunables (encoder_threads, output_fps, memory_*, all the pipeline
+# timeouts, batch_chunk_size, min_part_bytes…) from "Save current as
+# defaults".
+USER_DEFAULTS_KEYS: tuple[str, ...] = tuple(USER_DEFAULT_KEYS)
 
 
 def build_save_settings_snapshot(widgets: dict[str, Any]) -> dict[str, Any]:
@@ -134,11 +121,14 @@ def build_user_defaults_snapshot(widgets: dict[str, Any]) -> dict[str, Any]:
     GUI, not from individual widget reads — the GUI's existing
     ``_sync_slider_entries`` call already normalises them). Returns a
     new dict containing exactly the keys in ``USER_DEFAULTS_KEYS``.
+    Keys absent from ``widgets`` are read from ``config.CONFIG_DEFAULTS``
+    so tunables without a dedicated widget (encoder_threads, output_fps,
+    memory_*, timeouts, …) still persist their current effective values.
     Pure: no widget reads, no I/O.
     """
     snapshot: dict[str, Any] = {}
     for key in USER_DEFAULTS_KEYS:
-        snapshot[key] = widgets[key]
+        snapshot[key] = widgets.get(key, _CONFIG_DEFAULTS.get(key))
     return snapshot
 
 

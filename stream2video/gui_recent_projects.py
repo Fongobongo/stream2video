@@ -90,19 +90,25 @@ class RecentProjectsMixin:
         if not project_path:
             return
         path_str = str(project_path)
-        self.config["recent_projects"] = add_recent_project(
-            self.config.get("recent_projects", []),
-            path_str,
-        )
-        self._tk_after(0, self._render_recent_projects)
 
-        def _persist() -> None:
+        def _apply_and_persist() -> None:
+            # Runs on the Tk main loop: mutate config, re-render, and
+            # persist from one place so a concurrent ``_save_settings``
+            # can't serialize a half-updated list (the old code mutated
+            # ``self.config`` on the pipeline worker thread — a GIL-atomic
+            # rebinding, but visible to a concurrent main-thread save as
+            # a lost update on disk).
+            self.config["recent_projects"] = add_recent_project(
+                self.config.get("recent_projects", []),
+                path_str,
+            )
+            self._render_recent_projects()
             try:
                 self._save_settings()
             except Exception as e:
                 _logger.warning("Failed to save settings after adding recent project: %s", e)
 
-        self._tk_after(0, _persist)
+        self._tk_after(0, _apply_and_persist)
 
     def _delete_recent_project(self, path_str: str) -> None:
         """Confirm with the user, then recursively delete the project dir."""

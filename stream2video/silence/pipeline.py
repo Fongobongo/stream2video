@@ -246,12 +246,21 @@ def detect_silence(
                     f"detection. WAV cache invalidated."
                 )
                 wav_path.unlink(missing_ok=True)
+
+                def _direct_prog(f: float) -> None:
+                    # The WAV silencedetect above already consumed
+                    # 0.15..0.85 of the phase bar; report the direct
+                    # fallback's 0..1 fraction inside the same slice so
+                    # the overall bar never regresses.
+                    if progress_callback is not None:
+                        progress_callback(0.15 + max(0.0, min(1.0, f)) * 0.70)
+
                 segments = _c._run_silencedetect(
                     video_path,
                     threshold,
                     min_silence,
                     duration,
-                    progress_callback,
+                    _direct_prog if progress_callback is not None else None,
                     cancel_callback,
                     "video",
                     on_segment=on_segment,

@@ -115,13 +115,22 @@ def _run_cut_then_encode(
             cut_path = cut_dir / f"cut_{i:06d}.mkv"
 
             # Resume skip: if the file exists, is large enough, and
-            # passes ffprobe validation AND has the expected duration,
-            # reuse it.
+            # passes ffprobe validation, reuse it.
+            #
+            # Duration is intentionally NOT checked here: phase 1 uses
+            # ``-c copy``, which snaps the cut to keyframes — on long-GOP
+            # sources (2-10s GOP is typical for streamed H.264) the actual
+            # part length legitimately differs from ``dur`` by more than
+            # any fixed slack, so a keyframe-snapped part would fail the
+            # check on EVERY resume attempt and be re-cut identically
+            # (wasted work, never converges). The ffprobe validity check
+            # above is the real corruption guard, and the manifest wipe
+            # (``_ensure_fresh_work_dir``) already invalidated parts that
+            # came from different cut points.
             if (
                 cut_path.exists()
                 and cut_path.stat().st_size >= min_part_bytes
                 and _c._ffprobe_is_valid_mp4(cut_path)
-                and _c._ffprobe_duration_ok(cut_path, dur)
             ):
                 logger.debug(f"cut_then_encode: reusing cut_{i:06d}.mkv")
                 continue
@@ -175,8 +184,14 @@ def _run_cut_then_encode(
                 raw_concat_path,
                 part_paths,
                 total_duration=total_duration,
+                # _run_final_concat already maps its fraction into the
+                # 0.9..1.0 tail; rescale into our 0.4..0.45 slice so the
+                # bar moves continuously through the concat step instead
+                # of teleporting from 0.4 to 0.49 at its start.
                 progress_callback=(
-                    (lambda f: progress_callback(0.4 + f * 0.1)) if progress_callback else None
+                    (lambda f: progress_callback(0.4 + (f - 0.9) * 0.5))
+                    if progress_callback
+                    else None
                 ),
                 cancel_callback=cancel_callback,
                 label="cut_then_encode concat",

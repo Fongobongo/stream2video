@@ -123,6 +123,7 @@ def _run_gapless_segment_concat(
     low_process_priority: bool = False,
     rlimit_as_mb: int = 0,
     memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
+    manifest: dict | None = None,
 ) -> None:
     """Gapless segment join via concat filter (re-encode both streams).
 
@@ -172,7 +173,10 @@ def _run_gapless_segment_concat(
 
      Tree intermediates are kept in ``output_path.parent /
      _gapless_tree_<stem>`` so an interrupted run keeps the working
-     set for the next attempt; the dir is deleted on success.
+     set for the next attempt; the dir is deleted on success. Reuse is
+     gated on the run manifest (``manifest`` kwarg, written into the tree
+     dir via ``_ensure_fresh_work_dir``) so intermediates from a run with
+     different cut points / source / encoder are wiped, not reused.
      Intermediates use libx264 CRF 18 (visually lossless, ~source
      size) + PCM — ffv1 would be 10-30x larger (disk blowup on 15GB
      sources → -28 ENOSPC).
@@ -221,7 +225,17 @@ def _run_gapless_segment_concat(
 
     # ── Tree path (Windows, too many inputs for one pass) ──
     tree_dir = output_path.parent / f"_gapless_tree_{output_path.stem}"
-    tree_dir.mkdir(parents=True, exist_ok=True)
+    # Gate tree-intermediate reuse on a manifest snapshot identical to the
+    # segment path's: ``tree_dir`` lives OUTSIDE the per-run seg_dir, so a
+    # stale tree from an interrupted run would otherwise be reused after
+    # the user changed cut points / source / encoder settings — the old
+    # run's content would be silently concatenated into the new output.
+    # `_ensure_fresh_work_dir` wipes the dir and rewrites the manifest on
+    # any mismatch; a run that matches the manifest reuses intermediates.
+    if manifest is not None:
+        _c._ensure_fresh_work_dir(tree_dir, manifest)
+    else:
+        tree_dir.mkdir(parents=True, exist_ok=True)
 
     # Tree uses overall 0.9..1.0 (pipeline_controller: 90% Cutting / 10%
     # Concatenating). Reserve 0.9..0.98 for tree intermediate groups and
@@ -256,7 +270,8 @@ def _run_gapless_segment_concat(
             inter = tree_dir / f"L{level}_{g:05d}.mkv"
             if cancel_callback and cancel_callback():
                 raise _c.CancelledError(f"gapless tree L{level} cancelled")
-            if inter.exists() and inter.stat().st_size >= _MIN_PART_BYTES:
+            reuse = inter.exists() and inter.stat().st_size >= _MIN_PART_BYTES
+            if reuse:
                 # P1: cheap "size is enough" check is insufficient — a
                 # mid-write crash leaves a file that passes the byte
                 # threshold but has no moov / corrupt stream, and the
@@ -265,16 +280,17 @@ def _run_gapless_segment_concat(
                 # a long time (segment.py:119); the tree path had the
                 # gap. MKV uses stream_type="a" because PCM audio + H.264
                 # video are both streams in the same file — "v" alone
-                # would reject a video-only chunk.
+                # would reject a video-only chunk. A failed validation is
+                # NOT fatal: like every other resume check in the codebase
+                # (segment.py / batch.py / audio.py), we simply re-encode
+                # the group instead of aborting the whole run.
                 try:
                     if not _ffprobe_is_valid_media(inter, stream_type="v"):
-                        raise _c.ConcatError(
-                            f"gapless tree L{level} intermediate {inter.name} "
-                            f"is corrupt (ffprobe validation failed); delete "
-                            f"{tree_dir.resolve()} to force re-encode"
+                        logger.warning(
+                            f"gapless tree L{level}: intermediate {inter.name} "
+                            f"failed ffprobe validation; re-encoding group {g}"
                         )
-                except _c.ConcatError:
-                    raise
+                        reuse = False
                 except Exception:
                     # ffprobe missing / timed out — fall back to the size
                     # check. A crash mid-write here doesn't *create* a
@@ -283,6 +299,7 @@ def _run_gapless_segment_concat(
                         f"gapless tree L{level}: ffprobe validation skipped for {inter}",
                         exc_info=True,
                     )
+            if reuse:
                 next_level.append(inter)
                 completed_groups += 1
                 _report_tree_progress()

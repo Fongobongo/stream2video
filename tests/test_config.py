@@ -484,9 +484,11 @@ class TestApplyPreset:
     def test_default_preset_is_balanced(self):
         # The CLI/GUI default MUST be a preset that produces no changes
         # over CONFIG_DEFAULTS — otherwise a user who never touches the
-        # preset combobox would suddenly get non-default tunables.
+        # preset combobox would suddenly get non-default tunables, and a
+        # YAML key like ``gapless_concat: false`` would be silently
+        # re-enabled by the balanced preset on every run (regression).
         assert DEFAULT_PRESET == "balanced"
-        assert PRESETS["balanced"] == {"gapless_concat": True}
+        assert PRESETS["balanced"] == {}
 
     def test_all_presets_are_subsets_of_config_defaults_keys(self):
         # Every tunable a preset overrides must exist in CONFIG_DEFAULTS,

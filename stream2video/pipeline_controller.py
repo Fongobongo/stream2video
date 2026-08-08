@@ -849,7 +849,12 @@ class PipelineController:
             else:
                 if current_phase != "concatenating":
                     _set_phase("concatenating", force=True)
-                assert concat_start is not None
+                if concat_start is None:
+                    # Invariant guard, not control flow: `_set_phase` above
+                    # sets concat_start; raising beats a TypeError from
+                    # ``time.monotonic() - None`` if the order regresses
+                    # (and unlike ``assert`` this survives ``python -O``).
+                    raise RuntimeError("concat phase entered without concat_start")
                 elapsed = time.monotonic() - concat_start
                 controller._set_phase_progress(f)
                 if f > 0.01:

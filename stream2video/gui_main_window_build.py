@@ -145,7 +145,6 @@ class MainWindowBuildMixin:
                     # grid_remove remembers options, so plain grid() restores
                     ctrl_frame._scrollbar.grid()
 
-                # Also suppress xs/croll when idle? keep as-is.
             ctrl_frame._scrollbar.set = _auto_hide_set
             ctrl_frame._parent_canvas.configure(yscrollcommand=_auto_hide_set)
         except Exception:

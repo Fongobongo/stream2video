@@ -34,3 +34,12 @@ _STALL_KILL = 300
 # Minimum size (bytes) for a resumed part to be considered valid.
 # Exposed via CONFIG_DEFAULTS (``min_part_bytes``).
 _MIN_PART_BYTES = 1024
+
+# User-facing hint appended to every OOM-class error. Single source of
+# truth: runner.py / silence detect previously carried several hand-copied
+# variants of this line that drifted in wording (one omitted the
+# --batch-chunk-size branch).
+_OOM_HINT = (
+    "try --preset low_memory / lowering --memory-limit-mb / "
+    "reducing --batch-chunk-size"
+)

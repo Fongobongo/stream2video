@@ -54,6 +54,30 @@ MIN_RENDER_WIDTH = 200
 MIN_RENDER_HEIGHT = 80
 
 
+def cursor_plot_frac(
+    event_x: int,
+    image_width: int,
+    axis_width: int,
+) -> float | None:
+    """Map a mouse ``event.x`` to a fraction along the *plot* area.
+
+    Returns ``None`` when the cursor is outside the plot (over the dB
+    axis strip or past the right edge of the rendered image — CTkLabel
+    centers its image, so the label can be wider than the bitmap and
+    ``event.x`` can exceed ``image_width``).
+
+    Every cursor→time consumer (hover fraction, tooltip, drag pan) must
+    use this same mapping so zoom anchors and readouts agree.
+    """
+    plot_w = image_width - axis_width
+    if plot_w <= 0:
+        return None
+    plot_x = event_x - axis_width
+    if plot_x < 0 or plot_x >= plot_w:
+        return None
+    return plot_x / plot_w
+
+
 def compute_zoom_view(
     duration: float,
     view_start: float,

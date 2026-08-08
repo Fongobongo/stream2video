@@ -258,7 +258,10 @@ def _classify_error(stderr: str) -> DownloadError:
         return DiskSpaceError("Insufficient disk space")
     if "permission denied" in msg or "errno 13" in msg:
         return PermissionDeniedError("Permission denied")
-    return DownloadError(f"Download failed: {stderr[:500]}")
+    # Keep the message prefix-free: both the CLI ("Download failed: {e}")
+    # and the GUI add their own label, so a "Download failed:" here would
+    # double-print.
+    return DownloadError(stderr[:500] if stderr else "unknown error")
 
 
 def _find_downloaded_file(out_dir: Path, expected: Path) -> Path | None:

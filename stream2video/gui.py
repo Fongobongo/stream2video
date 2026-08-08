@@ -304,9 +304,10 @@ class Stream2VideoGUI(
                         self._set_running(False)
                         return
         except Exception:
-            import logging as _logging
-
-            _logging.getLogger("stream2video.gui").debug("start disk preflight failed", exc_info=True)
+            # Whole pre-flight degraded to a no-op (ffprobe missing, a
+            # units bug in the estimator, messagebox quirk): the feature
+            # silently skipped — log at warning so it isn't invisible.
+            logger.warning("start disk preflight skipped", exc_info=True)
 
         self._ui_update_output(output_dir)
 

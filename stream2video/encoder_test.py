@@ -28,10 +28,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Protocol
-
-if TYPE_CHECKING:
-    pass
+from typing import Any, Protocol
 
 logger = logging.getLogger("stream2video.encoder_test")
 

@@ -3,24 +3,16 @@
 Extracted from ``Stream2VideoGUI``: ``_test_encoders`` (the button
 handler that runs a real ffmpeg smoke test on the picked encoder) and
 ``_on_encoder_change`` (combobox selection → updates the description
-label). The ``ENCODER_DESCRIPTIONS`` ClassVar moves here too.
+label).
 """
 
 from __future__ import annotations
 
-from typing import ClassVar
-
-from stream2video.encoder_test import (
-    ENCODER_DESCRIPTIONS,
-    EncoderTester,
-    get_encoder_description,
-)
+from stream2video.encoder_test import EncoderTester, get_encoder_description
 
 
 class EncoderPanelMixin:
     """The encoder combobox + Test encoder button surface."""
-
-    ENCODER_DESCRIPTIONS: ClassVar[dict[str, str]] = ENCODER_DESCRIPTIONS
 
     def _init_encoder_panel(self) -> None:
         # ``EncoderTester`` worker (see ``stream2video.encoder_test``). Held

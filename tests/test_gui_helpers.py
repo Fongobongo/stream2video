@@ -11,7 +11,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from stream2video.gui_helpers import (
-    STATUS_MAX,
     STATUS_UPDATE_INTERVAL,
     TOTAL_ETA_MIN_PROGRESS,
     EtaSmoother,

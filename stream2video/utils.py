@@ -402,16 +402,14 @@ def read_lines_queue(pipe: IO[bytes]) -> tuple[queue.Queue[bytes | None], thread
     return q, thread
 
 
-_active_proc: subprocess.Popen | None = None
-_active_proc_lock = threading.Lock()
-
-# Scoped process registry (P1.11). The single-slot ``_active_proc`` above
-# was overwritten by every subprocess — a parallel preview waveform and a
-# pipeline encode would race for the slot, and one's ``finally`` would
-# clear the other's registration, so cancel/close couldn't reach the
-# right process. The dict below keys processes by an opaque owner string
-# (caller-chosen, e.g. "pipeline", "preview", "download") so multiple
-# subprocesses can coexist and cancellation can target the right one.
+# Scoped process registry (P1.11). The historical single-slot
+# ``_active_proc`` (removed) was overwritten by every subprocess — a
+# parallel preview waveform and a pipeline encode raced for the slot, and
+# one's ``finally`` cleared the other's registration, so cancel/close
+# couldn't reach the right process. The dict below keys processes by an
+# opaque owner string (caller-chosen, e.g. "pipeline", "preview",
+# "download") so multiple subprocesses can coexist and cancellation can
+# target the right one.
 #
 # ``set_active_process`` / ``get_active_process`` are retained as thin
 # wrappers around the registry so existing call sites (concat.py,
@@ -443,11 +441,6 @@ def set_active_process(proc: subprocess.Popen | None, owner: str = "default") ->
     clobber each other's registration — see P1.11 in the fix plan.
     """
     with _proc_registry_lock:
-        global _active_proc
-        if owner == "default":
-            # Mirror to the legacy single-slot so existing readers see
-            # the latest "default" registration as before.
-            _active_proc = proc
         if proc is None:
             _proc_registry.pop(owner, None)
         else:

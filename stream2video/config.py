@@ -159,11 +159,14 @@ CONFIG_DEFAULTS: dict[str, Any] = {
 # Resource presets (P3.x). Bundle existing tunables (x264_low_memory,
 # memory_limit_mb, memory_reserve_mb, batch_chunk_size, low_process_priority,
 # encoder_threads) into three named profiles so a user can pick a goal at a
-# glance instead of toggling six flags. ``balanced`` reproduces the
-# historical defaults verbatim; the other two override only the tunables
+# glance instead of toggling six flags. ``balanced`` is the empty identity
+# preset — it applies no overrides itself, but applying it still resets all
+# PRESET_MANAGED_KEYS back to CONFIG_DEFAULTS so switching presets in the GUI
+# doesn't stay sticky.
+# The other two override only the tunables
 # listed below — pipeline-only settings (method, encoder, *_quality,
-# threshold, min_silence, margin, timeouts) always come from the user's
-# existing config and are *never* touched by apply_preset.
+# threshold, min_silence, margin, timeouts, gapless_concat) always come from
+# the user's existing config and are *never* touched by apply_preset.
 #
 # ``low_memory`` trades speed for stability on 4-8 GB machines:
 #   * x264_low_memory=True → rc-lookahead=10 / ref=1 / bframes=0 (smaller
@@ -197,7 +200,11 @@ PRESETS: dict[str, dict[str, Any]] = {
         "x264_low_memory": True,
         "low_process_priority": True,
     },
-    "balanced": {"gapless_concat": True},
+    # balanced: identity preset — the GUI resets preset-managed tunables
+    # to CONFIG_DEFAULTS when the user switches back to balanced (see
+    # PRESET_MANAGED_KEYS); no additional overrides here so a user's YAML
+    # ``gapless_concat: false`` isn't silently re-enabled on every run.
+    "balanced": {},
     "maximum_performance": {
         "x264_low_memory": False,
         "memory_limit_mb": 0,

@@ -276,6 +276,7 @@ def _run_segment_concat(
                 low_process_priority=low_process_priority,
                 rlimit_as_mb=rlimit_as_mb,
                 memory_monitor_factory=memory_monitor_factory,
+                manifest=manifest,
             )
         else:
             _c._run_final_concat(

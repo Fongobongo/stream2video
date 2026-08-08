@@ -15,10 +15,8 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
-from typing import ClassVar
 
 from stream2video.gui_helpers import (
-    STATUS_MAX,
     TOTAL_ETA_MIN_PROGRESS,
     EtaSmoother,
     _wrap_status_lines,
@@ -55,8 +53,6 @@ _DEFAULT_PHASE_BOUNDS: tuple[float, float, float, float] = (0.05, 0.40, 0.94, 1.
 
 class ProgressUiMixin:
     """Worker → main-thread UI dispatchers for the progress widgets."""
-
-    _STATUS_MAX: ClassVar[int] = STATUS_MAX
 
     def _init_progress_ui(self) -> None:
         # Per-run state the worker thread reads through the adapter.
@@ -247,11 +243,15 @@ class ProgressUiMixin:
         """
         clamped = max(0.0, min(1.0, value))
         self._phase_progress = clamped
-        if not hasattr(self, "phase_progress"):
-            self._update_pct_label()
-            self._refresh_step_status()
-            return
-        self._tk_after(0, lambda: self.phase_progress.set(clamped))
+        # Always refresh the status line — regardless of whether a legacy
+        # ``phase_progress`` widget attribute exists (the branch below is
+        # kept only so a stale embed/test fake can't crash). Previously
+        # the ``hasattr`` branch skipped the status refresh, so the live
+        # percent froze on any host that still carried the attribute.
+        self._update_pct_label()
+        self._refresh_step_status()
+        if hasattr(self, "phase_progress"):
+            self._tk_after(0, lambda: self.phase_progress.set(clamped))
 
     def _refresh_step_status(self) -> None:
         """Re-render the step indicator with the current in-phase

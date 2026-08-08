@@ -260,10 +260,10 @@ def build_download_status(
     format the bytes/sizes via :mod:`stream2video.formatters` and pass
     them here.
     """
-    downloaded_s = fmt_size(int(downloaded_bytes)) if downloaded_bytes else "?"
+    downloaded_s = fmt_size(int(downloaded_bytes)) if downloaded_bytes is not None else "?"
     speed_s = fmt_speed(speed)
-    eta_s = fmt_time(eta) if eta else "?"
-    if total_bytes:
+    eta_s = fmt_time(eta) if eta is not None else "?"
+    if total_bytes is not None and total_bytes > 0:
         total_s = fmt_size(int(total_bytes))
         if pct is None:
             # Caller didn't compute percent — derive it here so the

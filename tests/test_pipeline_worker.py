@@ -234,7 +234,7 @@ class TestBuildDownloadProgressCallback:
         cb = build_download_progress_callback(gui, start_monotonic=time.monotonic())
         cb(DownloadProgress(downloaded_bytes=0, total_bytes=100_000_000, speed=0, eta=0))
         assert gui.progress_values[0] == 0.0
-        assert "0%" in gui.status_texts[0]
+        assert "0.0%" in gui.status_texts[0]
         assert "Step 1/4: Downloading" in gui.status_texts[0]
 
     def test_scales_progress_bar_to_5_percent_max(self):
@@ -252,7 +252,9 @@ class TestBuildDownloadProgressCallback:
         )
         # 50% * 0.05 = 0.025 (2.5%)
         assert pytest.approx(gui.progress_values[0], abs=1e-6) == 0.025
-        assert "50%" in gui.status_texts[0]
+        # Status line uses the shared build_download_status format
+        # (one-decimal percent, synced with the CLI's description line).
+        assert "50.0%" in gui.status_texts[0]
         # Speed formatting flows through; ETA too.
         # Just assert the line contains the ETA marker we configured.
         assert "ETA" in gui.status_texts[0]

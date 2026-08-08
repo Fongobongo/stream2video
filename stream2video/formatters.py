@@ -29,7 +29,12 @@ def fmt_speed(bytes_per_sec: float | None) -> str:
 
 
 def fmt_time(secs: float) -> str:
+    # divmod() on negative seconds spreads the minus across every unit
+    # (fmt_time(-5) used to render "-1d 23h 59m 59s"); clamp negatives and
+    # non-finite values to 0 — callers pass elapsed durations.
     total = int(secs)
+    if total < 0:
+        total = 0
     d, r = divmod(total, 86400)
     h, r = divmod(r, 3600)
     m, s = divmod(r, 60)

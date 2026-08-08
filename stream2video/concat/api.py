@@ -172,7 +172,7 @@ def cut_and_concat(
         def _wrap(f: float) -> None:
             f = max(0.0, min(1.0, f))
             if f < 0.9:
-                on_phase("cutting", f / 0.9 if 0.9 > 0 else 1.0)
+                on_phase("cutting", f / 0.9)
             elif f < 1.0:
                 on_phase("concatenating", (f - 0.9) / 0.1)
             else:

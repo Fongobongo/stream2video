@@ -8,7 +8,11 @@ from typing import Any
 
 from stream2video.formatters import fmt_clock_time, fmt_zoom_text
 from stream2video.waveform import DB_AXIS_WIDTH
-from stream2video.waveform_view_math import compute_pan_view, compute_zoom_view
+from stream2video.waveform_view_math import (
+    compute_pan_view,
+    compute_zoom_view,
+    cursor_plot_frac,
+)
 
 _logger = logging.getLogger("stream2video.gui")
 
@@ -25,17 +29,19 @@ class WaveformInteractionsMixin:
 
     def _on_waveform_motion(self, event: Any) -> None:
         """Track the cursor's horizontal position over the image."""
-        if self.lbl_wave_image is None:
+        if self._waveform_image_width <= 0:
             return
-        try:
-            width = self.lbl_wave_image.winfo_width()
-        except Exception:
-            return
-        if width <= 0:
-            return
-        frac = max(0.0, min(1.0, event.x / width))
-        self._waveform_cursor_frac = frac
-        self._waveform_cursor_known = True
+        # Map the label-local x into a fraction of the *plot* area (the
+        # dB axis strip on the left is not plot). Using the label width —
+        # or ignoring the axis — mis-anchors cursor zoom and mismatches
+        # the tooltip's time/dB readout; outside the plot the cursor is
+        # treated as unknown so zoom falls back to the view center.
+        frac = cursor_plot_frac(event.x, self._waveform_image_width, DB_AXIS_WIDTH)
+        if frac is None:
+            self._waveform_cursor_known = False
+        else:
+            self._waveform_cursor_frac = frac
+            self._waveform_cursor_known = True
         self._waveform_last_motion_event = event
         if self._waveform_tooltip_after_id is not None:
             try:
@@ -92,16 +98,15 @@ class WaveformInteractionsMixin:
             or self._waveform_image_width <= 0
         ):
             return
-        plot_w = self._waveform_image_width - DB_AXIS_WIDTH
-        plot_x = event.x - DB_AXIS_WIDTH
-        if plot_x < 0 or plot_x >= plot_w:
+        frac = cursor_plot_frac(event.x, self._waveform_image_width, DB_AXIS_WIDTH)
+        if frac is None:
             self._hide_waveform_tooltip()
             return
         view_duration = self._waveform_view_end - self._waveform_view_start
         if view_duration <= 0:
             self._hide_waveform_tooltip()
             return
-        t = self._waveform_view_start + (plot_x / plot_w) * view_duration
+        t = self._waveform_view_start + frac * view_duration
         n_peaks = len(self._waveform_peaks)
         idx = int(t / self._waveform_duration * n_peaks)
         idx = max(0, min(n_peaks - 1, idx))
@@ -284,7 +289,7 @@ class WaveformInteractionsMixin:
         view_duration = self._waveform_view_end - self._waveform_view_start
         if duration <= 0 or view_duration <= 0:
             return
-        zoom_level = duration / view_duration if view_duration > 0 else 1.0
+        zoom_level = duration / view_duration
         if self._waveform_zoom_label is not None:
             self._waveform_zoom_label.configure(text=fmt_zoom_text(zoom_level))
         if self._waveform_slider is not None:

@@ -3,6 +3,7 @@
 import logging
 import shutil
 import signal
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -18,13 +19,6 @@ from rich.progress import (
 )
 
 from stream2video.cli_config import load_config as _load_config_impl
-from stream2video.pipeline_controller import (
-    PipelineConfig as _PipelineConfig,
-)
-from stream2video.pipeline_controller import (
-    validate_pipeline_config as _validate_pipeline_config,
-)
-from stream2video.pipeline_controller import validate_pipeline_config as _validate_pipeline_config
 from stream2video.cli_helpers import (
     ParameterSource,
     _check_ffmpeg,
@@ -64,6 +58,10 @@ from stream2video.download import (
 from stream2video.gui_helpers import build_download_status
 from stream2video.memory import check_memory_reserve
 from stream2video.paths import apply_per_video_dir
+from stream2video.pipeline_controller import PipelineConfig as _PipelineConfig
+from stream2video.pipeline_controller import (
+    validate_pipeline_config as _validate_pipeline_config,
+)
 from stream2video.silence import (
     SilenceCancelledError,
     SilenceDetectionError,
@@ -333,7 +331,8 @@ def main(
         CONFIG_DEFAULTS["waveform_timeout"],
         "--waveform-timeout",
         help="Waveform preview decode timeout in seconds (default 300 = 5 min). "
-        "If not passed, the config file's `waveform_timeout` key is used.",
+        "GUI-only tunable — accepted here so a copied GUI CLI command parses, "
+        "but it has no effect on this CLI run (no waveform preview is rendered).",
     ),
     batch_chunk_size: int = typer.Option(
         CONFIG_DEFAULTS["batch_chunk_size"],
@@ -418,7 +417,10 @@ def main(
     except (ValueError, OSError) as e:
         logger.warning(f"Could not read current SIGINT handler: {e}")
         prev_handler = None
-    _cancel_event, cancel_cb = _make_sigint_cancel()
+    # Only the cancel predicate is used in-process; the event half of the
+    # pair exists for embedding hosts that want to poll it (the signal
+    # handler keeps it alive via closure even though we don't keep a name).
+    _, cancel_cb = _make_sigint_cancel()
 
     fh = None
     try:
@@ -579,6 +581,35 @@ def main(
 
         resolved_memory_limit_mb: str | int = _resolved_memory_limit_mb(memory_limit_mb)
 
+        def _resolved_bool(name: str, flag_value: bool | None) -> bool:
+            if ParameterSource is None:
+                return bool(config.get(name, CONFIG_DEFAULTS.get(name, False)))
+            src = ctx.get_parameter_source(name)
+            if src == ParameterSource.COMMANDLINE:
+                return bool(flag_value)
+            # Config already type-checked in load_config; bool is enforced.
+            # Fall back to CONFIG_DEFAULTS (not a bare ``False``) so the
+            # guard matches the real default when the key is absent.
+            return bool(config.get(name, CONFIG_DEFAULTS.get(name, False)))
+
+        def _resolved_int(name: str, flag_value: int) -> int:
+            if ParameterSource is None:
+                return int(config.get(name, CONFIG_DEFAULTS.get(name, flag_value)))
+            src = ctx.get_parameter_source(name)
+            if src == ParameterSource.COMMANDLINE:
+                return int(flag_value)
+            # Config already validated in load_config; preset overrides
+            # have been applied above so ``config.get(name)`` reflects
+            # the preset-transformed value.
+            return int(config.get(name, CONFIG_DEFAULTS.get(name, flag_value)))
+
+        resolved_x264_low_memory: bool = _resolved_bool("x264_low_memory", x264_low_memory)
+        resolved_use_crf: bool = _resolved_bool("use_crf", use_crf)
+        resolved_gapless_concat: bool = _resolved_bool("gapless_concat", gapless_concat)
+        resolved_low_process_priority: bool = _resolved_bool(
+            "low_process_priority", low_process_priority
+        )
+
         def _resolved_memory_reserve_mb(flag_value: int) -> int:
             if ParameterSource is None:
                 return int(config.get("memory_reserve_mb", 2048))
@@ -594,57 +625,6 @@ def main(
 
         resolved_memory_reserve_mb: int = _resolved_memory_reserve_mb(memory_reserve_mb)
 
-        def _resolved_x264_low_memory(flag_value: bool) -> bool:
-            if ParameterSource is None:
-                return bool(config.get("x264_low_memory", False))
-            src = ctx.get_parameter_source("x264_low_memory")
-            if src == ParameterSource.COMMANDLINE:
-                return flag_value
-            return bool(config.get("x264_low_memory", False))
-
-        resolved_x264_low_memory: bool = _resolved_x264_low_memory(x264_low_memory)
-
-        def _resolved_use_crf(flag_value: bool) -> bool:
-            if ParameterSource is None:
-                return bool(config.get("use_crf", False))
-            src = ctx.get_parameter_source("use_crf")
-            if src == ParameterSource.COMMANDLINE:
-                return flag_value
-            return bool(config.get("use_crf", False))
-
-        resolved_use_crf: bool = _resolved_use_crf(use_crf)
-
-        def _resolved_gapless_concat(flag_value: bool) -> bool:
-            if ParameterSource is None:
-                return bool(config.get("gapless_concat", False))
-            src = ctx.get_parameter_source("gapless_concat")
-            if src == ParameterSource.COMMANDLINE:
-                return flag_value
-            return bool(config.get("gapless_concat", False))
-
-        resolved_gapless_concat: bool = _resolved_gapless_concat(gapless_concat)
-
-        def _resolved_low_process_priority(flag_value: bool) -> bool:
-            if ParameterSource is None:
-                return bool(config.get("low_process_priority", False))
-            src = ctx.get_parameter_source("low_process_priority")
-            if src == ParameterSource.COMMANDLINE:
-                return flag_value
-            return bool(config.get("low_process_priority", False))
-
-        resolved_low_process_priority: bool = _resolved_low_process_priority(low_process_priority)
-
-        def _resolved_bool(name: str, flag_value: bool | None) -> bool:
-            if ParameterSource is None:
-                return bool(config.get(name, False))
-            src = ctx.get_parameter_source(name)
-            if src == ParameterSource.COMMANDLINE:
-                return bool(flag_value)
-            # Config already type-checked in load_config; bool is enforced.
-            # `config.get(name, False)` so a future CONFIG_DEFAULTS edit
-            # that drops a bool key doesn't raise KeyError here.
-            return bool(config.get(name, False))
-
         force = _resolved_bool("force", force)
         delete_after = _resolved_bool("delete_after", delete_after)
         per_video_dir_resolved = _resolved_bool("per_video_dir", per_video_dir)
@@ -652,17 +632,6 @@ def main(
         # reads config["per_video_dir"] (e.g. paths.apply_per_video_dir)
         # sees the same value as the CLI path.
         config["per_video_dir"] = per_video_dir_resolved
-
-        def _resolved_int(name: str, flag_value: int) -> int:
-            if ParameterSource is None:
-                return int(config.get(name, CONFIG_DEFAULTS.get(name, flag_value)))
-            src = ctx.get_parameter_source(name)
-            if src == ParameterSource.COMMANDLINE:
-                return int(flag_value)
-            # Config already validated in load_config; preset overrides
-            # have been applied above so ``config.get(name)`` reflects
-            # the preset-transformed value.
-            return int(config.get(name, CONFIG_DEFAULTS.get(name, flag_value)))
 
         # batch_chunk_size is a preset-tunable, so honour the preset
         # override unless the user passed --batch-chunk-size explicitly.
@@ -1137,13 +1106,15 @@ def main(
         raise typer.Exit(1) from e
 
     finally:
-        # `signal.getsignal` can return `None` on some interpreters when no
-        # handler has been installed; restoring `None` would raise TypeError
-        # (which the prior `except (OSError, ValueError)` did not catch).
-        # Treat `None` as "no explicit handler installed" → restore SIG_DFL
-        # for a clean state. SIG_IGN / SIG_DFL are restored as-is.
+        # ``signal.getsignal`` can return ``None`` on some interpreters
+        # when no handler has been installed; restoring ``None`` would
+        # raise TypeError, so treat ``None`` as "no explicit handler" and
+        # restore SIG_DFL for a clean state. SIG_IGN / SIG_DFL must be
+        # restored just like any other handler: skipping them would leave
+        # our temporary ``_handler`` installed, so a host that had SIGINT
+        # ignored would see it point at a stale cancel event afterwards.
         restore_to: Any = signal.SIG_DFL if prev_handler is None else prev_handler
-        if restore_to not in (signal.SIG_IGN, signal.SIG_DFL):
+        if restore_to is not None:
             try:
                 signal.signal(signal.SIGINT, restore_to)
             except (OSError, ValueError, TypeError) as e:

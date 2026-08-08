@@ -19,6 +19,7 @@ from pathlib import Path
 
 from stream2video import concat as _c
 from stream2video.concat.constants import (
+    _OOM_HINT,
     _STALL_KILL,
     _STALL_WARNING,
     _STDERR_TRUNCATE,
@@ -147,6 +148,11 @@ def _run_ffmpeg(
         drain_done = False
         last_progress_time = time.monotonic()
         process_start = time.monotonic()
+        # Latched once the first stall warning is logged; a stalled encode
+        # otherwise spams "no progress" twice a second for the whole
+        # stall window from the queue.Empty branch below. Every progress
+        # line resets the latch so a *new* stall period warns again once.
+        stall_warned = False
 
         # P1.5: stall watchdog. The ``track_progress=True`` branch checks
         # ``elapsed_since_progress`` inside its readline loop, but readline
@@ -228,7 +234,8 @@ def _run_ffmpeg(
                                     f"{label} stalled -- no progress for {int(elapsed_since_progress)}s, "
                                     "possible resource exhaustion"
                                 ) from None
-                            elif elapsed_since_progress > stall_warning:
+                            elif elapsed_since_progress > stall_warning and not stall_warned:
+                                stall_warned = True
                                 logger.warning(
                                     f"{label}: no progress for {int(elapsed_since_progress)}s -- waiting..."
                                 )
@@ -243,6 +250,7 @@ def _run_ffmpeg(
                         line = raw_line.decode("utf-8", errors="replace").strip()
                         if line.startswith("out_time_us="):
                             last_progress_time = time.monotonic()
+                            stall_warned = False
                             if progress_callback:
                                 try:
                                     us = int(line.split("=", 1)[1])
@@ -256,7 +264,8 @@ def _run_ffmpeg(
                                 f"{label} stalled -- no progress for {int(elapsed_since_progress)}s, "
                                 "possible resource exhaustion"
                             )
-                        elif elapsed_since_progress > stall_warning:
+                        elif elapsed_since_progress > stall_warning and not stall_warned:
+                            stall_warned = True
                             logger.warning(
                                 f"{label}: no progress for {int(elapsed_since_progress)}s -- waiting..."
                             )
@@ -284,9 +293,7 @@ def _run_ffmpeg(
                     raise FFmpegOutOfMemoryError(
                         f"{label} ran out of memory "
                         f"(memory monitor hard limit hit, "
-                        f"rc={process.returncode}); "
-                        "try --preset low_memory / lowering "
-                        "--memory-limit-mb / reducing --batch-chunk-size"
+                        f"rc={process.returncode}); {_OOM_HINT}"
                     )
                 # Stall-watchdog kill (rc=-9 on POSIX): distinguish from
                 # a real OOM kill BEFORE looks_like_oom claims it (P1
@@ -309,9 +316,7 @@ def _run_ffmpeg(
                 if _c.looks_like_oom(process.returncode, stderr_text):
                     raise FFmpegOutOfMemoryError(
                         f"{label} ran out of memory "
-                        f"(rc={process.returncode}); "
-                        "try --preset low_memory / lowering "
-                        "--memory-limit-mb / reducing --batch-chunk-size"
+                        f"(rc={process.returncode}); {_OOM_HINT}"
                     )
                 raise FFmpegError(f"{label} failed: {msg}")
 
@@ -320,8 +325,7 @@ def _run_ffmpeg(
                 raise FFmpegOutOfMemoryError(
                     f"{label} ran out of memory "
                     "(memory monitor hard limit hit); "
-                    "try --preset low_memory / lowering --memory-limit-mb / "
-                    "reducing --batch-chunk-size"
+                    f"{_OOM_HINT}"
                 ) from None
             raise
         except subprocess.TimeoutExpired as e:
@@ -330,8 +334,7 @@ def _run_ffmpeg(
                 raise FFmpegOutOfMemoryError(
                     f"{label} ran out of memory "
                     "(memory monitor hard limit hit); "
-                    "try --preset low_memory / lowering --memory-limit-mb / "
-                    "reducing --batch-chunk-size"
+                    f"{_OOM_HINT}"
                 ) from None
             raise FFmpegError(f"{label} timeout after {e.timeout}s") from None
         finally:
@@ -431,8 +434,7 @@ def _run_subprocess_cmd(
                 stderr_text = "".join(stderr_lines)
                 if _c.looks_like_oom(process.returncode, stderr_text):
                     raise FFmpegOutOfMemoryError(
-                        f"{label} ran out of memory (rc={process.returncode}); "
-                        "try --preset low_memory / lowering --memory-limit-mb"
+                        f"{label} ran out of memory (rc={process.returncode}); {_OOM_HINT}"
                     )
                 # ``ConcatError`` is resolved through the package so
                 # ``stream2video.concat.ConcatError`` identity is

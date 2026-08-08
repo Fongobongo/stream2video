@@ -50,7 +50,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from stream2video.completion_sound import play_completion_sound
 from stream2video.config import CONFIG_DEFAULTS
 from stream2video.download import DownloadProgress
-from stream2video.formatters import fmt_size, fmt_speed, fmt_time
+from stream2video.gui_helpers import build_download_status
 from stream2video.silence import SilenceSegment
 
 if TYPE_CHECKING:
@@ -246,11 +246,16 @@ def build_download_progress_callback(
             frac = min(1.0, 0.1 * elapsed)  # unknown size: cap at the synthetic bar
             gui.ui_progress(min(0.04, 0.005 * elapsed))
         gui.ui_phase_progress(frac)
-        pct = 100.0 * (p.downloaded_bytes or 0.0) / p.total_bytes if p.total_bytes else 0.0
+        # Delegate the status-line format to the shared helper so the GUI
+        # and CLI stay in sync (the CLI prints the same string via
+        # build_download_status in cli.py's progress callback).
         gui.ui_status(
-            f"Step 1/4: Downloading {pct:.0f}% "
-            f"({fmt_size(int(p.downloaded_bytes or 0))}/{fmt_size(int(p.total_bytes or 0))}) "
-            f"at {fmt_speed(p.speed)} ETA {fmt_time(p.eta) if p.eta else '?'}",
+            "Step 1/4: " + build_download_status(
+                downloaded_bytes=float(p.downloaded_bytes or 0.0),
+                total_bytes=float(p.total_bytes) if p.total_bytes else None,
+                speed=p.speed,
+                eta=p.eta,
+            ),
             force=True,
         )
         gui.ui_overall(elapsed, p.eta or 0.0, True)
