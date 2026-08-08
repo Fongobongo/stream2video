@@ -671,6 +671,45 @@ def main(
         # the same fallback semantics apply).
         resolved_rlimit_as_mb: int = _resolved_int("rlimit_as_mb", rlimit_as_mb)
 
+        # P1: pipeline timeouts + network tunables. These were the
+        # 9 yaml keys silently ignored before — the CLI used to rely on
+        # typer defaults populated from CONFIG_DEFAULTS at import time,
+        # so a user ``silence_timeout: 60`` in config.yaml had no effect.
+        resolved_download_timeout: int = _resolved_int("download_timeout", download_timeout)
+        resolved_connect_timeout: int = _resolved_int("connect_timeout", connect_timeout)
+        resolved_no_progress_timeout: int = _resolved_int("no_progress_timeout", no_progress_timeout)
+        resolved_silence_timeout: int = _resolved_int("silence_timeout", silence_timeout)
+        resolved_segment_encode_timeout: int = _resolved_int(
+            "segment_encode_timeout", segment_encode_timeout
+        )
+        resolved_final_concat_timeout: int = _resolved_int(
+            "final_concat_timeout", final_concat_timeout
+        )
+        resolved_stall_kill_timeout: int = _resolved_int("stall_kill_timeout", stall_kill_timeout)
+        resolved_min_part_bytes: int = _resolved_int("min_part_bytes", min_part_bytes)
+
+        # P1: proxy — honour YAML + CLI. ``--proxy URL`` (COMMANDLINE)
+        # wires the value AND enables it (the user's intent is clear).
+        # YAML's ``proxy: url`` is gated by ``proxy_active: true`` so a
+        # config file doesn't silently change networking (matches the
+        # GUI's checkbox contract — pipeline_worker.py line ~197).
+        _proxy_src = (
+            ctx.get_parameter_source("proxy") if ParameterSource is not None else None
+        )
+        if _proxy_src == getattr(ParameterSource, "COMMANDLINE", None):
+            resolved_proxy = proxy
+        else:
+            resolved_proxy = (
+                config.get("proxy", "") if config.get("proxy_active", False) else ""
+            )
+        if isinstance(resolved_proxy, bool) or (
+            not isinstance(resolved_proxy, str) and resolved_proxy is not None
+        ):
+            console.print(
+                f"[red]Invalid proxy:[/red] {resolved_proxy!r} (must be a string URL or empty)"
+            )
+            raise typer.Exit(1)
+
         # Defensive re-validation through the shared pipeline validator.
         # ``_resolved_*`` + ``load_config`` already rejected every
         # CLI-visible bad key; this second pass runs the final resolved
@@ -704,16 +743,46 @@ def main(
             gapless_concat=resolved_gapless_concat,
             low_process_priority=resolved_low_process_priority,
             rlimit_as_mb=resolved_rlimit_as_mb,
-            download_timeout=download_timeout,
-            connect_timeout=connect_timeout,
-            no_progress_timeout=no_progress_timeout,
-            proxy=proxy,
+            download_timeout=resolved_download_timeout,
+            connect_timeout=resolved_connect_timeout,
+            no_progress_timeout=resolved_no_progress_timeout,
+            proxy=resolved_proxy,
+            segment_encode_timeout=resolved_segment_encode_timeout,
+            final_concat_timeout=resolved_final_concat_timeout,
+            silence_timeout=resolved_silence_timeout,
+            stall_kill_timeout=resolved_stall_kill_timeout,
+            min_part_bytes=resolved_min_part_bytes,
         )
         _cfg_errors = _validate_pipeline_config(_pcfg)
         if _cfg_errors:
             for _err in _cfg_errors:
                 console.print(f"[red]Invalid configuration:[/red] {_err}")
             raise typer.Exit(1)
+
+        # P1: reify ``software_fallback="ask"``. The callback typer
+        # confirms with (``--force``-style defaults can't short-circuit
+        # because the sigint-cancel has already fired for Ctrl+C-era
+        # reproducibility) closes the gap between the CLI and the
+        # GUI's consent dialog.
+        def _make_fallback_consent() -> "Callable[[], bool] | None":
+            if software_fallback != "ask":
+                return None
+
+            def _consent() -> bool:
+                try:
+                    import typer as _typer
+
+                    return _typer.confirm(
+                        f"Selected encoder {encoder!r} is unavailable or failed. "
+                        "Fall back to libx264 (CPU-heavy, ~3-5x slower)?",
+                        default=False,
+                    )
+                except Exception:
+                    # Non-interactive tty / EOF / headless: refuse the
+                    # fallback (``ask`` must not silently switch).
+                    return False
+
+            return _consent
 
         progress_columns = [
             TextColumn("[progress.description]{task.description}"),
@@ -775,10 +844,10 @@ def main(
                     cancel_callback=cancel_cb,
                     quality=download_quality,
                     progress_callback=_download_progress_cb,
-                    download_timeout=download_timeout,
-                    connect_timeout=connect_timeout,
-                    no_progress_timeout=no_progress_timeout,
-                    proxy=proxy,
+                    download_timeout=resolved_download_timeout,
+                    connect_timeout=resolved_connect_timeout,
+                    no_progress_timeout=resolved_no_progress_timeout,
+                    proxy=resolved_proxy,
                 )
                 video_path = download_result.path
                 if download_result.is_downloaded:
@@ -921,7 +990,7 @@ def main(
                         progress_callback=silence_progress,
                         cancel_callback=cancel_cb,
                         resume_cache_path=resume_cache_path,
-                        timeout=silence_timeout,
+                        timeout=resolved_silence_timeout,
                     )
                     save_silence_cache(video_path, silence_segments, output_dir, config)
                     # Detection succeeded → the final cache is the
@@ -1000,6 +1069,7 @@ def main(
                     audio_quality=audio_quality,
                     cancel_callback=cancel_cb,
                     software_fallback=software_fallback,
+                    fallback_consent=_make_fallback_consent(),
                     x264_preset=x264_preset,
                     encoder_threads=resolved_encoder_threads,
                     output_fps=output_fps,
@@ -1011,12 +1081,12 @@ def main(
                     gapless_concat=resolved_gapless_concat,
                     low_process_priority=resolved_low_process_priority,
                     rlimit_as_mb=resolved_rlimit_as_mb,
-                    segment_encode_timeout=segment_encode_timeout,
-                    final_concat_timeout=final_concat_timeout,
-                    stall_kill_timeout=stall_kill_timeout,
+                    segment_encode_timeout=resolved_segment_encode_timeout,
+                    final_concat_timeout=resolved_final_concat_timeout,
+                    stall_kill_timeout=resolved_stall_kill_timeout,
                     stall_warning_timeout=config.get("stall_warning_timeout", 120),
                     batch_chunk_size=batch_chunk_size,
-                    min_part_bytes=min_part_bytes,
+                    min_part_bytes=resolved_min_part_bytes,
                 )
 
                 # Mark whichever task is live as done

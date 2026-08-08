@@ -485,11 +485,14 @@ def _run_silencedetect(
                         "may be truncated"
                     )
                 return list(progressive_segments)
-            # Batch path: _parse_ffmpeg_output already logs mismatched
-            # starts/ends; trailing silence there is handled by the same
-            # warning path (can't recover in batch mode without the
-            # progressive state machine).
-            return _parse_ffmpeg_output("".join(stderr_lines))
+            # Batch path: the parser closes a trailing silence_start
+            # at the media duration when we know it (the canonical
+            # pipeline probes it via ``_probe_duration``), so the CLI's
+            # no-callback path and the GUI's progressive path now produce
+            # the same cut plan on trailing silence. Falls back to
+            # dropping the dangling start (with a warning) when duration
+            # is unavailable — the preview path.
+            return _parse_ffmpeg_output("".join(stderr_lines), duration=duration)
 
     except subprocess.TimeoutExpired as e:
         process.kill()

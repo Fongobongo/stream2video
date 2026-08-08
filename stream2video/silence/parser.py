@@ -172,7 +172,9 @@ class SilenceParser:
         return list(self._segments)
 
 
-def _parse_ffmpeg_output(stderr: str) -> list[SilenceSegment]:
+def _parse_ffmpeg_output(
+    stderr: str, duration: float | None = None
+) -> list[SilenceSegment]:
     """Parse ffmpeg silencedetect output (batch path).
 
     Delegates to :class:`SilenceParser` so the parsing logic lives in
@@ -180,15 +182,18 @@ def _parse_ffmpeg_output(stderr: str) -> list[SilenceSegment]:
     implementation diverged from the progressive path on the
     decimal-comma handling (P1.13) before P2.5 unified them.
 
-    Batch callers don't have a media duration to close trailing
-    silence with, so unmatched starts are dropped here (with a
-    warning from ``finalize``). Callers that know the duration
-    should use ``SilenceParser`` directly with ``finalize(duration=...)``.
+    ``duration``: when known (media duration in seconds, already
+    ffprobe'd by the caller), a trailing ``silence_start`` without a
+    matching ``silence_end`` is closed at that duration — the batch
+    path then produces the same cut plan as the progressive path
+    (P1: CLI/GUI parity). When None the trailing start is dropped with
+    a warning (historical behaviour for callers that don't know the
+    duration, e.g. the waveform preview).
     """
     parser = SilenceParser()
     for line in stderr.splitlines():
         parser.feed(line)
-    return parser.finalize(duration=None)
+    return parser.finalize(duration=duration)
 
 
 def apply_margin(

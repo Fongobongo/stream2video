@@ -256,6 +256,34 @@ def _run_gapless_segment_concat(
             if cancel_callback and cancel_callback():
                 raise _c.CancelledError(f"gapless tree L{level} cancelled")
             if inter.exists() and inter.stat().st_size >= _MIN_PART_BYTES:
+                # P1: cheap "size is enough" check is insufficient — a
+                # mid-write crash leaves a file that passes the byte
+                # threshold but has no moov / corrupt stream, and the
+                # concat demuxer would happily embed it into the final
+                # file. The segment path has done ffprobe validation for
+                # a long time (segment.py:119); the tree path had the
+                # gap. MKV uses stream_type="a" because PCM audio + H.264
+                # video are both streams in the same file — "v" alone
+                # would reject a video-only chunk.
+                try:
+                    from stream2video.concat.probing import _ffprobe_is_valid_media
+
+                    if not _ffprobe_is_valid_media(inter, stream_type="v"):
+                        raise _c.ConcatError(
+                            f"gapless tree L{level} intermediate {inter.name} "
+                            f"is corrupt (ffprobe validation failed); delete "
+                            f"{tree_dir.name}/ to force re-encode"
+                        )
+                except _c.ConcatError:
+                    raise
+                except Exception:
+                    # ffprobe missing / timed out — fall back to the size
+                    # check. A crash mid-write here doesn't *create* a
+                    # corrupt file; we just don't detect it.
+                    logger.debug(
+                        f"gapless tree L{level}: ffprobe validation skipped for {inter}",
+                        exc_info=True,
+                    )
                 next_level.append(inter)
                 completed_groups += 1
                 _report_tree_progress()

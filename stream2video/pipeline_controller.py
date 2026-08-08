@@ -353,9 +353,16 @@ class PipelineController:
     # and ``apply_per_video_dir`` has resolved the final output dir.
     # The GUI uses it to add the project to the recent-projects panel,
     # update the output label, and refresh the file-info panel — all
-    # mid-pipeline side effects that need to happen BEFORE silence
-    # detection starts. Optional because the CLI doesn't need it.
+    # main-thread operations the worker thread defers to this hook.
     on_output_resolved: Callable[[Path, Path, bool], None] | None = None
+    # ``on_fallback_consent`` implements ``software_fallback="ask"`` for
+    # interactive hosts. The pipeline controller's fresh-encoder check
+    # and mid-run fallback both call it when the requested encoder is
+    # missing / fails; the GUI pops a yes/no dialog on the main thread
+    # and the CLI wires ``typer.confirm``. When None (default) and the
+    # policy is ``ask``, the pipeline raises — ``ask`` without a consent
+    # handler must never silently switch encoders.
+    on_fallback_consent: Callable[[], bool] | None = None
 
     # Mutable per-run state. The GUI reads these after ``run()`` to
     # drive the completion summary + recent-projects panel; on error
@@ -907,6 +914,7 @@ class PipelineController:
             stall_warning_timeout=self.cfg.stall_warning_timeout,
             batch_chunk_size=self.cfg.batch_chunk_size,
             min_part_bytes=self.cfg.min_part_bytes,
+            fallback_consent=self.on_fallback_consent,
         )
 
         self._output_path = None

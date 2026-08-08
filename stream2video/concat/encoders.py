@@ -404,6 +404,16 @@ def get_video_encoder(
             use_crf=use_crf,
         )
 
+    # If the requested encoder IS libx264 and it failed its smoke test,
+    # falling back to libx264 again would guarantee a mid-pipeline crash
+    # (the ffmpeg build is broken). Surface a clear startup error instead.
+    if preferred == "libx264":
+        raise EncoderUnavailableError(
+            "libx264 was requested but the ffmpeg smoke test failed "
+            "(encoder not compiled in / broken ffmpeg installation). "
+            "Install a working ffmpeg or select a hardware encoder."
+        )
+
     # HW encoder unavailable -- apply fallback policy.
     if software_fallback == "enabled":
         logger.warning(f"{preferred} not available, falling back to libx264")

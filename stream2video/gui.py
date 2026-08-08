@@ -462,6 +462,54 @@ class _PipelineGuiCallbacksAdapter:
     def log(self, message: str) -> None:
         self._gui._log(message)
 
+    def _fallback_consent_enc_label(self) -> str:
+        """Best-effort encoder name for the consent dialog. Falls back to
+        a neutral string when the widget is unavailable (test fakes,
+        early-start races) so ``_tk_after`` scheduling never crashes."""
+        try:
+            encoder = str(self._gui.combo_encoder.get())
+            quality = str(self._gui.combo_video_quality.get())
+            return f"{encoder} ({quality})"
+        except Exception:
+            return "the selected encoder"
+
+    def ask_fallback_consent(self) -> bool:
+        """Block the worker thread while the user answers a yes/no dialog
+        on the Tk main loop. Implements the ``software_fallback="ask"``
+        contract for interactive hosts (mirrors ``typer.confirm`` for
+        the CLI). Any dialog error (Tk already destructed, headless run)
+        defaults to *refuse* so ``ask`` never silently switches encoders.
+        """
+        answered = threading.Event()
+        consent: list[bool] = [False]
+
+        def _ask() -> None:
+            try:
+                consent[0] = bool(
+                    messagebox.askyesno(
+                        "Encoder fallback",
+                        "The selected encoder is unavailable or failed: "
+                        f"{self._fallback_consent_enc_label()}.\n\n"
+                        "Fall back to libx264 (CPU, slower) for this run?",
+                        parent=self._gui,
+                    )
+                )
+            except Exception:
+                consent[0] = False
+            finally:
+                answered.set()
+
+        try:
+            self._gui._tk_after(0, _ask)
+        except Exception:
+            return False
+        # Wait up to 60 s — plenty for a user click; a wedged Tk loop
+        # (e.g. mid-shutdown) must not hang the pipeline worker forever.
+        if not answered.wait(timeout=60):
+            self._gui._log("[WARN] Encoder-fallback dialog timed out — refusing fallback")
+            return False
+        return consent[0]
+
     def ui_progress(self, value: float) -> None:
         self._gui._ui_progress(value)
 

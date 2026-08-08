@@ -446,6 +446,12 @@ class _FakeGuiCallbacks:
         self.live_segments_pops.append(video_path)
         return None
 
+    def ask_fallback_consent(self) -> bool:
+        # Tests: always refuse so the ``ask`` policy raises (we'd need a
+        # real Tk to click the dialog). A consent-yes path would need a
+        # dedicated fake subclass.
+        return False
+
 
 class TestPipelineWorkerRun:
     def _params(self) -> PipelineWorkerParams:
