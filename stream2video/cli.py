@@ -693,18 +693,13 @@ def main(
         # YAML's ``proxy: url`` is gated by ``proxy_active: true`` so a
         # config file doesn't silently change networking (matches the
         # GUI's checkbox contract — pipeline_worker.py line ~197).
-        _proxy_src = (
-            ctx.get_parameter_source("proxy") if ParameterSource is not None else None
-        )
-        if _proxy_src == getattr(ParameterSource, "COMMANDLINE", None):
-            resolved_proxy = proxy
-        else:
-            resolved_proxy = (
+        if ParameterSource is None or ctx.get_parameter_source("proxy") != ParameterSource.COMMANDLINE:
+            resolved_proxy: str = (
                 config.get("proxy", "") if config.get("proxy_active", False) else ""
             )
-        if isinstance(resolved_proxy, bool) or (
-            not isinstance(resolved_proxy, str) and resolved_proxy is not None
-        ):
+        else:
+            resolved_proxy = proxy if isinstance(proxy, str) else ""
+        if not isinstance(resolved_proxy, str):
             console.print(
                 f"[red]Invalid proxy:[/red] {resolved_proxy!r} (must be a string URL or empty)"
             )
@@ -770,9 +765,7 @@ def main(
 
             def _consent() -> bool:
                 try:
-                    import typer as _typer
-
-                    return _typer.confirm(
+                    return typer.confirm(
                         f"Selected encoder {encoder!r} is unavailable or failed. "
                         "Fall back to libx264 (CPU-heavy, ~3-5x slower)?",
                         default=False,

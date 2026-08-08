@@ -254,7 +254,7 @@ class TestPipelineControllerRun:
         def on_progress(f: float) -> None:
             calls["progress"].append(f)
 
-        def on_status(s: str) -> None:
+        def on_status(s: str, force: bool = False) -> None:
             calls["status"].append(s)
 
         def on_log(s: str) -> None:

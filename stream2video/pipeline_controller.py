@@ -159,7 +159,11 @@ class PipelineCallbacks:
     """
 
     on_progress: Callable[[float], None]
-    on_status: Callable[[str], None]
+    # ``force=True`` bypasses the GUI's status throttling for step-boundary
+    # / error updates. A plain ``Callable[[str], None]`` used to be OK for
+    # the CLI only; now the CLI's bundle also passes a two-positional
+    # closure, so the signature is uniform across hosts.
+    on_status: Callable[[str, bool], None]
     on_log: Callable[[str], None]
     on_info: Callable[[str], None]
     on_overall: Callable[[float, float | None, bool], None]
@@ -375,10 +379,7 @@ class PipelineController:
     _src_duration: float | None = field(default=None, init=False)
 
     def _set_status(self, text: str, *, force: bool = False) -> None:
-        try:
-            self.cb.on_status(text, force=force)  # type: ignore[call-arg]
-        except TypeError:
-            self.cb.on_status(text)
+        self.cb.on_status(text, force=force)
 
     def _set_phase_progress(self, fraction: float) -> None:
         """Dispatch the per-phase bar update (no-op when the callback

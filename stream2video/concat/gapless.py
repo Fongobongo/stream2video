@@ -18,6 +18,7 @@ from stream2video.concat.constants import (
     _STALL_KILL,
     _STALL_WARNING,
 )
+from stream2video.concat.probing import _ffprobe_is_valid_media
 from stream2video.memory import MemoryMonitor
 from stream2video.tools import ffmpeg_path
 
@@ -266,13 +267,11 @@ def _run_gapless_segment_concat(
                 # video are both streams in the same file — "v" alone
                 # would reject a video-only chunk.
                 try:
-                    from stream2video.concat.probing import _ffprobe_is_valid_media
-
                     if not _ffprobe_is_valid_media(inter, stream_type="v"):
                         raise _c.ConcatError(
                             f"gapless tree L{level} intermediate {inter.name} "
                             f"is corrupt (ffprobe validation failed); delete "
-                            f"{tree_dir.name}/ to force re-encode"
+                            f"{tree_dir.resolve()} to force re-encode"
                         )
                 except _c.ConcatError:
                     raise
