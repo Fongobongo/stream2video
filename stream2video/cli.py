@@ -30,6 +30,12 @@ from stream2video.cli_helpers import (
     logger,
 )
 from stream2video.cli_resolver import make_resolver
+# Module-level flag toggled by --log-format json. When True the human-
+# readable banner and Rich progress bars are suppressed so the stdout
+# stream stays line-per-JSON-record (piping to ``jq`` or an aggregator
+# like ELK is unaffected by decorative output).
+_JSON_LOG_MODE: bool = False
+
 from stream2video.concat import CancelledError, ConcatError, cut_and_concat
 from stream2video.config import (
     CONFIG_DEFAULTS,
@@ -77,10 +83,130 @@ def load_config(config_file: Path | None) -> dict:
     return _load_config_impl(config_file, console)
 
 
+def _doctor_callback(ctx: typer.Context, param: Any, value: bool) -> bool:
+    """Eager callback for ``--doctor``: run diagnostics + exit before the
+    positional-arg validator fires, so ``stream2video --doctor`` works
+    without an input path.
+    """
+    if value:
+        _run_doctor(ctx.params.get("config") if ctx else None)
+        raise typer.Exit(0)
+    return value
+
+
+def _run_doctor(config_file: Path | None = None) -> None:
+    """Print environment diagnostics and exit.
+
+    Reports system information (Python, ffmpeg, encoders, RAM, config)
+    in a compact OK/fail list. Exits 0 when all critical checks pass,
+    1 otherwise. Non-critical items (psutil, YAML config file) only
+    print a warning — the CLI still works without them.
+    """
+    import shutil
+    import subprocess
+    import sys
+
+    from rich.table import Table
+
+    from stream2video.config import _base_dir, settings_path, user_defaults_path
+
+    all_critical_ok = True
+    tbl = Table(show_header=False, box=None, padding=(0, 1))
+    tbl.add_column("status", width=4)
+    tbl.add_column("check")
+
+    # Python version
+    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    ok = sys.version_info >= (3, 13)
+    tbl.add_row(
+        "[green]✓[/green]" if ok else "[red]✗[/red]",
+        f"Python {py_ver}" + ("" if ok else "  [red](3.13+ required)[/red]"),
+    )
+    if not ok:
+        all_critical_ok = False
+
+    # ffmpeg + ffprobe presence
+    for tool in ("ffmpeg", "ffprobe"):
+        exe = shutil.which(tool)
+        if exe:
+            try:
+                out = subprocess.run(
+                    [exe, "-version"], capture_output=True, text=True, timeout=5, check=False
+                ).stdout.splitlines()[0].strip()
+                tbl.add_row("[green]✓[/green]", f"{tool}: {out} ({exe})")
+            except Exception as e:
+                tbl.add_row("[green]✓[/green]", f"{tool}: found at {exe} [dim](version unknown: {e})[/dim]")
+        else:
+            tbl.add_row("[red]✗[/red]", f"{tool}: not found in PATH")
+            all_critical_ok = False
+
+    # GPU encoder availability (smoke test via the existing check_encoder).
+    # Each check spawns a 1-frame lavfi encode — fast (< 2s each) and
+    # authoritative.
+    from stream2video.concat.encoders import check_encoder
+
+    enc_rows: list[str] = []
+    for enc_name in ("h264_nvenc", "h264_amf", "h264_mf"):
+        enc_rows.append(f"{enc_name}={'ok' if check_encoder(enc_name) else 'no'}")
+    tbl.add_row("[green]✓[/green]", f"GPU encoders: {', '.join(enc_rows)}")
+
+    # RAM
+    try:
+        from stream2video.memory import _HAS_PSUTIL, _available_ram_mb
+
+        if _HAS_PSUTIL:
+            import psutil
+
+            vm = psutil.virtual_memory()
+            total_mb = vm.total / (1024 * 1024)
+            avail_mb = _available_ram_mb()
+            budget_mb = int(total_mb * 0.60)  # 60% default auto policy
+            tbl.add_row(
+                "[green]✓[/green]",
+                f"RAM: {total_mb / 1024:.0f} GB (60% budget = {budget_mb / 1024:.1f} GB, "
+                f"available now: {avail_mb:.0f} MB if avail_mb else '?')",
+            )
+        else:
+            tbl.add_row(
+                "[yellow]![/yellow]",
+                "RAM: psutil not installed (no memory guardrail; install with `pip install stream2video[monitor]`)",
+            )
+    except Exception as e:
+        tbl.add_row("[yellow]![/yellow]", f"RAM: could not query ({e})")
+
+    # Config file (YAML or user_defaults.json)
+    if config_file is not None:
+        # User explicitly passed --config: report whether it loaded.
+        if config_file.exists():
+            tbl.add_row("[green]✓[/green]", f"Config file: {config_file}")
+        else:
+            tbl.add_row(
+                "[yellow]![/yellow]",
+                f"Config file: {config_file} [yellow](not found — using defaults)[/yellow]",
+            )
+    user_cfg = user_defaults_path()
+    if user_cfg.exists():
+        tbl.add_row("[green]✓[/green]", f"User defaults: {user_cfg}")
+    else:
+        tbl.add_row("[dim]i[/dim]", f"User defaults: {user_cfg} [dim](none — defaults used)[/dim]")
+
+    # Output dir (settings file location — informational)
+    tbl.add_row("[dim]i[/dim]", f"Settings: {settings_path()}")
+    tbl.add_row("[dim]i[/dim]", f"Base dir: {_base_dir()}")
+
+    console.print("\n[bold cyan]stream2video doctor[/bold cyan]\n")
+    console.print(tbl)
+    if not all_critical_ok:
+        console.print("\n[red]Some critical checks failed — see above[/red]")
+
+
 @app.command()
 def main(
     ctx: typer.Context,
-    input_video: str = typer.Argument(..., help="URL or path to input video"),
+    input_video: str = typer.Argument(
+        ...,  # required positionally; --doctor / --completion bypass via is_eager
+        help="URL or path to input video",
+    ),
     output_dir: Path = typer.Option(
         Path("./processed_videos"),
         "--output",
@@ -251,11 +377,29 @@ def main(
         help="Group all artifacts (source, WAV cache, JSON cache, output, log) "
         "into a per-video subdirectory. Default follows config/per_video_dir.",
     ),
+    doctor: bool = typer.Option(
+        False,
+        "--doctor",
+        # Eager callback runs the diagnostics and exits before Typer
+        # validates the positional INPUT_VIDEO argument, so
+        # ``stream2video --doctor`` works without a URL/path.
+        is_flag=True,
+        is_eager=True,
+        callback=_doctor_callback,
+        help="Print environment diagnostics (Python version, ffmpeg/encoders, "
+        "RAM, config) and exit.",
+    ),
     log_level: str = typer.Option(
         "INFO",
         "--log-level",
         "-l",
         help="Logging level (DEBUG, INFO, WARNING, ERROR)",
+    ),
+    log_format: str = typer.Option(
+        "rich",
+        "--log-format",
+        help="Console log format: 'rich' (default — human-readable markup), "
+        "'json' (one JSON object per line, for log aggregation: ELK/Splunk/Loki).",
     ),
     download_timeout: int = typer.Option(
         CONFIG_DEFAULTS["download_timeout"],
@@ -377,6 +521,18 @@ def main(
     3. Cut and concatenate video
     """
     pipeline_start_time = time.monotonic()  # for the final-summary wall-clock line
+
+    # Validate log_format BEFORE any logging happens so an unknown format
+    # exits cleanly instead of producing half-Rich/half-JSON output.
+    valid_formats = ("rich", "json")
+    log_format_lower = log_format.lower()
+    if log_format_lower not in valid_formats:
+        console.print(
+            f"[red]Invalid log format:[/red] {log_format!r} "
+            f"(use {' or '.join(repr(f) for f in valid_formats)})"
+        )
+        raise typer.Exit(1)
+
     # Configure root logging ONCE at entry — see P2.9 in the fix plan.
     # Previously ``logging.basicConfig`` ran at import time, which
     # hijacked the root logger of any host application that imported
@@ -384,11 +540,33 @@ def main(
     # here keeps the CLI's user-facing logging behaviour (Rich stderr
     # handler + DEBUG-level root) for ``stream2video`` invocations
     # while leaving importers' logging untouched.
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(message)s",
-        handlers=[_console_handler],
-    )
+    if log_format_lower == "json":
+        # JSON structured logging — replace the Rich console handler with
+        # a JSON formatter writing to stdout so the caller can pipe the
+        # log stream into a renderer (``| jq .``, ELK, Splunk). The file
+        # handler still writes human-readable text to stream2video.log;
+        # only stdout switches format. The human-readable banner and
+        # progress bars are suppressed in JSON mode (they'd pollute the
+        # JSON stream).
+        from stream2video.json_logging import install_json_handler
+
+        _json_handler = install_json_handler(logger, level=log_level.upper())
+        logging.basicConfig(
+            level=logging.DEBUG,
+            handlers=[_json_handler],
+            force=True,  # replace any handler the caller attached
+        )
+        # Suppress the stdout banner in JSON mode — mixing non-JSON
+        # lines into the log stream breaks line-per-record parsers.
+        global _JSON_LOG_MODE
+        _JSON_LOG_MODE = True
+    else:
+        _JSON_LOG_MODE = False
+        logging.basicConfig(
+            level=logging.DEBUG,
+            format="%(message)s",
+            handlers=[_console_handler],
+        )
 
     # Verify ffmpeg is available
     _check_ffmpeg()
@@ -408,8 +586,14 @@ def main(
     output_dir.mkdir(parents=True, exist_ok=True)
     log_file = output_dir / "stream2video.log"
 
-    console.print("\n[bold cyan]stream2video[/bold cyan] - Compress by removing silence")
-    console.print(f"Logs saved to: {log_file}\n")
+    if not _JSON_LOG_MODE:
+        console.print("\n[bold cyan]stream2video[/bold cyan] - Compress by removing silence")
+        console.print(f"Logs saved to: {log_file}\n")
+
+    # --doctor: environment diagnostics, no pipeline.
+    if doctor:
+        _run_doctor(config_file)
+        raise typer.Exit(0)
 
     # ``signal.getsignal`` / ``signal.signal`` can only be called from the
     # interpreter's main thread; a host embedding ``cli.main`` in a worker

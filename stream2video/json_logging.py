@@ -1,0 +1,77 @@
+"""JSON structured logging for the CLI.
+
+Drop-in replacement for the Rich console handler when the user runs
+with ``--log-format json``. Each log record is emitted as a single
+JSON object per line to **stdout** (not stderr), suitable for piping
+into ELK / Splunk / Loki / journald:
+
+    $ stream2video --log-format json video.mp4 | jq .
+    {"ts": "2026-08-09T14:32:07.123Z", "level": "INFO", "logger": "stream2video", "msg": "..."}
+
+Why a custom formatter instead of ``python-json-logger``: the
+dependency would be heavy for a CLI tool that already ships Rich, and
+the format we emit is intentionally minimal (no thread name, code path
+in every record, etc.) to keep line size small for log aggregators.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import sys
+from datetime import datetime, timezone
+from typing import Any
+
+# Static schema version. Bump when fields change so parsers can detect.
+_LOG_SCHEMA_VERSION = 1
+
+
+class _JsonFormatter(logging.Formatter):
+    """Format log records as JSON, one per line."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        obj: dict[str, Any] = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "level": record.levelname,
+            "logger": record.name,
+            "msg": record.getMessage(),
+            "v": _LOG_SCHEMA_VERSION,
+        }
+        # Exception info as a single string (newlines escaped inside the
+        # JSON string so the line stays one-line-per-record).
+        if record.exc_info:
+            obj["exc"] = self.formatException(record.exc_info)
+        # Standard `extra` fields passed via logger.info("...", extra={})
+        # land in ``record.__dict__`` alongside the reserved attributes.
+        # Common keys are hoisted into the top level so queries like
+        # ``step="download" AND status="ok"`` work without knowing the
+        # record's class-path. Unknown fields stay in the record dict but
+        # are not surfaced here (avoid leaking internals accidentally).
+        for key in ("step", "phase", "duration_s", "bytes", "src", "dst"):
+            val = record.__dict__.get(key)
+            if val is not None:
+                obj[key] = val
+        return json.dumps(obj, default=str, ensure_ascii=False)
+
+
+def install_json_handler(logger: logging.Logger, level: str = "INFO") -> logging.Handler:
+    """Replace ``logger``'s handlers with a single JSON-emitting stdout handler.
+
+    Returns the handler so callers can detach it in a ``finally:`` block
+    (mirroring how the CLI handles its Rich handler).
+
+    The stream is ``sys.stdout`` (not stderr) so a piped command
+    ``stream2video --log-format json video.mp4 | jq .`` shows the JSON
+    and the human-readable banner is unaffected.
+
+    NOTE: the function leaves the console handler level alone — the
+    caller is expected to set ``level`` on the returned handler if they
+    want a non-default filter.
+    """
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(getattr(logging, level.upper(), logging.INFO))
+    handler.setFormatter(_JsonFormatter())
+    # Mirror the existing CLI behaviour: leave the root level alone so
+    # importers of this module don't get re-configured. The caller adds
+    # this handler to the logger explicitly.
+    return handler

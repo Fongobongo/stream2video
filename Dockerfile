@@ -19,6 +19,17 @@
 #     stream2video-test stream2video /in.mp4 -o /out --encoder libx264
 #
 # Size: ~250 MB (Python 3.13 slim + ffmpeg + project deps).
+#
+# ── Lightweight CLI-only variant ────────────────────────────────────────
+# For pipelines that only need the transcoding step (no GUI, no tests,
+# no lint): build with the target ``cli`` to get a smaller image.
+#   docker build -t stream2video-cli --target cli .
+#   docker run --rm -v "$PWD/in.mp4:/in.mp4" -v "$PWD/out:/out" \
+#     stream2video-cli /in.mp4 -o /out --dry-run
+#
+# Entrypoint is the CLI itself; a positional argument maps to
+# ``INPUT_VIDEO``. The image omits the dev extras (pytest/ruff/mypy/
+# PySide6) so it's roughly half the size.
 
 FROM python:3.13-slim
 
@@ -52,3 +63,33 @@ RUN pip install --no-cache-dir -e ".[dev]"
 # so `docker run stream2video-test` exits non-zero on any failure.
 # Override the command to invoke the CLI directly instead.
 CMD ["sh", "-c", "ruff check . && ruff format --check . && mypy stream2video && pytest -q"]
+
+
+# ── Target: cli ────────────────────────────────────────────────────────
+# Lightweight image with only the runtime dependencies — no dev
+# toolchain, no test runner, no GUI extras. Suitable as the base for
+# a GitHub Actions step or a cronjob encoding worker. The entrypoint
+# is the ``stream2video`` binary; positional args land in
+# ``INPUT_VIDEO`` the way the host CLI would receive them.
+FROM python:3.13-slim AS cli
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY pyproject.toml README.md ./
+COPY stream2video/ stream2video/
+
+# Runtime-only install (no .[dev] extras).
+RUN pip install --no-cache-dir .
+
+# Drop the build user for security (uid 1000 is conventional).
+RUN useradd --create-home --uid 1000 stream2video
+USER stream2video
+
+ENTRYPOINT ["stream2video"]
+CMD ["--help"]

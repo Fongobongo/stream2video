@@ -69,6 +69,13 @@ stream2video https://www.youtube.com/watch?v=VIDEO_ID
 stream2video /path/to/video.mp4
 ```
 
+### Shell completion
+
+```bash
+stream2video --install-completion   # Bash/Zsh/Fish/PowerShell
+stream2video --show-completion      # Print the completion script for manual install
+```
+
 ### Options
 
 | Flag | Default | Description |
