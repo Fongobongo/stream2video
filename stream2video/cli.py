@@ -20,7 +20,6 @@ from rich.progress import (
 
 from stream2video.cli_config import load_config as _load_config_impl
 from stream2video.cli_helpers import (
-    ParameterSource,
     _check_ffmpeg,
     _console_handler,
     _make_file_handler,
@@ -29,19 +28,12 @@ from stream2video.cli_helpers import (
     console,
     logger,
 )
+from stream2video.cli_resolver import make_resolver
 from stream2video.concat import CancelledError, ConcatError, cut_and_concat
 from stream2video.config import (
     CONFIG_DEFAULTS,
     DEFAULT_PRESET,
     PRESET_NAMES,
-    VALID_DOWNLOAD_QUALITIES,
-    VALID_ENCODERS,
-    VALID_METHODS,
-    VALID_OUTPUT_FORMATS,
-    VALID_OUTPUT_FPS,
-    VALID_QUALITIES,
-    VALID_SOFTWARE_FALLBACKS,
-    VALID_X264_PRESETS,
     apply_preset,
 )
 from stream2video.download import (
@@ -125,16 +117,16 @@ def main(
         CONFIG_DEFAULTS["video_quality"],
         "--video-quality",
         "-vq",
-        help="Encode quality preset: 'source' (encoder defaults), 'high' (10000k / CRF 18), "
-        "'medium' (7000k / CRF 23, default), or 'low' (3500k / CRF 28). If not passed, "
+        help="Encode quality preset: 'source' (encoder defaults, default), 'high' (10000k / CRF 18), "
+        "'medium' (7000k / CRF 23), or 'low' (3500k / CRF 28). If not passed, "
         "the config file's `video_quality` key is used.",
     ),
     audio_quality: str = typer.Option(
         CONFIG_DEFAULTS["audio_quality"],
         "--audio-quality",
         "-aq",
-        help="Audio (AAC) quality preset: 'source' (codec defaults + native rate/channels), "
-        "'high' (256k), 'medium' (192k, default), or 'low' (128k). If not passed, "
+        help="Audio (AAC) quality preset: 'source' (codec defaults + native rate/channels, default), "
+        "'high' (256k), 'medium' (192k), or 'low' (128k). If not passed, "
         "the config file's `audio_quality` key is used.",
     ),
     download_quality: str = typer.Option(
@@ -229,7 +221,7 @@ def main(
             "(x264_low_memory=True, batch_chunk_size=20, "
             "low_process_priority=True). 'balanced' (default) reproduces "
             "the historical defaults. 'maximum_performance' trades RAM "
-            "for throughput (x264_low_memory=False, memory_limit_mb=0, "
+            "for maximum throughput (x264_low_memory=False, memory_limit_mb=0, "
             "batch_chunk_size=80). The preset is applied first, then any "
             "explicit --flag overrides win — so `--preset low_memory "
             "--no-low-process-priority` keeps low_memory's other "
@@ -435,67 +427,35 @@ def main(
         # Apply the resource preset. The preset bundles tunables
         # (x264_low_memory, memory_limit_mb, batch_chunk_size,
         # low_process_priority) into a named profile; each subsequent
-        # ``_resolved_*`` below reads the merged config AND checks
+        # resolver call below reads the merged config AND checks
         # ``ParameterSource.COMMANDLINE``, so an explicit --flag wins
-        # over the preset's override. The preset itself is read via
-        # ParameterSource too — COMMANDLINE --preset wins, otherwise
-        # the YAML key ``preset`` (if present) is used, else
-        # DEFAULT_PRESET.
-        def _resolved_preset(flag_value: str) -> str:
-            if ParameterSource is None:
-                value = str(config.get("preset", DEFAULT_PRESET))
-            else:
-                src = ctx.get_parameter_source("preset")
-                if src == ParameterSource.COMMANDLINE:
-                    value = flag_value
-                else:
-                    value = str(config.get("preset", DEFAULT_PRESET))
-            if value not in PRESET_NAMES:
-                console.print(
-                    f"[red]Invalid preset:[/red] {value!r} "
-                    f"(use {' or '.join(repr(p) for p in PRESET_NAMES)})"
-                )
-                raise typer.Exit(1)
-            return value
-
-        resolved_preset = _resolved_preset(preset)
+        # over the preset's override. The preset itself is resolved via
+        # the resolver too — CLI --preset wins, otherwise the YAML key
+        # ``preset`` (if present) is used, else DEFAULT_PRESET.
+        resolver = make_resolver(ctx, config, console)
+        resolved_preset = resolver.resolve("preset", preset)
+        if resolved_preset not in PRESET_NAMES:
+            console.print(
+                f"[red]Invalid preset:[/red] {resolved_preset!r} "
+                f"(use {' or '.join(repr(p) for p in PRESET_NAMES)})"
+            )
+            raise typer.Exit(1)
         config = apply_preset(config, resolved_preset)
 
-        # Resolve each CLI flag against the config. A flag that the user
-        # passed explicitly (ParameterSource.COMMANDLINE) wins; one that
-        # the user left at its default falls back to the config value
-        # (which came from YAML if provided, else CONFIG_DEFAULTS, with
-        # preset overrides already applied above).
-        def _resolved_str(name: str, flag_value: str, valid: list[str]) -> str:
-            if ParameterSource is None:
-                value = config[name]
-            else:
-                src = ctx.get_parameter_source(name)
-                if src == ParameterSource.COMMANDLINE:
-                    value = flag_value
-                else:
-                    value = config[name]
-            if value not in valid:
-                console.print(
-                    f"[red]Invalid {name}:[/red] {value!r} "
-                    f"(use {' or '.join(repr(v) for v in valid)})"
-                )
-                raise typer.Exit(1)
-            return value
-
-        method = _resolved_str("method", method, VALID_METHODS)
-        encoder = _resolved_str("encoder", encoder, VALID_ENCODERS)
-        video_quality = _resolved_str("video_quality", video_quality, VALID_QUALITIES)
-        download_quality = _resolved_str(
-            "download_quality", download_quality, VALID_DOWNLOAD_QUALITIES
-        )
-        audio_quality = _resolved_str("audio_quality", audio_quality, VALID_QUALITIES)
-        software_fallback = _resolved_str(
-            "software_fallback", software_fallback, VALID_SOFTWARE_FALLBACKS
-        )
-        x264_preset = _resolved_str("x264_preset", x264_preset, VALID_X264_PRESETS)
-        output_fps = _resolved_str("output_fps", output_fps, VALID_OUTPUT_FPS)
-        output_format = _resolved_str("output_format", output_format, VALID_OUTPUT_FORMATS)
+        # Resolve each CLI flag against the config via the generic resolver.
+        # A flag that the user passed explicitly (ParameterSource.COMMANDLINE)
+        # wins; one that the user left at its default falls back to the
+        # config value (which came from YAML if provided, else CONFIG_DEFAULTS,
+        # with preset overrides already applied above).
+        method = resolver.resolve("method", method)
+        encoder = resolver.resolve("encoder", encoder)
+        video_quality = resolver.resolve("video_quality", video_quality)
+        download_quality = resolver.resolve("download_quality", download_quality)
+        audio_quality = resolver.resolve("audio_quality", audio_quality)
+        software_fallback = resolver.resolve("software_fallback", software_fallback)
+        x264_preset = resolver.resolve("x264_preset", x264_preset)
+        output_fps = resolver.resolve("output_fps", output_fps)
+        output_format = resolver.resolve("output_format", output_format)
 
         # Output filename extension follows the chosen output_format.
         # ``video`` keeps the historical ``_compressed.mp4`` name; the
@@ -511,7 +471,7 @@ def main(
         else:
             spec = OUTPUT_FORMAT_SPECS.get(output_format)
             if spec is None:
-                # Unreachable: _resolved_str already validated against
+                # Unreachable: resolver.resolve already validated against
                 # VALID_OUTPUT_FORMATS. Defensive guard so a future
                 # format added to VALID_OUTPUT_FORMATS but missing from
                 # OUTPUT_FORMAT_SPECS produces a clear error rather than
@@ -522,112 +482,24 @@ def main(
                 raise typer.Exit(1)
             output_suffix = f"compressed.{spec['ext']}"
 
-        # ``encoder_threads`` accepts ``"auto"`` or a positive int (see
-        # ``config.coerce_typed_value``). The CLI flag arrives as a
-        # string; the config-file value arrives as int (already validated).
-        # Resolve: CLI override parses to int when possible, else "auto".
-        def _resolved_encoder_threads(
-            flag_value: str,
-        ) -> str | int:
-            if ParameterSource is None:
-                return config.get("encoder_threads", "auto")
-            src = ctx.get_parameter_source("encoder_threads")
-            if src == ParameterSource.COMMANDLINE:
-                v = flag_value.strip()
-                if v == "auto":
-                    return "auto"
-                try:
-                    n = int(v)
-                except (TypeError, ValueError) as e:
-                    console.print(
-                        f"[red]Invalid encoder-threads:[/red] {flag_value!r} "
-                        f"(use 'auto' or a positive integer)"
-                    )
-                    raise typer.Exit(1) from e
-                if n <= 0:
-                    console.print(
-                        f"[red]Invalid encoder-threads:[/red] {n} (must be > 0 or 'auto')"
-                    )
-                    raise typer.Exit(1)
-                return n
-            # Fall back to config value (already int-or-"auto" validated).
-            return config.get("encoder_threads", "auto")
-
-        resolved_encoder_threads: str | int = _resolved_encoder_threads(encoder_threads)
-
-        def _resolved_memory_limit_mb(flag_value: str) -> str | int:
-            if ParameterSource is None:
-                return config.get("memory_limit_mb", "auto")
-            src = ctx.get_parameter_source("memory_limit_mb")
-            if src == ParameterSource.COMMANDLINE:
-                v = flag_value.strip()
-                if v == "auto":
-                    return "auto"
-                try:
-                    n = int(v)
-                except (TypeError, ValueError) as e:
-                    console.print(
-                        f"[red]Invalid memory-limit-mb:[/red] {flag_value!r} "
-                        f"(use 'auto' or a non-negative integer)"
-                    )
-                    raise typer.Exit(1) from e
-                if n < 0:
-                    console.print(
-                        f"[red]Invalid memory-limit-mb:[/red] {n} (must be >= 0 or 'auto')"
-                    )
-                    raise typer.Exit(1)
-                return n
-            return config.get("memory_limit_mb", "auto")
-
-        resolved_memory_limit_mb: str | int = _resolved_memory_limit_mb(memory_limit_mb)
-
-        def _resolved_bool(name: str, flag_value: bool | None) -> bool:
-            if ParameterSource is None:
-                return bool(config.get(name, CONFIG_DEFAULTS.get(name, False)))
-            src = ctx.get_parameter_source(name)
-            if src == ParameterSource.COMMANDLINE:
-                return bool(flag_value)
-            # Config already type-checked in load_config; bool is enforced.
-            # Fall back to CONFIG_DEFAULTS (not a bare ``False``) so the
-            # guard matches the real default when the key is absent.
-            return bool(config.get(name, CONFIG_DEFAULTS.get(name, False)))
-
-        def _resolved_int(name: str, flag_value: int) -> int:
-            if ParameterSource is None:
-                return int(config.get(name, CONFIG_DEFAULTS.get(name, flag_value)))
-            src = ctx.get_parameter_source(name)
-            if src == ParameterSource.COMMANDLINE:
-                return int(flag_value)
-            # Config already validated in load_config; preset overrides
-            # have been applied above so ``config.get(name)`` reflects
-            # the preset-transformed value.
-            return int(config.get(name, CONFIG_DEFAULTS.get(name, flag_value)))
-
-        resolved_x264_low_memory: bool = _resolved_bool("x264_low_memory", x264_low_memory)
-        resolved_use_crf: bool = _resolved_bool("use_crf", use_crf)
-        resolved_gapless_concat: bool = _resolved_bool("gapless_concat", gapless_concat)
-        resolved_low_process_priority: bool = _resolved_bool(
+        # Bool and int parameters with a single call site each. The
+        # resolver reads the CLI flag value, the YAML config value, and
+        # the preset-merged CONFIG_DEFAULTS, applying CLI > config >
+        # default precedence.
+        resolved_x264_low_memory: bool = resolver.resolve("x264_low_memory", x264_low_memory)
+        resolved_use_crf: bool = resolver.resolve("use_crf", use_crf)
+        resolved_gapless_concat: bool = resolver.resolve("gapless_concat", gapless_concat)
+        resolved_low_process_priority: bool = resolver.resolve(
             "low_process_priority", low_process_priority
         )
+        resolved_encoder_threads: str | int = resolver.resolve("encoder_threads", encoder_threads)
+        resolved_memory_limit_mb: str | int = resolver.resolve("memory_limit_mb", memory_limit_mb)
+        resolved_memory_reserve_mb: int = resolver.resolve("memory_reserve_mb", memory_reserve_mb)
+        resolved_rlimit_as_mb: int = resolver.resolve("rlimit_as_mb", rlimit_as_mb)
 
-        def _resolved_memory_reserve_mb(flag_value: int) -> int:
-            if ParameterSource is None:
-                return int(config.get("memory_reserve_mb", 2048))
-            src = ctx.get_parameter_source("memory_reserve_mb")
-            if src == ParameterSource.COMMANDLINE:
-                if flag_value < 0:
-                    console.print(
-                        f"[red]Invalid memory-reserve-mb:[/red] {flag_value} (must be >= 0)"
-                    )
-                    raise typer.Exit(1)
-                return flag_value
-            return int(config.get("memory_reserve_mb", 2048))
-
-        resolved_memory_reserve_mb: int = _resolved_memory_reserve_mb(memory_reserve_mb)
-
-        force = _resolved_bool("force", force)
-        delete_after = _resolved_bool("delete_after", delete_after)
-        per_video_dir_resolved = _resolved_bool("per_video_dir", per_video_dir)
+        force = resolver.resolve("force", force)
+        delete_after = resolver.resolve("delete_after", delete_after)
+        per_video_dir_resolved = resolver.resolve("per_video_dir", per_video_dir)
         # Push the resolved value back into config so downstream code that
         # reads config["per_video_dir"] (e.g. paths.apply_per_video_dir)
         # sees the same value as the CLI path.
@@ -635,51 +507,43 @@ def main(
 
         # batch_chunk_size is a preset-tunable, so honour the preset
         # override unless the user passed --batch-chunk-size explicitly.
-        batch_chunk_size = _resolved_int("batch_chunk_size", batch_chunk_size)
-        # rlimit_as_mb is also a preset-tunable (well, CLI-only, but
-        # the same fallback semantics apply).
-        resolved_rlimit_as_mb: int = _resolved_int("rlimit_as_mb", rlimit_as_mb)
+        batch_chunk_size = resolver.resolve("batch_chunk_size", batch_chunk_size)
 
         # P1: pipeline timeouts + network tunables. These were the
         # 9 yaml keys silently ignored before — the CLI used to rely on
         # typer defaults populated from CONFIG_DEFAULTS at import time,
         # so a user ``silence_timeout: 60`` in config.yaml had no effect.
-        resolved_download_timeout: int = _resolved_int("download_timeout", download_timeout)
-        resolved_connect_timeout: int = _resolved_int("connect_timeout", connect_timeout)
-        resolved_no_progress_timeout: int = _resolved_int("no_progress_timeout", no_progress_timeout)
-        resolved_silence_timeout: int = _resolved_int("silence_timeout", silence_timeout)
-        resolved_segment_encode_timeout: int = _resolved_int(
+        resolved_download_timeout: int = resolver.resolve("download_timeout", download_timeout)
+        resolved_connect_timeout: int = resolver.resolve("connect_timeout", connect_timeout)
+        resolved_no_progress_timeout: int = resolver.resolve(
+            "no_progress_timeout", no_progress_timeout
+        )
+        resolved_silence_timeout: int = resolver.resolve("silence_timeout", silence_timeout)
+        resolved_segment_encode_timeout: int = resolver.resolve(
             "segment_encode_timeout", segment_encode_timeout
         )
-        resolved_final_concat_timeout: int = _resolved_int(
+        resolved_final_concat_timeout: int = resolver.resolve(
             "final_concat_timeout", final_concat_timeout
         )
-        resolved_stall_kill_timeout: int = _resolved_int("stall_kill_timeout", stall_kill_timeout)
-        resolved_min_part_bytes: int = _resolved_int("min_part_bytes", min_part_bytes)
+        resolved_stall_kill_timeout: int = resolver.resolve(
+            "stall_kill_timeout", stall_kill_timeout
+        )
+        resolved_min_part_bytes: int = resolver.resolve("min_part_bytes", min_part_bytes)
 
-        # P1: proxy — honour YAML + CLI. ``--proxy URL`` (COMMANDLINE)
-        # wires the value AND enables it (the user's intent is clear).
-        # YAML's ``proxy: url`` is gated by ``proxy_active: true`` so a
-        # config file doesn't silently change networking (matches the
-        # GUI's checkbox contract — pipeline_worker.py line ~197).
-        if ParameterSource is None or ctx.get_parameter_source("proxy") != ParameterSource.COMMANDLINE:
-            resolved_proxy: str = (
-                config.get("proxy", "") if config.get("proxy_active", False) else ""
-            )
-        else:
-            resolved_proxy = proxy if isinstance(proxy, str) else ""
-        if not isinstance(resolved_proxy, str):
-            console.print(
-                f"[red]Invalid proxy:[/red] {resolved_proxy!r} (must be a string URL or empty)"
-            )
-            raise typer.Exit(1)
+        # P1: proxy — honour YAML + CLI. The resolver's ``proxy`` kind
+        # implements the "CLI --proxy implies proxy_active=True" contract:
+        # a user explicitly passing --proxy on the command line means the
+        # run goes through the proxy. YAML's ``proxy: url`` is inert unless
+        # paired with ``proxy_active: true`` so a config file doesn't
+        # silently change networking (matches the GUI's checkbox contract).
+        resolved_proxy: str = resolver.resolve("proxy", proxy)
 
         # Defensive re-validation through the shared pipeline validator.
-        # ``_resolved_*`` + ``load_config`` already rejected every
+        # ``resolver.resolve`` + ``load_config`` already rejected every
         # CLI-visible bad key; this second pass runs the final resolved
         # values through the same ``validate_pipeline_config`` the GUI's
         # worker uses, so a value that bypasses the per-key checks here
-        # (future config key, regression in ``_resolved_*``) still fails
+        # (future config key, regression in the resolver) still fails
         # early with a clear message instead of mid-pipeline.
         _pcfg = _PipelineConfig(
             input_raw=input_video,
