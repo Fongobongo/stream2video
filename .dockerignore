@@ -13,6 +13,7 @@
 _portable/
 stream2video.egg-info/
 compressed_videos/
+processed_videos/
 **/__pycache__/
 **/*.pyc
 **/*.pyo

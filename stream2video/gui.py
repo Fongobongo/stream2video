@@ -223,7 +223,7 @@ class Stream2VideoGUI(
         # worker threads; the worker receives the values as args, see
         # _pipeline_worker's signature and P1.10 in the fix plan).
         input_raw = self.entry_input.get().strip()
-        output_dir = Path(self.entry_output.get().strip() or "./compressed_videos")
+        output_dir = Path(self.entry_output.get().strip() or "./processed_videos")
         output_dir = output_dir.resolve()
         method = self.combo_method.get()
         encoder = self.combo_encoder.get()

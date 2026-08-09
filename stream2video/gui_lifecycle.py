@@ -244,7 +244,7 @@ class LifecycleMixin:
     def _copy_cli_command(self) -> None:
         self._sync_slider_entries()
         inp = self.entry_input.get().strip()
-        out_raw = self.entry_output.get().strip() or "./compressed_videos"
+        out_raw = self.entry_output.get().strip() or "./processed_videos"
         method = self.combo_method.get()
         encoder = self.combo_encoder.get()
         video_quality = self.combo_video_quality.get()

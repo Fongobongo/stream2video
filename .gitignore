@@ -64,8 +64,11 @@ env/
 *~
 .DS_Store
 
-# Project specific
+# Project specific. Both the new default and the pre-0.4 name are
+# ignored so a legacy checkout doesn't suddenly start tracking its old
+# output directory.
 compressed_videos/
+processed_videos/
 _portable/
 PLAN.md
 *.log

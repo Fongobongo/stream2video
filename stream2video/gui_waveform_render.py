@@ -106,7 +106,7 @@ class WaveformRenderMixin:
         # Resolve the same output dir the pipeline uses — the final
         # silence cache lives there as a fallback when the in-memory
         # live store is empty (popup opened after pipeline finished).
-        out_raw = self.entry_output.get().strip() or "./compressed_videos"
+        out_raw = self.entry_output.get().strip() or "./processed_videos"
         out_dir = Path(out_raw).expanduser().resolve()
         if bool(self.chk_per_video_dir.get()):
             out_dir = out_dir / in_path.stem

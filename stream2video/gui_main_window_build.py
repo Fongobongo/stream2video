@@ -178,7 +178,7 @@ class MainWindowBuildMixin:
         row2 = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
         row2.pack(fill="x", padx=5, pady=(0, 5))
         ctk.CTkLabel(row2, text="Output:", width=58, anchor="w").pack(side="left", padx=(0, 5))
-        self.entry_output = ctk.CTkEntry(row2, placeholder_text="compressed_videos")
+        self.entry_output = ctk.CTkEntry(row2, placeholder_text="processed_videos")
         self.entry_output.pack(side="left", fill="x", expand=True)
         if self.config.get("output_dir"):
             self.entry_output.insert(0, self.config["output_dir"])

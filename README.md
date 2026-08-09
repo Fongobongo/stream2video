@@ -73,7 +73,7 @@ stream2video /path/to/video.mp4
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-o, --output` | `./compressed_videos` | Output directory |
+| `-o, --output` | `./processed_videos` | Output directory |
 | `-e, --encoder` | `h264_mf` | `h264_nvenc`, `h264_amf`, `h264_mf`, `libx264` |
 | `-vq, --video-quality` | `medium` | Encode quality preset: `source` (encoder defaults), `high` (10000k / CRF 18), `medium` (7000k / CRF 23), `low` (3500k / CRF 28) |
 | `-aq, --audio-quality` | `medium` | Audio quality preset: `source` (codec defaults + native rate/channels), `high` (256k), `medium` (192k), `low` (128k) |
@@ -276,7 +276,7 @@ python -m stream2video.gui
 ### GUI Features
 
 - **Input**: Local file (Browse) or URL
-- **Output**: Select output directory (defaults to `./compressed_videos`)
+- **Output**: Select output directory (defaults to `./processed_videos`)
 - **Sliders**: Threshold, Min Silence, Margin
 - **Per-video project directory** checkbox — group all of a video's artifacts into `{output_dir}/{stem}/`
 - **Method**: segment (per-segment encode + concat demuxer) or batch (frame-exact select/aselect)

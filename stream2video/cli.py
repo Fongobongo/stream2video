@@ -87,7 +87,7 @@ def main(
     ctx: typer.Context,
     input_video: str = typer.Argument(..., help="URL or path to input video"),
     output_dir: Path = typer.Option(
-        Path("./compressed_videos"),
+        Path("./processed_videos"),
         "--output",
         "-o",
         help="Output directory for compressed video",
