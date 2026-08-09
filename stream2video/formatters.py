@@ -62,6 +62,137 @@ def fmt_clock_time(secs: float | None) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}"
 
 
+def fmt_completion_summary(
+    src_duration: float | None,
+    src_size_bytes: int,
+    output_path: str,
+    dst_size_bytes: int,
+    keep_duration: float,
+    pipeline_seconds: float,
+) -> str:
+    """Format the final success block shown after a pipeline completes.
+
+    Returns a Rich-markup string like::
+
+        [bold green]+ Compression complete![/bold green]
+           Input:  6h 23m (2.4 GB)
+           Output: 4h 12m (1.1 GB)  [34% reduction, 8.2x realtime]
+           Time:   12m 34s
+
+    ``src_duration`` / ``keep_duration`` being None shows ``?`` for the
+    time columns; the realtime factor is omitted when duration is unknown
+    (e.g. ffprobe failed during a dry-run)."""
+    lines = [
+        "[bold green]+ Compression complete![/bold green]",
+        f"   Input:  {fmt_clock_time(src_duration)} ({fmt_size(src_size_bytes)})" if src_duration else f"   Input:  ? ({fmt_size(src_size_bytes)})",
+    ]
+
+    dst_time_str = fmt_clock_time(keep_duration)
+    dst_size_str = fmt_size(dst_size_bytes)
+
+    # Reduction percent: (src - dst) / src * 100. Only show when both
+    # sizes are non-zero — a zero-byte source (empty file) would divide
+    # by zero.
+    if src_size_bytes > 0:
+        reduction_pct = 100.0 * (src_size_bytes - dst_size_bytes) / src_size_bytes
+        lines.append(f"   Output: {dst_time_str} ({dst_size_str})  [{reduction_pct:.0f}% reduction]")
+    else:
+        lines.append(f"   Output: {dst_time_str} ({dst_size_str})")
+
+    # Realtime factor: source_seconds / pipeline_seconds. >1 means faster
+    # than realtime (good). Only compute when both are known and pipeline
+    # took measurable time (avoid div-by-zero on a sub-second run).
+    if src_duration is not None and src_duration > 0 and pipeline_seconds > 0.1:
+        rt_factor = src_duration / pipeline_seconds
+        lines.append(f"   Time:   {fmt_time(pipeline_seconds)} ({rt_factor:.1f}x realtime)")
+    else:
+        lines.append(f"   Time:   {fmt_time(pipeline_seconds)}")
+
+    lines.append(f"Output file: [cyan]{output_path}[/cyan]")
+    return "\n".join(lines)
+
+
+def fmt_dry_run_summary(
+    src_duration: float | None,
+    src_size_bytes: int,
+    silence_segments: list,
+    keep_segments: list,
+) -> str:
+    """Format the --dry-run output block.
+
+    Returns a multi-line Rich-markup string:
+
+        [bold cyan]═══ Dry‑run: silence detection only ═══[/bold cyan]
+        Source: 6h 23m 12s (2.4 GB)
+        Silence segments: 42 (total 1h 23m 45s, 21.9%)
+        Keep segments: 15 (total 5h 0m 0s, 78.1%)
+        Estimated output: ~2h 5m 30s (assuming 40% bitrate reduction)
+        [dim]Use --force to re-run with encode (or remove --dry-run).[/dim]
+
+    ``src_duration`` None is handled gracefully (shows ``?`` for times).
+    ``silence_segments`` / ``keep_segments`` are lists of
+    ``SilenceSegment`` / ``(start, end)`` tuples; the caller passes
+    whatever ``detect_silence`` and ``generate_keep_segments`` returned.
+    """
+    def _sum_durations(segs: list) -> float:
+        # silence_segments is list[SilenceSegment] (has .start/.end attrs);
+        # keep_segments is list[tuple[float, float]]. Handle both by duck-typing.
+        total = 0.0
+        for s in segs:
+            if hasattr(s, "end") and hasattr(s, "start"):
+                total += max(0.0, s.end - s.start)
+            else:
+                # tuple (start, end)
+                total += max(0.0, s[1] - s[0])
+        return total
+
+    sil_dur = _sum_durations(silence_segments)
+    keep_dur = _sum_durations(keep_segments)
+
+    lines = [
+        "[bold cyan]═══ Dry‑run: silence detection only ═══[/bold cyan]",
+    ]
+
+    if src_duration is not None:
+        lines.append(f"Source: {fmt_clock_time(src_duration)}")
+    else:
+        lines.append("Source: [dim]? (duration unknown — ffprobe unavailable)[/dim]")
+    lines.append(f"Size: {fmt_size(src_size_bytes)}")
+
+    if silence_segments:
+        pct_sil = f"{100.0 * sil_dur / src_duration:.1f}%" if src_duration else "?"
+        lines.append(
+            f"Silence: {len(silence_segments)} segment{'s' if len(silence_segments) != 1 else ''} "
+            f"({fmt_clock_time(sil_dur)}, {pct_sil})"
+        )
+    else:
+        lines.append("Silence: [dim]none detected[/dim]")
+
+    if keep_segments:
+        pct_keep = f"{100.0 * keep_dur / src_duration:.1f}%" if src_duration else "?"
+        lines.append(
+            f"Keep: {len(keep_segments)} segment{'s' if len(keep_segments) != 1 else ''} "
+            f"({fmt_clock_time(keep_dur)}, {pct_keep})"
+        )
+    else:
+        lines.append("Keep: [dim]none (would produce empty output)[/dim]")
+
+    # Rough size estimate. Encoding at video_quality=medium (7000k) from a
+    # typical 2-4 GB/h stream source usually yields ~35-50% size reduction.
+    # We avoid false precision by showing a range and a caveat.
+    if src_duration and src_duration > 0 and keep_dur > 0:
+        keep_ratio = keep_dur / src_duration
+        est_low = src_size_bytes * keep_ratio * 0.4
+        est_high = src_size_bytes * keep_ratio * 0.6
+        lines.append(
+            f"Est. output: {fmt_size(int(est_low))} … {fmt_size(int(est_high))} "
+            f"[dim](rough guess; actual depends on content/encoder)[/dim]"
+        )
+
+    lines.append("[dim]Use --force to re-run detection; remove --dry-run to encode.[/dim]")
+    return "\n".join(lines)
+
+
 def fmt_zoom_text(zoom_level: float) -> str:
     """Format a zoom multiplier (duration / view_duration) for
     the controls and status line. Under 10x uses 1 decimal

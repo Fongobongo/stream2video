@@ -3,6 +3,7 @@
 import logging
 import shutil
 import signal
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,8 @@ from stream2video.download import (
     VideoNotAvailableError,
     download,
 )
+from stream2video.concat import generate_keep_segments, get_video_duration
+from stream2video.formatters import fmt_completion_summary, fmt_dry_run_summary
 from stream2video.gui_helpers import build_download_status
 from stream2video.memory import check_memory_reserve
 from stream2video.paths import apply_per_video_dir
@@ -96,6 +99,14 @@ def main(
         "-f",
         help="Re-detect silence, ignore cache. If not passed, falls back to "
         "the config file's `force` key (default False).",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        "-n",
+        help="Show what would be cut (silence detection + statistics) without "
+        "encoding. Exits after phase 2. Useful for tuning threshold/min_silence "
+        "before a long encode.",
     ),
     method: str = typer.Option(
         CONFIG_DEFAULTS["method"],
@@ -365,6 +376,7 @@ def main(
     2. Detect silence segments
     3. Cut and concatenate video
     """
+    pipeline_start_time = time.monotonic()  # for the final-summary wall-clock line
     # Configure root logging ONCE at entry — see P2.9 in the fix plan.
     # Previously ``logging.basicConfig`` ran at import time, which
     # hijacked the root logger of any host application that imported
@@ -837,6 +849,27 @@ def main(
                     description=f"[green]+[/green] Found {len(silence_segments)} silence segments",
                 )
 
+                # --dry-run: stop here. Show the "what would be cut"
+                # summary and exit before the encode phase starts.
+                # This is the tuning loop: a user adjusts threshold /
+                # min_silence / margin in the config, runs --dry-run,
+                # reads the stats, and iterates without spending CPU on
+                # a throwaway encode. See tests/test_cli_dry_run.py.
+                if dry_run:
+                    keep_segments = generate_keep_segments(video_path, silence_segments)
+                    src_duration = get_video_duration(video_path)
+                    src_size = video_path.stat().st_size
+                    console.print()
+                    console.print(
+                        fmt_dry_run_summary(
+                            src_duration=src_duration,
+                            src_size_bytes=src_size,
+                            silence_segments=silence_segments,
+                            keep_segments=keep_segments,
+                        )
+                    )
+                    raise typer.Exit(0)
+
             except SilenceCancelledError:
                 console.print("[yellow]Silence detection cancelled.[/yellow]")
                 raise typer.Exit(130) from None
@@ -940,9 +973,43 @@ def main(
                 logger.exception("Concatenation error")
                 raise typer.Exit(1) from None
 
-        # Summary
-        console.print("\n[bold green]+ Compression complete![/bold green]")
-        console.print(f"Output: [cyan]{output_video}[/cyan]")
+        # Summary — show rich stats: input/output size + duration, percent
+        # saved, wall-clock time, and a ``X.Yx realtime`` throughput hint.
+        # The numbers help the user sanity-check a long encode at a glance
+        # (a 6h source -> 1h output at 8x realtime is ~7.5 min wall time,
+        # anything slower suggests something went wrong).
+        try:
+            from stream2video.concat import get_video_duration as _get_duration
+
+            src_size = video_path.stat().st_size if video_path.exists() else 0
+            dst_size = output_video.stat().st_size if output_video.exists() else 0
+            src_dur_secs = _get_duration(video_path)  # None on ffprobe failure
+            # Wall-clock from the top of main() to the completion banner —
+            # covers download + silence + encode and matches what the user
+            # watched on the clock.
+            elapsed = time.monotonic() - pipeline_start_time
+            # Use output_video's duration as "keep_dur" — that's the
+            # actual encoded length, which beats an estimate computed
+            # from the input. ``None`` on an empty file is tolerated by
+            # fmt_completion_summary.
+            keep_dur_secs = _get_duration(output_video) if output_video.exists() else None
+            console.print(
+                "\n"
+                + fmt_completion_summary(
+                    src_duration=src_dur_secs,
+                    src_size_bytes=src_size,
+                    output_path=str(output_video),
+                    dst_size_bytes=dst_size,
+                    keep_duration=keep_dur_secs if keep_dur_secs is not None else 0.0,
+                    pipeline_seconds=elapsed,
+                )
+            )
+        except Exception as e:
+            # Summary formatting should never crash the pipeline — fall
+            # back to the legacy one-line output (the "Output:" line below).
+            logger.debug(f"Could not build completion summary: {e}", exc_info=True)
+            console.print("\n[bold green]+ Compression complete![/bold green]")
+            console.print(f"Output: [cyan]{output_video}[/cyan]")
 
         if download_result.is_downloaded:
             if delete_after:

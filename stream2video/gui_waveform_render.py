@@ -119,13 +119,34 @@ class WaveformRenderMixin:
 
         def _run() -> None:
             try:
-                # Phase 1: read peaks directly from ffmpeg pipe (no WAV).
-                self._tk_after(0, lambda: self._safe_status_set("Loading..."))
-                peaks, duration = read_peaks_from_stream(
-                    in_path,
-                    target_buckets=800,
-                    timeout=self.config.get("waveform_timeout", 300),
+                # Phase 1: read peaks. When the pipeline has already run,
+                # the cached {stem}_audio.wav (16 kHz mono PCM) holds the
+                # same waveform data but decodes ~10x faster than the
+                # full video (~0.5s vs ~25s for a 6h stream). Fall back
+                # to the original video decode when the cache is missing
+                # or stale (mtime older than the source).
+                from stream2video.silence.cache import (
+                    _get_wav_cache_path,
+                    _is_wav_cache_valid,
                 )
+
+                self._tk_after(0, lambda: self._safe_status_set("Loading..."))
+                wav_cache = _get_wav_cache_path(in_path, out_dir)
+                if _is_wav_cache_valid(wav_cache, in_path):
+                    self._log(
+                        f"  Waveform preview: using cached audio ({wav_cache.name})"
+                    )
+                    peaks, duration = read_peaks_from_stream(
+                        wav_cache,
+                        target_buckets=800,
+                        timeout=self.config.get("waveform_timeout", 300),
+                    )
+                else:
+                    peaks, duration = read_peaks_from_stream(
+                        in_path,
+                        target_buckets=800,
+                        timeout=self.config.get("waveform_timeout", 300),
+                    )
                 if token != self._waveform_render_token:
                     return
                 if not peaks or duration <= 0:
