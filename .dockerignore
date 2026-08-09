@@ -25,7 +25,5 @@ stream2video.log
 *.webm
 *.wav
 
-# The fix plan and dev notes are documentation, not runtime deps.
-docs/stream2video-fix-plan.md
+# PLAN.md is documentation, not a runtime dep.
 PLAN.md
-STREAM2VIDEO_DEVELOPMENT_PLAN.md
