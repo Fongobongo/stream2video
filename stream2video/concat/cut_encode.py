@@ -127,6 +127,15 @@ def _run_cut_then_encode(
             # Resume skip: if the file exists, is large enough, and
             # passes ffprobe validation, reuse it.
             #
+            # Validate BOTH streams (when the source has audio): the cut
+            # phase runs ``-c copy`` on video AND audio, so an ffmpeg kill
+            # between flushes can leave a chunk with a readable video track
+            # but a truncated audio one. The plain video-stream validity
+            # check would accept that file, and the lossless phase-2 concat
+            # would then splice a broken audio track into the middle of the
+            # output. Match ``_ffprobe_is_valid_media(..., "a")`` here the
+            # same way ``audio.py:extract`` already does for its segments.
+            #
             # Duration is intentionally NOT checked here: phase 1 uses
             # ``-c copy``, which snaps the cut to keyframes — on long-GOP
             # sources (2-10s GOP is typical for streamed H.264) the actual
@@ -141,6 +150,7 @@ def _run_cut_then_encode(
                 cut_path.exists()
                 and cut_path.stat().st_size >= min_part_bytes
                 and _c._ffprobe_is_valid_mp4(cut_path)
+                and (not source_has_audio or _c._ffprobe_is_valid_media(cut_path, stream_type="a"))
             ):
                 logger.debug(f"cut_then_encode: reusing cut_{i:06d}.mkv")
                 continue

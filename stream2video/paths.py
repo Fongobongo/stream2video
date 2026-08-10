@@ -102,9 +102,16 @@ def move_into_project(file_path: Path, project_dir: Path) -> Path:
         return file_path
     new_path = project_dir / file_path.name
     project_dir.mkdir(parents=True, exist_ok=True)
-    # shutil.move handles both ``target exists`` (replaces) and
-    # cross-filesystem moves (copy+unlink fallback) — two failure modes
-    # this function previously hit on plain ``Path.rename``.
+    # os.rename inside shutil.move raises FileExistsError (WinError 183)
+    # on Windows when dst exists — remove the stale target first so the
+    # fresh download always wins.
+    try:
+        new_path.unlink(missing_ok=True)
+    except OSError:
+        # Target locked by another reader — let move() surface the error.
+        pass
+    # shutil.move handles both same-volume rename and the cross-drive
+    # copy+unlink fallback the plain Path.rename would have raised on.
     shutil.move(str(file_path), str(new_path))
     return new_path
 

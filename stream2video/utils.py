@@ -798,9 +798,7 @@ class SubprocessRunner:
             try:
                 self.process.kill()
             except Exception:
-                logger.debug(
-                    "SubprocessRunner.__enter__ cleanup: kill() failed", exc_info=True
-                )
+                logger.debug("SubprocessRunner.__enter__ cleanup: kill() failed", exc_info=True)
             set_active_process(None, owner=self.owner)
             raise
         return self

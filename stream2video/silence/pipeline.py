@@ -337,18 +337,21 @@ def detect_silence(
             # the false positives that previously triggered a pointless
             # full re-detect on a healthy source.
             _pad = max(0.0, min_silence)
+            _pad_active = _pad < _SAMPLE_VERIFY_DURATION
             segments_D_sample = (
                 [s for s in segments_D if s.start < _SAMPLE_VERIFY_DURATION - _pad]
-                if _pad < _SAMPLE_VERIFY_DURATION
+                if _pad_active
                 else list(segments_D)
             )
             if _c._sample_segments_match(
                 segments_D_sample, segments_A_sample, _SEGMENT_MATCH_TOLERANCE
             ):
                 logger.debug(
-                    f"Sample-verify passed (D-sample: {len(segments_D_sample)} starts in first "
-                    f"{_SAMPLE_VERIFY_DURATION:.0f}s match A-sample: {len(segments_A_sample)}) "
-                    f"— using D result, keeping WAV cache"
+                    f"Sample-verify passed (D-sample: {len(segments_D_sample)} starts within "
+                    f"first {_SAMPLE_VERIFY_DURATION:.0f}s"
+                    + (f" padded by {_pad:.1f}s" if _pad_active else "")
+                    + f" match A-sample: {len(segments_A_sample)}) — using D result, "
+                    f"keeping WAV cache"
                 )
                 _c._mark_wav_verified(wav_path)
                 segments = segments_D
