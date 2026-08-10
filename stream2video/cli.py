@@ -3,6 +3,7 @@
 import logging
 import shutil
 import signal
+import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -89,17 +90,35 @@ def _doctor_callback(ctx: typer.Context, param: Any, value: bool) -> bool:
     without an input path.
     """
     if value:
-        _run_doctor(ctx.params.get("config") if ctx else None)
-        raise typer.Exit(0)
+        # ``--doctor`` is eager: it may fire before the *non-eager*
+        # ``--config`` option has been parsed, so ``ctx.params`` does not
+        # reliably contain ``config_file``. Scan argv directly — cheap,
+        # order-agnostic, and covers both ``--config X`` / ``-c X`` and
+        # the ``--config=X`` / ``-c=X`` spellings.
+        cfg: Path | None = None
+        argv = sys.argv[1:]
+        for i, arg in enumerate(argv):
+            if arg in ("--config", "-c"):
+                if i + 1 < len(argv):
+                    cfg = Path(argv[i + 1])
+                break
+            if arg.startswith("--config="):
+                cfg = Path(arg.split("=", 1)[1])
+                break
+            if arg.startswith("-c="):
+                cfg = Path(arg.split("=", 1)[1])
+                break
+        ok = _run_doctor(cfg)
+        raise typer.Exit(0 if ok else 1)
     return value
 
 
-def _run_doctor(config_file: Path | None = None) -> None:
-    """Print environment diagnostics and exit.
+def _run_doctor(config_file: Path | None = None) -> bool:
+    """Print environment diagnostics; return True iff all critical checks pass.
 
     Reports system information (Python, ffmpeg, encoders, RAM, config)
-    in a compact OK/fail list. Exits 0 when all critical checks pass,
-    1 otherwise. Non-critical items (psutil, YAML config file) only
+    in a compact OK/fail list. Callers exit 0 when all critical checks
+    pass, 1 otherwise. Non-critical items (psutil, YAML config file) only
     print a warning — the CLI still works without them.
     """
     import shutil
@@ -114,6 +133,20 @@ def _run_doctor(config_file: Path | None = None) -> None:
     tbl = Table(show_header=False, box=None, padding=(0, 1))
     tbl.add_column("status", width=4)
     tbl.add_column("check")
+
+    # Redirected stdout on Windows decodes via the OEM/ANSI codepage
+    # (cp1251/cp866), which can't encode the ✓/✗/— glyphs below. Rich
+    # only enables its legacy Windows console API when the stream is a
+    # real console; for pipes/files, reconfigure stdout/stderr to UTF-8
+    # so ``--doctor > report.txt`` doesn't die with UnicodeEncodeError.
+    for _stream in (sys.stdout, sys.stderr):
+        _reconfigure = getattr(_stream, "reconfigure", None)
+        if _reconfigure is None:
+            continue  # e.g. pytest's captured stream
+        try:
+            _reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
 
     # Python version
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
@@ -161,10 +194,11 @@ def _run_doctor(config_file: Path | None = None) -> None:
             total_mb = vm.total / (1024 * 1024)
             avail_mb = _available_ram_mb()
             budget_mb = int(total_mb * 0.60)  # 60% default auto policy
+            avail_s = f"{avail_mb:.0f} MB" if avail_mb is not None else "?"
             tbl.add_row(
                 "[green]✓[/green]",
                 f"RAM: {total_mb / 1024:.0f} GB (60% budget = {budget_mb / 1024:.1f} GB, "
-                f"available now: {avail_mb:.0f} MB if avail_mb else '?')",
+                f"available now: {avail_s})",
             )
         else:
             tbl.add_row(
@@ -198,6 +232,7 @@ def _run_doctor(config_file: Path | None = None) -> None:
     console.print(tbl)
     if not all_critical_ok:
         console.print("\n[red]Some critical checks failed — see above[/red]")
+    return all_critical_ok
 
 
 @app.command()
@@ -556,8 +591,13 @@ def main(
             handlers=[_json_handler],
             force=True,  # replace any handler the caller attached
         )
-        # Suppress the stdout banner in JSON mode — mixing non-JSON
-        # lines into the log stream breaks line-per-record parsers.
+        # Keep the stdout stream line-per-JSON-record: point the shared
+        # Rich console at stderr and disable the live progress bars.
+        # Progress updates are still emitted as JSON log records by the
+        # callbacks, so no information is lost — but no Rich frames,
+        # banners, or summaries may leak into stdout, or a downstream
+        # ``| jq .`` breaks on the first non-JSON line.
+        console.stderr = True
         global _JSON_LOG_MODE
         _JSON_LOG_MODE = True
     else:
@@ -592,8 +632,8 @@ def main(
 
     # --doctor: environment diagnostics, no pipeline.
     if doctor:
-        _run_doctor(config_file)
-        raise typer.Exit(0)
+        _doctor_ok = _run_doctor(config_file)
+        raise typer.Exit(0 if _doctor_ok else 1)
 
     # ``signal.getsignal`` / ``signal.signal`` can only be called from the
     # interpreter's main thread; a host embedding ``cli.main`` in a worker
@@ -814,7 +854,9 @@ def main(
             TimeRemainingColumn(),
         ]
 
-        with Progress(*progress_columns, console=console) as progress:
+        with Progress(
+            *progress_columns, console=console, disable=_JSON_LOG_MODE
+        ) as progress:
             # Step 1: Download video (indeterminate: yt-dlp does not report progress)
             task1 = progress.add_task("[cyan]Downloading video...", total=None)
 

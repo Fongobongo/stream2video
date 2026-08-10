@@ -52,7 +52,11 @@ def load_config(config_file: Path | None, console: Any) -> dict:
             console.print(f"[yellow]Warning:[/yellow] Config file not found: {config_file}")
         else:
             try:
-                with open(config_file) as f:
+                # The project writes every config/JSON file as UTF-8
+                # (settings_io, config writers); let the reader match so
+                # a non-ASCII path/comment doesn't mojibake or raise
+                # UnicodeDecodeError on a cp1251 Windows host.
+                with open(config_file, encoding="utf-8") as f:
                     loaded = yaml.safe_load(f) or {}
 
                 if not isinstance(loaded, dict):
