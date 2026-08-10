@@ -419,6 +419,13 @@ def download(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            # yt-dlp reconfigures its own stdout/stderr to UTF-8; without
+            # an explicit ``encoding=`` the pipes are decoded with the
+            # Windows ANSI codepage (cp1251/cp1252), so a non-ASCII
+            # output path in ``--print after_move:filepath`` arrives as
+            # mojibake and the file lookup below reports "file not found".
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
             **no_window_kwargs(),
         )
@@ -561,7 +568,17 @@ def download(
             if resolved is None:
                 raise DownloadError(f"Download completed but file not found: {reported_path}")
 
-            size = resolved.stat().st_size
+            # ``stat()`` can raise a raw OSError (file quarantined by AV
+            # between the resolve and here, permissions, ...) which is
+            # not a ``DownloadError`` — surface it as one so the pipeline
+            # controller maps it to a download failure, not "unexpected
+            # error".
+            try:
+                size = resolved.stat().st_size
+            except OSError as e:
+                raise DownloadError(
+                    f"Downloaded file unreadable: {resolved}: {e}"
+                ) from e
             if size == 0:
                 raise DownloadError(f"Download completed but file is empty: {resolved}")
 

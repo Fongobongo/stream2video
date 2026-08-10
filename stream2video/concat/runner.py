@@ -270,7 +270,19 @@ def _run_ffmpeg(
                                 f"{label}: no progress for {int(elapsed_since_progress)}s -- waiting..."
                             )
 
-            _c._wait_with_cancel(process, timeout, _effective_cancel_callback, label)
+            # The wall-clock timeout is a deadline from SPAWN, not from
+            # this wait: the read loop above already consumed part of the
+            # budget, so pass only the remaining time. Otherwise a process
+            # that closes stdout but refuses to die would get up to
+            # 2×timeout before being killed, contradicting the docstring.
+            remaining_timeout = timeout
+            if timeout > 0:
+                remaining_timeout = max(
+                    1, timeout - int(time.monotonic() - process_start)
+                )
+            _c._wait_with_cancel(
+                process, remaining_timeout, _effective_cancel_callback, label
+            )
             wait_for_drain()
             drain_done = True
 
@@ -404,6 +416,10 @@ def _run_subprocess_cmd(
         # when the test expected interception.
         process = subprocess.Popen(
             cmd,
+            # Same rationale as ``_run_ffmpeg``: inheriting a
+            # console-mode stdin under pythonw.exe triggers a
+            # CreateProcessW winerror 206 on Windows.
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             bufsize=-1,

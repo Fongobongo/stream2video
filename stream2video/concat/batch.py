@@ -190,7 +190,17 @@ def _run_batch_concat(
             # amount. Both compensations are no-ops when start_time=0.
             _CHUNK_SEEK_MARGIN = 0.5
             seek_to = max(0.0, chunk_start - _CHUNK_SEEK_MARGIN - start_time)
-            chunk_dur = chunk_end - seek_to
+            # Window length must be a pure function of the chunk span +
+            # the margins, NOT ``chunk_end - seek_to``: the seek already
+            # backs off by ``start_time`` (and the margin), so the old
+            # formula decoded up to ``margin + start_time`` seconds of
+            # unwanted tail per chunk. On ``start_time=30`` itsoffset
+            # sources that undercut the windowed-decode win by ~30s per
+            # chunk — harmless for output (the ``trim`` below still
+            # selects the right frames) but needlessly slow.
+            chunk_dur = (chunk_end + _CHUNK_SEEK_MARGIN) - (
+                chunk_start - _CHUNK_SEEK_MARGIN
+            )
 
             # Frame-accurate, gapless chunk filter -- ``trim`` per keep
             # segment + ``concat`` filter glue.

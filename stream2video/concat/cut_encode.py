@@ -48,8 +48,16 @@ def _run_cut_then_encode(
     low_process_priority: bool = False,
     rlimit_as_mb: int = 0,
     memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
+    x264_low_memory: bool = False,
 ) -> None:
     """Cut lossless segments, concat losslessly, then do ONE final encode.
+
+    ``x264_low_memory`` is accepted for symmetry with segment/batch (those
+    pipelines use it to size the per-segment bitrate/CRF table). Here the
+    flag is currently a no-op — the single final encode uses the caller's
+    ``vcodec_opts`` directly — but the parameter must exist so a future
+    fix in ``encoder_opts`` keyed on ``x264_low_memory`` silently applies
+    to this method too instead of passing a never-forwarded kwarg.
 
     Unlike ``_run_segment_concat`` (N encode passes + 1 lossless join)
     and ``_run_batch_concat`` (M chunk encodes + 1 lossless join), this

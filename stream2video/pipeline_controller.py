@@ -160,10 +160,11 @@ class PipelineCallbacks:
 
     on_progress: Callable[[float], None]
     # ``force=True`` bypasses the GUI's status throttling for step-boundary
-    # / error updates. A plain ``Callable[[str], None]`` used to be OK for
-    # the CLI only; now the CLI's bundle also passes a two-positional
-    # closure, so the signature is uniform across hosts.
-    on_status: Callable[[str, bool], None]
+    # / error updates. Keyword-style so hosts can declare
+    # ``def cb(text, *, force=False)``; a plain two-positional closure
+    # would also type-check here but the callers below pass the flag as
+    # a keyword, so the annotation must include the keyword form.
+    on_status: Callable[..., None]
     on_log: Callable[[str], None]
     on_info: Callable[[str], None]
     on_overall: Callable[[float, float | None, bool], None]
@@ -783,14 +784,14 @@ class PipelineController:
                         f"[WARN] Free space {fmt_size(free)} < worst-case peak "
                         f"{fmt_size(required_worst)} (method={self.cfg.method}, "
                         f"typical ~{fmt_size(required_typical)}). "
-                        f"Need ~{fmt_size(required_worst - free)} more — may hit "
+                        f"Need ~{fmt_size(max(0, required_worst - free))} more — may hit "
                         f"'No space left' during gapless tree L0."
                     )
                 elif not ok_typ:
                     self.cb.on_log(
                         f"[WARN] Free space {fmt_size(free)} < typical peak "
                         f"{fmt_size(required_typical)} (worst ~{fmt_size(required_worst)}). "
-                        f"Will likely succeed but free ~{fmt_size(required_typical - free)} more."
+                        f"Will likely succeed but free ~{fmt_size(max(0, required_typical - free))} more."
                     )
                 else:
                     self.cb.on_log(

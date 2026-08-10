@@ -28,6 +28,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import struct
 import subprocess
 import time
 from functools import cache
@@ -193,7 +194,12 @@ def _createprocess_probe(exe: str) -> str:
         except OSError:
             exists = False
 
-        si = (ctypes.c_byte * 112)()  # STARTUPINFO storage; contents unused
+        # A zeroed buffer without ``cb`` set is rejected by CreateProcessW
+        # with ERROR_INVALID_PARAMETER — which would mask the REAL spawn
+        # failure (winerror 2/3/5, winget-shim-vanished, AV-block) that
+        # this probe exists to diagnose. Set cb = sizeof(STARTUPINFOW).
+        si = (ctypes.c_byte * 112)()  # STARTUPINFOW storage
+        struct.pack_into("<I", si, 0, 104)  # cb field: 104 on x64, 68 on x86
 
         class PROCESS_INFORMATION(ctypes.Structure):
             _fields_: ClassVar[list[tuple[str, Any]]] = [

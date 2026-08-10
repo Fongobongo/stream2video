@@ -145,6 +145,7 @@ def _run_with_fallback(
                 low_process_priority=low_process_priority,
                 rlimit_as_mb=rlimit_as_mb,
                 memory_monitor_factory=memory_monitor_factory,
+                x264_low_memory=x264_low_memory,
             )
         else:
             _c._run_batch_concat(
