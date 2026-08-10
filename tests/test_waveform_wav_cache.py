@@ -20,7 +20,7 @@ def _gui_stub(
     tmp_path: Path,
     wav_exists: bool = False,
     wav_newer: bool = True,
-) -> "tuple[MagicMock, Path, Path]":
+) -> tuple[MagicMock, Path, Path]:
     """Build a minimal GUI stub with just enough attrs for _run() to work.
 
     Returns a MagicMock whose instance attributes mimic the real GUI
@@ -101,7 +101,11 @@ class TestWaveformWavCache:
             patch.object(wfr, "read_peaks_from_stream", side_effect=_capture),
             patch.object(wfr, "load_silence_cache", return_value=[]),
             patch.object(wfr, "detect_silence_stream", return_value=[]),
-            patch.object(threading, "Thread", side_effect=lambda target=None, daemon=None: _run_synchronously(target)),
+            patch.object(
+                threading,
+                "Thread",
+                side_effect=lambda target=None, daemon=None: _run_synchronously(target),
+            ),
         ):
             g._waveform_peaks = []
             render = wfr.WaveformRenderMixin._render_waveform_preview.__get__(g)
@@ -110,13 +114,12 @@ class TestWaveformWavCache:
         from stream2video.silence.cache import _get_wav_cache_path
 
         assert captured.get("path") == _get_wav_cache_path(in_path, out_dir), (
-            f"Expected WAV path {_get_wav_cache_path(in_path, out_dir)}, "
-            f"got {captured.get('path')}"
+            f"Expected WAV path {_get_wav_cache_path(in_path, out_dir)}, got {captured.get('path')}"
         )
 
     def test_falls_back_to_video_when_wav_missing(self, tmp_path: Path) -> None:
         """No WAV cache -> peaks come from the source video."""
-        g, in_path, out_dir = _gui_stub(tmp_path, wav_exists=False)
+        g, in_path, _out_dir = _gui_stub(tmp_path, wav_exists=False)
         captured: dict = {}
 
         def _capture(path, **kw):
@@ -129,7 +132,11 @@ class TestWaveformWavCache:
             patch.object(wfr, "read_peaks_from_stream", side_effect=_capture),
             patch.object(wfr, "load_silence_cache", return_value=[]),
             patch.object(wfr, "detect_silence_stream", return_value=[]),
-            patch.object(threading, "Thread", side_effect=lambda target=None, daemon=None: _run_synchronously(target)),
+            patch.object(
+                threading,
+                "Thread",
+                side_effect=lambda target=None, daemon=None: _run_synchronously(target),
+            ),
         ):
             g._waveform_peaks = []
             render = wfr.WaveformRenderMixin._render_waveform_preview.__get__(g)
@@ -141,7 +148,7 @@ class TestWaveformWavCache:
 
     def test_stale_wav_falls_back_to_video(self, tmp_path: Path) -> None:
         """Stale WAV cache (older than video) is not trusted -> video used."""
-        g, in_path, out_dir = _gui_stub(tmp_path, wav_exists=True, wav_newer=False)
+        g, in_path, _out_dir = _gui_stub(tmp_path, wav_exists=True, wav_newer=False)
         captured: dict = {}
 
         def _capture(path, **kw):
@@ -154,7 +161,11 @@ class TestWaveformWavCache:
             patch.object(wfr, "read_peaks_from_stream", side_effect=_capture),
             patch.object(wfr, "load_silence_cache", return_value=[]),
             patch.object(wfr, "detect_silence_stream", return_value=[]),
-            patch.object(threading, "Thread", side_effect=lambda target=None, daemon=None: _run_synchronously(target)),
+            patch.object(
+                threading,
+                "Thread",
+                side_effect=lambda target=None, daemon=None: _run_synchronously(target),
+            ),
         ):
             g._waveform_peaks = []
             render = wfr.WaveformRenderMixin._render_waveform_preview.__get__(g)

@@ -102,7 +102,13 @@ def get_video_bitrate(video_path: Path) -> int | None:
         if not raw or raw == "N/A":
             return None
         return int(float(raw))
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError, FileNotFoundError, OSError) as e:
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        ValueError,
+        FileNotFoundError,
+        OSError,
+    ) as e:
         logger.warning(f"Could not determine video bitrate for {video_path}: {e}")
         return None
 
@@ -238,6 +244,28 @@ def check_disk_space(
         logger.warning("Could not check free space at %s: %s", path, e)
         return True, None
     return usage.free >= required_bytes, usage.free
+
+
+def resolve_disk_probe(path: Path) -> Path:
+    """Return the existing anchor for a disk-space probe of *path*.
+
+    When the user names a *new* output directory (the common first-run
+    case), probing that not-yet-existing path directly is wrong: the
+    previous code fell back to the *source* file's parent, which sits on
+    a different drive whenever the source and the destination are on
+    different volumes — the check then passes against the wrong disk.
+    Walk up to the nearest ancestor that does exist so
+    ``shutil.disk_usage`` measures the real destination volume.
+    """
+    path = Path(path)
+    probe = path
+    while not probe.exists():
+        parent = probe.parent
+        if parent == probe:
+            # Path has no anchor (relative single-component path).
+            break
+        probe = parent
+    return probe
 
 
 def has_audio_stream(video_path: Path) -> bool:
@@ -474,23 +502,33 @@ def cancel_process(owner: str, timeout: float = 2.0) -> bool:
     because we don't know which subprocess type it is and graceful
     shutdown would race with the pipeline's own cancel_callback. The
     caller's wait loop already handles the cleanup once the process exits.
+
+    Order matters: ``kill()`` is issued *before* any pipe close. Closing
+    the parent's pipe handles first raises ``ValueError: I/O operation on
+    closed file`` in the drain threads still reading them (e.g. the yt-dlp
+    stdout/stderr pumps in download.py); killing first lets them see EOF
+    and exit cleanly.
     """
     with _proc_registry_lock:
         proc = _proc_registry.get(owner)
     if proc is None or proc.poll() is not None:
         return False
+    try:
+        proc.kill()
+    except Exception:
+        logger.exception(f"cancel_process({owner!r}): kill() failed")
+        return False
+    # Only now, after kill, close OUR pipe handles. Any drain thread will
+    # get EBADF on its own read — daemon thread handles its own teardown.
     for pipe_name in ("stdin", "stdout", "stderr"):
         pipe = getattr(proc, pipe_name, None)
         if pipe is not None:
             try:
                 pipe.close()
             except Exception:
-                logger.debug("cancel_process(%r): closing %s failed", owner, pipe_name, exc_info=True)
-    try:
-        proc.kill()
-    except Exception:
-        logger.exception(f"cancel_process({owner!r}): kill() failed")
-        return False
+                logger.debug(
+                    "cancel_process(%r): closing %s failed", owner, pipe_name, exc_info=True
+                )
     try:
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -745,12 +783,26 @@ class SubprocessRunner:
             raise FileNotFoundError(
                 f"Executable not found in PATH while running {self.cmd[0]!r}"
             ) from e
-        set_active_process(self.process, owner=self.owner)
-        stderr = self.process.stderr
-        if stderr is not None:
-            self._wait_for_drain = drain_stderr_lines(
-                stderr, self.stderr_lines, on_line=self.on_line
-            )
+        try:
+            set_active_process(self.process, owner=self.owner)
+            stderr = self.process.stderr
+            if stderr is not None:
+                self._wait_for_drain = drain_stderr_lines(
+                    stderr, self.stderr_lines, on_line=self.on_line
+                )
+        except Exception:
+            # Half-entered state: Popen succeeded but registration/drain
+            # setup raised. ``__exit__`` won't run for a failed ``__enter__``,
+            # so kill the child and clear the registry slot here or the
+            # ffmpeg would leak as an orphan.
+            try:
+                self.process.kill()
+            except Exception:
+                logger.debug(
+                    "SubprocessRunner.__enter__ cleanup: kill() failed", exc_info=True
+                )
+            set_active_process(None, owner=self.owner)
+            raise
         return self
 
     def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:

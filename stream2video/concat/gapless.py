@@ -189,14 +189,21 @@ def _run_gapless_segment_concat(
     # Honour the module-level cap first (tests shrink it); then tighten it
     # further if the actual paths are long (a 250-char path in a deep temp
     # dir needs fewer inputs than an 80-char one to stay under 24K).
-    if os.name == "nt":
-        worst_path = max(len(str(p)) for p in part_paths) + 23
-        max_inputs = min(
-            _c._GAPLESS_MAX_INPUTS_PER_CALL,
-            max(2, (24_000 - 512) // max(1, worst_path)),
-        )
-    else:
-        max_inputs = _c._GAPLESS_MAX_INPUTS_PER_CALL
+    # per-input = path + `-i "` + `" ` + `[i:v][i:a]` pads + argv headroom.
+    # ``output_path`` is included in `prefix` so a long final output path
+    # shrinks the budget too (the final pass carries the user codec opts).
+    def _compute_max_inputs(paths: list[Path]) -> int:
+        if os.name != "nt" or not paths:
+            return _c._GAPLESS_MAX_INPUTS_PER_CALL
+        prefix = 512 + len(str(output_path))
+        worst_path = max(len(str(p)) for p in paths)
+        per_input = worst_path + 23
+        budget = 24_000 - prefix
+        if per_input <= 0 or budget <= 0:
+            return 2
+        return min(_c._GAPLESS_MAX_INPUTS_PER_CALL, max(2, budget // per_input))
+
+    max_inputs = _compute_max_inputs(part_paths)
 
     if n <= max_inputs or os.name != "nt":
         _c._concat_filter_one_pass(
@@ -263,6 +270,15 @@ def _run_gapless_segment_concat(
     _tree_group_dur = (total_duration / max(1, total_groups_est)) if total_duration > 0 else 0
 
     while len(current) > max_inputs:
+        # Intermediate paths (``tree_dir\L{level}_{g:05d}.mkv``) are
+        # typically *longer* than the original part paths (tree prefix +
+        # fixed-width group suffix). Recompute the per-call cap from the
+        # current level's actual paths so a long temp-dir prefix can't
+        # push the deeper tree levels back over the Win32 32K line limit
+        # on L1+.
+        max_inputs = min(max_inputs, _compute_max_inputs(current))
+        if len(current) <= max_inputs:
+            break
         next_level: list[Path] = []
         n_groups = (len(current) + max_inputs - 1) // max_inputs
         for g in range(n_groups):
@@ -278,10 +294,11 @@ def _run_gapless_segment_concat(
                 # concat demuxer would happily embed it into the final
                 # file. The segment path has done ffprobe validation for
                 # a long time (segment.py:119); the tree path had the
-                # gap. MKV uses stream_type="a" because PCM audio + H.264
-                # video are both streams in the same file — "v" alone
-                # would reject a video-only chunk. A failed validation is
-                # NOT fatal: like every other resume check in the codebase
+                # gap. Every intermediate carries a video stream (the
+                # gapless path only runs when the source has audio, so
+                # both streams are always present), so validate on
+                # ``stream_type="v"``. A failed validation is NOT fatal:
+                # like every other resume check in the codebase
                 # (segment.py / batch.py / audio.py), we simply re-encode
                 # the group instead of aborting the whole run.
                 try:
@@ -338,7 +355,11 @@ def _run_gapless_segment_concat(
                     if progress_callback is None or total_groups_est == 0:
                         return
                     gf = max(0.0, min(1.0, s / max(1.0, chunk_dur)))
-                    overall = 0.9 + (base_completed / max(1, total_groups_est)) * 0.08 + gf * (0.08 / max(1, total_groups_est))
+                    overall = (
+                        0.9
+                        + (base_completed / max(1, total_groups_est)) * 0.08
+                        + gf * (0.08 / max(1, total_groups_est))
+                    )
                     progress_callback(min(0.98, overall))
 
                 return _pg
@@ -352,7 +373,7 @@ def _run_gapless_segment_concat(
                 audio_codec="pcm_s16le",
                 audio_opts=[],
                 total_duration=_chunk_dur,
-                    progress_callback=_group_prog,
+                progress_callback=_group_prog,
                 cancel_callback=cancel_callback,
                 timeout=timeout,
                 label=f"gapless tree L{level} G{g}",

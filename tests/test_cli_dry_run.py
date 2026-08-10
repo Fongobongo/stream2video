@@ -29,7 +29,7 @@ def _make_silence_segments() -> list:
     return [SilenceSegment(2.0, 4.0), SilenceSegment(6.0, 8.0)]
 
 
-def _invoke(argv: list[str]) -> "tuple[int, str, MagicMock, MagicMock]":
+def _invoke(argv: list[str]) -> tuple[int, str, MagicMock, MagicMock]:
     """Invoke the CLI with mocked heavy I/O. Returns
     (exit_code, stdout, download_mock, cut_concat_mock)."""
     runner = CliRunner()
@@ -44,10 +44,12 @@ def _invoke(argv: list[str]) -> "tuple[int, str, MagicMock, MagicMock]":
         # generate_keep_segments internally calls get_video_duration —
         # patch it where concat's helpers re-exported it (concat.helpers
         # imports the symbol from stream2video.concat at call time).
-            patch("stream2video.concat.get_video_duration", return_value=10.0),
+        patch("stream2video.concat.get_video_duration", return_value=10.0),
         patch.object(cli_mod, "cut_and_concat") as mock_cut,
         patch.object(cli_mod, "check_memory_reserve", return_value=True),
-        patch.object(cli_mod, "apply_per_video_dir", side_effect=lambda o, v, d, per_video_dir=False: (o, v)),
+        patch.object(
+            cli_mod, "apply_per_video_dir", side_effect=lambda o, v, d, per_video_dir=False: (o, v)
+        ),
     ):
         # download() passthrough: return the input path as-is.
         mock_dl.return_value = MagicMock(
@@ -67,13 +69,10 @@ class TestDryRun:
         _make_video_file(src, size_mb=10.0)
         out_dir = tmp_path / "out"
 
-        code, stdout, mock_dl, mock_cut = _invoke(
-            [src, "-o", out_dir, "--dry-run"]
-        )
+        code, stdout, mock_dl, mock_cut = _invoke([src, "-o", out_dir, "--dry-run"])
 
         assert code == 0, f"expected exit 0, got {code}: {stdout}"
         mock_dl.assert_called_once()
-        mock_detect_calls = mock_dl.call_count + mock_cut.call_count
         # The encoder must NEVER be called in dry-run mode.
         assert mock_cut.call_count == 0, (
             "cut_and_concat was called during --dry-run — the dry-run "
@@ -141,23 +140,26 @@ class TestDryRun:
             patch.object(cli_mod, "detect_silence") as mock_detect,
             patch.object(cli_mod, "load_silence_cache", return_value=None),
             patch.object(cli_mod, "save_silence_cache", lambda *a, **kw: None),
-        # generate_keep_segments reads duration via ``stream2video.concat.get_video_duration``
-        # (the indirection layer keeps the historical patch-point alive).
-        patch("stream2video.concat.get_video_duration", return_value=10.0),
+            # generate_keep_segments reads duration via ``stream2video.concat.get_video_duration``
+            # (the indirection layer keeps the historical patch-point alive).
+            patch("stream2video.concat.get_video_duration", return_value=10.0),
             patch.object(cli_mod, "cut_and_concat"),
             patch.object(cli_mod, "check_memory_reserve", side_effect=_counted),
-            patch.object(cli_mod, "apply_per_video_dir", side_effect=lambda o, v, d, per_video_dir=False: (o, v)),
+            patch.object(
+                cli_mod,
+                "apply_per_video_dir",
+                side_effect=lambda o, v, d, per_video_dir=False: (o, v),
+            ),
         ):
             mock_dl.return_value = MagicMock(path=src, is_downloaded=False)
             mock_detect.return_value = _make_silence_segments()
             result = runner.invoke(
-                cli_mod.app, [str(src), "-o", str(out_dir), "--dry-run"],
+                cli_mod.app,
+                [str(src), "-o", str(out_dir), "--dry-run"],
                 catch_exceptions=False,
             )
 
         assert result.exit_code == 0
         # Silence-phase pre-flight ran; concat-phase pre-flight did NOT.
         assert "silence detection" in calls, f"silence pre-flight missing: {calls}"
-        assert "concat phase" not in calls, (
-            f"concat pre-flight ran despite --dry-run: {calls}"
-        )
+        assert "concat phase" not in calls, f"concat pre-flight ran despite --dry-run: {calls}"

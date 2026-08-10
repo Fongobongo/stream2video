@@ -190,7 +190,9 @@ def build_cli_command(
     return " ".join(parts)
 
 
-def _wrap_status_lines(text: str, max_len: int = STATUS_MAX, max_lines: int = STATUS_MAX_LINES) -> list[str]:
+def _wrap_status_lines(
+    text: str, max_len: int = STATUS_MAX, max_lines: int = STATUS_MAX_LINES
+) -> list[str]:
     """Wrap a status string into up to *max_lines* lines of *max_len* each.
 
     Word-aware where possible (breaks on space); hard-breaks when a

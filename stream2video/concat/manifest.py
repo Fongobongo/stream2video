@@ -24,7 +24,8 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-PIPELINE_VERSION = 3  # bump when the on-disk segment/chunk format changes
+PIPELINE_VERSION = 4  # bump when the on-disk segment/chunk format changes or a new
+# identity key is added (v4: +output_fps, gapless_concat, source_has_audio)
 
 
 def _manifest_path(work_dir: Path) -> Path:
@@ -58,8 +59,20 @@ def _build_manifest(
     audio_quality: str,
     x264_preset: str,
     encoder_threads: str | int,
+    *,
+    output_fps: str = "source",
+    gapless_concat: bool = False,
+    source_has_audio: bool = True,
 ) -> dict:
-    """Construct the manifest dict describing the current run's identity."""
+    """Construct the manifest dict describing the current run's identity.
+
+    ``output_fps`` / ``gapless_concat`` / ``source_has_audio`` must be part
+    of the identity: they change the per-segment bytes (``-vf fps=...`` in
+    the segment command, the tree-vs-demuxer join strategy) but are not
+    captured by ``encoder`` / ``encoder_opts`` alone. Without them a user
+    who changed only ``output_fps`` between two runs would silently reuse
+    segments encoded at the *old* frame rate.
+    """
     return {
         "pipeline_version": PIPELINE_VERSION,
         "source": _source_identity(video_path),
@@ -71,6 +84,9 @@ def _build_manifest(
         "audio_quality": audio_quality,
         "x264_preset": x264_preset,
         "encoder_threads": encoder_threads,
+        "output_fps": output_fps,
+        "gapless_concat": bool(gapless_concat),
+        "source_has_audio": bool(source_has_audio),
         "keep_segments": list(keep_segments),
         "keep_segments_total_duration": sum(e - s for s, e in keep_segments),
         "created_at": time.time(),
@@ -144,6 +160,9 @@ def _validate_manifest(
         "audio_quality",
         "x264_preset",
         "encoder_threads",
+        "output_fps",
+        "gapless_concat",
+        "source_has_audio",
     ):
         if stored.get(key) != current.get(key):
             logger.info(

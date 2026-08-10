@@ -374,6 +374,13 @@ class PipelineController:
     # they're still populated up to the point where the failure occurred.
     _download_path: Path | None = field(default=None, init=False)
     _output_path: Path | None = field(default=None, init=False)
+    # Resolved per-run output directory (per_video_dir project dir when
+    # enabled, else cfg.output_dir). Declared explicitly instead of being
+    # set ad-hoc in _run_download_phase and read back via getattr — the
+    # getattr fallback silently returned cfg.output_dir when the field had
+    # never been written, hiding a real "phase order" bug behind a wrong
+    # default.
+    _output_dir_resolved: Path | None = field(default=None, init=False)
     _pipeline_start: float = field(default=0.0, init=False)
     _progress_plan: ProgressPlan = field(default_factory=ProgressPlan, init=False)
     _download_was_real: bool = field(default=True, init=False)
@@ -506,7 +513,9 @@ class PipelineController:
             self._cleanup_download_path()
             self._cleanup_partial_output()
             raise PipelineCancelled(str(e)) from e
-        except (DownloadError, URLValidationError) as e:
+        except DownloadError as e:
+            # URLValidationError is a DownloadError subclass — no separate
+            # clause needed.
             self._cleanup_download_path()
             self._cleanup_partial_output()
             raise PipelineDownloadError(str(e)) from e
@@ -588,7 +597,15 @@ class PipelineController:
             except Exception:
                 logger.debug("on_output_resolved raised", exc_info=True)
 
-        src_size_bytes = video_path.stat().st_size
+        try:
+            src_size_bytes = video_path.stat().st_size
+        except OSError as e:
+            # Between ``download()`` and this stat the file can be yanked
+            # (antivirus quarantine, user cleanup). Surface a clear
+            # download-phase error, not a generic "Unexpected: WinError 2".
+            raise PipelineDownloadError(
+                f"Downloaded file is no longer readable: {video_path} ({e})"
+            ) from e
         src_duration = get_video_duration(video_path)
         self._src_duration = src_duration
         self._progress_plan = _build_progress_plan(
@@ -632,7 +649,9 @@ class PipelineController:
         ``PipelineSilenceError`` on ffmpeg failure and
         ``PipelineCancelled`` on user cancel.
         """
-        output_dir = getattr(self, "_output_dir_resolved", self.cfg.output_dir)
+        # _run_download_phase sets this before _run_silence_phase runs;
+        # fall back to cfg.output_dir only for a direct unit-test call.
+        output_dir = self._output_dir_resolved or self.cfg.output_dir
         self.cb.on_progress(self._progress_plan.download_end)
         self._set_phase_progress(0.0)
         self._set_status("Step 2/4: Detecting silence...", force=True)
@@ -736,7 +755,7 @@ class PipelineController:
         Raises ``PipelineConcatError`` on ffmpeg failure and
         ``PipelineCancelled`` on user cancel.
         """
-        output_dir = getattr(self, "_output_dir_resolved", self.cfg.output_dir)
+        output_dir = self._output_dir_resolved or self.cfg.output_dir
         self.cb.on_progress(self._progress_plan.silence_end)
 
         # Output filename extension follows the chosen output_format.
@@ -772,10 +791,14 @@ class PipelineController:
                 src_size, self._src_duration, keep_dur, self.cfg.method
             )
 
-            # Disk check: use output_dir (project dir is inside it). Warn only,
-            # same as memory_reserve_mb — don't cancel, just log so user sees
-            # “No space left” coming and can abort early.
-            disk_probe = output_dir if output_dir.exists() else video_path.parent
+            # Disk check: probe the *destination* drive, walking up to
+            # the nearest existing ancestor when the output dir doesn't
+            # exist yet (first-run case). Previously this fell back to
+            # ``video_path.parent`` — the SOURCE drive — so a source on
+            # C: with output on D: would check the wrong disk entirely.
+            from stream2video.utils import resolve_disk_probe
+
+            disk_probe = resolve_disk_probe(output_dir)
             ok_typ, free = _check_disk_space(disk_probe, required_typical)
             ok_worst, _ = _check_disk_space(disk_probe, required_worst)
             if free is not None:
@@ -877,7 +900,9 @@ class PipelineController:
         # cut_and_concat with progress_callback). Keep the old single-phase
         # shape but map it onto 3 so back-compat tests see 3.
         def concat_prog(f: float) -> None:
-            _on_phase("cutting" if f < 0.9 else "concatenating", f / 0.9 if f < 0.9 else (f - 0.9) / 0.1)
+            _on_phase(
+                "cutting" if f < 0.9 else "concatenating", f / 0.9 if f < 0.9 else (f - 0.9) / 0.1
+            )
 
         # Announce atomic split in logs so the user's report shows
         # [16:13:43] Step 3/4 Cutting + [16:14:xx] Step 4/4 Concatenating

@@ -84,6 +84,10 @@ def _run_audio_concat_filter(
             "[outa]",
             "-c:a",
             codec,
+            # Bitrate first so ``extra_opts`` (already carrying e.g.
+            # explicit sample-rate / channel pins) can override on a
+            # later flag — ffmpeg takes the LAST occurrence of each option.
+            *_c._audio_bitrate_opts(audio_quality),
             *_c._audio_opts(audio_quality),
             *extra_opts,
             str(output_path),

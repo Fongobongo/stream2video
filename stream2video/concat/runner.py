@@ -192,6 +192,19 @@ def _run_ffmpeg(
         stall_thread = threading.Thread(target=_stall_watchdog, daemon=True, name=f"stall_{label}")
         stall_thread.start()
 
+        # Helper so every kill-first path in the read loop reaps the child
+        # before propagating: on Windows ``kill()`` is asynchronous, and letting
+        # the exception escape without a ``wait()`` keeps the process handles
+        # (and the segment file ffmpeg had open) alive long enough for the next
+        # ``shutil.rmtree(seg_dir)`` to trip WinError 32 (file busy).
+        def _kill_and_raise(exc: BaseException) -> None:
+            process.kill()
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                pass  # already dead or un-killable; nothing more to reap
+            raise exc from None
+
         try:
             with cancel_monitor(process, _effective_cancel_callback) as cancelled:
                 if track_progress:
@@ -213,27 +226,28 @@ def _run_ffmpeg(
                         # *progress gaps*, not the total elapsed.
                         elapsed_total = time.monotonic() - process_start
                         if timeout > 0 and elapsed_total > timeout:
-                            process.kill()
-                            raise FFmpegError(
-                                f"{label} timeout after {int(elapsed_total)}s "
-                                f"(limit {timeout}s — killed mid-encode)"
-                            ) from None
+                            _kill_and_raise(
+                                FFmpegError(
+                                    f"{label} timeout after {int(elapsed_total)}s "
+                                    f"(limit {timeout}s — killed mid-encode)"
+                                )
+                            )
                         try:
                             raw_line = line_queue.get(timeout=CANCEL_POLL_INTERVAL)
                         except queue.Empty:
                             # No new line -- check cancel + stall.
                             if _effective_cancel_callback():
-                                process.kill()
-                                raise CancelledError(f"{label} cancelled") from None
+                                _kill_and_raise(CancelledError(f"{label} cancelled"))
                             if cancelled.is_set():
                                 raise CancelledError(f"{label} cancelled") from None
                             elapsed_since_progress = time.monotonic() - last_progress_time
                             if elapsed_since_progress > stall_kill:
-                                process.kill()
-                                raise FFmpegError(
-                                    f"{label} stalled -- no progress for {int(elapsed_since_progress)}s, "
-                                    "possible resource exhaustion"
-                                ) from None
+                                _kill_and_raise(
+                                    FFmpegError(
+                                        f"{label} stalled -- no progress for {int(elapsed_since_progress)}s, "
+                                        "possible resource exhaustion"
+                                    )
+                                )
                             elif elapsed_since_progress > stall_warning and not stall_warned:
                                 stall_warned = True
                                 logger.warning(
@@ -243,10 +257,9 @@ def _run_ffmpeg(
                         if raw_line is None:
                             break  # EOF -- pipe closed
                         if _effective_cancel_callback():
-                            process.kill()
-                            raise CancelledError(f"{label} cancelled")
+                            _kill_and_raise(CancelledError(f"{label} cancelled"))
                         if cancelled.is_set():
-                            raise CancelledError(f"{label} cancelled")
+                            raise CancelledError(f"{label} cancelled") from None
                         line = raw_line.decode("utf-8", errors="replace").strip()
                         if line.startswith("out_time_us="):
                             last_progress_time = time.monotonic()
@@ -259,10 +272,11 @@ def _run_ffmpeg(
                                     pass
                         elapsed_since_progress = time.monotonic() - last_progress_time
                         if elapsed_since_progress > stall_kill:
-                            process.kill()
-                            raise FFmpegError(
-                                f"{label} stalled -- no progress for {int(elapsed_since_progress)}s, "
-                                "possible resource exhaustion"
+                            _kill_and_raise(
+                                FFmpegError(
+                                    f"{label} stalled -- no progress for {int(elapsed_since_progress)}s, "
+                                    "possible resource exhaustion"
+                                )
                             )
                         elif elapsed_since_progress > stall_warning and not stall_warned:
                             stall_warned = True
@@ -270,83 +284,79 @@ def _run_ffmpeg(
                                 f"{label}: no progress for {int(elapsed_since_progress)}s -- waiting..."
                             )
 
-            # The wall-clock timeout is a deadline from SPAWN, not from
-            # this wait: the read loop above already consumed part of the
-            # budget, so pass only the remaining time. Otherwise a process
-            # that closes stdout but refuses to die would get up to
-            # 2×timeout before being killed, contradicting the docstring.
-            remaining_timeout = timeout
-            if timeout > 0:
-                remaining_timeout = max(
-                    1, timeout - int(time.monotonic() - process_start)
-                )
-            _c._wait_with_cancel(
-                process, remaining_timeout, _effective_cancel_callback, label
-            )
-            wait_for_drain()
-            drain_done = True
+                # The wall-clock timeout is a deadline from SPAWN, not from
+                # this wait: the read loop above already consumed part of the
+                # budget, so pass only the remaining time. Otherwise a process
+                # that closes stdout but refuses to die would get up to
+                # 2x timeout before being killed, contradicting the docstring.
+                remaining_timeout = timeout
+                if timeout > 0:
+                    remaining_timeout = max(1, timeout - int(time.monotonic() - process_start))
+                _c._wait_with_cancel(process, remaining_timeout, _effective_cancel_callback, label)
+                wait_for_drain()
+                drain_done = True
 
-            if process.returncode != 0:
-                stderr_text = "".join(stderr_lines)
-                msg = (
-                    stderr_text[:_STDERR_TRUNCATE]
-                    if stderr_text
-                    else "unknown error (no stderr)"
-                )
-                # Memory monitor's hard-budget kill: it triggers cancel
-                # via cancel_callback rather than killing the process
-                # directly, and on a race the cancel_monitor's kill can
-                # land before cancelled propagates — so we'd otherwise
-                # reach the rc != 0 branch with a SIGKILL and report
-                # this as a stall or a generic ffmpeg failure. Surface
-                # it as an OOM-class error here so the user sees the
-                # "lower the budget" hint (P1 audit v0.3 §4).
-                if memory_monitor is not None and memory_monitor.hard_exceeded:
-                    raise FFmpegOutOfMemoryError(
-                        f"{label} ran out of memory "
-                        f"(memory monitor hard limit hit, "
-                        f"rc={process.returncode}); {_OOM_HINT}"
+                if process.returncode != 0:
+                    stderr_text = "".join(stderr_lines)
+                    msg = (
+                        stderr_text[:_STDERR_TRUNCATE]
+                        if stderr_text
+                        else "unknown error (no stderr)"
                     )
-                # Stall-watchdog kill (rc=-9 on POSIX): distinguish from
-                # a real OOM kill BEFORE looks_like_oom claims it (P1
-                # audit v0.3 §4). The watchdog set the flag just before
-                # process.kill(); the inline stall-check in the reader
-                # loop also raises a stall FFmpegError directly, but a
-                # race between reader EOF and the watchdog firing could
-                # surface rc=-9 — so the flag check is the source of
-                # truth here.
-                if stall_killed.is_set():
-                    raise FFmpegError(
-                        f"{label} stalled -- no progress for > {stall_kill}s, "
-                        "process killed by watchdog"
-                    )
-                # P3.x: surface OOM as a dedicated error so the CLI/GUI
-                # can hint the user to lower the memory budget or pick
-                # the Low-memory preset, instead of dumping the raw
-                # stderr. SIGKILL on POSIX (rc -9 / 137) or stderr
-                # allocator-failure markers — see looks_like_oom.
-                if _c.looks_like_oom(process.returncode, stderr_text):
-                    raise FFmpegOutOfMemoryError(
-                        f"{label} ran out of memory "
-                        f"(rc={process.returncode}); {_OOM_HINT}"
-                    )
-                raise FFmpegError(f"{label} failed: {msg}")
+                    # Memory monitor's hard-budget kill: it triggers cancel
+                    # via cancel_callback rather than killing the process
+                    # directly, and on a race the cancel_monitor's kill can
+                    # land before cancelled propagates — so we'd otherwise
+                    # reach the rc != 0 branch with a SIGKILL and report
+                    # this as a stall or a generic ffmpeg failure. Surface
+                    # it as an OOM-class error here so the user sees the
+                    # "lower the budget" hint (P1 audit v0.3 §4).
+                    if memory_monitor is not None and memory_monitor.hard_exceeded:
+                        raise FFmpegOutOfMemoryError(
+                            f"{label} ran out of memory "
+                            f"(memory monitor hard limit hit, "
+                            f"rc={process.returncode}); {_OOM_HINT}"
+                        )
+                    # Stall-watchdog kill (rc=-9 on POSIX): distinguish from
+                    # a real OOM kill BEFORE looks_like_oom claims it (P1
+                    # audit v0.3 §4). The watchdog set the flag just before
+                    # process.kill(); the inline stall-check in the reader
+                    # loop also raises a stall FFmpegError directly, but a
+                    # race between reader EOF and the watchdog firing could
+                    # surface rc=-9 — so the flag check is the source of
+                    # truth here.
+                    if stall_killed.is_set():
+                        raise FFmpegError(
+                            f"{label} stalled -- no progress for > {stall_kill}s, "
+                            "process killed by watchdog"
+                        )
+                    # P3.x: surface OOM as a dedicated error so the CLI/GUI
+                    # can hint the user to lower the memory budget or pick
+                    # the Low-memory preset, instead of dumping the raw
+                    # stderr. SIGKILL on POSIX (rc -9 / 137) or stderr
+                    # allocator-failure markers — see looks_like_oom.
+                    if _c.looks_like_oom(process.returncode, stderr_text):
+                        raise FFmpegOutOfMemoryError(
+                            f"{label} ran out of memory (rc={process.returncode}); {_OOM_HINT}"
+                        )
+                    raise FFmpegError(f"{label} failed: {msg}")
 
         except CancelledError:
             if memory_monitor is not None and memory_monitor.hard_exceeded:
                 raise FFmpegOutOfMemoryError(
-                    f"{label} ran out of memory "
-                    "(memory monitor hard limit hit); "
-                    f"{_OOM_HINT}"
+                    f"{label} ran out of memory (memory monitor hard limit hit); {_OOM_HINT}"
                 ) from None
             raise
         except subprocess.TimeoutExpired as e:
             process.kill()
+            try:
+                process.wait()  # reap so stderr can finish draining and the
+                # next rmtree(work_dir) doesn't hit WinError 32.
+            except subprocess.TimeoutExpired:
+                pass
             if memory_monitor is not None and memory_monitor.hard_exceeded:
                 raise FFmpegOutOfMemoryError(
-                    f"{label} ran out of memory "
-                    "(memory monitor hard limit hit); "
-                    f"{_OOM_HINT}"
+                    f"{label} ran out of memory (memory monitor hard limit hit); {_OOM_HINT}"
                 ) from None
             raise FFmpegError(f"{label} timeout after {e.timeout}s") from None
         finally:
@@ -486,4 +496,6 @@ def _wait_with_cancel(
         except subprocess.TimeoutExpired:
             if cancel_callback and cancel_callback():
                 process.kill()
+                process.wait()  # reap — same WinError-32 rationale as in
+                # the inline stall/cancel paths above.
                 raise CancelledError(f"{label} cancelled") from None

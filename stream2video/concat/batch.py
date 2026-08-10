@@ -102,6 +102,8 @@ def _run_batch_concat(
         audio_quality,
         x264_preset,
         encoder_threads,
+        output_fps=output_fps,
+        source_has_audio=source_has_audio,
     )
     _c._ensure_fresh_work_dir(batch_dir, manifest)
 
@@ -198,9 +200,7 @@ def _run_batch_concat(
             # sources that undercut the windowed-decode win by ~30s per
             # chunk — harmless for output (the ``trim`` below still
             # selects the right frames) but needlessly slow.
-            chunk_dur = (chunk_end + _CHUNK_SEEK_MARGIN) - (
-                chunk_start - _CHUNK_SEEK_MARGIN
-            )
+            chunk_dur = (chunk_end + _CHUNK_SEEK_MARGIN) - (chunk_start - _CHUNK_SEEK_MARGIN)
 
             # Frame-accurate, gapless chunk filter -- ``trim`` per keep
             # segment + ``concat`` filter glue.

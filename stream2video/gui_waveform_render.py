@@ -133,9 +133,7 @@ class WaveformRenderMixin:
                 self._tk_after(0, lambda: self._safe_status_set("Loading..."))
                 wav_cache = _get_wav_cache_path(in_path, out_dir)
                 if _is_wav_cache_valid(wav_cache, in_path):
-                    self._log(
-                        f"  Waveform preview: using cached audio ({wav_cache.name})"
-                    )
+                    self._log(f"  Waveform preview: using cached audio ({wav_cache.name})")
                     peaks, duration = read_peaks_from_stream(
                         wav_cache,
                         target_buckets=800,

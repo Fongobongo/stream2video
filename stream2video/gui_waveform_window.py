@@ -111,9 +111,19 @@ class WaveformWindowMixin:
         self._waveform_threshold_after_id: str | None = None
 
     def _wave_window_alive(self) -> bool:
-        """True if the waveform popup exists and is still on-screen."""
+        """True if the waveform popup exists and is still on-screen.
+
+        ``winfo_exists()`` can raise ``TclError("invalid command name ...")``
+        when the Toplevel is mid-destroy on Windows; treat that as "not
+        alive" instead of letting it propagate.
+        """
         win = getattr(self, "_wave_window", None)
-        return win is not None and win.winfo_exists()
+        if win is None:
+            return False
+        try:
+            return bool(win.winfo_exists())
+        except Exception:
+            return False
 
     def _can_preview_waveform(self) -> bool:
         """True iff the input field points at a readable local file."""
@@ -334,13 +344,13 @@ class WaveformWindowMixin:
         """Image size for the next render, derived from the popup window size."""
         if not self._wave_window_alive():
             return compute_render_size(None, None)
-        # _wave_window_alive() above guarantees self._wave_window is set,
-        # but mypy can't follow the helper's return type — narrow locally
-        # so the .winfo_width/height() below don't union-attr.
-        assert self._wave_window is not None
-        return compute_render_size(
-            self._wave_window.winfo_width(), self._wave_window.winfo_height()
-        )
+        # _wave_window_alive() above guarantees self._wave_window is set;
+        # narrow via a local so the .winfo_*() calls don't union-attr and
+        # so ``python -O`` (which strips asserts) can't drop the guard.
+        win = self._wave_window
+        if win is None:
+            return compute_render_size(None, None)
+        return compute_render_size(win.winfo_width(), win.winfo_height())
 
     def _schedule_waveform_threshold_re_render(self) -> None:
         """Schedule a debounced re-render of the waveform popup so the

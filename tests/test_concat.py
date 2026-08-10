@@ -69,9 +69,7 @@ def test_run_subprocess_cmd_waits_for_stderr_drain_before_oom_classification():
         _run_subprocess_cmd(["ffmpeg"], timeout=5, label="cut phase")
 
 
-def test_gapless_uses_tree_when_cmdline_would_exceed_windows_limit(
-    tmp_path: Path, monkeypatch
-):
+def test_gapless_uses_tree_when_cmdline_would_exceed_windows_limit(tmp_path: Path, monkeypatch):
     """After the 2026-08-02/03 incident the gapless path never falls back
     to the concat demuxer: it splits many inputs into groups joined via
     intermediates (binary tree) and runs the final encode once.
@@ -143,15 +141,27 @@ def test_gapless_real_ffmpeg_long_command_line_fails(tmp_path: Path):
         graph_parts.append(f"[{i}:v][{i}:a]")
     graph = "".join(graph_parts) + f"concat=n={n}:v=1:a=1[outv][outa]"
 
-    ffmpeg = subprocess.check_output(
-        ["where", "ffmpeg"], text=True, shell=False
-    ).splitlines()[0].strip()
-    cmd = [ffmpeg, "-y", "-v", "error", *inputs,
-           "-filter_complex", graph, "-map", "[outv]", "-map", "[outa]",
-           "-f", "null", "-"]
+    ffmpeg = (
+        subprocess.check_output(["where", "ffmpeg"], text=True, shell=False).splitlines()[0].strip()
+    )
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-v",
+        "error",
+        *inputs,
+        "-filter_complex",
+        graph,
+        "-map",
+        "[outv]",
+        "-map",
+        "[outa]",
+        "-f",
+        "null",
+        "-",
+    ]
     assert len(subprocess.list2cmdline(cmd)) > 32767, (
-        f"test setup should exceed the Windows limit (got "
-        f"{len(subprocess.list2cmdline(cmd))})"
+        f"test setup should exceed the Windows limit (got {len(subprocess.list2cmdline(cmd))})"
     )
 
     with pytest.raises(FileNotFoundError) as exc_info:

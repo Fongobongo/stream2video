@@ -36,35 +36,13 @@ Layout::
 # Windows error-206 incident). Importing the modules here lets the
 # patch's attribute traversal succeed; the actual runtime work happens
 # inside the submodules below.
-import queue
 import subprocess
-import threading
-import time  # noqa: F401
-from collections.abc import Callable
-from typing import IO, Any
+from typing import Any
 
 from stream2video.concat import constants as _consts
 from stream2video.concat.api import cut_and_concat
 from stream2video.concat.audio import _run_audio_concat_filter, _run_audio_extract
 from stream2video.concat.batch import _run_batch_concat
-
-# Surface every constant as an attribute of the package so external
-# callers (and ``patch("stream2video.concat.<CONST>")``) keep working.
-_AUDIO_BITRATE = _consts._AUDIO_BITRATE
-_AUDIO_BITRATES = _consts._AUDIO_BITRATES
-_AUDIO_CHANNELS = _consts._AUDIO_CHANNELS
-_AUDIO_SAMPLE_RATE = _consts._AUDIO_SAMPLE_RATE
-_BATCH_CHUNK_MIN = _consts._BATCH_CHUNK_MIN
-_BATCH_CHUNK_SIZE = _consts._BATCH_CHUNK_SIZE
-_FINAL_CONCAT_TIMEOUT = _consts._FINAL_CONCAT_TIMEOUT
-_MIN_PART_BYTES = _consts._MIN_PART_BYTES
-_OOM_HINT = _consts._OOM_HINT
-_SEGMENT_ENCODE_TIMEOUT = _consts._SEGMENT_ENCODE_TIMEOUT
-_STALL_KILL = _consts._STALL_KILL
-_STALL_WARNING = _consts._STALL_WARNING
-_STDERR_TRUNCATE = _consts._STDERR_TRUNCATE
-_VIDEO_BITRATE = _consts._VIDEO_BITRATE
-ENCODER_CHECK_TIMEOUT = _consts.ENCODER_CHECK_TIMEOUT
 from stream2video.concat.cut_encode import _run_cut_then_encode
 from stream2video.concat.encoders import (
     _VIDEO_BITRATES,
@@ -121,6 +99,32 @@ from stream2video.concat.runner import (
     _wait_with_cancel,
 )
 from stream2video.concat.segment import _run_segment_concat
+from stream2video.utils import (
+    drain_stderr_lines,
+    get_video_duration,
+    get_video_start_time,
+    has_audio_stream,
+    looks_like_oom,
+    read_lines_queue,
+)
+
+# Surface every constant as an attribute of the package so external
+# callers (and ``patch("stream2video.concat.<CONST>")``) keep working.
+_AUDIO_BITRATE = _consts._AUDIO_BITRATE
+_AUDIO_BITRATES = _consts._AUDIO_BITRATES
+_AUDIO_CHANNELS = _consts._AUDIO_CHANNELS
+_AUDIO_SAMPLE_RATE = _consts._AUDIO_SAMPLE_RATE
+_BATCH_CHUNK_MIN = _consts._BATCH_CHUNK_MIN
+_BATCH_CHUNK_SIZE = _consts._BATCH_CHUNK_SIZE
+_FINAL_CONCAT_TIMEOUT = _consts._FINAL_CONCAT_TIMEOUT
+_MIN_PART_BYTES = _consts._MIN_PART_BYTES
+_OOM_HINT = _consts._OOM_HINT
+_SEGMENT_ENCODE_TIMEOUT = _consts._SEGMENT_ENCODE_TIMEOUT
+_STALL_KILL = _consts._STALL_KILL
+_STALL_WARNING = _consts._STALL_WARNING
+_STDERR_TRUNCATE = _consts._STDERR_TRUNCATE
+_VIDEO_BITRATE = _consts._VIDEO_BITRATE
+ENCODER_CHECK_TIMEOUT = _consts.ENCODER_CHECK_TIMEOUT
 
 # ------------------------------------------------------------------
 # Indirection layer preserved for monkey-patching tests.
@@ -134,7 +138,6 @@ from stream2video.concat.segment import _run_segment_concat
 # ------------------------------------------------------------------
 
 import stream2video.tools as _tools_mod  # noqa: E402  (after local imports)
-import stream2video.utils as _utils_mod  # noqa: E402
 
 
 def ffmpeg_path() -> str:
@@ -153,27 +156,6 @@ def run_with_retry(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess
     return _tools_mod.run_with_retry(cmd, **kwargs)
 
 
-def drain_stderr_lines(
-    pipe: IO[bytes],
-    sink: list[str],
-    on_line: Callable[[str], None] | None = None,
-) -> Callable[[], None]:
-    return _utils_mod.drain_stderr_lines(pipe, sink, on_line=on_line)
-
-
-def read_lines_queue(pipe: IO[bytes]) -> tuple["queue.Queue[bytes | None]", "threading.Thread"]:
-    return _utils_mod.read_lines_queue(pipe)
-
-
-# Direct passthroughs from ``stream2video.utils`` that tests patch on
-# the concat module itself.
-from stream2video.utils import (
-    get_video_duration,
-    get_video_start_time,
-    has_audio_stream,
-    looks_like_oom,
-)
-
 # ------------------------------------------------------------------
 # Constants that aren't tied to a specific submodule and that tests
 # patch directly. Defined here so ``patch("stream2video.concat.
@@ -191,67 +173,62 @@ _GAPLESS_MAX_INPUTS_PER_CALL: int = 200
 
 
 __all__ = [
-    # errors
+    "ENCODER_OPTS",
+    "PIPELINE_VERSION",
+    "_GAPLESS_MAX_INPUTS_PER_CALL",
+    "_VIDEO_BITRATES",
+    "_X264_CRF",
+    "CancelledError",
     "ConcatError",
+    "EncoderUnavailableError",
     "FFmpegError",
     "FFmpegOutOfMemoryError",
-    "CancelledError",
-    "EncoderUnavailableError",
-    # public entry point
-    "cut_and_concat",
-    "generate_keep_segments",
-    "encoder_opts",
-    "check_encoder",
-    "get_video_encoder",
-    "ENCODER_OPTS",
-    # historically patch-ed internals
-    "_run_ffmpeg",
-    "_run_subprocess_cmd",
-    "_wait_with_cancel",
-    "_run_final_concat",
-    "_run_audio_concat_filter",
-    "_run_audio_extract",
-    "_concat_filter_one_pass",
-    "_run_gapless_segment_concat",
-    "_run_segment_concat",
-    "_run_cut_then_encode",
-    "_run_batch_concat",
-    "_with_libx264_fallback",
-    "_run_with_fallback",
-    "_GAPLESS_MAX_INPUTS_PER_CALL",
-    "_build_manifest",
-    "_write_manifest",
-    "_load_manifest",
-    "_validate_manifest",
-    "_ensure_fresh_work_dir",
-    "_manifest_path",
-    "_source_identity",
-    "_ffprobe_is_valid_media",
-    "_ffprobe_is_valid_mp4",
-    "_ffprobe_duration_ok",
     "_audio_bitrate",
     "_audio_bitrate_opts",
     "_audio_opts",
+    "_build_manifest",
+    "_concat_filter_one_pass",
+    "_ensure_fresh_work_dir",
+    "_ffprobe_duration_ok",
+    "_ffprobe_is_valid_media",
+    "_ffprobe_is_valid_mp4",
     "_fps_filter_chain",
-    "_threads_opt",
-    "_x264_low_memory_opts",
-    "_quote_concat_path",
+    "_load_manifest",
     "_make_memory_monitor_factory",
+    "_manifest_path",
     "_memory_budget_mb",
     "_new_memory_monitor",
-    "_VIDEO_BITRATES",
-    "_X264_CRF",
-    "PIPELINE_VERSION",
-    # Re-exported utils helpers (historically patched / from-imported
-    # through ``stream2video.concat``).
-    "get_video_duration",
-    "get_video_start_time",
-    "has_audio_stream",
+    "_quote_concat_path",
+    "_run_audio_concat_filter",
+    "_run_audio_extract",
+    "_run_batch_concat",
+    "_run_cut_then_encode",
+    "_run_ffmpeg",
+    "_run_final_concat",
+    "_run_gapless_segment_concat",
+    "_run_segment_concat",
+    "_run_subprocess_cmd",
+    "_run_with_fallback",
+    "_source_identity",
+    "_threads_opt",
+    "_validate_manifest",
+    "_wait_with_cancel",
+    "_with_libx264_fallback",
+    "_write_manifest",
+    "_x264_low_memory_opts",
+    "check_encoder",
+    "cut_and_concat",
     "drain_stderr_lines",
-    "read_lines_queue",
-    "looks_like_oom",
+    "encoder_opts",
     "ffmpeg_path",
     "ffprobe_path",
+    "generate_keep_segments",
+    "get_video_duration",
+    "get_video_encoder",
+    "get_video_start_time",
+    "has_audio_stream",
+    "looks_like_oom",
     "popen_with_retry",
+    "read_lines_queue",
     "run_with_retry",
 ]

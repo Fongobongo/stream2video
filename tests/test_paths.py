@@ -90,8 +90,9 @@ class TestMoveIntoProject:
             assert result == src
             assert src.exists()
 
-    def test_target_exists_keeps_existing_removes_source(self):
-        """On retry / re-run, an existing target wins (avoids clobbering)."""
+    def test_target_exists_replaces_existing_with_source(self):
+        """On retry / re-run, the fresh download must win — keeping a stale
+        previous-run target would silently process the *old* video."""
         with TemporaryDirectory() as tmp:
             out = Path(tmp)
             src = out / "video1.mp4"
@@ -102,7 +103,7 @@ class TestMoveIntoProject:
             existing.write_text("old")
             result = move_into_project(src, project)
             assert result == existing
-            assert result.read_text() == "old"
+            assert result.read_text() == "new"
             assert not src.exists()
 
     def test_creates_project_dir_if_missing(self):

@@ -366,7 +366,9 @@ class TestPipelineControllerRun:
             ),
             patch("stream2video.pipeline_controller.save_silence_cache"),
             patch("stream2video.pipeline_controller.load_silence_cache", return_value=None),
-            patch("stream2video.pipeline_controller.cut_and_concat", side_effect=fake_cut_and_concat),
+            patch(
+                "stream2video.pipeline_controller.cut_and_concat", side_effect=fake_cut_and_concat
+            ),
             patch(
                 "stream2video.pipeline_controller.generate_keep_segments", return_value=[(0.0, 1.0)]
             ),

@@ -112,7 +112,10 @@ def build_save_settings_snapshot(widgets: dict[str, Any]) -> dict[str, Any]:
     return snapshot
 
 
-def build_user_defaults_snapshot(widgets: dict[str, Any]) -> dict[str, Any]:
+def build_user_defaults_snapshot(
+    widgets: dict[str, Any],
+    current: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Construct the dict passed to ``config.save_user_defaults``.
 
     ``widgets`` has the same shape as for
@@ -121,14 +124,26 @@ def build_user_defaults_snapshot(widgets: dict[str, Any]) -> dict[str, Any]:
     GUI, not from individual widget reads — the GUI's existing
     ``_sync_slider_entries`` call already normalises them). Returns a
     new dict containing exactly the keys in ``USER_DEFAULTS_KEYS``.
-    Keys absent from ``widgets`` are read from ``config.CONFIG_DEFAULTS``
-    so tunables without a dedicated widget (encoder_threads, output_fps,
-    memory_*, timeouts, …) still persist their current effective values.
+
+    Keys absent from ``widgets`` are taken from ``current`` (the GUI's
+    live ``self.config``) when supplied — that dict holds the *current
+    effective* values, including ones the user set via an earlier
+    ``user_defaults.json`` / preset but that have no dedicated widget
+    (``encoder_threads``, ``output_fps``, ``memory_*``, timeouts, …).
+    When ``current`` is omitted or a key is absent from both, the
+    fallback is ``config.CONFIG_DEFAULTS`` — the previous behaviour
+    silently reset those 18 tunables to factory on every "Save current
+    as defaults".
     Pure: no widget reads, no I/O.
     """
     snapshot: dict[str, Any] = {}
     for key in USER_DEFAULTS_KEYS:
-        snapshot[key] = widgets.get(key, _CONFIG_DEFAULTS.get(key))
+        if key in widgets:
+            snapshot[key] = widgets[key]
+        elif current is not None and key in current:
+            snapshot[key] = current[key]
+        else:
+            snapshot[key] = _CONFIG_DEFAULTS.get(key)
     return snapshot
 
 

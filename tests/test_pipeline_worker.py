@@ -326,7 +326,9 @@ class TestBuildCompletionCallback:
 
     def test_status_log_lines_popup_total_all_called(self):
         gui = self._FakeGui()
-        with patch("stream2video.pipeline_worker.play_completion_sound", return_value=None) as sound:
+        with patch(
+            "stream2video.pipeline_worker.play_completion_sound", return_value=None
+        ) as sound:
             cb = build_completion_callback(gui, completion_sound=True)
             cb(self._summary())
         assert gui.status_texts  # one status line set

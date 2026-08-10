@@ -24,6 +24,7 @@ the per-video subdir.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 # Max length of the displayed name in a Recent Projects row. Long
@@ -80,13 +81,18 @@ def ensure_project_dir(output_dir: Path, video_stem: str, per_video_dir: bool) -
 def move_into_project(file_path: Path, project_dir: Path) -> Path:
     """Move ``file_path`` into ``project_dir`` (same filename). Returns new path.
 
-    If the target already exists, ``file_path`` is removed and the existing
-    target is kept (avoids clobbering on retry). If ``file_path`` is already
-    inside ``project_dir``, returns it unchanged.
+    If the target already exists, it is *replaced* (the incoming file wins):
+    on a retry of a fresh download we must not silently keep the previous
+    run's stale video. If ``file_path`` is already inside ``project_dir``,
+    returns it unchanged.
 
-    Raises ``FileNotFoundError`` if ``file_path`` does not exist — callers
-    that expect the source to be present (e.g. after a download) should see
-    a clear error rather than a silent unlink of nothing.
+    Uses :func:`shutil.move` (not :meth:`Path.rename`) so a cross-drive
+    download dir → project dir move (e.g. temp on C:, project on D:)
+    works instead of raising ``OSError``.
+
+    Raises ``FileNotFoundError`` if ``file_path`` does not exist —
+    callers that expect the source to be present (e.g. after a download)
+    should see a clear error rather than a silent unlink of nothing.
     """
     file_path = Path(file_path)
     project_dir = Path(project_dir)
@@ -95,11 +101,11 @@ def move_into_project(file_path: Path, project_dir: Path) -> Path:
     if file_path.parent == project_dir:
         return file_path
     new_path = project_dir / file_path.name
-    if new_path.exists():
-        file_path.unlink(missing_ok=True)
-        return new_path
     project_dir.mkdir(parents=True, exist_ok=True)
-    file_path.rename(new_path)
+    # shutil.move handles both ``target exists`` (replaces) and
+    # cross-filesystem moves (copy+unlink fallback) — two failure modes
+    # this function previously hit on plain ``Path.rename``.
+    shutil.move(str(file_path), str(new_path))
     return new_path
 
 

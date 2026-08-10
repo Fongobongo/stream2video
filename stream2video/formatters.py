@@ -84,7 +84,9 @@ def fmt_completion_summary(
     (e.g. ffprobe failed during a dry-run)."""
     lines = [
         "[bold green]+ Compression complete![/bold green]",
-        f"   Input:  {fmt_clock_time(src_duration)} ({fmt_size(src_size_bytes)})" if src_duration else f"   Input:  ? ({fmt_size(src_size_bytes)})",
+        f"   Input:  {fmt_clock_time(src_duration)} ({fmt_size(src_size_bytes)})"
+        if src_duration
+        else f"   Input:  ? ({fmt_size(src_size_bytes)})",
     ]
 
     dst_time_str = fmt_clock_time(keep_duration)
@@ -95,7 +97,9 @@ def fmt_completion_summary(
     # by zero.
     if src_size_bytes > 0:
         reduction_pct = 100.0 * (src_size_bytes - dst_size_bytes) / src_size_bytes
-        lines.append(f"   Output: {dst_time_str} ({dst_size_str})  [{reduction_pct:.0f}% reduction]")
+        lines.append(
+            f"   Output: {dst_time_str} ({dst_size_str})  [{reduction_pct:.0f}% reduction]"
+        )
     else:
         lines.append(f"   Output: {dst_time_str} ({dst_size_str})")
 
@@ -122,7 +126,7 @@ def fmt_dry_run_summary(
 
     Returns a multi-line Rich-markup string:
 
-        [bold cyan]═══ Dry‑run: silence detection only ═══[/bold cyan]
+        [bold cyan]═══ Dry-run: silence detection only ═══[/bold cyan]
         Source: 6h 23m 12s (2.4 GB)
         Silence segments: 42 (total 1h 23m 45s, 21.9%)
         Keep segments: 15 (total 5h 0m 0s, 78.1%)
@@ -134,6 +138,7 @@ def fmt_dry_run_summary(
     ``SilenceSegment`` / ``(start, end)`` tuples; the caller passes
     whatever ``detect_silence`` and ``generate_keep_segments`` returned.
     """
+
     def _sum_durations(segs: list) -> float:
         # silence_segments is list[SilenceSegment] (has .start/.end attrs);
         # keep_segments is list[tuple[float, float]]. Handle both by duck-typing.
@@ -150,7 +155,7 @@ def fmt_dry_run_summary(
     keep_dur = _sum_durations(keep_segments)
 
     lines = [
-        "[bold cyan]═══ Dry‑run: silence detection only ═══[/bold cyan]",
+        "[bold cyan]═══ Dry-run: silence detection only ═══[/bold cyan]",
     ]
 
     if src_duration is not None:

@@ -128,6 +128,8 @@ def cut_and_concat(
     if video_quality == "source" and not use_crf:
         from stream2video.utils import (
             get_video_bitrate as _gvb,
+        )
+        from stream2video.utils import (
             get_video_duration as _gvd,
         )
 
@@ -145,7 +147,7 @@ def cut_and_concat(
                 source_bitrate = estimate
                 logger.info(
                     f"ffprobe stream bit_rate=N/A for {video_path.name} — "
-                    f"estimated source bitrate {estimate/1000:.0f}k from "
+                    f"estimated source bitrate {estimate / 1000:.0f}k from "
                     f"file size/duration"
                 )
             else:
@@ -158,7 +160,9 @@ def cut_and_concat(
                 )
                 effective_opts_quality = "high"
         else:
-            logger.info(f"Probed source video bitrate: {source_bitrate/1000:.0f}k for {encoder} source")
+            logger.info(
+                f"Probed source video bitrate: {source_bitrate / 1000:.0f}k for {encoder} source"
+            )
     vcodec, vcodec_opts = _c.get_video_encoder(
         encoder,
         effective_opts_quality,
@@ -174,7 +178,9 @@ def cut_and_concat(
     # the HW source case where probe succeeded, get_video_encoder used
     # source_bitrate to emit -b:v. Log final choice.
     if video_quality == "source" and not use_crf and source_bitrate is None:
-        logger.info(f"Encoder: {vcodec} {vcodec_opts} (quality=source→{effective_opts_quality} fallback)")
+        logger.info(
+            f"Encoder: {vcodec} {vcodec_opts} (quality=source→{effective_opts_quality} fallback)"
+        )
     else:
         logger.info(f"Encoder: {vcodec} {vcodec_opts} (quality={video_quality})")
 

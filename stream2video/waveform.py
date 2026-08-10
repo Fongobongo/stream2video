@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import array
 import math
-import struct
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
@@ -117,6 +116,10 @@ def read_peaks_from_stream(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            # stdin=DEVNULL: never inherit the parent's console stdin —
+            # under pythonw.exe with an attached console it triggers
+            # CreateProcessW winerror 206 on Windows (see concat/runner.py).
+            stdin=subprocess.DEVNULL,
             bufsize=-1,
             **no_window_kwargs(),
         )

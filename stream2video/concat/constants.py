@@ -39,7 +39,4 @@ _MIN_PART_BYTES = 1024
 # truth: runner.py / silence detect previously carried several hand-copied
 # variants of this line that drifted in wording (one omitted the
 # --batch-chunk-size branch).
-_OOM_HINT = (
-    "try --preset low_memory / lowering --memory-limit-mb / "
-    "reducing --batch-chunk-size"
-)
+_OOM_HINT = "try --preset low_memory / lowering --memory-limit-mb / reducing --batch-chunk-size"

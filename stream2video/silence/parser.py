@@ -177,9 +177,7 @@ class SilenceParser:
         return list(self._segments)
 
 
-def _parse_ffmpeg_output(
-    stderr: str, duration: float | None = None
-) -> list[SilenceSegment]:
+def _parse_ffmpeg_output(stderr: str, duration: float | None = None) -> list[SilenceSegment]:
     """Parse ffmpeg silencedetect output (batch path).
 
     Delegates to :class:`SilenceParser` so the parsing logic lives in

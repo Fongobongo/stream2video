@@ -49,9 +49,7 @@ def test_play_completion_sound_uses_winsound_on_windows(monkeypatch, tmp_path: P
     import stream2video.completion_sound as cs
 
     monkeypatch.setattr(cs.sys, "platform", "win32")
-    monkeypatch.setattr(
-        cs, "ensure_completion_chime", lambda *a, **k: tmp_path / "chime.wav"
-    )
+    monkeypatch.setattr(cs, "ensure_completion_chime", lambda *a, **k: tmp_path / "chime.wav")
     called: dict[str, Path] = {}
 
     def fake_winsound(chime: Path):
@@ -67,9 +65,7 @@ def test_play_completion_sound_uses_posix_on_non_windows(monkeypatch, tmp_path: 
     import stream2video.completion_sound as cs
 
     monkeypatch.setattr(cs.sys, "platform", "darwin")
-    monkeypatch.setattr(
-        cs, "ensure_completion_chime", lambda *a, **k: tmp_path / "chime.wav"
-    )
+    monkeypatch.setattr(cs, "ensure_completion_chime", lambda *a, **k: tmp_path / "chime.wav")
     called: dict[str, Path] = {}
 
     def fake_posix(chime: Path):
@@ -97,7 +93,9 @@ def test_posix_uses_first_available_player(monkeypatch, tmp_path: Path):
     import stream2video.completion_sound as cs
 
     # Pretend only aplay is installed.
-    monkeypatch.setattr(cs.shutil, "which", lambda exe: "/usr/bin/aplay" if exe == "aplay" else None)
+    monkeypatch.setattr(
+        cs.shutil, "which", lambda exe: "/usr/bin/aplay" if exe == "aplay" else None
+    )
     spawned: list[list[str]] = []
 
     def fake_popen(cmd, **kw):

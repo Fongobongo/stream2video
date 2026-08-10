@@ -199,7 +199,9 @@ def build_pipeline_config_from_snapshot(
             "no_progress_timeout", CONFIG_DEFAULTS["no_progress_timeout"]
         ),
         proxy=(
-            config.get("proxy", "") if config.get("proxy_active", CONFIG_DEFAULTS["proxy_active"]) else ""
+            config.get("proxy", "")
+            if config.get("proxy_active", CONFIG_DEFAULTS["proxy_active"])
+            else ""
         ),
         segment_encode_timeout=config.get(
             "segment_encode_timeout", CONFIG_DEFAULTS["segment_encode_timeout"]
@@ -208,9 +210,7 @@ def build_pipeline_config_from_snapshot(
             "final_concat_timeout", CONFIG_DEFAULTS["final_concat_timeout"]
         ),
         silence_timeout=config.get("silence_timeout", CONFIG_DEFAULTS["silence_timeout"]),
-        stall_kill_timeout=config.get(
-            "stall_kill_timeout", CONFIG_DEFAULTS["stall_kill_timeout"]
-        ),
+        stall_kill_timeout=config.get("stall_kill_timeout", CONFIG_DEFAULTS["stall_kill_timeout"]),
         stall_warning_timeout=config.get(
             "stall_warning_timeout", CONFIG_DEFAULTS["stall_warning_timeout"]
         ),
@@ -250,7 +250,8 @@ def build_download_progress_callback(
         # and CLI stay in sync (the CLI prints the same string via
         # build_download_status in cli.py's progress callback).
         gui.ui_status(
-            "Step 1/4: " + build_download_status(
+            "Step 1/4: "
+            + build_download_status(
                 downloaded_bytes=float(p.downloaded_bytes or 0.0),
                 total_bytes=float(p.total_bytes) if p.total_bytes else None,
                 speed=p.speed,
@@ -353,76 +354,78 @@ class PipelineWorker:
             validate_pipeline_config,
         )
 
-        cfg = build_pipeline_config_from_snapshot(params, self._config)
-
-        # Pre-flight config validation — must stay BEFORE any phase work
-        # starts. ``validate_pipeline_config`` is pure, so calling it here
-        # costs nothing; a bad combo/threshold (e.g. stale settings.json
-        # value outside the GUI slider range) now surfaces as a clear
-        # status line instead of a ``PipelineConcatError`` mid-pipeline.
-        cfg_errors = validate_pipeline_config(cfg)
-        if cfg_errors:
-            for err in cfg_errors:
-                self._gui.log(f"[ERROR] Invalid configuration: {err}")
-            first = cfg_errors[0]
-            self._gui.ui_status(
-                f"Invalid configuration: {first}"
-                + (f" (+{len(cfg_errors) - 1} more)" if len(cfg_errors) > 1 else ""),
-                force=True,
-            )
-            self._gui.ui_set_failure_style()
-            self._play_completion_sound("attention")
-            # ``gui.py._pipeline_worker`` owns the per-run cleanup in its
-            # own ``finally``; we only release the Start button here (the
-            # normal return path does this in the shared ``finally``
-            # below, but this early exit bypasses it).
-            self._gui.set_running(False)
-            return
-
         # Mutable holder for the resolved video path — the
         # ``on_output_resolved`` callback fills it and ``_on_live_segment``
         # / the success cleanup read it after.
         video_path_ref: list[Path | None] = [None]
-        download_start = time.monotonic()
 
-        def _on_live_segment(seg_list: list[SilenceSegment]) -> None:
-            if video_path_ref[0] is not None:
-                self._gui.set_live_segments(video_path_ref[0], list(seg_list))
-
-        def _on_output_resolved(out_dir: Path, vpath: Path, is_dl: bool) -> None:
-            video_path_ref[0] = vpath
-            self._gui.add_to_recent_projects(out_dir)
-            self._gui.ui_update_output(out_dir)
-            self._gui.ui_update_file_info(vpath)
-            self._gui.log(f"Project directory: {out_dir}")
-            self._gui.set_encoder_label(params.encoder, params.video_quality)
-
-        cb = PipelineCallbacks(
-            on_progress=self._gui.ui_progress,
-            on_status=self._gui.ui_status,
-            on_log=self._gui.log,
-            on_info=self._gui.ui_info,
-            on_overall=self._gui.ui_overall,
-            on_total=self._gui.ui_total,
-            on_phase_progress=self._gui.ui_phase_progress,
-            on_progress_plan=self._gui.ui_progress_plan,
-            on_download_progress=build_download_progress_callback(self._gui, download_start),
-            on_pipeline_complete=build_completion_callback(
-                self._gui,
-                completion_sound=bool(self._config.get("completion_sound", False)),
-            ),
-        )
-
-        controller = PipelineController(
-            cfg=cfg,
-            cb=cb,
-            cancel_event=self._gui.cancel_event,
-            on_live_segment=_on_live_segment,
-            on_output_resolved=_on_output_resolved,
-            on_fallback_consent=self._gui.ask_fallback_consent,
-        )
-
+        # Wrap the *whole* body (config build + validation + controller
+        # construction + run) in the try/finally so a KeyError raised by a
+        # corrupt settings.json shape in ``build_pipeline_config_from_snapshot``
+        # still reaches ``finally: set_running(False)`` below and releases
+        # the Start button. Previously the config build sat *before* the
+        # try, and a crash there left the button disabled forever.
         try:
+            cfg = build_pipeline_config_from_snapshot(params, self._config)
+            # Pre-flight config validation — must stay BEFORE any phase
+            # work starts. ``validate_pipeline_config`` is pure, so
+            # calling it here costs nothing; a bad combo/threshold (e.g.
+            # stale settings.json value outside the GUI slider range)
+            # surfaces as a clear status line instead of a
+            # ``PipelineConcatError`` mid-pipeline.
+            cfg_errors = validate_pipeline_config(cfg)
+            if cfg_errors:
+                for err in cfg_errors:
+                    self._gui.log(f"[ERROR] Invalid configuration: {err}")
+                first = cfg_errors[0]
+                self._gui.ui_status(
+                    f"Invalid configuration: {first}"
+                    + (f" (+{len(cfg_errors) - 1} more)" if len(cfg_errors) > 1 else ""),
+                    force=True,
+                )
+                self._gui.ui_set_failure_style()
+                self._play_completion_sound("attention")
+                return
+
+            download_start = time.monotonic()
+
+            def _on_live_segment(seg_list: list[SilenceSegment]) -> None:
+                if video_path_ref[0] is not None:
+                    self._gui.set_live_segments(video_path_ref[0], list(seg_list))
+
+            def _on_output_resolved(out_dir: Path, vpath: Path, is_dl: bool) -> None:
+                video_path_ref[0] = vpath
+                self._gui.add_to_recent_projects(out_dir)
+                self._gui.ui_update_output(out_dir)
+                self._gui.ui_update_file_info(vpath)
+                self._gui.log(f"Project directory: {out_dir}")
+                self._gui.set_encoder_label(params.encoder, params.video_quality)
+
+            cb = PipelineCallbacks(
+                on_progress=self._gui.ui_progress,
+                on_status=self._gui.ui_status,
+                on_log=self._gui.log,
+                on_info=self._gui.ui_info,
+                on_overall=self._gui.ui_overall,
+                on_total=self._gui.ui_total,
+                on_phase_progress=self._gui.ui_phase_progress,
+                on_progress_plan=self._gui.ui_progress_plan,
+                on_download_progress=build_download_progress_callback(self._gui, download_start),
+                on_pipeline_complete=build_completion_callback(
+                    self._gui,
+                    completion_sound=bool(self._config.get("completion_sound", False)),
+                ),
+            )
+
+            controller = PipelineController(
+                cfg=cfg,
+                cb=cb,
+                cancel_event=self._gui.cancel_event,
+                on_live_segment=_on_live_segment,
+                on_output_resolved=_on_output_resolved,
+                on_fallback_consent=self._gui.ask_fallback_consent,
+            )
+
             controller.run()
             if video_path_ref[0] is not None:
                 self._gui.pop_live_segments(video_path_ref[0])
@@ -459,6 +462,17 @@ class PipelineWorker:
         except PipelineUnexpectedError as e:
             self._gui.log(f"[ERROR] Unexpected: {e}")
             logger.exception("Pipeline error")
+            self._gui.ui_status(f"Error: {e}", force=True)
+            self._gui.ui_set_failure_style()
+            self._play_completion_sound("attention")
+        except Exception as e:
+            # Safety net: building the config / controller above raised
+            # something outside the typed Pipeline*Error hierarchy (e.g.
+            # a KeyError from a corrupt settings.json shape). Without this
+            # guard the exception escapes ``finally`` below leaving the
+            # Start button disabled forever.
+            logger.exception("Pipeline startup error")
+            self._gui.log(f"[ERROR] Unexpected error: {e}")
             self._gui.ui_status(f"Error: {e}", force=True)
             self._gui.ui_set_failure_style()
             self._play_completion_sound("attention")

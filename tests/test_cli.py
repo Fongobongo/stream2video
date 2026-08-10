@@ -30,7 +30,9 @@ class TestCliMemoryReservePreflight:
         cfg.write_text("memory_reserve_mb: 32000\nper_video_dir: false\n", encoding="utf-8")
 
         with (
-            patch("stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)),
+            patch(
+                "stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)
+            ),
             patch("stream2video.memory._available_ram_mb", return_value=8000.0),
         ):
             result = CliRunner().invoke(
@@ -58,7 +60,9 @@ class TestCliMemoryReservePreflight:
             return output_path
 
         with (
-            patch("stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)),
+            patch(
+                "stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)
+            ),
             patch("stream2video.cli.load_silence_cache", return_value=[]),
             patch("stream2video.cli.cut_and_concat", side_effect=fake_cut_and_concat),
             patch("stream2video.memory._available_ram_mb", return_value=64 * 1024.0),
@@ -151,7 +155,9 @@ class TestCliUseCrf:
             return output_path
 
         with (
-            patch("stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)),
+            patch(
+                "stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)
+            ),
             patch("stream2video.cli.load_silence_cache", return_value=[]),
             patch("stream2video.cli.cut_and_concat", side_effect=fake_cut_and_concat),
         ):
@@ -189,7 +195,9 @@ class TestCliUseCrf:
             return output_path
 
         with (
-            patch("stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)),
+            patch(
+                "stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)
+            ),
             patch("stream2video.cli.load_silence_cache", return_value=[]),
             patch("stream2video.cli.cut_and_concat", side_effect=fake_cut_and_concat),
         ):
@@ -252,7 +260,9 @@ class TestCliOutputFps:
             return output_path
 
         with (
-            patch("stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)),
+            patch(
+                "stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)
+            ),
             patch("stream2video.cli.load_silence_cache", return_value=[]),
             patch("stream2video.cli.cut_and_concat", side_effect=fake_cut_and_concat),
         ):
@@ -291,7 +301,9 @@ class TestCliOutputFps:
             return output_path
 
         with (
-            patch("stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)),
+            patch(
+                "stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)
+            ),
             patch("stream2video.cli.load_silence_cache", return_value=[]),
             patch("stream2video.cli.cut_and_concat", side_effect=fake_cut_and_concat),
         ):

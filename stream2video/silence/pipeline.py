@@ -277,6 +277,7 @@ def detect_silence(
             if progress_callback is not None:
                 # Keep bar at 15% until silencedetect starts producing
                 progress_callback(0.15)
+
             # The WAV was just (re-)extracted with -copyts — its PTS
             # timeline matches the source video exactly, so the
             # resume context (initial_segments + resume_from) is still
@@ -324,7 +325,23 @@ def detect_silence(
                 duration_limit=_SAMPLE_VERIFY_DURATION,
                 timeout=effective_timeout,
             )
-            segments_D_sample = [s for s in segments_D if s.start < _SAMPLE_VERIFY_DURATION]
+            # Pad the D-sample clip by one ``min_silence`` window: a
+            # segment starting just inside ``_SAMPLE_VERIFY_DURATION``
+            # must also appear in the ``-t``-clipped A-sample, but the
+            # silencedetect ``duration=min_silence`` integration window
+            # means the filter raises ``silence_start`` up to
+            # ``min_silence`` seconds after the real energy dip — a
+            # segment whose true start is a hair below the boundary can
+            # legitimately be reported just *past* it on one pass and
+            # inside it on the other. Dropping the tail window removes
+            # the false positives that previously triggered a pointless
+            # full re-detect on a healthy source.
+            _pad = max(0.0, min_silence)
+            segments_D_sample = (
+                [s for s in segments_D if s.start < _SAMPLE_VERIFY_DURATION - _pad]
+                if _pad < _SAMPLE_VERIFY_DURATION
+                else list(segments_D)
+            )
             if _c._sample_segments_match(
                 segments_D_sample, segments_A_sample, _SEGMENT_MATCH_TOLERANCE
             ):

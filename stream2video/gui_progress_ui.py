@@ -113,9 +113,7 @@ class ProgressUiMixin:
             self._reposition_phase_ticks()
             self._tk_after(
                 0,
-                lambda: self.lbl_progress_pct.configure(
-                    text_color=("gray40", "gray60")
-                ),
+                lambda: self.lbl_progress_pct.configure(text_color=("gray40", "gray60")),
             )
             self._set_phase_progress(0.0)
         else:
@@ -179,7 +177,9 @@ class ProgressUiMixin:
         bounds = self._phase_bounds
 
         def _place() -> None:
-            for i, (tick, b) in enumerate(zip(self._phase_ticks, bounds)):
+            # len(ticks)==3 < len(bounds)==4 by design (the concat
+            # boundary is the bar's right rim), hence strict=False.
+            for tick, b in zip(self._phase_ticks, bounds, strict=False):
                 # First (download) boundary may be 0 for a local file;
                 # skip it so the marker doesn't sit on the bar's left rim.
                 if b <= 1e-9:
@@ -304,9 +304,7 @@ class ProgressUiMixin:
         total_line = build_total_line(total_elapsed, overall_est)
         total_prefix = "Total: "
         total_tail = (
-            total_line[len(total_prefix):]
-            if total_line.startswith(total_prefix)
-            else total_line
+            total_line[len(total_prefix) :] if total_line.startswith(total_prefix) else total_line
         )
         tip = (
             f"Overall: {self._overall_progress * 100:.0f}% | "

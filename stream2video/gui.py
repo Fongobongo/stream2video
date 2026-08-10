@@ -264,6 +264,7 @@ class Stream2VideoGUI(
             from stream2video.utils import check_disk_space as _cds
             from stream2video.utils import estimate_disk_need as _edn
             from stream2video.utils import get_video_duration as _gvd
+            from stream2video.utils import resolve_disk_probe as _rdp
 
             disk_input = Path(input_raw) if input_raw else None
             is_local = disk_input is not None and disk_input.exists() and disk_input.is_file()
@@ -273,7 +274,7 @@ class Stream2VideoGUI(
                 # Without silence cache we don't know keep_dur — use worst
                 # by passing None so estimate assumes keep_ratio=1.
                 typ, worst = _edn(src_size, src_dur, None, method)
-                probe = output_dir if output_dir.exists() else disk_input.parent
+                probe = _rdp(output_dir)
                 ok_typ, free = _cds(probe, typ)
                 ok_worst, _ = _cds(probe, worst)
                 if free is not None and (not ok_worst or not ok_typ):
@@ -297,9 +298,7 @@ class Stream2VideoGUI(
                         f"{'worst ' + _fmt(worst) if not ok_worst else 'typical ' + _fmt(typ)} "
                         f"(need ~{_fmt(short)} more)"
                     )
-                    if not messagebox.askokcancel(
-                        "Low disk space — may fail", msg, icon="warning"
-                    ):
+                    if not messagebox.askokcancel("Low disk space — may fail", msg, icon="warning"):
                         self._log("Start cancelled — low disk space")
                         self._set_running(False)
                         return

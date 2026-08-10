@@ -178,7 +178,18 @@ def encoder_opts(
             low_mem = _x264_low_memory_opts() if x264_low_memory else []
             # Constant bitrate for source parity: use -b:v + -maxrate like HW.
             # Keep preset for speed trade-off, but cap bitrate to source.
-            return ["-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bitrate, "-preset", x264_preset, *threads_opt, *low_mem]
+            return [
+                "-b:v",
+                bitrate,
+                "-maxrate",
+                bitrate,
+                "-bufsize",
+                bitrate,
+                "-preset",
+                x264_preset,
+                *threads_opt,
+                *low_mem,
+            ]
         # HW encoders
         bitrate = _bitrate_for_quality("source", source_bitrate)
         if encoder == "h264_mf":
@@ -187,7 +198,17 @@ def encoder_opts(
             return ["-usage", "transcoding", "-quality", "speed", "-b:v", bitrate, *threads_opt]
         if encoder == "h264_nvenc":
             return [
-                "-preset", "p7", "-rc", "vbr", "-b:v", bitrate, "-maxrate", bitrate, "-cq", "18", *threads_opt,
+                "-preset",
+                "p7",
+                "-rc",
+                "vbr",
+                "-b:v",
+                bitrate,
+                "-maxrate",
+                bitrate,
+                "-cq",
+                "18",
+                *threads_opt,
             ]
         return [*threads_opt]
 
@@ -233,7 +254,18 @@ def encoder_opts(
     # behind use_crf=True (see below).
     bitrate = _bitrate_for_quality(quality, source_bitrate)
     low_mem = _x264_low_memory_opts() if x264_low_memory else []
-    return ["-b:v", bitrate, "-maxrate", bitrate, "-bufsize", bitrate, "-preset", x264_preset, *threads_opt, *low_mem]
+    return [
+        "-b:v",
+        bitrate,
+        "-maxrate",
+        bitrate,
+        "-bufsize",
+        bitrate,
+        "-preset",
+        x264_preset,
+        *threads_opt,
+        *low_mem,
+    ]
 
 
 def _threads_opt(encoder_threads: str | int) -> list[str]:

@@ -171,7 +171,7 @@ def _spawn_with_retry(
             if attempt >= _SPAWN_RETRY_ATTEMPTS:
                 break
             reset_tool_cache()
-            cmd, tool = _re_resolve_cmd0(cmd)
+            cmd, _tool = _re_resolve_cmd0(cmd)
             time.sleep(_SPAWN_RETRY_DELAY_S)
     assert last_exc is not None
     raise last_exc
@@ -212,8 +212,16 @@ def _createprocess_probe(exe: str) -> str:
         pi = PROCESS_INFORMATION()
         buf = ctypes.create_unicode_buffer(f'"{exe}" -version')
         ok = kernel32.CreateProcessW(
-            None, buf, None, None, False, 0, None, None,
-            ctypes.cast(si, ctypes.c_void_p), ctypes.byref(pi),
+            None,
+            buf,
+            None,
+            None,
+            False,
+            0,
+            None,
+            None,
+            ctypes.cast(si, ctypes.c_void_p),
+            ctypes.byref(pi),
         )
         if ok:
             kernel32.CloseHandle(pi.hProcess)
@@ -239,4 +247,3 @@ def popen_with_retry(cmd: list[str], **popen_kwargs: Any) -> subprocess.Popen[An
 def run_with_retry(cmd: list[str], **run_kwargs: Any) -> subprocess.CompletedProcess[Any]:
     """``subprocess.run(cmd)`` with transparent retry on transient FNF."""
     return _spawn_with_retry("run", list(cmd), run_kwargs)  # type: ignore[return-value]
-

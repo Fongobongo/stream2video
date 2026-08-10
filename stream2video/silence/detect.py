@@ -145,22 +145,33 @@ def detect_silence_stream(
                 try:
                     raw = line_queue.get(timeout=CANCEL_POLL_INTERVAL)
                 except queue.Empty:
-                    if proc.poll() is not None:
-                        # Process exited — let the next get drain the
-                        # reader's trailing None (EOF).
-                        continue
+                    # No new line in the poll window — loop back and
+                    # re-check the wall-clock deadline above. (The reader
+                    # thread is the sole sender of None; a merely-exited
+                    # process still has a trailing EOF sentinel to drain.)
                     continue
                 if raw is None:
                     break  # EOF — reader saw the pipe close.
                 line = raw.decode("utf-8", errors="replace")
                 parser.feed(line)
 
-            proc.wait(timeout=timeout)
+            # stderr reached EOF — the process should already be exiting.
+            # A short bounded wait is enough: waiting the full `timeout`
+            # (up to 10h by default) after EOF would hang the preview
+            # worker on a stuck ffmpeg, exactly the bug the deadline in
+            # ``_run_silencedetect`` (process.wait(timeout=30)) guards
+            # against. Mirror that short bound here.
+            try:
+                proc.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                raise SilenceDetectionError(
+                    "ffmpeg silencedetect did not exit 30s after stderr EOF — killed"
+                ) from None
             if proc.returncode != 0:
                 if looks_like_oom(proc.returncode, ""):
                     raise SilenceOutOfMemoryError(
-                        f"ffmpeg silencedetect OOM (rc={proc.returncode}); "
-                        f"{_OOM_HINT}"
+                        f"ffmpeg silencedetect OOM (rc={proc.returncode}); {_OOM_HINT}"
                     )
                 raise SilenceDetectionError(f"ffmpeg silencedetect failed (rc={proc.returncode})")
             # ``detect_silence_stream`` is a preview-only helper that
@@ -476,8 +487,7 @@ def _run_silencedetect(
                 stderr_text = "".join(stderr_lines)
                 if looks_like_oom(process.returncode, stderr_text):
                     raise SilenceOutOfMemoryError(
-                        f"ffmpeg silencedetect OOM (rc={process.returncode}); "
-                        f"{_OOM_HINT}"
+                        f"ffmpeg silencedetect OOM (rc={process.returncode}); {_OOM_HINT}"
                     )
                 error_msg = stderr_text or "Unknown error"
                 raise SilenceDetectionError(f"ffmpeg silencedetect failed: {error_msg}")
@@ -568,9 +578,7 @@ def _extract_audio_wav(
     # stdout the pipe buffer fills (~64KB on Windows) and ffmpeg blocks
     # mid-write — the else-branch below would deadlock until the
     # ``timeout`` fires (~7min in a real 4:1 source observed).
-    _progressive_wav = (
-        duration is not None and duration > 0 and progress_callback is not None
-    )
+    _progressive_wav = duration is not None and duration > 0 and progress_callback is not None
     cmd = [
         _c.ffmpeg_path(),
         "-y",
@@ -603,9 +611,7 @@ def _extract_audio_wav(
             # stdout=DEVNULL when nobody consumes -progress; otherwise the
             # 64KB OS pipe buffers fill and ffmpeg blocks on write → hang
             # until timeout (see _progressive_wav above).
-            stdout=(
-                _c.subprocess.PIPE if _progressive_wav else _c.subprocess.DEVNULL
-            ),
+            stdout=(_c.subprocess.PIPE if _progressive_wav else _c.subprocess.DEVNULL),
             stderr=_c.subprocess.PIPE,
             bufsize=-1,
             **no_window_kwargs(),
@@ -693,8 +699,7 @@ def _extract_audio_wav(
                 if looks_like_oom(process.returncode, stderr_text):
                     wav_path.unlink(missing_ok=True)
                     raise SilenceOutOfMemoryError(
-                        f"ffmpeg extract OOM (rc={process.returncode}); "
-                        f"{_OOM_HINT}"
+                        f"ffmpeg extract OOM (rc={process.returncode}); {_OOM_HINT}"
                     )
                 error_msg = stderr_text or "Unknown error"
                 wav_path.unlink(missing_ok=True)

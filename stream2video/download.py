@@ -282,7 +282,17 @@ def _find_downloaded_file(out_dir: Path, expected: Path) -> Path | None:
     candidates = [p for p in out_dir.glob(f"{video_id}.*") if p.suffix.lower() in _VIDEO_EXTENSIONS]
     if not candidates:
         return None
-    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+    def _mtime(p: Path) -> float:
+        """mtime for "newest wins"; a file deleted between glob() and
+        stat() (antivirus, user cleanup) would otherwise raise OSError
+        out of the whole fallback."""
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return -1.0
+
+    return max(candidates, key=_mtime)
 
 
 def _stderr_snippet(stderr_chunks: list[str], limit: int = 300) -> str:
@@ -297,7 +307,9 @@ def _timeout_error(message: str, stderr_chunks: list[str]) -> DownloadTimeoutErr
     return DownloadTimeoutError(message)
 
 
-def _resolve_reported_download_path(out_dir: Path, stdout_lines: list[str]) -> tuple[Path | None, Path | None]:
+def _resolve_reported_download_path(
+    out_dir: Path, stdout_lines: list[str]
+) -> tuple[Path | None, Path | None]:
     """Find the downloaded file path among yt-dlp stdout lines."""
     last_candidate: Path | None = None
     for line in reversed(stdout_lines):
@@ -418,6 +430,11 @@ def download(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            # stdin=DEVNULL: same rationale as concat/runner.py — when the
+            # parent is pythonw.exe (GUI subsystem) with an attached
+            # console, inheriting the parent's console-mode stdin handle
+            # makes CreateProcessW fail with winerror 206.
+            stdin=subprocess.DEVNULL,
             text=True,
             # yt-dlp reconfigures its own stdout/stderr to UTF-8; without
             # an explicit ``encoding=`` the pipes are decoded with the
@@ -576,9 +593,7 @@ def download(
             try:
                 size = resolved.stat().st_size
             except OSError as e:
-                raise DownloadError(
-                    f"Downloaded file unreadable: {resolved}: {e}"
-                ) from e
+                raise DownloadError(f"Downloaded file unreadable: {resolved}: {e}") from e
             if size == 0:
                 raise DownloadError(f"Download completed but file is empty: {resolved}")
 

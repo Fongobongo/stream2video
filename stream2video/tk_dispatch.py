@@ -266,3 +266,23 @@ class LogQueuePoller:
         handler.setFormatter(logging.Formatter("%(message)s"))
         logging.getLogger("stream2video").addHandler(handler)
         self._handler = handler
+
+    def teardown_logging(self) -> None:
+        """Detach the ``QueueHandler`` the poller attached in ``setup_logging``.
+
+        Without this, a reused process (test suite, or a future in-process
+        GUI restart) would accumulate defunct handlers on the ``stream2video``
+        logger — each pointing at a queue whose poller no longer exists,
+        which both leaks memory and means later log records are silently
+        dropped into an un-drain queue.
+        """
+        if self._handler is None:
+            return
+        try:
+            logging.getLogger("stream2video").removeHandler(self._handler)
+        except Exception:
+            # Handler was already detached (e.g. logging module teardown) —
+            # nothing to do. Never raise from a close path.
+            pass
+        finally:
+            self._handler = None

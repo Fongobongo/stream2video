@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 # Static schema version. Bump when fields change so parsers can detect.
@@ -31,7 +31,7 @@ class _JsonFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         obj: dict[str, Any] = {
-            "ts": datetime.now(timezone.utc).isoformat(timespec="milliseconds"),
+            "ts": datetime.now(UTC).isoformat(timespec="milliseconds"),
             "level": record.levelname,
             "logger": record.name,
             "msg": record.getMessage(),
@@ -55,23 +55,27 @@ class _JsonFormatter(logging.Formatter):
 
 
 def install_json_handler(logger: logging.Logger, level: str = "INFO") -> logging.Handler:
-    """Replace ``logger``'s handlers with a single JSON-emitting stdout handler.
+    """Build and attach a single JSON-emitting stdout handler to ``logger``.
 
-    Returns the handler so callers can detach it in a ``finally:`` block
-    (mirroring how the CLI handles its Rich handler).
+    The handler is both attached to ``logger`` and returned so callers
+    can detach it in a ``finally:`` block (mirroring how the CLI handles
+    its Rich handler). Existing handlers are left alone — replacing them
+    is the caller's choice (the CLI replaces its Rich console handler
+    explicitly before calling this).
 
-    The stream is ``sys.stdout`` (not stderr) so a piped command
-    ``stream2video --log-format json video.mp4 | jq .`` shows the JSON
-    and the human-readable banner is unaffected.
+    The stream is captured as ``sys.stdout`` *at call time* (not stderr)
+    so a piped command ``stream2video --log-format json video.mp4 | jq .``
+    shows the JSON and the human-readable banner is unaffected.
 
-    NOTE: the function leaves the console handler level alone — the
-    caller is expected to set ``level`` on the returned handler if they
-    want a non-default filter.
+    The handler's level is set from ``level``; the logger's own level is
+    left untouched so importers of this module don't get re-configured.
     """
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(getattr(logging, level.upper(), logging.INFO))
     handler.setFormatter(_JsonFormatter())
-    # Mirror the existing CLI behaviour: leave the root level alone so
-    # importers of this module don't get re-configured. The caller adds
-    # this handler to the logger explicitly.
+    # Attach here so the function's name honours its contract. Callers
+    # that previously did ``logger.addHandler(install_json_handler(...))``
+    # still work — ``addHandler`` is idempotent for the same instance.
+    if handler not in logger.handlers:
+        logger.addHandler(handler)
     return handler

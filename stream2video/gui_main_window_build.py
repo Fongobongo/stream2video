@@ -111,15 +111,11 @@ class MainWindowBuildMixin:
         proxy_row.pack(fill="x", padx=5, pady=(0, 4))
         proxy_row.grid_columnconfigure(0, weight=0)
         proxy_row.grid_columnconfigure(1, weight=1)
-        self.chk_proxy = ctk.CTkCheckBox(
-            proxy_row, text="Use proxy", command=self._on_proxy_toggle
-        )
+        self.chk_proxy = ctk.CTkCheckBox(proxy_row, text="Use proxy", command=self._on_proxy_toggle)
         self.chk_proxy.grid(row=0, column=0, sticky="w")
         if self.config.get("proxy_active", False):
             self.chk_proxy.select()
-        self.btn_proxy = ctk.CTkButton(
-            proxy_row, text="Set proxy…", command=self._set_proxy
-        )
+        self.btn_proxy = ctk.CTkButton(proxy_row, text="Set proxy…", command=self._set_proxy)
         self.btn_proxy.grid(row=0, column=1, sticky="e")
 
         # ── Center: Controls ──
@@ -574,9 +570,7 @@ class MainWindowBuildMixin:
         # the wrapping helper emits a second line. No dedicated second row,
         # so no blank line sits between the status text and the bar when a
         # short message ("Starting...") is shown.
-        self.lbl_status = ctk.CTkLabel(
-            prog_frame, text="", anchor="w", width=200, justify="left"
-        )
+        self.lbl_status = ctk.CTkLabel(prog_frame, text="", anchor="w", width=200, justify="left")
         self.lbl_status.grid(row=0, column=0, columnspan=4, sticky="w", pady=(0, 1))
 
         # Overall pipeline progress bar. A wrapper frame (same fixed
@@ -640,6 +634,4 @@ class MainWindowBuildMixin:
             anchor="w",
             text_color=("gray40", "gray60"),
         )
-        self.lbl_progress_meta.grid(
-            row=2, column=0, columnspan=4, sticky="w", pady=(2, 0)
-        )
+        self.lbl_progress_meta.grid(row=2, column=0, columnspan=4, sticky="w", pady=(2, 0))

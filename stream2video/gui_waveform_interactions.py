@@ -54,9 +54,7 @@ class WaveformInteractionsMixin:
         # destroyed — catch it so the exception doesn't propagate to the
         # Tk event loop as an unhandled error.
         try:
-            self._waveform_tooltip_after_id = self.after_idle(
-                self._show_waveform_tooltip_on_idle
-            )
+            self._waveform_tooltip_after_id = self.after_idle(self._show_waveform_tooltip_on_idle)
         except Exception:
             self._waveform_tooltip_after_id = None
 

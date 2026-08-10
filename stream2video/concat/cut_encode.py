@@ -106,6 +106,8 @@ def _run_cut_then_encode(
         audio_quality,
         x264_preset,
         encoder_threads,
+        output_fps=output_fps,
+        source_has_audio=source_has_audio,
     )
     _c._ensure_fresh_work_dir(cut_dir, manifest)
     cut_dir.mkdir(parents=True, exist_ok=True)

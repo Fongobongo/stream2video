@@ -15,7 +15,9 @@ class TestCompletionSummary:
             keep_duration=2700.0,  # 45m
             pipeline_seconds=300.0,  # 5m
         )
-        assert "[+ Compression complete!]" in out.replace("[bold green]", "[").replace("[/bold green]", "]")
+        assert "[+ Compression complete!]" in out.replace("[bold green]", "[").replace(
+            "[/bold green]", "]"
+        )
         assert "Input:" in out
         assert "Output:" in out
         assert "54% reduction" in out or "54 %" in out

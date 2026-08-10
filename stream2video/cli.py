@@ -1,5 +1,7 @@
 """CLI entry point using Typer."""
 
+from __future__ import annotations
+
 import logging
 import shutil
 import signal
@@ -31,13 +33,13 @@ from stream2video.cli_helpers import (
     logger,
 )
 from stream2video.cli_resolver import make_resolver
-# Module-level flag toggled by --log-format json. When True the human-
-# readable banner and Rich progress bars are suppressed so the stdout
-# stream stays line-per-JSON-record (piping to ``jq`` or an aggregator
-# like ELK is unaffected by decorative output).
-_JSON_LOG_MODE: bool = False
-
-from stream2video.concat import CancelledError, ConcatError, cut_and_concat
+from stream2video.concat import (
+    CancelledError,
+    ConcatError,
+    cut_and_concat,
+    generate_keep_segments,
+    get_video_duration,
+)
 from stream2video.config import (
     CONFIG_DEFAULTS,
     DEFAULT_PRESET,
@@ -55,7 +57,6 @@ from stream2video.download import (
     VideoNotAvailableError,
     download,
 )
-from stream2video.concat import generate_keep_segments, get_video_duration
 from stream2video.formatters import fmt_completion_summary, fmt_dry_run_summary
 from stream2video.gui_helpers import build_download_status
 from stream2video.memory import check_memory_reserve
@@ -71,6 +72,12 @@ from stream2video.silence import (
     load_silence_cache,
     save_silence_cache,
 )
+
+# Module-level flag toggled by --log-format json. When True the human-
+# readable banner and Rich progress bars are suppressed so the stdout
+# stream stays line-per-JSON-record (piping to ``jq`` or an aggregator
+# like ELK is unaffected by decorative output).
+_JSON_LOG_MODE: bool = False
 
 
 def load_config(config_file: Path | None) -> dict:
@@ -163,12 +170,18 @@ def _run_doctor(config_file: Path | None = None) -> bool:
         exe = shutil.which(tool)
         if exe:
             try:
-                out = subprocess.run(
-                    [exe, "-version"], capture_output=True, text=True, timeout=5, check=False
-                ).stdout.splitlines()[0].strip()
+                out = (
+                    subprocess.run(
+                        [exe, "-version"], capture_output=True, text=True, timeout=5, check=False
+                    )
+                    .stdout.splitlines()[0]
+                    .strip()
+                )
                 tbl.add_row("[green]✓[/green]", f"{tool}: {out} ({exe})")
             except Exception as e:
-                tbl.add_row("[green]✓[/green]", f"{tool}: found at {exe} [dim](version unknown: {e})[/dim]")
+                tbl.add_row(
+                    "[green]✓[/green]", f"{tool}: found at {exe} [dim](version unknown: {e})[/dim]"
+                )
         else:
             tbl.add_row("[red]✗[/red]", f"{tool}: not found in PATH")
             all_critical_ok = False
@@ -418,7 +431,6 @@ def main(
         # Eager callback runs the diagnostics and exits before Typer
         # validates the positional INPUT_VIDEO argument, so
         # ``stream2video --doctor`` works without a URL/path.
-        is_flag=True,
         is_eager=True,
         callback=_doctor_callback,
         help="Print environment diagnostics (Python version, ffmpeg/encoders, "
@@ -586,6 +598,8 @@ def main(
         from stream2video.json_logging import install_json_handler
 
         _json_handler = install_json_handler(logger, level=log_level.upper())
+        # install_json_handler attached the handler to the app ``logger``.
+        # basicConfig below re-roots the same handler for the root logger.
         logging.basicConfig(
             level=logging.DEBUG,
             handlers=[_json_handler],
@@ -828,7 +842,7 @@ def main(
         # because the sigint-cancel has already fired for Ctrl+C-era
         # reproducibility) closes the gap between the CLI and the
         # GUI's consent dialog.
-        def _make_fallback_consent() -> "Callable[[], bool] | None":
+        def _make_fallback_consent() -> Callable[[], bool] | None:
             if software_fallback != "ask":
                 return None
 
@@ -854,9 +868,7 @@ def main(
             TimeRemainingColumn(),
         ]
 
-        with Progress(
-            *progress_columns, console=console, disable=_JSON_LOG_MODE
-        ) as progress:
+        with Progress(*progress_columns, console=console, disable=_JSON_LOG_MODE) as progress:
             # Step 1: Download video (indeterminate: yt-dlp does not report progress)
             task1 = progress.add_task("[cyan]Downloading video...", total=None)
 
@@ -1118,7 +1130,9 @@ def main(
                     progress.update(task_cut, completed=min(f * 100, 100))
                 else:
                     if task_concat is None:
-                        progress.update(task_cut, completed=100, description="[green]+[/green] Cutting done")
+                        progress.update(
+                            task_cut, completed=100, description="[green]+[/green] Cutting done"
+                        )
                         task_concat = progress.add_task("[cyan]Concatenating...", total=100)
                     progress.update(task_concat, completed=min(f * 100, 100))
 
@@ -1129,7 +1143,9 @@ def main(
                     progress.update(task_cut, completed=min(fraction / 0.9 * 100, 100))
                 else:
                     if task_concat is None:
-                        progress.update(task_cut, completed=100, description="[green]+[/green] Cutting done")
+                        progress.update(
+                            task_cut, completed=100, description="[green]+[/green] Cutting done"
+                        )
                         task_concat = progress.add_task("[cyan]Concatenating...", total=100)
                     progress.update(task_concat, completed=min((fraction - 0.9) / 0.1 * 100, 100))
 
@@ -1176,12 +1192,20 @@ def main(
 
                 # Mark whichever task is live as done
                 if task_concat is not None:
-                    progress.update(task_concat, completed=100, description="[green]+[/green] Concatenating done")
+                    progress.update(
+                        task_concat,
+                        completed=100,
+                        description="[green]+[/green] Concatenating done",
+                    )
                 else:
-                    progress.update(task_cut, completed=100, description="[green]+[/green] Cutting done")
+                    progress.update(
+                        task_cut, completed=100, description="[green]+[/green] Cutting done"
+                    )
                     # No concat phase (e.g. single segment) — still show it
                     tc = progress.add_task("[cyan]Concatenating...", total=100)
-                    progress.update(tc, completed=100, description="[green]+[/green] Concatenating done")
+                    progress.update(
+                        tc, completed=100, description="[green]+[/green] Concatenating done"
+                    )
 
             except CancelledError:
                 # ``CancelledError`` is a subclass of ``ConcatError`` so

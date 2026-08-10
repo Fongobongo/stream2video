@@ -233,7 +233,7 @@ class LifecycleMixin:
             "proxy": str(self.config.get("proxy", "")),
             "proxy_active": bool(self.config.get("proxy_active", False)),
         }
-        snapshot = build_user_defaults_snapshot(widgets)
+        snapshot = build_user_defaults_snapshot(widgets, current=self.config)
         try:
             save_user_defaults(snapshot)
         except Exception as e:
@@ -340,4 +340,8 @@ class LifecycleMixin:
             self._save_settings()
         except Exception as e:
             _logger.warning("Failed to save settings on close: %s", e)
+        # Detach the log-queue handler so a future GUI window / test in
+        # this same process doesn't keep piping records into a dead queue.
+        if self._log_poller is not None:
+            self._log_poller.teardown_logging()
         self.destroy()

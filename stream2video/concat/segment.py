@@ -76,6 +76,9 @@ def _run_segment_concat(
         audio_quality,
         x264_preset,
         encoder_threads,
+        output_fps=output_fps,
+        gapless_concat=gapless_concat,
+        source_has_audio=source_has_audio,
     )
     _c._ensure_fresh_work_dir(seg_dir, manifest)
 
@@ -141,7 +144,9 @@ def _run_segment_concat(
             # already normalised to start at 0, so a `setpts=PTS-STARTPTS`
             # is a no-op here and is omitted for clarity.
 
-            def _seg_prog(seconds: float, _dur: float = dur, _encoded_keep: float = encoded_keep) -> None:
+            def _seg_prog(
+                seconds: float, _dur: float = dur, _encoded_keep: float = encoded_keep
+            ) -> None:
                 # ffmpeg -progress reports `out_time_us` -- the position within
                 # this segment's output, NOT the original video. Map it to
                 # absolute progress across the whole video so the GUI/CLI

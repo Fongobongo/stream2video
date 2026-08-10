@@ -65,9 +65,9 @@ def _play_with_winsound(chime: Path) -> str | None:
 # asynchronously and exit when the file ends, so no SND_ASYNC equivalent is
 # needed.
 _POSIX_PLAYERS: tuple[tuple[str, ...], ...] = (
-    ("afplay",),          # macOS (preinstalled)
-    ("paplay",),          # PulseAudio / PipeWire
-    ("aplay", "-q"),      # ALSA
+    ("afplay",),  # macOS (preinstalled)
+    ("paplay",),  # PulseAudio / PipeWire
+    ("aplay", "-q"),  # ALSA
     ("ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"),  # ffmpeg fallback
 )
 
