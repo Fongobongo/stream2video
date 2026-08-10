@@ -314,32 +314,49 @@ class WaveformRenderMixin:
             f"-{fmt_clock_time(view_end)}  |  {zoom_text}"
         )
 
-        img = render_waveform_image(
-            view_peaks,
-            width=render_w,
-            height=render_h,
-            total_duration=view_duration,
-            silence_segments=view_segments,
-            title=title,
-            view_start=view_start,
-            threshold_db=float(self.config["threshold"]),
-        )
+        # The PIL render is CPU-bound (800x200 canvas, hundreds of
+        # silence rectangles + bars). Doing it synchronously on the Tk
+        # main thread freezes the UI for every 1s live-poll tick while a
+        # pipeline runs, so build the image on a worker thread and only
+        # marshal the final widget ``configure`` back to the main loop.
+        threshold_db = float(self.config["threshold"])
 
-        if token != self._waveform_render_token:
-            return
-        ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
-        self._waveform_ctk_image = ctk_img
-        self.lbl_wave_image.configure(image=ctk_img, text="")
-        self._waveform_image_width = img.size[0]
-        # ``_waveform_last_render_*`` are declared as ``int | None`` in
-        # ``WaveformWindowMixin``; mypy needs a narrow here to keep
-        # the two mixins' definitions compatible.
-        self._waveform_last_render_w = int(img.size[0])
-        self._waveform_last_render_h = int(img.size[1])
+        def _render_then_apply() -> None:
+            try:
+                img = render_waveform_image(
+                    view_peaks,
+                    width=render_w,
+                    height=render_h,
+                    total_duration=view_duration,
+                    silence_segments=view_segments,
+                    title=title,
+                    view_start=view_start,
+                    threshold_db=threshold_db,
+                )
+            except Exception as e:
+                _logger.exception("Waveform render failed")
+                self._tk_after(0, lambda err=e: self._log(f"[ERROR] Waveform render failed: {err}"))
+                return
 
-        self.lbl_wave_status.configure(text=title)
-        self._update_waveform_controls()
-        self._update_intervals_list(view_segments, segments, view_start, view_end)
+            def _apply() -> None:
+                if token != self._waveform_render_token:
+                    return
+                if self.lbl_wave_image is None or not self._wave_window_alive():
+                    return
+                ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=img.size)
+                self._waveform_ctk_image = ctk_img
+                self.lbl_wave_image.configure(image=ctk_img, text="")
+                self._waveform_image_width = img.size[0]
+                self._waveform_last_render_w = int(img.size[0])
+                self._waveform_last_render_h = int(img.size[1])
+
+                self.lbl_wave_status.configure(text=title)
+                self._update_waveform_controls()
+                self._update_intervals_list(view_segments, segments, view_start, view_end)
+
+            self._tk_after(0, _apply)
+
+        threading.Thread(target=_render_then_apply, daemon=True).start()
 
     def _update_intervals_list(
         self,

@@ -108,12 +108,21 @@ class EncoderTester:
             self._running = True
         # Delay-import so the test suite can monkeypatch
         # ``check_encoder`` on ``stream2video.concat`` and have the
-        # change visible to the worker thread.
-        self._cb.log(f"Testing encoder: {encoder} ...")
-        # We deliberately set the button state while holding the
-        # ``_running`` flag transition so the GUI's re-enable on test
-        # completion matches the actual lifecycle.
-        self._cb.set_test_button_state(running=True)
+        # change visible to the worker thread. If either callback raises
+        # (e.g. TclError from a destroyed window during app close — only
+        # AttributeError is guarded in the adapter), reset the flag so
+        # every later click doesn't hit "Test already running" forever
+        # with no worker ever started.
+        try:
+            self._cb.log(f"Testing encoder: {encoder} ...")
+            # We deliberately set the button state while holding the
+            # ``_running`` flag transition so the GUI's re-enable on test
+            # completion matches the actual lifecycle.
+            self._cb.set_test_button_state(running=True)
+        except Exception:
+            with self._lock:
+                self._running = False
+            raise
 
         def _run() -> None:
             from stream2video.concat import check_encoder

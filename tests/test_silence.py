@@ -18,6 +18,7 @@ from stream2video.silence import (
     _get_wav_cache_path,
     _is_wav_cache_valid,
     _load_silence_cache_from_path,
+    _mark_wav_verified,
     _sample_segments_match,
     _save_cache,
     apply_margin,
@@ -247,7 +248,7 @@ class TestWavCacheValidity:
             assert not wav.exists()
             assert _is_wav_cache_valid(wav, video) is False
 
-    def test_newer_wav_is_valid(self):
+    def test_newer_wav_with_verified_marker_is_valid(self):
         with TemporaryDirectory() as tmp:
             video = Path(tmp) / "video.mp4"
             wav = Path(tmp) / "video_audio.wav"
@@ -255,7 +256,21 @@ class TestWavCacheValidity:
             wav.write_text("dummy")
             os.utime(video, (1000, 1000))
             os.utime(wav, (2000, 2000))
+            _mark_wav_verified(wav)
             assert _is_wav_cache_valid(wav, video) is True
+
+    def test_newer_wav_without_verified_marker_is_invalid(self):
+        """A fresh-mtime WAV that never passed sample-verify must NOT be
+        trusted — a cancelled run leaves exactly this on disk, and on a
+        broken-PTS source reusing it would silently shift cut points."""
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "video.mp4"
+            wav = Path(tmp) / "video_audio.wav"
+            video.write_text("dummy")
+            wav.write_text("dummy")
+            os.utime(video, (1000, 1000))
+            os.utime(wav, (2000, 2000))
+            assert _is_wav_cache_valid(wav, video) is False
 
     def test_older_wav_is_invalid(self):
         with TemporaryDirectory() as tmp:
@@ -267,7 +282,7 @@ class TestWavCacheValidity:
             os.utime(wav, (1000, 1000))
             assert _is_wav_cache_valid(wav, video) is False
 
-    def test_equal_mtime_is_valid(self):
+    def test_equal_mtime_with_verified_marker_is_valid(self):
         """Equal mtime counts as fresh (avoids re-extract on same-second touches)."""
         with TemporaryDirectory() as tmp:
             video = Path(tmp) / "video.mp4"
@@ -276,6 +291,7 @@ class TestWavCacheValidity:
             wav.write_text("dummy")
             os.utime(video, (1000, 1000))
             os.utime(wav, (1000, 1000))
+            _mark_wav_verified(wav)
             assert _is_wav_cache_valid(wav, video) is True
 
 
@@ -350,14 +366,16 @@ class TestWavCacheFallback:
         return fake_popen
 
     def test_d_matches_a_keeps_wav_cache(self):
-        """When the WAV cache is valid (newer mtime than source), only D runs
-        and no verification happens. The WAV is kept."""
+        """When the WAV cache is valid (verified marker + newer mtime than
+        source), detection runs against the WAV directly — no re-extract,
+        no per-run verification. The WAV is kept."""
         with TemporaryDirectory() as tmp:
             video = Path(tmp) / "video.mp4"
             video.write_text("dummy")
             out = Path(tmp)
             wav = out / "video_audio.wav"
             wav.write_text("placeholder")  # pre-existing → D path is taken
+            _mark_wav_verified(wav)  # as if a prior run's sample-verify passed
             os.utime(video, (1000, 1000))
             os.utime(wav, (2000, 2000))
 

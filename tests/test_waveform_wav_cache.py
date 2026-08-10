@@ -49,10 +49,13 @@ def _gui_stub(
     g._take_live_snapshot = MagicMock(return_value=None)
 
     if wav_exists:
-        from stream2video.silence.cache import _get_wav_cache_path
+        from stream2video.silence.cache import _get_wav_cache_path, _mark_wav_verified
 
         wav = _get_wav_cache_path(in_path, out_dir)
         wav.write_bytes(b"\x00" * 100)
+        # The render mixin only trusts a WAV that passed the pipeline's
+        # broken-PTS sample-verify (the ``.verified`` sidecar).
+        _mark_wav_verified(wav)
         if not wav_newer:
             # Make the WAV older than the video so _is_wav_cache_valid fails.
             import os

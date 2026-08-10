@@ -301,9 +301,16 @@ class ProgressUiMixin:
         )
 
         # Live tooltip on the bar with the raw + smoothed numbers.
+        total_line = build_total_line(total_elapsed, overall_est)
+        total_prefix = "Total: "
+        total_tail = (
+            total_line[len(total_prefix):]
+            if total_line.startswith(total_prefix)
+            else total_line
+        )
         tip = (
             f"Overall: {self._overall_progress * 100:.0f}% | "
-            f"Phase ETA: {tail} | Total: {build_total_line(total_elapsed, overall_est)[7:]}"
+            f"Phase ETA: {tail} | Total: {total_tail}"
         )
         self._update_progress_tooltip(tip)
 

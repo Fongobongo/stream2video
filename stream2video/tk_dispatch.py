@@ -215,30 +215,36 @@ class LogQueuePoller:
             # state around every line makes the auto-scroll fight the
             # pending redraw).
             self._textbox.configure(state="normal")
-            while True:
-                try:
-                    msg = self._queue.get_nowait()
-                except queue.Empty:
-                    break
-                self._textbox.insert("end", msg + "\n")
-                self._line_count += 1
-                tag = self._severity_tag(msg)
-                if tag is not None:
-                    # The log is append-only and every message is exactly
-                    # one line, so line ``_line_count`` is the line just
-                    # written. Tag the whole line (excluding the trailing
-                    # newline, which Tk owns).
-                    self._apply_tag(
-                        tag, f"{self._line_count}.0", f"{self._line_count}.0 lineend"
-                    )
-                inserted = True
-            if inserted:
-                # Auto-scroll to the bottom once the whole batch is in.
-                # ``see("end")`` scrolls to the last line; calling it
-                # after all inserts (instead of after each one) keeps the
-                # view pinned to the tail while the log grows.
-                self._textbox.see("end")
-            self._textbox.configure(state="disabled")
+            try:
+                while True:
+                    try:
+                        msg = self._queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    self._textbox.insert("end", msg + "\n")
+                    self._line_count += 1
+                    tag = self._severity_tag(msg)
+                    if tag is not None:
+                        # The log is append-only and every message is exactly
+                        # one line, so line ``_line_count`` is the line just
+                        # written. Tag the whole line (excluding the trailing
+                        # newline, which Tk owns).
+                        self._apply_tag(
+                            tag, f"{self._line_count}.0", f"{self._line_count}.0 lineend"
+                        )
+                    inserted = True
+                if inserted:
+                    # Auto-scroll to the bottom once the whole batch is in.
+                    # ``see("end")`` scrolls to the last line; calling it
+                    # after all inserts (instead of after each one) keeps the
+                    # view pinned to the tail while the log grows.
+                    self._textbox.see("end")
+            finally:
+                # An exception mid-batch (TclError from a widget race, a
+                # ValueError from a tag index overflow) must not leave the
+                # textbox permanently user-editable — restore the read-only
+                # state even when the drain fails.
+                self._textbox.configure(state="disabled")
         except Exception:
             # Root destroyed (TclError) or textbox gone — stop the poller
             # quietly. Logging the exception would loop forever through
