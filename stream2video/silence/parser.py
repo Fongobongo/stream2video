@@ -59,7 +59,12 @@ def _noop_on_segment(_segments: list[SilenceSegment]) -> None:
     the caller didn't supply `on_segment` — see `_run_silencedetect`."""
 
 
-_NUM = r"\d+(?:[.,]\d+)?"
+# ffmpeg's silencedetect can emit negative starts on sources with a
+# negative initial PTS (edit lists / -itsoffset captures):
+# ``silence_start: -0.021906``. Without the leading ``-?`` the leading
+# silence is silently dropped (the later silence_end has no pending
+# start). Negative values are clamped to 0 by apply_margin / the caller.
+_NUM = r"-?\d+(?:[.,]\d+)?"
 _SILENCE_START_RE = re.compile(rf"silence_start:\s*({_NUM})")
 _SILENCE_END_RE = re.compile(rf"silence_end:\s*({_NUM})")
 

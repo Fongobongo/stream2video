@@ -18,6 +18,13 @@ from stream2video.silence.parser import (
 logger = logging.getLogger(__name__)
 
 
+def _stat_mtime(p: Path) -> float:
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def detect_silence(
     video_path: Path,
     threshold: float = CONFIG_DEFAULTS["threshold"],
@@ -162,6 +169,96 @@ def detect_silence(
                 resume_save_config=current_config,
                 timeout=effective_timeout,
             )
+        elif wav_path.exists() and wav_path.stat().st_mtime >= _stat_mtime(video_path):
+            # The WAV exists and is fresh but carries no ``.verified``
+            # sidecar — it was extracted by a run that was cancelled or
+            # crashed before the broken-PTS sample-verify could run (or
+            # was extracted by an older version without the marker).
+            # mtime alone cannot prove the WAV's timestamps match the
+            # source, and trusting an unverified WAV on a broken-PTS
+            # source would silently shift every cut point. Run the cheap
+            # 60s sample-verify once here; on success mark the WAV so
+            # subsequent runs skip straight to the fast path above.
+            logger.info(
+                f"Cached WAV has no verified marker — running one-time "
+                f"sample-verify before reusing it: {wav_path.name}"
+            )
+            segments_A_sample = _c._run_silencedetect(
+                video_path,
+                threshold,
+                min_silence,
+                duration,
+                None,
+                cancel_callback,
+                "video (sample)",
+                duration_limit=_SAMPLE_VERIFY_DURATION,
+                timeout=effective_timeout,
+            )
+            segments_D_sample = _c._run_silencedetect(
+                wav_path,
+                threshold,
+                min_silence,
+                duration,
+                None,
+                cancel_callback,
+                "WAV (sample)",
+                duration_limit=_SAMPLE_VERIFY_DURATION,
+                timeout=effective_timeout,
+            )
+            if _c._sample_segments_match(
+                segments_D_sample, segments_A_sample, _SEGMENT_MATCH_TOLERANCE
+            ):
+                _c._mark_wav_verified(wav_path)
+                logger.info(
+                    f"Sample-verify passed for cached WAV — marking verified: {wav_path.name}"
+                )
+                segments = _c._run_silencedetect(
+                    wav_path,
+                    threshold,
+                    min_silence,
+                    duration,
+                    progress_callback,
+                    cancel_callback,
+                    "WAV cache",
+                    on_segment=on_segment,
+                    initial_segments=initial_segments,
+                    resume_from=resume_from,
+                    resume_save_path=resume_cache_path,
+                    resume_save_config=current_config,
+                    timeout=effective_timeout,
+                )
+            else:
+                logger.warning(
+                    f"Sample-verify failed for previously-cached WAV "
+                    f"(D-sample: {len(segments_D_sample)}, "
+                    f"A-sample: {len(segments_A_sample)} segment starts in first "
+                    f"{_SAMPLE_VERIFY_DURATION:.0f}s). Source may have broken "
+                    f"timestamps — re-extracting and falling back if needed."
+                )
+                wav_path.unlink(missing_ok=True)
+                _c.clear_wav_verified(wav_path)
+                if resume_cache_path is not None:
+                    # The resume checkpoints were written against the
+                    # broken WAV timeline — continuing from them would
+                    # poison the direct result.
+                    resume_cache_path.unlink(missing_ok=True)
+                    initial_segments = []
+                    resume_from = None
+                segments = _c._run_silencedetect(
+                    video_path,
+                    threshold,
+                    min_silence,
+                    duration,
+                    progress_callback,
+                    cancel_callback,
+                    "video",
+                    on_segment=on_segment,
+                    initial_segments=initial_segments,
+                    resume_from=resume_from,
+                    resume_save_path=resume_cache_path,
+                    resume_save_config=current_config,
+                    timeout=effective_timeout,
+                )
         else:
             # Fresh WAV — report extraction as 0..15% of the Silence phase
             # so the thin bar moves during the 15GB extract (otherwise 0%).
@@ -236,6 +333,7 @@ def detect_silence(
                     f"{_SAMPLE_VERIFY_DURATION:.0f}s match A-sample: {len(segments_A_sample)}) "
                     f"— using D result, keeping WAV cache"
                 )
+                _c._mark_wav_verified(wav_path)
                 segments = segments_D
             else:
                 logger.warning(
@@ -246,6 +344,17 @@ def detect_silence(
                     f"detection. WAV cache invalidated."
                 )
                 wav_path.unlink(missing_ok=True)
+                _c.clear_wav_verified(wav_path)
+                # The throttled resume checkpoints above were written
+                # against the broken WAV's timeline during the D pass —
+                # before this verify pass ran. Feeding them into the
+                # direct-video fallback would produce a cut plan that is
+                # half broken-PTS, half correct. Drop them and restart
+                # the direct detection from t=0.
+                if resume_cache_path is not None:
+                    resume_cache_path.unlink(missing_ok=True)
+                initial_segments = []
+                resume_from = None
 
                 def _direct_prog(f: float) -> None:
                     # The WAV silencedetect above already consumed

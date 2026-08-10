@@ -401,7 +401,19 @@ def _run_silencedetect(
             # P1.5: use queue-based reader so cancel checks run between
             # reads without blocking on readline().
             line_queue, _reader_thread = read_lines_queue(stdout_pipe)
+            # Wall-clock deadline measured from spawn — matches the
+            # concat runner (runner.py). Without this a hung ffmpeg that
+            # never closes stdout would block the read loop forever and
+            # the ``timeout`` parameter (``silence_timeout``, 10h
+            # default) would be dead code: ``process.wait(timeout=...)``
+            # below is only reached AFTER stdout EOF.
+            deadline = (time.monotonic() + timeout) if timeout else None
             while True:
+                if deadline is not None and time.monotonic() > deadline:
+                    process.kill()
+                    raise SilenceDetectionError(
+                        f"ffmpeg silencedetect timeout after {timeout}s (no stdout EOF — killed)"
+                    ) from None
                 try:
                     raw_line = line_queue.get(timeout=CANCEL_POLL_INTERVAL)
                 except queue.Empty:
@@ -411,6 +423,11 @@ def _run_silencedetect(
                         raise SilenceCancelledError("silence detection cancelled") from None
                     if cancelled.is_set():
                         raise SilenceCancelledError("silence detection cancelled") from None
+                    if deadline is not None and time.monotonic() > deadline:
+                        process.kill()
+                        raise SilenceDetectionError(
+                            f"ffmpeg silencedetect timeout after {timeout}s (no stdout EOF — killed)"
+                        ) from None
                     continue
                 if raw_line is None:
                     break  # EOF
@@ -441,7 +458,17 @@ def _run_silencedetect(
             if cancelled.is_set():
                 raise SilenceCancelledError("silence detection cancelled")
 
-            process.wait(timeout=timeout)
+            # stdout reached EOF — the process should already be exiting.
+            # A short bounded wait is enough; if ffmpeg still refuses to
+            # die, the wall-clock deadline above was about total runtime,
+            # not about a post-EOF hang, so report it distinctly.
+            try:
+                process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                raise SilenceDetectionError(
+                    "ffmpeg silencedetect did not exit 30s after stdout EOF — killed"
+                ) from None
             wait_for_drain()
             drain_done = True
 
@@ -505,9 +532,6 @@ def _run_silencedetect(
             # is unavailable — the preview path.
             return _parse_ffmpeg_output("".join(stderr_lines), duration=duration)
 
-    except subprocess.TimeoutExpired as e:
-        process.kill()
-        raise SilenceDetectionError(f"ffmpeg timeout after {e.timeout}s") from e
     finally:
         if not drain_done:
             wait_for_drain()
@@ -635,15 +659,26 @@ def _extract_audio_wav(
                     if line.startswith("out_time_us="):
                         try:
                             us = int(line.split("=", 1)[1])
-                            progress_callback(min(us / 1_000_000 / duration, 1.0))
-                        except Exception:
-                            pass
-                # Ensure process finished
+                        except (ValueError, IndexError):
+                            continue
+                        # mypy: ``_progressive_wav`` guarantees both are
+                        # non-None here, but narrowing through the flag
+                        # doesn't reach this closure — check directly.
+                        if progress_callback is not None and duration:
+                            try:
+                                progress_callback(min(us / 1_000_000 / duration, 1.0))
+                            except Exception:
+                                pass
+                # Ensure process finished. This is a post-EOF hang, not
+                # the wall-clock runtime limit — report it distinctly
+                # instead of misleadingly citing the configured timeout.
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     process.kill()
-                    raise SilenceDetectionError(f"ffmpeg extract timeout after {timeout}s") from None
+                    raise SilenceDetectionError(
+                        "ffmpeg extract did not exit 5s after progress EOF — killed"
+                    ) from None
             else:
                 if cancelled.is_set():
                     raise SilenceCancelledError("audio extraction cancelled")
@@ -683,11 +718,16 @@ def _extract_audio_wav(
             # Poisoned-cache guard: drop the partial WAV left behind by a
             # cancel / deadline kill / wait timeout. unlink() is a no-op
             # when the file was never created (e.g. Popen succeeded but
-            # ffmpeg failed before opening the output).
+            # ffmpeg failed before opening the output). The verified
+            # sidecar (if a stale one somehow exists) must go too —
+            # an unverified WAV must never look cache-valid.
             try:
                 wav_path.unlink(missing_ok=True)
             except OSError:
                 pass
+            from stream2video.silence.cache import clear_wav_verified
+
+            clear_wav_verified(wav_path)
 
 
 def _sample_segments_match(

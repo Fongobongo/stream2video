@@ -15,9 +15,41 @@ def _get_wav_cache_path(video_path: Path, output_dir: Path) -> Path:
     return output_dir / f"{video_path.stem}_audio.wav"
 
 
+def _get_wav_verified_path(wav_path: Path) -> Path:
+    """Sidecar marking that `wav_path` passed the sample-verify PTS check."""
+    return wav_path.with_name(wav_path.name + ".verified")
+
+
+def _mark_wav_verified(wav_path: Path) -> None:
+    """Drop the verified sidecar next to `wav_path` (best-effort)."""
+    try:
+        _get_wav_verified_path(wav_path).write_text("ok\n", encoding="utf-8")
+    except OSError as e:
+        logger.debug(f"Could not write WAV verified marker: {e}")
+
+
+def clear_wav_verified(wav_path: Path) -> None:
+    """Invalidate the WAV cache after a failed verification / partial extract."""
+    try:
+        _get_wav_verified_path(wav_path).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _is_wav_cache_valid(wav_path: Path, video_path: Path) -> bool:
-    """WAV cache is valid if it exists and is at least as new as the source video."""
+    """WAV cache is valid if it exists, is at least as new as the source,
+    and has passed the broken-PTS sample verification.
+
+    The verified sidecar matters: a cancelled run can leave a freshly
+    extracted (fresh mtime) but never-verified WAV on disk. Without the
+    marker every subsequent run would trust that WAV and, on a
+    broken-timestamp source, silently produce shifted cut points
+    forever. When the sidecar is missing the caller re-runs the cheap
+    60s sample-verify before trusting the cache.
+    """
     if not wav_path.exists():
+        return False
+    if not _get_wav_verified_path(wav_path).exists():
         return False
     return wav_path.stat().st_mtime >= video_path.stat().st_mtime
 

@@ -115,22 +115,48 @@ def cut_and_concat(
         return output_path
 
     # Honest source bitrate probe when quality==source in bitrate mode.
-    # ffprobe stream bit_rate may be N/A; fallback to high preset with a warning.
+    # ffprobe's per-stream ``bit_rate`` is ``N/A`` for most muxes that
+    # don't store it explicitly — jumping straight to the fixed "high"
+    # 10 Mbps preset there would inflate a 3 Mbps source ~3x. Estimate
+    # the overall bitrate from file size / duration first (the same
+    # heuristic ``estimate_disk_need`` uses — includes container and
+    # audio overhead, which is fine for a "don't regress vs source"
+    # target); only fall back to the "high" preset when even the
+    # container duration is unprobed.
     source_bitrate: int | None = None
     effective_opts_quality = video_quality
     if video_quality == "source" and not use_crf:
-        from stream2video.utils import get_video_bitrate as _gvb
+        from stream2video.utils import (
+            get_video_bitrate as _gvb,
+            get_video_duration as _gvd,
+        )
 
         source_bitrate = _gvb(video_path)
         if source_bitrate is None or source_bitrate <= 0:
-            logger.warning(
-                f"source bitrate probe failed for {video_path.name} "
-                f"(ffprobe returned N/A) — falling back to high quality "
-                f"({ _c._VIDEO_BITRATES['high'] if hasattr(_c, '_VIDEO_BITRATES') else '10000k'}) "
-                f"for {encoder}. File will be larger than source; "
-                f"consider probing manually or using high/medium."
-            )
-            effective_opts_quality = "high"
+            estimate: int | None = None
+            try:
+                est_duration = _gvd(video_path)
+                est_size = video_path.stat().st_size
+                if est_duration and est_duration > 0 and est_size > 0:
+                    estimate = int(est_size * 8 / est_duration)
+            except OSError as e:
+                logger.debug(f"source bitrate estimate failed for {video_path.name}: {e}")
+            if estimate and estimate > 0:
+                source_bitrate = estimate
+                logger.info(
+                    f"ffprobe stream bit_rate=N/A for {video_path.name} — "
+                    f"estimated source bitrate {estimate/1000:.0f}k from "
+                    f"file size/duration"
+                )
+            else:
+                logger.warning(
+                    f"source bitrate probe failed for {video_path.name} "
+                    f"(ffprobe returned N/A and duration unknown) — falling "
+                    f"back to high quality ({_c._VIDEO_BITRATES['high']}) "
+                    f"for {encoder}. File will be larger than source; "
+                    f"consider probing manually or using high/medium."
+                )
+                effective_opts_quality = "high"
         else:
             logger.info(f"Probed source video bitrate: {source_bitrate/1000:.0f}k for {encoder} source")
     vcodec, vcodec_opts = _c.get_video_encoder(
