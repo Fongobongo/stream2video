@@ -186,11 +186,28 @@ def write_cli_config_yaml(
 
     Pure: returns the path written or ``None`` on any filesystem error
     (the GUI logs the warning; the caller decides whether to keep
-    ``--config`` in the command). Atomicity: not strictly required for
-    a tiny CLI config — a partial write is acceptable because the
-    caller tolerates ``None`` (it just omits the flag).
+    ``--config`` in the command).
+
+    Security: ``filename`` must be a plain file name (no path
+    components). ``(out_dir / "../evil.yaml").resolve()`` would
+    otherwise escape the output directory — the parameter is part of
+    the public surface, so enforce the invariant here (fix-plan #23).
+    Atomicity: not strictly required for a tiny CLI config — a partial
+    write is acceptable because the caller tolerates ``None``.
     """
+    if Path(filename).name != filename:
+        raise ValueError(
+            f"filename must be a plain file name, got {filename!r} "
+            f"(path traversal would escape the output directory)"
+        )
     config_path = (out_dir / filename).resolve()
+    # ``resolve()`` collapses ``..`` but a caller using a nested name
+    # (``subdir/cfg.yaml``) is caught above; this check is the last
+    # line of defence against platform quirks (e.g. 8.3 short names).
+    if config_path.parent != out_dir.resolve():
+        raise ValueError(
+            f"filename resolves outside the output directory: {filename!r}"
+        )
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
         config_yaml = f"threshold: {threshold}\nmin_silence: {min_silence}\nmargin: {margin}\n"

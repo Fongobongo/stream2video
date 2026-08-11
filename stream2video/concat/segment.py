@@ -16,6 +16,7 @@ from stream2video.concat.constants import (
 )
 from stream2video.memory import MemoryMonitor
 from stream2video.tools import ffmpeg_path
+from stream2video.utils import get_video_start_time
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,21 @@ def _run_segment_concat(
 
     encoded_keep = 0.0
     skipped = 0
+
+    # start_time compensation (P1.16): ``keep_segments`` are expressed in
+    # the *detected* timeline that silence detection produced (PTS-based,
+    # via the -copyts WAV mirror). An input-side ``-ss`` seek, however,
+    # positions by *file position* — on a source with a non-zero container
+    # ``start_time`` (OBS ``-itsoffset``, mid-file re-mux) the demuxer's
+    # file position 0 corresponds to PTS ``start_time``, so seeking to
+    # ``start`` lands ``start_time`` seconds too late. Subtract the offset
+    # once here; on normal sources (start_time=0) this is a no-op. The
+    # batch path already compensates the same way (batch.py); this brings
+    # the segment path in line. Negative start_time is clamped to 0 —
+    # ffmpeg zeroes a negative DTS timeline itself.
+    start_offset = get_video_start_time(video_path)
+    if start_offset < 0.0:
+        start_offset = 0.0
 
     try:
         for i, (start, end) in enumerate(keep_segments):
@@ -176,11 +192,15 @@ def _run_segment_concat(
                     "-progress",
                     "pipe:1",
                     "-ss",
-                    f"{start:.3f}",
+                    # Microsecond precision (was millisecond): silence
+                    # boundaries come from silencedetect at sub-ms float
+                    # precision, and .3f rounding could shift a cut point
+                    # by up to half a millisecond per boundary.
+                    f"{max(0.0, start - start_offset):.6f}",
                     "-i",
                     str(video_path),
                     "-t",
-                    f"{dur:.3f}",
+                    f"{dur:.6f}",
                     # Explicit stream mapping (P1.14): pick the first
                     # video stream and the first audio stream rather
                     # than letting ffmpeg auto-select. A source with
@@ -217,6 +237,17 @@ def _run_segment_concat(
                             *_c._audio_opts(audio_quality),
                         ]
                         if source_has_audio
+                        else []
+                    ),
+                    *(
+                        # P0.9: when fps conversion duplicates frames, the
+                        # video track grows past ``dur`` while audio is
+                        # bound by ``-t`` — without ``-shortest`` the muxer
+                        # extends the segment by the duplicated tail and
+                        # the final concat plays longer than the keep
+                        # window (frozen video over silence at each join).
+                        ["-shortest"]
+                        if source_has_audio and output_fps != "source"
                         else []
                     ),
                     str(seg_path),

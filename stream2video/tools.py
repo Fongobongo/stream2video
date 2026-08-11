@@ -147,9 +147,18 @@ def _spawn_with_retry(
     for attempt in range(1 + _SPAWN_RETRY_ATTEMPTS):
         try_kwargs = kwargs
         if attempt > 0:
-            try_kwargs = {**kwargs, "creationflags": 0}
+            # Drop ONLY the CREATE_NO_WINDOW bit (0x08000000): it's the
+            # one that composes badly with an inconsistent parent console
+            # (CPython #37380 → winerror 206). Zeroing the whole field
+            # (the previous behaviour) also discarded
+            # BELOW_NORMAL_PRIORITY_CLASS — so a low-priority retry
+            # silently ran at normal priority exactly when the machine
+            # was already under the AV/filter-driver load that triggered
+            # the retry in the first place (fix-plan #17).
+            orig_flags = int(kwargs.get("creationflags", 0))
+            try_kwargs = {**kwargs, "creationflags": orig_flags & ~0x08000000}
             logger.warning(
-                "retrying spawn with creationflags=0 (workaround for "
+                "retrying spawn without CREATE_NO_WINDOW (workaround for "
                 "CreateProcess error 206 when parent's console code page "
                 "was changed after spawning with CREATE_NO_WINDOW)"
             )

@@ -1,5 +1,6 @@
 """Silence cache read/write (final cache and resume checkpoints)."""
 
+import hashlib
 import json
 import logging
 import os
@@ -9,6 +10,31 @@ from pathlib import Path
 from stream2video.silence.parser import SilenceSegment
 
 logger = logging.getLogger(__name__)
+
+
+def build_resume_cache_path(video_path: Path, output_dir: Path) -> Path:
+    """Canonical resume-checkpoint path shared by the CLI and GUI.
+
+    The filename embeds a hash of the resolved source path so two videos
+    that share a stem but live in different directories never share one
+    resume file. Prior to this helper the CLI hashed the path while the
+    GUI didn't, so neither front-end ever saw the other's checkpoints.
+    """
+    path_key = hashlib.sha256(
+        str(video_path.resolve()).encode("utf-8", "replace")
+    ).hexdigest()[:8]
+    return output_dir / f"{video_path.stem}_{path_key}_silence_cache.json.resume"
+
+
+def resume_inuse_path(resume_path: Path) -> Path:
+    """Sidecar path a resume file is moved to *while being consumed*.
+
+    ``detect_silence`` used to unlink the resume file right after loading
+    it; a crash between that unlink and the first throttled checkpoint
+    lost hours of detection progress. Renaming to ``.inuse`` keeps the
+    data on disk until the run proves it can write fresh checkpoints.
+    """
+    return resume_path.with_name(resume_path.name + ".inuse")
 
 
 def _get_wav_cache_path(video_path: Path, output_dir: Path) -> Path:
@@ -66,6 +92,7 @@ def _save_cache(
     *,
     indent: int | None = 2,
     fsync: bool = True,
+    probe_position: float | None = None,
 ) -> None:
     """Atomically write a silence cache to `cache_path`.
 
@@ -77,6 +104,10 @@ def _save_cache(
         indent: JSON indent level (None for compact, default 2).
         fsync: Whether to fsync after writing (True for final cache,
                False for ephemeral resume checkpoints).
+        probe_position: Source-time position (seconds) ffmpeg had decoded
+               up to when this checkpoint was written. Recorded so a
+               resume with ZERO detected segments still restarts from the
+               checkpoint instead of from t=0 (fix-plan #3b).
 
     Note: with ``fsync=False`` (resume checkpoint path), a kernel crash
     between ``json.dump`` and ``os.replace`` could leave the previous
@@ -87,8 +118,14 @@ def _save_cache(
     cache (``fsync=True``) is the durable source of truth.
     """
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    data = {
+    try:
+        src_stat = video_path.stat()
+        src_size: int | None = src_stat.st_size
+    except OSError:
+        src_size = None
+    data: dict = {
         "source": video_path.name,
+        "source_size": src_size,
         "config": {
             "threshold": config.get("threshold"),
             "min_silence": config.get("min_silence"),
@@ -96,6 +133,8 @@ def _save_cache(
         },
         "segments": [{"start": s.start, "end": s.end} for s in segments],
     }
+    if probe_position is not None:
+        data["probe_position"] = probe_position
     fd, tmp_path = tempfile.mkstemp(
         dir=cache_path.parent, prefix=f".{cache_path.name}.", suffix=".tmp"
     )
@@ -152,21 +191,50 @@ def _load_silence_cache_from_path(
     """Load and validate a silence cache file at `cache_path`.
 
     Returns the margin-applied segments on success, ``None`` on any
-    failure: file missing, source newer than cache, malformed JSON,
-    config mismatch, or malformed segments. The final cache stores
-    margin-applied results; for resume, the caller uses the raw
-    progressive_segments directly (no cache load).
+    failure: file missing, source newer than cache, source *identity*
+    mismatch (name or size), malformed JSON, config mismatch, or
+    malformed segments. The final cache stores margin-applied results;
+    for resume, the caller uses the raw progressive_segments directly
+    (no cache load).
     """
-    if not cache_path.exists():
+    try:
+        cache_mtime = cache_path.stat().st_mtime
+        src_stat = video_path.stat()
+    except OSError as e:
+        # Either file vanished between the caller's existence check and
+        # here (AV scan, user delete) — treat as a cache miss, not a crash.
+        logger.info(f"Silence cache stat failed ({e}); treating as miss")
         return None
-    if cache_path.stat().st_mtime < video_path.stat().st_mtime:
+    if cache_mtime < src_stat.st_mtime:
         logger.info(f"Silence cache outdated (source file newer): {cache_path.name}")
         return None
     try:
-        with open(cache_path) as f:
+        # encoding="utf-8" matches _save_cache; without it a source name
+        # containing non-ASCII chars raises UnicodeDecodeError on cp1251
+        # Windows locales instead of a graceful cache miss.
+        with open(cache_path, encoding="utf-8") as f:
             data = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
         logger.warning(f"Could not read silence cache: {e}")
+        return None
+    # Source identity (fix-plan #8): the cache filename only embeds the
+    # stem, so two different videos named ``a.mp4`` in the same output
+    # dir would otherwise share one cache and cut each other's content.
+    # mtime is also forgeable (robocopy /COPYALL preserves it), so check
+    # the recorded name AND byte size against the actual source.
+    recorded_name = data.get("source")
+    if recorded_name is not None and recorded_name != video_path.name:
+        logger.info(
+            f"Silence cache ignored: source name mismatch "
+            f"(cached {recorded_name!r}, actual {video_path.name!r})"
+        )
+        return None
+    recorded_size = data.get("source_size")
+    if recorded_size is not None and recorded_size != src_stat.st_size:
+        logger.info(
+            f"Silence cache ignored: source size mismatch "
+            f"(cached {recorded_size}, actual {src_stat.st_size})"
+        )
         return None
     # Cache key comparison (P2.14): compare the *numeric* values, not
     # raw ``!=``. JSON round-trips lose the int/float distinction
@@ -191,4 +259,46 @@ def _load_silence_cache_from_path(
         return [SilenceSegment(s["start"], s["end"]) for s in data["segments"]]
     except (KeyError, TypeError, ValueError) as e:
         logger.warning(f"Invalid silence cache: {e}")
+        return None
+
+
+def load_resume_probe_position(cache_path: Path, video_path: Path, config: dict) -> float | None:
+    """Return the ``probe_position`` recorded in a resume checkpoint.
+
+    Needed for fix-plan #3b: a checkpoint with ZERO detected segments
+    (healthy source, hours already scanned) must resume from the probe
+    position, not from t=0. Re-runs the same validation as
+    ``_load_silence_cache_from_path`` so a stale/foreign/mismatched
+    checkpoint never yields a seek point. Returns None when the field
+    is absent (legacy checkpoint) or invalid — the caller then falls
+    back to the last segment's end, or to a fresh scan.
+    """
+    try:
+        cache_mtime = cache_path.stat().st_mtime
+        src_stat = video_path.stat()
+    except OSError:
+        return None
+    if cache_mtime < src_stat.st_mtime:
+        return None
+    try:
+        with open(cache_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if data.get("source") is not None and data.get("source") != video_path.name:
+        return None
+    if data.get("source_size") is not None and data.get("source_size") != src_stat.st_size:
+        return None
+    for key in ("threshold", "min_silence", "margin"):
+        try:
+            if float(data.get("config", {}).get(key)) != float(config.get(key)):  # type: ignore[arg-type]
+                return None
+        except (TypeError, ValueError):
+            return None
+    pos = data.get("probe_position")
+    if pos is None:
+        return None
+    try:
+        return float(pos)
+    except (TypeError, ValueError):
         return None

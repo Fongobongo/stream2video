@@ -1,6 +1,7 @@
 """Top-level ``detect_silence`` pipeline orchestrator."""
 
 import logging
+import os
 from collections.abc import Callable
 from pathlib import Path
 
@@ -118,19 +119,30 @@ def detect_silence(
         "margin": margin,
     }
 
-    # Resume cache: load and validate, then unlink so a retry inside
-    # this call doesn't re-load it. The file is ephemeral — if the
-    # detection is cancelled, the next run reads whatever was last
-    # throttled-saved. On success, the final cache is the source of
-    # truth and the resume file is the GUI's responsibility to clean
-    # up.
+    # Resume cache: load and validate, then rename to a ``.inuse``
+    # sidecar instead of unlinking (fix-plan #3). A previous crash
+    # between the old load-then-unlink window could lose ALL checkpointed
+    # progress; the rename keeps the data on disk until this run writes
+    # fresh checkpoints, at which point the .inuse file is redundant.
     initial_segments: list[SilenceSegment] = []
     resume_from: float | None = None
     if resume_cache_path is not None:
-        loaded = _c._load_silence_cache_from_path(resume_cache_path, video_path, current_config)
+        # A leftover .inuse (crash mid-previous-run) takes precedence:
+        # it's the newest checkpoint the previous run consumed.
+        inuse_path = _c.resume_inuse_path(resume_cache_path)
+        load_path = inuse_path if inuse_path.exists() else resume_cache_path
+        loaded = _c._load_silence_cache_from_path(load_path, video_path, current_config)
         if loaded is not None:
             initial_segments = loaded
-            resume_from = initial_segments[-1].end if initial_segments else None
+            # probe_position (#3b): a checkpoint with ZERO segments on a
+            # clean source still records how far the ffmpeg decode had
+            # advanced; resuming from the last segment's end (the old
+            # behaviour) meant restarting from t=0 and losing hours.
+            probe_pos = _c.load_resume_probe_position(load_path, video_path, current_config)
+            if probe_pos is not None:
+                resume_from = probe_pos
+            elif initial_segments:
+                resume_from = initial_segments[-1].end
             if resume_from is not None:
                 logger.info(
                     f"Resuming from resume cache: {len(initial_segments)} segments, "
@@ -140,13 +152,17 @@ def detect_silence(
                 logger.info("Resume cache has 0 segments — starting from t=0 with checkpointing on")
         else:
             logger.info("No valid resume cache — starting fresh")
-        # Unlink unconditionally — if it was stale/missing, this is a
-        # no-op (missing_ok=True guards against FileNotFoundError); if
-        # it was valid, we don't want a retry to re-load it.
-        try:
-            resume_cache_path.unlink(missing_ok=True)
-        except OSError as e:
-            logger.debug(f"Resume cache unlink failed (will be retried next run): {e}")
+        # Move the checkpoint out of the way (don't delete): a subsequent
+        # crash before the first new checkpoint keeps the data recoverable.
+        for p in (resume_cache_path, inuse_path):
+            if p.exists():
+                try:
+                    # If we already consumed an .inuse file, just drop the
+                    # canonical name; otherwise rename canonical → .inuse.
+                    if p == resume_cache_path and p.exists():
+                        os.replace(p, inuse_path)
+                except OSError as e:
+                    logger.debug(f"Resume cache rename failed (non-fatal): {e}")
 
     duration = _c._probe_duration(video_path)
 
@@ -240,8 +256,10 @@ def detect_silence(
                 if resume_cache_path is not None:
                     # The resume checkpoints were written against the
                     # broken WAV timeline — continuing from them would
-                    # poison the direct result.
+                    # poison the direct result. Remove both the canonical
+                    # and the in-flight (.inuse) checkpoint.
                     resume_cache_path.unlink(missing_ok=True)
+                    _c.resume_inuse_path(resume_cache_path).unlink(missing_ok=True)
                     initial_segments = []
                     resume_from = None
                 segments = _c._run_silencedetect(
@@ -373,6 +391,7 @@ def detect_silence(
                 # the direct detection from t=0.
                 if resume_cache_path is not None:
                     resume_cache_path.unlink(missing_ok=True)
+                    _c.resume_inuse_path(resume_cache_path).unlink(missing_ok=True)
                 initial_segments = []
                 resume_from = None
 
@@ -417,6 +436,21 @@ def detect_silence(
             resume_save_config=current_config,
             timeout=effective_timeout,
         )
+
+    # fix-plan #14: ffprobe can fail (timeout, corrupt container) and
+    # return None for duration. Without a media duration apply_margin
+    # can't clamp a negative margin to the file end, and the concat
+    # stage's generate_keep_segments() then raises "Could not determine
+    # video duration" AFTER a multi-hour silence detect. Re-probe once
+    # here so a transient ffprobe failure doesn't doom the whole run;
+    # if it still fails we surface a clear error before margin math.
+    if duration is None:
+        duration = _c._probe_duration(video_path)
+        if duration is None:
+            logger.warning(
+                "Could not probe media duration (ffprobe failed twice) — "
+                "silence segments will not be clamped to the media end"
+            )
 
     segments = apply_margin(segments, margin, duration)
 

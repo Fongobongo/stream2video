@@ -280,6 +280,13 @@ class WaveformRenderMixin:
         if not self._waveform_peaks or self._waveform_duration <= 0:
             return
 
+        # fix-plan #12: every drag/zoom/pan calls _apply_view; without a
+        # token bump here each call captured the SAME token and every
+        # render result was accepted, queuing dozens of PIL renders on
+        # worker threads per mouse gesture. Invalidate prior renders
+        # immediately — only the latest view-state's image lands on the
+        # widget.
+        self._waveform_render_token += 1
         token = self._waveform_render_token
 
         view_start = self._waveform_view_start

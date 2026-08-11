@@ -298,7 +298,7 @@ class MainWindowBuildMixin:
         self.combo_audio_quality = ctk.CTkComboBox(
             opt_frame, values=VALID_QUALITIES, state="readonly", width=108
         )
-        self.combo_audio_quality.set(self.config.get("audio_quality", "medium"))
+        self.combo_audio_quality.set(self.config.get("audio_quality", "source"))
         self.combo_audio_quality.grid(row=2, column=3, sticky="ew", padx=(0, 5), pady=(0, 2))
         _Tooltip(
             self.combo_audio_quality,

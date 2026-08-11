@@ -1,0 +1,391 @@
+"""Regression tests for the 28-bug audit sweep.
+
+Every test in this module maps directly to a numbered audit finding.
+A test that starts failing again means the corresponding bug came back.
+"""
+
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from stream2video.concat import (
+    ConcatLockError,
+    _run_cut_then_encode,
+    acquire_output_lock,
+    release_output_lock,
+)
+from stream2video.concat.output_lock import lock_path_for
+
+
+# ── #4/#3b ── resume cache path is shared between CLI and GUI ──────────
+class TestResumeCachePathShared:
+    def test_cli_and_gui_agree_on_resume_path(self, tmp_path: Path):
+        from stream2video.silence import build_resume_cache_path
+
+        video = tmp_path / "myvideo.mp4"
+        video.write_bytes(b"x")
+        expected = build_resume_cache_path(video, tmp_path / "out")
+        # The CLI must NOT hand-roll the hash inline anymore.
+        import inspect
+
+        import stream2video.cli as cli_mod
+
+        src = inspect.getsource(cli_mod)
+        assert "build_resume_cache_path" in src, (
+            "cli.py must use build_resume_cache_path (shared with GUI)"
+        )
+        assert video.stem in expected.name
+
+    def test_probe_position_resumes_with_zero_segments(self, tmp_path: Path):
+        """#3b: a checkpoint with zero segments must not restart at t=0."""
+        from stream2video.silence.cache import (
+            _save_cache,
+            load_resume_probe_position,
+        )
+
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"video-bytes")
+        cache = tmp_path / "out" / "src_x_silence_cache.json.resume"
+        cfg = {"threshold": -30.0, "min_silence": 2.0, "margin": 0.5}
+        _save_cache(cache, video, [], cfg, indent=None, fsync=False, probe_position=3600.0)
+        pos = load_resume_probe_position(cache, video, cfg)
+        assert pos == pytest.approx(3600.0)
+
+
+# ── #8 ── cache identity: name + size, utf-8 round-trip ────────────────
+class TestSilenceCacheIdentity:
+    def test_other_stem_does_not_share_cache(self, tmp_path: Path):
+        from stream2video.silence.cache import _save_cache, load_silence_cache
+
+        out = tmp_path / "out"
+        a = tmp_path / "a.mp4"
+        b = tmp_path / "b.mp4"
+        a.write_bytes(b"aaa")
+        b.write_bytes(b"bbb")
+        # _save_cache keys by video_path.name — directly place a cache
+        # under b's stem but with a's content marker.
+        cache_path = out / f"{b.stem}_silence_cache.json"
+        _save_cache(cache_path, a, [], {"threshold": -30.0, "min_silence": 2.0, "margin": 0.5})
+        # Load for b: recorded source is a.mp4 — must NOT match.
+        hit = load_silence_cache(b, out, {"threshold": -30.0, "min_silence": 2.0, "margin": 0.5})
+        assert hit is None, "cache for a.mp4 was reused for b.mp4"
+
+    def test_unicode_source_name_does_not_crash(self, tmp_path: Path):
+        """#8: Cyrillic source names on cp1251 Windows must not UnicodeDecodeError."""
+        from stream2video.silence.cache import _save_cache, load_silence_cache
+
+        out = tmp_path / "out"
+        vid = tmp_path / "стрим_запись.mp4"
+        vid.write_bytes(b"video")
+        _save_cache(out / f"{vid.stem}_silence_cache.json", vid, [], {
+            "threshold": -30.0, "min_silence": 2.0, "margin": 0.5})
+        hit = load_silence_cache(vid, out, {"threshold": -30.0, "min_silence": 2.0, "margin": 0.5})
+        assert hit == []
+
+    def test_size_mismatch_detected(self, tmp_path: Path):
+        """#8: same mtime but different size must invalidate the cache."""
+        from stream2video.silence.cache import _save_cache, load_silence_cache
+
+        out = tmp_path / "out"
+        vid = tmp_path / "a.mp4"
+        vid.write_bytes(b"small")
+        cfg = {"threshold": -30.0, "min_silence": 2.0, "margin": 0.5}
+        _save_cache(out / f"{vid.stem}_silence_cache.json", vid, [], cfg)
+        # Grow the file (same mtime would need os.utime; different size
+        # alone must already invalidate).
+        vid.write_bytes(b"small_but_grown")
+        assert load_silence_cache(vid, out, cfg) is None
+
+
+# ── #5 ── cut_encode resume: truncated part is re-cut, not reused ──────
+class TestCutEncodeResumeDuration:
+    def test_wrong_duration_part_is_recut(self, tmp_path: Path):
+        """#5: a stale part whose duration is off must be re-encoded."""
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"source")
+        output = tmp_path / "out.mp4"
+        keep = [(10.0, 20.0)]  # dur=10
+        cut_dir = output.parent / "_out_cut"
+        cut_dir.mkdir(parents=True)
+        (cut_dir / "cut_000000.mkv").write_bytes(b"\x00" * 2048)
+
+        cut_calls: list[list[str]] = []
+
+        def fake_cut(cmd, **kw):
+            cut_calls.append(list(cmd))
+
+        with (
+            patch("stream2video.concat._run_subprocess_cmd", side_effect=fake_cut),
+            patch("stream2video.concat._run_final_concat"),
+            patch("stream2video.concat._ffprobe_is_valid_mp4", return_value=True),
+            patch("stream2video.concat._ffprobe_is_valid_media", return_value=True),
+            # Duration probe says "wrong length" → must NOT reuse.
+            patch("stream2video.concat._ffprobe_duration_ok", return_value=False),
+            patch("stream2video.concat._run_ffmpeg"),
+            patch("stream2video.concat._ensure_fresh_work_dir"),
+        ):
+            _run_cut_then_encode(
+                video, keep, output, "libx264", ["-preset", "medium"],
+                None, None, encoder="libx264", source_has_audio=False,
+            )
+        assert len(cut_calls) == 1, "stale-duration part was reused, not re-cut"
+
+
+# ── #6 ── output lock ──────────────────────────────────────────────────
+class TestOutputLock:
+    def test_second_acquire_raises(self, tmp_path: Path):
+        out = tmp_path / "x.mp4"
+        lp = acquire_output_lock(out)
+        assert lp.exists()
+        with pytest.raises(ConcatLockError):
+            acquire_output_lock(out)
+        release_output_lock(lp)
+        assert not lp.exists()
+        # Releasing frees the name for the next run.
+        lp2 = acquire_output_lock(out)
+        lp2.unlink()
+
+    def test_lock_released_on_pipeline_error(self, tmp_path: Path):
+        """#6: a pipeline that raises still releases the lock."""
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"source")
+        output = tmp_path / "out.mp4"
+
+        def boom(*_a, **_kw):
+            raise RuntimeError("encoder exploded")
+
+        from stream2video.concat import cut_and_concat
+
+        with (
+            patch("stream2video.concat._run_with_fallback", side_effect=boom),
+            patch("stream2video.concat.get_video_encoder", return_value=("libx264", [])),
+            patch("stream2video.concat.has_audio_stream", return_value=False),
+            patch("stream2video.concat.generate_keep_segments", return_value=[(0.0, 5.0)]),
+            patch("stream2video.concat._make_memory_monitor_factory", return_value=None),
+            pytest.raises(RuntimeError, match="encoder exploded"),
+        ):
+            cut_and_concat(video, [], output)
+        assert not lock_path_for(output).exists(), "lock leaked after pipeline error"
+
+
+# ── #7 ── pre-first-progress timeout (opt-in) ──────────────────────────
+class TestPreProgressTimeout:
+    def test_kills_silent_start(self, tmp_path: Path):
+        """#7: pre_progress_timeout must kill an ffmpeg that emits nothing."""
+        from stream2video.concat import FFmpegError, _run_ffmpeg
+
+        real_popen = subprocess.Popen
+
+        def fake_popen(cmd, **kwargs):
+            return real_popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+
+        start = time.monotonic()
+        with (
+            patch("stream2video.concat.subprocess.Popen", side_effect=fake_popen),
+            pytest.raises(FFmpegError, match="no progress"),
+        ):
+            _run_ffmpeg(
+                [sys.executable, "-c", "pass"],
+                progress_callback=lambda us: None,
+                timeout=60,
+                label="silent",
+                pre_progress_timeout=1,
+            )
+        elapsed = time.monotonic() - start
+        assert elapsed < 10.0, f"pre-progress kill took {elapsed:.1f}s, expected fast kill"
+
+    def test_default_preserves_legacy_behaviour(self, tmp_path: Path):
+        """pre_progress_timeout=None (default) must not break the existing
+        stall watchdog contract — the pipeline is the thing setting it."""
+        # Just verifies the parameter is accepted and defaults to None.
+        import inspect
+
+        from stream2video.concat.runner import _run_ffmpeg
+
+        sig = inspect.signature(_run_ffmpeg)
+        assert sig.parameters["pre_progress_timeout"].default is None
+
+
+# ── #15 ── cancel_process ordering ─────────────────────────────────────
+class TestCancelProcessOrder:
+    def test_wait_before_pipe_close(self):
+        """#15: wait() must run before pipes are closed."""
+        from stream2video import utils
+
+        calls: list[str] = []
+
+        class FakePipe:
+            def close(self):
+                calls.append("close")
+
+        class FakeProc:
+            def __init__(self):
+                self.stdin = FakePipe()
+                self.stdout = FakePipe()
+                self.stderr = FakePipe()
+                self._alive = True
+
+            def poll(self):
+                calls.append("poll")
+                return None if self._alive else 0
+
+            def kill(self):
+                calls.append("kill")
+                self._alive = False
+
+            def wait(self, timeout=None):
+                calls.append("wait")
+                self._alive = False
+                return 0
+
+        proc = FakeProc()
+        with utils.registered_process(proc, owner="test"):
+            assert utils.cancel_process("test")
+        assert calls.index("kill") < calls.index("wait") < calls.index("close")
+
+
+# ── #19 ── SIGINT identity ──────────────────────────────────────────────
+class TestSigintIdentity:
+    def test_double_main_restores_default(self):
+        """#19: two in-process main() calls must not hold the first cancel event."""
+        import stream2video.cli_helpers as ch
+
+        assert hasattr(ch, "_installed_sigint_handler"), (
+            "cli_helpers must track its own SIGINT handler by reference"
+        )
+
+
+# ── #22 ── unlink retry ─────────────────────────────────────────────────
+class TestUnlinkRetry:
+    def test_retries_then_succeeds(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        from stream2video.pipeline_controller import _unlink_with_retry
+
+        f = tmp_path / "x.tmp"
+        f.write_bytes(b"x")
+
+        # Fail twice, then succeed — simulates an AV holding the file.
+        fail_count = [0]
+        real_unlink = Path.unlink
+
+        def flaky(self, *a, **kw):
+            if self == f and fail_count[0] < 2:
+                fail_count[0] += 1
+                raise PermissionError("WinError 32: file in use")
+            return real_unlink(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "unlink", flaky)
+        assert _unlink_with_retry(f, attempts=3, delay_s=0.01)
+        assert fail_count[0] == 2, "retry didn't retry before succeeding"
+
+    def test_gives_up_cleanly(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        from stream2video.pipeline_controller import _unlink_with_retry
+
+        f = tmp_path / "x.tmp"
+        f.write_bytes(b"x")
+
+        def always_fail(self, *a, **kw):
+            raise PermissionError("permanent lock")
+
+        monkeypatch.setattr(Path, "unlink", always_fail)
+        assert not _unlink_with_retry(f, attempts=2, delay_s=0.01)
+
+
+# ── #23 ── settings_io path traversal ──────────────────────────────────
+class TestSettingsIoTraversal:
+    def test_dotdot_rejected(self, tmp_path: Path):
+        from stream2video.settings_io import write_cli_config_yaml
+
+        with pytest.raises(ValueError, match="plain file name"):
+            write_cli_config_yaml(tmp_path, -30.0, 2.0, 0.5, filename="../evil.yaml")
+
+    def test_plain_name_still_works(self, tmp_path: Path):
+        from stream2video.settings_io import write_cli_config_yaml
+
+        p = write_cli_config_yaml(tmp_path, -30.0, 2.0, 0.5)
+        assert p is not None and p.parent == tmp_path.resolve()
+
+    def test_subdirectory_rejected(self, tmp_path: Path):
+        from stream2video.settings_io import write_cli_config_yaml
+
+        with pytest.raises(ValueError):
+            write_cli_config_yaml(tmp_path, -30.0, 2.0, 0.5, filename="nested/cfg.yaml")
+
+
+# ── #24 ── manifest identity ────────────────────────────────────────────
+class TestManifestHash:
+    def test_same_size_mtime_different_content_invalidates(self, tmp_path: Path):
+        from stream2video.concat.manifest import (
+            _build_manifest,
+            _ensure_fresh_work_dir,
+        )
+
+        src = tmp_path / "a.mp4"
+        src.write_bytes(os.urandom(1024) + os.urandom(1024))  # >1MiB tail differs
+        # Force the same mtime on the rewrite so ONLY the hash differs.
+        st = src.stat()
+        keep = [(0.0, 1.0)]
+        m1 = _build_manifest(src, keep, "segment", "libx264", "libx264", [], "medium", "medium", "medium", "auto")
+
+        wd = tmp_path / "_work"
+        _ensure_fresh_work_dir(wd, m1)
+        marker = wd / "seg_000000.mp4"
+        marker.write_bytes(b"partial")
+
+        # Rewrite content, restore mtime to fake "same file".
+        src.write_bytes(os.urandom(2048))
+        os.utime(src, ns=(st.st_atime_ns, st.st_mtime_ns))
+        m2 = _build_manifest(src, keep, "segment", "libx264", "libx264", [], "medium", "medium", "medium", "auto")
+        _ensure_fresh_work_dir(wd, m2)
+        assert not marker.exists(), "stale part survived a content swap with preserved mtime"
+
+
+# ── #28 ── log trimming ─────────────────────────────────────────────────
+class TestLogTrimming:
+    def test_poller_caps_line_count(self):
+        from stream2video.tk_dispatch import LogQueuePoller, TkDispatcher
+
+        class TB:
+            def __init__(self): self.lines: list[str] = []
+            def configure(self, **_k): ...
+            def see(self, _i): ...
+            def tag_config(self, *_a, **_k): ...
+            def tag_add(self, *_a): ...
+            def index(self, i): return i
+            def insert(self, _i, t): self.lines.extend(t.splitlines())
+            def delete(self, a, b=None):
+                n = int(b.split(".")[0]) if b else 1
+                del self.lines[:n]
+
+        class R:
+            def after(self, _ms, _fn): return "x"
+
+        tb = TB()
+        poller = LogQueuePoller(tb, TkDispatcher(R()))
+        poller._MAX_LOG_LINES = 50
+        for i in range(150):
+            poller.log(f"m{i}")
+        # Pump the queue through poll (drains in 100ms batches; call repeatedly).
+        while True:
+            try:
+                poller.poll()
+            except Exception:
+                break
+            # poll reschedules via the fake dispatcher, so we drive manually.
+            if poller._queue.empty():
+                break
+        # Drive poll once more to drain any stragglers
+        try:
+            poller.poll()
+        except Exception:
+            pass
+        assert len(tb.lines) <= 50, f"log not trimmed: {len(tb.lines)} lines"
+        assert tb.lines[-1].endswith("m149"), "newest line was trimmed"

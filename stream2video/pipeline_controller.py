@@ -57,6 +57,7 @@ from stream2video.silence import (
     SilenceCancelledError,
     SilenceDetectionError,
     SilenceSegment,
+    build_resume_cache_path,
     detect_silence,
     load_silence_cache,
     save_silence_cache,
@@ -67,6 +68,31 @@ from stream2video.utils import get_video_duration
 logger = logging.getLogger(__name__)
 
 _MEMORY_POLL_INTERVAL = 2.0
+
+
+def _unlink_with_retry(path: Path, attempts: int = 5, delay_s: float = 0.2) -> bool:
+    """Best-effort unlink with short retries for Windows AV/indexer locks.
+
+    A fresh download or a just-finished output is often held open by a
+    virus scanner or Windows Search indexer for tens of milliseconds
+    (WinError 32). A bare ``unlink()`` then fails and the cleanup helper
+    leaves garbage on disk — exactly the "failed run leaves a stale file"
+    bug the cleanup was designed to prevent (fix-plan #22). Retries with
+    a short sleep absorb the transient lock; a final failure is logged
+    with the full path so the user can delete it manually.
+    """
+    for attempt in range(attempts):
+        try:
+            path.unlink()
+            return True
+        except FileNotFoundError:
+            return True  # already gone — cleanup goal achieved
+        except OSError as e:
+            if attempt < attempts - 1:
+                time.sleep(delay_s)
+            else:
+                logger.warning("_unlink_with_retry(%s): %s after %d attempts", path, e, attempts)
+    return False
 
 
 @dataclass(frozen=True)
@@ -413,10 +439,7 @@ class PipelineController:
         never touched (ownership check).
         """
         if self._download_path is not None and self._download_path.exists():
-            try:
-                self._download_path.unlink()
-            except OSError:
-                pass
+            _unlink_with_retry(self._download_path)
         self._download_path = None
 
     def _cleanup_partial_output(self) -> None:
@@ -433,11 +456,10 @@ class PipelineController:
         (the only place that actually knows the resolved path).
         """
         if self._output_path is not None and self._output_path.exists():
-            try:
-                self._output_path.unlink()
+            if _unlink_with_retry(self._output_path):
                 self.cb.on_log(f"Deleted incomplete output: {self._output_path}")
-            except OSError as e:
-                self.cb.on_log(f"[WARN] Could not delete incomplete output: {e}")
+            else:
+                self.cb.on_log(f"[WARN] Could not delete incomplete output: {self._output_path}")
         # Always clear the slot so a subsequent run (or the GUI's on-close
         # cleanup) can't chase a stale path.
         self._output_path = None
@@ -668,7 +690,10 @@ class PipelineController:
             "margin": self.cfg.margin,
         }
 
-        resume_cache_path = output_dir / f"{video_path.stem}_silence_cache.json.resume"
+        # Canonical resume path shared with the CLI (fix-plan #4): both
+        # front-ends must address the same checkpoint file, otherwise a
+        # GUI-cancelled run is invisible to the CLI resume and vice versa.
+        resume_cache_path = build_resume_cache_path(video_path, output_dir)
         if self.cfg.force and resume_cache_path.exists():
             try:
                 resume_cache_path.unlink()

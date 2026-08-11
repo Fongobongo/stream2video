@@ -14,6 +14,7 @@ from stream2video.concat.constants import (
     _STALL_KILL,
     _STALL_WARNING,
 )
+from stream2video.concat.output_lock import acquire_output_lock, release_output_lock
 from stream2video.config import VALID_OUTPUT_FORMATS
 
 if TYPE_CHECKING:
@@ -95,23 +96,28 @@ def cut_and_concat(
                 f"Source {video_path.name} has no audio stream -- cannot "
                 f"produce {output_format} output"
             )
-        _c._run_audio_extract(
-            video_path,
-            keep_segments,
-            output_path,
-            output_format,
-            progress_callback=progress_callback,
-            cancel_callback=cancel_callback,
-            audio_quality=audio_quality,
-            segment_encode_timeout=segment_encode_timeout,
-            final_concat_timeout=final_concat_timeout,
-            stall_kill=stall_kill_timeout,
-            stall_warning=stall_warning_timeout,
-            min_part_bytes=min_part_bytes,
-            low_process_priority=low_process_priority,
-            rlimit_as_mb=rlimit_as_mb,
-            memory_monitor_factory=memory_monitor_factory,
-        )
+        # Same output-file guard as the video path below (#6).
+        _audio_lock = acquire_output_lock(output_path)
+        try:
+            _c._run_audio_extract(
+                video_path,
+                keep_segments,
+                output_path,
+                output_format,
+                progress_callback=progress_callback,
+                cancel_callback=cancel_callback,
+                audio_quality=audio_quality,
+                segment_encode_timeout=segment_encode_timeout,
+                final_concat_timeout=final_concat_timeout,
+                stall_kill=stall_kill_timeout,
+                stall_warning=stall_warning_timeout,
+                min_part_bytes=min_part_bytes,
+                low_process_priority=low_process_priority,
+                rlimit_as_mb=rlimit_as_mb,
+                memory_monitor_factory=memory_monitor_factory,
+            )
+        finally:
+            release_output_lock(_audio_lock)
         return output_path
 
     # Honest source bitrate probe when quality==source in bitrate mode.
@@ -212,36 +218,45 @@ def cut_and_concat(
 
         inner_progress = _wrap
 
-    _c._run_with_fallback(
-        video_path,
-        keep_segments,
-        output_path,
-        vcodec,
-        vcodec_opts,
-        method,
-        inner_progress,
-        cancel_callback,
-        video_quality=video_quality,
-        audio_quality=audio_quality,
-        software_fallback=software_fallback,
-        fallback_consent=fallback_consent,
-        x264_preset=x264_preset,
-        encoder_threads=encoder_threads,
-        source_has_audio=source_has_audio,
-        output_fps=output_fps,
-        x264_low_memory=x264_low_memory,
-        use_crf=use_crf,
-        source_bitrate=source_bitrate,
-        gapless_concat=gapless_concat,
-        low_process_priority=low_process_priority,
-        rlimit_as_mb=rlimit_as_mb,
-        segment_encode_timeout=segment_encode_timeout,
-        final_concat_timeout=final_concat_timeout,
-        stall_kill=stall_kill_timeout,
-        stall_warning=stall_warning_timeout,
-        batch_chunk_size=batch_chunk_size,
-        min_part_bytes=min_part_bytes,
-        memory_monitor_factory=memory_monitor_factory,
-    )
+    # fix-plan #6: an exclusive lock file prevents a second concurrent
+    # run (GUI + CLI, two CLIs) from interleaving -y writes into the
+    # same output_path and silently corrupting each other. Acquired
+    # BEFORE any concat work (so the failing run exits before burning
+    # GPU minutes), released on every exit path.
+    _lock_path = acquire_output_lock(output_path)
+    try:
+        _c._run_with_fallback(
+            video_path,
+            keep_segments,
+            output_path,
+            vcodec,
+            vcodec_opts,
+            method,
+            inner_progress,
+            cancel_callback,
+            video_quality=video_quality,
+            audio_quality=audio_quality,
+            software_fallback=software_fallback,
+            fallback_consent=fallback_consent,
+            x264_preset=x264_preset,
+            encoder_threads=encoder_threads,
+            source_has_audio=source_has_audio,
+            output_fps=output_fps,
+            x264_low_memory=x264_low_memory,
+            use_crf=use_crf,
+            source_bitrate=source_bitrate,
+            gapless_concat=gapless_concat,
+            low_process_priority=low_process_priority,
+            rlimit_as_mb=rlimit_as_mb,
+            segment_encode_timeout=segment_encode_timeout,
+            final_concat_timeout=final_concat_timeout,
+            stall_kill=stall_kill_timeout,
+            stall_warning=stall_warning_timeout,
+            batch_chunk_size=batch_chunk_size,
+            min_part_bytes=min_part_bytes,
+            memory_monitor_factory=memory_monitor_factory,
+        )
+    finally:
+        release_output_lock(_lock_path)
 
     return output_path

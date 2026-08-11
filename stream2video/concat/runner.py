@@ -52,6 +52,7 @@ def _run_ffmpeg(
     memory_monitor: "MemoryMonitor | None" = None,
     stall_kill: int = _STALL_KILL,
     stall_warning: int = _STALL_WARNING,
+    pre_progress_timeout: int | None = None,
     low_process_priority: bool = False,
     rlimit_as_mb: int = 0,
 ) -> None:
@@ -154,6 +155,22 @@ def _run_ffmpeg(
         # line resets the latch so a *new* stall period warns again once.
         stall_warned = False
 
+        # fix-plan #7: pre-first-progress stall budget. The full
+        # ``stall_kill`` window (default 300s) is meant for *mid-encode*
+        # stalls; an ffmpeg that hasn't emitted a single ``out_time_us``
+        # line is usually wedged on a broken/corrupt input (or probing
+        # a network share) and shouldn't get five minutes before anyone
+        # notices. ``pre_progress_timeout=None`` preserves the legacy
+        # behaviour (only the stall watchdog guards a silent start);
+        # when set, the first progress line must arrive within that
+        # budget or the process is killed.
+        pre_progress_end: float | None = (
+            (time.monotonic() + float(pre_progress_timeout))
+            if pre_progress_timeout is not None
+            else None
+        )
+        got_first_progress = False
+
         # P1.5: stall watchdog. The ``track_progress=True`` branch checks
         # ``elapsed_since_progress`` inside its readline loop, but readline
         # blocks until ffmpeg emits a line -- a fully-hung ffmpeg (deadlock,
@@ -248,6 +265,17 @@ def _run_ffmpeg(
                                         "possible resource exhaustion"
                                     )
                                 )
+                            if not got_first_progress and (
+                                pre_progress_end is not None
+                                and time.monotonic() > pre_progress_end
+                            ):
+                                _kill_and_raise(
+                                    FFmpegError(
+                                        f"{label} produced no progress at all within "
+                                        f"{int(time.monotonic() - process_start)}s of spawn "
+                                        "-- likely a wedged input (broken file, blocked read)"
+                                    )
+                                )
                             elif elapsed_since_progress > stall_warning and not stall_warned:
                                 stall_warned = True
                                 logger.warning(
@@ -262,6 +290,7 @@ def _run_ffmpeg(
                             raise CancelledError(f"{label} cancelled") from None
                         line = raw_line.decode("utf-8", errors="replace").strip()
                         if line.startswith("out_time_us="):
+                            got_first_progress = True
                             last_progress_time = time.monotonic()
                             stall_warned = False
                             if progress_callback:

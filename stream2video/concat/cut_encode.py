@@ -21,6 +21,7 @@ from stream2video.concat.constants import (
 )
 from stream2video.memory import MemoryMonitor
 from stream2video.tools import ffmpeg_path
+from stream2video.utils import get_video_start_time
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,13 @@ def _run_cut_then_encode(
     cut_dir.mkdir(parents=True, exist_ok=True)
 
     try:
+        # start_time compensation (P1.16) — keep_segments are in detected
+        # PTS time; input-side -ss positions by file position. See segment.py
+        # for the full rationale. No-op on clean sources (start_time=0).
+        start_offset = get_video_start_time(video_path)
+        if start_offset < 0.0:
+            start_offset = 0.0
+
         # ── Phase 1: Cut pass (stream-copy each segment to MKV) ──
         # Progress: 0.0 .. 0.4 (cut is fast, so a small slice of the bar).
         cut_progress_base = 0.0
@@ -136,21 +144,19 @@ def _run_cut_then_encode(
             # output. Match ``_ffprobe_is_valid_media(..., "a")`` here the
             # same way ``audio.py:extract`` already does for its segments.
             #
-            # Duration is intentionally NOT checked here: phase 1 uses
-            # ``-c copy``, which snaps the cut to keyframes — on long-GOP
-            # sources (2-10s GOP is typical for streamed H.264) the actual
-            # part length legitimately differs from ``dur`` by more than
-            # any fixed slack, so a keyframe-snapped part would fail the
-            # check on EVERY resume attempt and be re-cut identically
-            # (wasted work, never converges). The ffprobe validity check
-            # above is the real corruption guard, and the manifest wipe
-            # (``_ensure_fresh_work_dir``) already invalidated parts that
-            # came from different cut points.
+            # Duration check (P0.5): ``-c copy`` snaps the cut start to the
+            # nearest *preceding* keyframe, so the actual part length can
+            # legitimately exceed ``dur`` by up to one GOP (2-10s on
+            # typical streamed H.264). Use a generous 15s slack — large
+            # enough to never falsely reject a healthy keyframe-snapped
+            # part, small enough to catch a part truncated by a mid-flush
+            # kill (the original resume-corruption bug).
             if (
                 cut_path.exists()
                 and cut_path.stat().st_size >= min_part_bytes
                 and _c._ffprobe_is_valid_mp4(cut_path)
                 and (not source_has_audio or _c._ffprobe_is_valid_media(cut_path, stream_type="a"))
+                and _c._ffprobe_duration_ok(cut_path, dur, slack=15.0)
             ):
                 logger.debug(f"cut_then_encode: reusing cut_{i:06d}.mkv")
                 continue
@@ -161,7 +167,13 @@ def _run_cut_then_encode(
                 "-loglevel",
                 "error",
                 "-ss",
-                str(start),
+                # start_time compensation (P1.16) — keep_segments are
+                # in detected PTS time; input-side -ss positions by file
+                # position. On a source with a non-zero container
+                # start_time (OBS -itsoffset) the demuxer's position 0 is
+                # PTS start_time, so an uncompensated seek lands start_time
+                # seconds too late and the keep segment is clipped early.
+                str(max(0.0, start - start_offset)),
                 "-i",
                 str(video_path),
                 "-t",
@@ -255,6 +267,14 @@ def _run_cut_then_encode(
                 "-y",
                 "-loglevel",
                 "error",
+                # -progress pipe:1 is REQUIRED here: _run_ffmpeg's stall
+                # watchdog resets on out_time_us lines from stdout, and
+                # without -progress a long final encode (multi-hour VOD)
+                # emits nothing there and gets killed after ``stall_kill``
+                # seconds despite encoding healthily. This regressed every
+                # cut_then_encode run longer than the stall window.
+                "-progress",
+                "pipe:1",
                 "-i",
                 str(raw_concat_path),
                 "-map",

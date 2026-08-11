@@ -96,6 +96,8 @@ class TkTextbox(Protocol):
 
     def insert(self, index: str, text: str) -> None: ...
 
+    def delete(self, index1: str, index2: str | None = None) -> None: ...
+
     def see(self, index: str) -> None: ...
 
     def index(self, index: str) -> str: ...
@@ -121,6 +123,7 @@ class LogQueuePoller:
     """
 
     _POLL_INTERVAL_MS = 100
+    _MAX_LOG_LINES = 10_000  # fix-plan #28: unbounded growth = GUI memory leak
 
     def __init__(
         self,
@@ -232,6 +235,21 @@ class LogQueuePoller:
                         self._apply_tag(
                             tag, f"{self._line_count}.0", f"{self._line_count}.0 lineend"
                         )
+                    # Trim the oldest lines once the log outgrows the
+                    # budget — otherwise a multi-hour run's log widget
+                    # accumulates tens of thousands of lines and the GUI's
+                    # memory footprint grows unboundedly (fix-plan #28).
+                    # Tk line indices are 1-based; deleting 1..extra removes
+                    # exactly the oldest ``extra`` lines and shifts every
+                    # subsequent line down — our own ``_line_count`` tracks
+                    # the new total.
+                    if self._line_count > self._MAX_LOG_LINES:
+                        extra = self._line_count - self._MAX_LOG_LINES
+                        try:
+                            self._textbox.delete("1.0", f"{extra}.0 lineend + 1 char")
+                        except Exception:
+                            logger.debug("log trim failed", exc_info=True)
+                        self._line_count -= extra
                     inserted = True
                 if inserted:
                     # Auto-scroll to the bottom once the whole batch is in.

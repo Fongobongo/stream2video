@@ -353,6 +353,16 @@ def _run_silencedetect(
     if progressive_segments and on_segment is not None:
         on_segment(list(progressive_segments))
 
+    # Last decoded source position (absolute seconds, -copyts space).
+    # Updated from ``out_time_us`` progress lines and recorded into resume
+    # checkpoints as ``probe_position`` so a resume that found ZERO
+    # segments still restarts from the probe frontier instead of t=0
+    # (fix-plan #3b -- previously a clean source's hours-long scan was
+    # lost because ``resume_from`` was derived only from segment ends).
+    last_progress_pos: list[float] = [
+        float(resume_from) if resume_from is not None else 0.0
+    ]
+
     pending_start: list[float | None] = [None]  # mutable container so the
     # closure can assign without `nonlocal`.
 
@@ -377,16 +387,24 @@ def _run_silencedetect(
             _maybe_save_resume()
 
     def _maybe_save_resume() -> None:
-        """Checkpoint the current segment list to disk if the throttle
-        window has elapsed. Counts and timestamps tracked via mutable
-        lists so the closure can update them without `nonlocal`.
+        """Checkpoint the current segment list + probe position to disk
+        if the throttle window has elapsed. Counts and timestamps tracked
+        via mutable lists so the closure can update them without
+        ``nonlocal``.
         """
         if resume_save_path is None or resume_save_config is None:
             return
         new_count = len(progressive_segments) - len(initial_segments or [])
-        if new_count <= 0:
-            return
         now = time.monotonic()
+        # Save when N new segments arrived OR the throttle interval passed
+        # AND the probe moved (a clean source accumulates no segments but
+        # still scans forward — that progress must be checkpointed, or a
+        # multi-hour silent scan is lost on cancel (fix-plan #3b)).
+        moved = last_progress_pos[0] - (
+            float(resume_from) if resume_from is not None else 0.0
+        )
+        if new_count <= 0 and not (moved > 0 and now - last_save_time[0] >= _RESUME_THROTTLE_S):
+            return
         if (
             now - last_save_time[0] < _RESUME_THROTTLE_S
             and new_count - last_save_count[0] < _RESUME_THROTTLE_N
@@ -400,6 +418,7 @@ def _run_silencedetect(
                 resume_save_config,
                 indent=None,
                 fsync=False,
+                probe_position=last_progress_pos[0],
             )
             last_save_time[0] = now
             last_save_count[0] = new_count
@@ -465,6 +484,12 @@ def _run_silencedetect(
                 if line.startswith("out_time_us="):
                     try:
                         us = int(line.split("=", 1)[1])
+                        last_progress_pos[0] = us / 1_000_000
+                        # A moving probe frontier is itself worth
+                        # checkpointing (clean source → zero segments but
+                        # hours of progress); the throttle inside
+                        # _maybe_save_resume keeps this cheap.
+                        _maybe_save_resume()
                         if progress_callback and progress_divisor and progress_divisor > 0:
                             rel_us = max(0, us - int(progress_offset_us))
                             progress_callback(min(rel_us / 1_000_000 / progress_divisor, 1.0))

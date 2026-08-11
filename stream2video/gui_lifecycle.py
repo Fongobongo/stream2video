@@ -337,6 +337,12 @@ class LifecycleMixin:
                 _logger.info(f"Cleaned up incomplete download: {self._download_path}")
             except OSError:
                 pass
+        # fix-plan #20: flush any uncommitted slider entry text into
+        # config BEFORE _save_settings reads it. A user typing into the
+        # numeric entry and closing the window (without FocusOut, which
+        # normally triggers the commit) silently lost the typed value
+        # and the config written to disk held the previous one.
+        self._sync_slider_entries()
         try:
             self._save_settings()
         except Exception as e:

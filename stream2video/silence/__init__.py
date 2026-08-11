@@ -31,8 +31,11 @@ from stream2video.silence.cache import (
     _load_silence_cache_from_path,
     _mark_wav_verified,
     _save_cache,
+    build_resume_cache_path,
     clear_wav_verified,
+    load_resume_probe_position,
     load_silence_cache,
+    resume_inuse_path,
     save_silence_cache,
 )
 from stream2video.silence.detect import (
@@ -110,9 +113,12 @@ __all__ = [
     "_save_cache",
     "_to_float",
     "apply_margin",
+    "build_resume_cache_path",
     "clear_wav_verified",
     "detect_silence",
     "detect_silence_stream",
+    "load_resume_probe_position",
     "load_silence_cache",
+    "resume_inuse_path",
     "save_silence_cache",
 ]

@@ -6,12 +6,12 @@ against the current run's parameters (source identity + encoder +
 quality + pipeline version + keep segments). A mismatch invalidates the
 working dir so old artifacts from an incompatible run cannot be reused.
 
-Source identity is (path, size, mtime_ns). A full hash is intentionally
-avoided -- for a 6h stream that's an extra O(filesize) read. (path,
-size, mtime_ns) is enough to detect: file moved/replaced, file edited
-in place (size and mtime change), file re-encoded (size and mtime
-change). For adversarial cases (size+mtime preserved by external
-tooling) the user can pass --force.
+Source identity is (path, size, mtime_ns, head_tail_hash). ``head_tail_hash``
+is a SHA-256 over the first + last 1 MiB of the file — O(1) in file size
+but enough to catch the adversarial "user re-downloaded the same stream,
+the file has identical size AND the copy tool preserved mtime" case
+(robocopy /COPYALL, rclone -M). A full-file hash is intentionally avoided
+(P0 audit: 6h of reads for a resume check is unacceptable).
 """
 
 import json
@@ -24,27 +24,66 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-PIPELINE_VERSION = 4  # bump when the on-disk segment/chunk format changes or a new
-# identity key is added (v4: +output_fps, gapless_concat, source_has_audio)
+PIPELINE_VERSION = 5  # bump when the on-disk segment/chunk format changes or a new
+# identity key is added (v4: +output_fps, gapless_concat, source_has_audio;
+# v5: +source.head_tail_hash, see _source_identity)
 
 
 def _manifest_path(work_dir: Path) -> Path:
     return work_dir / "_manifest.json"
 
 
+_HEAD_TAIL_BYTES = 1024 * 1024  # 1 MiB at each end; see _source_identity
+
+
+def _head_tail_hash(path: Path) -> str:
+    """SHA-256 of the file's first + last 1 MiB.
+
+    Cheap enough for resume identity (two 1 MiB reads vs a full-file
+    hash) but catches a same-size same-mtime content swap. The hash is
+    order-sensitive: ``H(head || tail)`` — two files that share a head
+    but differ at the tail hash differently, which is exactly the case
+    a re-downloaded stream flips (new outro = new tail).
+    """
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        h.update(f.read(_HEAD_TAIL_BYTES))
+        try:
+            f.seek(max(0, path.stat().st_size - _HEAD_TAIL_BYTES))
+        except OSError:
+            pass  # file shrank between reads — first read covered all of it
+        h.update(f.read(_HEAD_TAIL_BYTES))
+    return h.hexdigest()
+
+
 def _source_identity(video_path: Path) -> dict:
-    """Snapshot (path, size, mtime_ns) so resume detects source changes.
+    """Snapshot (path, size, mtime_ns, head_tail_hash) so resume detects source changes.
 
     Uses the absolute path so renaming the file (same content) doesn't
     silently reuse segments encoded against a different filename -- the
     concat list references segments by their position in the run, so a
     path rename invalidates the work dir deliberately.
+
+    ``head_tail_hash`` (fix-plan #24): catches the case where a copy
+    tool preserved both mtime and size but the *content* changed —
+    re-downloads of the same stream land exactly here (same duration →
+    same size; robocopy preserves mtime).
     """
     st = video_path.stat()
+    try:
+        hth = _head_tail_hash(video_path)
+    except OSError as e:
+        # Unreadable source: any segment reuse is unsafe — hash to a
+        # sentinel that will never match a healthy run's hash.
+        logger.warning(f"Could not hash {video_path.name} for manifest identity: {e}")
+        hth = "unreadable"
     return {
         "path": str(video_path.resolve()),
         "size": st.st_size,
         "mtime_ns": st.st_mtime_ns,
+        "head_tail_hash": hth,
     }
 
 
@@ -170,10 +209,13 @@ def _validate_manifest(
                 f"stored={stored.get(key)!r} current={current.get(key)!r}"
             )
             return False
-    # Source identity (path/size/mtime) -- strict equality.
+    # Source identity (path/size/mtime/head_tail_hash). ``head_tail_hash``
+    # may be absent in manifests written by pipeline_version<5 — treat a
+    # missing key as a mismatch (wipe and re-encode once) so a v4 manifest
+    # never silently short-circuits a v5 identity check.
     stored_src = stored.get("source") or {}
     current_src = current.get("source") or {}
-    for key in ("path", "size", "mtime_ns"):
+    for key in ("path", "size", "mtime_ns", "head_tail_hash"):
         if stored_src.get(key) != current_src.get(key):
             logger.info(
                 f"Resume: source {key} changed: "

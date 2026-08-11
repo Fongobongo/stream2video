@@ -68,6 +68,7 @@ from stream2video.pipeline_controller import (
 from stream2video.silence import (
     SilenceCancelledError,
     SilenceDetectionError,
+    build_resume_cache_path,
     detect_silence,
     load_silence_cache,
     save_silence_cache,
@@ -114,6 +115,18 @@ def _doctor_callback(ctx: typer.Context, param: Any, value: bool) -> bool:
                 break
             if arg.startswith("-c="):
                 cfg = Path(arg.split("=", 1)[1])
+                break
+        # ``--log-format json`` is also non-eager, so it hasn't populated
+        # _JSON_LOG_MODE yet when --doctor fires. Scan argv again (same
+        # rationale as --config above) so the doctor's "line-per-object"
+        # contract actually fires (fix-plan #27).
+        global _JSON_LOG_MODE
+        for i, arg in enumerate(argv):
+            if arg == "--log-format" and i + 1 < len(argv) and argv[i + 1] == "json":
+                _JSON_LOG_MODE = True
+                break
+            if arg.startswith("--log-format=") and arg.split("=", 1)[1] == "json":
+                _JSON_LOG_MODE = True
                 break
         ok = _run_doctor(cfg)
         raise typer.Exit(0 if ok else 1)
@@ -722,12 +735,14 @@ def main(
     # Marking the installed handler's owner lets the ``finally`` block
     # detect that case and restore ``SIG_DFL`` instead, which is the only
     # well-defined "previous" state a bare script had before the CLI ran.
-    # Detect by identity: our helpers install a closure literally named
-    # ``_handler`` in ``cli_helpers`` — module-qualified so a coincidental
-    # same-named function elsewhere isn't misclassified.
-    _ours = getattr(prev_handler, "__module__", "") == "stream2video.cli_helpers" and getattr(
-        prev_handler, "__name__", ""
-    ) == "_handler"
+    # fix-plan #19: identity check against the module-level reference in
+    # cli_helpers, not a name+module heuristic — a refactor that renamed
+    # the closure would break the old check silently.
+    import stream2video.cli_helpers as _ch
+
+    _ours = prev_handler is not None and prev_handler is getattr(
+        _ch, "_installed_sigint_handler", None
+    )
     if _ours:
         # A previous in-process main() call never restored. Treat the
         # pre-CLI state as SIG_DFL rather than restoring our own stale
@@ -1050,39 +1065,45 @@ def main(
                 if download_result.is_downloaded:
                     logger.info(f"Moved source into project dir: {video_path}")
                 if fh is not None:
-                    # Safe swap: detach the old handler, then attach the
-                    # new one. If addHandler fails after removeHandler +
-                    # close, `fh` is rolled back to the still-attached old
-                    # handler reference (already closed, but the outer
-                    # finally's removeHandler/close is idempotent) — and
-                    # we never leave a dangling closed handler attached
-                    # to the logger (which would double-log on the next
-                    # run).
+                    # Safe swap (fix-plan #13): the old handler must stay
+                    # attached until the new one is proven constructible —
+                    # but on Windows the open FileHandler holds a lock that
+                    # blocks shutil.move (WinError 32), so the move happens
+                    # between close() and addHandler(). Order:
+                    #   1. Close+detach old handler (releases the lock).
+                    #   2. Move the log file to the project dir.
+                    #   3. Construct+attach the new handler. If ANY of
+                    #      these fails after step 1, the outer ``finally``
+                    #      on ``fh`` (which still points at old_fh) is
+                    #      idempotent (removeHandler+close on a closed
+                    #      handler is harmless); the log lands wherever
+                    #      step 2 left it and the run continues with the
+                    #      new handler only if step 3 succeeded.
                     old_fh = fh
                     new_log = new_output / "stream2video.log"
-                    # Close + detach the old handler BEFORE moving the
-                    # log file: on Windows the open FileHandler holds a
-                    # lock that blocks shutil.move (WinError 32) until
-                    # the handle is released.
-                    logger.removeHandler(old_fh)
-                    old_fh.close()
-                    if new_log.exists():
-                        new_log.unlink()
-                    if log_file.exists():
-                        shutil.move(str(log_file), str(new_log))
-                    new_fh = _make_file_handler(new_log)
                     try:
-                        logger.addHandler(new_fh)
-                    except Exception:
-                        # addHandler raised: new_fh is detached, old_fh
-                        # is already removed+closed. Roll back `fh` to
-                        # old_fh so the outer finally's removeHandler()
-                        # is a no-op and close() is a harmless second
-                        # close on an already-closed handler. Re-raise.
-                        new_fh.close()
+                        logger.removeHandler(old_fh)
+                        old_fh.close()
+                        if new_log.exists():
+                            new_log.unlink()
+                        if log_file.exists():
+                            shutil.move(str(log_file), str(new_log))
+                        new_fh = _make_file_handler(new_log)
+                    except OSError as e:
+                        # Re-atach the old handler so the run isn't left
+                        # logless mid-pipeline (the old file may already
+                        # be moved, but the logger still records to the
+                        # console, and the finally below won't double-
+                        # close).
+                        logger.addHandler(old_fh)
                         fh = old_fh
-                        raise
-                    fh = new_fh
+                        logger.warning(
+                            f"Could not move log file to project dir ({e}); "
+                            f"log continues on the original path where possible"
+                        )
+                    else:
+                        logger.addHandler(new_fh)
+                        fh = new_fh
                 output_dir = new_output
                 console.print(f"Project directory: [cyan]{output_dir}[/cyan]")
 
@@ -1109,31 +1130,18 @@ def main(
                     def silence_progress(f: float) -> None:
                         progress.update(task2, completed=min(f * 100, 100))
 
-                    # Resume cache: the CLI now wires the same resume
-                    # path the GUI uses, so a Ctrl+C mid-detection can
-                    # pick up from the last throttled checkpoint instead
-                    # of restarting from t=0. Without this the CLI
-                    # silently discarded any resume state the GUI had
-                    # written for the same source/output_dir pair (see
-                    # P1.8 in the fix plan). The filename embeds a hash
-                    # of the resolved source path so two videos that
-                    # share a stem but live in different directories
-                    # don't share one resume file; threshold/margin
-                    # mismatches are still caught by the in-file config
-                    # check in silence.pipeline.
-                    import hashlib as _hashlib
-
-                    _stem = video_path.stem
-                    _path_key = _hashlib.sha256(
-                        str(video_path.resolve()).encode("utf-8", "replace")
-                    ).hexdigest()[:8]
-                    resume_cache_path = (
-                        output_dir / f"{_stem}_{_path_key}_silence_cache.json.resume"
-                    )
+                    # Resume cache: the CLI and GUI share ONE canonical
+                    # path (fix-plan #4): ``build_resume_cache_path``
+                    # embeds a hash of the resolved source path so two
+                    # videos that share a stem but live in different
+                    # directories don't share one resume file. Previously
+                    # the CLI hashed and the GUI didn't, so neither
+                    # front-end ever saw the other's checkpoints.
+                    resume_cache_path = build_resume_cache_path(video_path, output_dir)
                     # Migrate a legacy (path-unkeyed) resume file written
                     # by previous versions so a user resuming after an
                     # upgrade doesn't lose their checkpoint.
-                    _legacy_resume = output_dir / f"{_stem}_silence_cache.json.resume"
+                    _legacy_resume = output_dir / f"{video_path.stem}_silence_cache.json.resume"
                     if _legacy_resume.exists() and not resume_cache_path.exists():
                         try:
                             _legacy_resume.replace(resume_cache_path)

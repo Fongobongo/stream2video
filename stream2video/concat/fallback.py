@@ -232,6 +232,16 @@ def _with_libx264_fallback(
     chose ``ultrafast`` + a thread cap to protect an unstable CPU.
     ``x264_low_memory`` reduces the encoder's frame-buffer footprint
     (see ``encoder_opts`` for details).
+
+    Two exception classes bypass the retry entirely (fix-plan #10):
+
+      * ``FFmpegOutOfMemoryError`` — the hardware encoder died by OOM.
+        Retrying with libx264 (which allocates MORE memory for its
+        frame buffers) would just OOM again; better to surface the
+        "lower the memory budget" hint to the user immediately.
+      * ``EncoderUnavailableError`` — the driver/encoder was never even
+        tried (a config problem, not a video-data problem), so a libx264
+        retry adds no information.
     """
     enc, enc_opts = primary_codec, primary_opts
     while True:
@@ -239,6 +249,9 @@ def _with_libx264_fallback(
             try_fn(enc, enc_opts)
             return
         except _c.CancelledError:
+            raise
+        except (_c.FFmpegOutOfMemoryError, _c.EncoderUnavailableError):
+            # Never retry these with libx264 — see docstring.
             raise
         except exc_types as e:
             if enc == "libx264":

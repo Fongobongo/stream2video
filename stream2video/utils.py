@@ -519,8 +519,25 @@ def cancel_process(owner: str, timeout: float = 2.0) -> bool:
     except Exception:
         logger.exception(f"cancel_process({owner!r}): kill() failed")
         return False
-    # Only now, after kill, close OUR pipe handles. Any drain thread will
-    # get EBADF on its own read — daemon thread handles its own teardown.
+    # fix-plan #15: wait for the child to actually reap BEFORE closing
+    # our pipe handles. On Windows, closing a pipe handle while a drain
+    # thread is blocked in a synchronous ReadFile on it does NOT wake
+    # the reader (no EBADF is delivered to the in-flight read); the
+    # reader only exits when the child dies and breaks the pipe. The old
+    # order closed the pipes first, so a failing ``kill()`` (or a slow
+    # one) left the drain threads permanently wedged and the caller's
+    # wait loop running with no data flow. ``wait(timeout)`` first, then
+    # close.
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        logger.warning("cancel_process(%r): process did not exit within %.1fs", owner, timeout)
+        # fix-plan #15: fall through to closing the pipes anyway — if the
+        # child survives (killed but wedged), the drain threads blocked in
+        # ReadFile need our handle-close to see EOF and unwind. Returning
+        # False here without closing would leak them until process exit.
+    # Only now, after kill+wait, close OUR pipe handles. Any drain thread
+    # sees EOF (the child's ends are gone) and exits.
     for pipe_name in ("stdin", "stdout", "stderr"):
         pipe = getattr(proc, pipe_name, None)
         if pipe is not None:
@@ -530,11 +547,6 @@ def cancel_process(owner: str, timeout: float = 2.0) -> bool:
                 logger.debug(
                     "cancel_process(%r): closing %s failed", owner, pipe_name, exc_info=True
                 )
-    try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        logger.warning("cancel_process(%r): process did not exit within %.1fs", owner, timeout)
-        return False
     return proc.poll() is not None
 
 

@@ -10,6 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
+from stream2video.tools import popen_with_retry
 from stream2video.utils import CANCEL_POLL_INTERVAL, no_window_kwargs, registered_process
 
 logger = logging.getLogger(__name__)
@@ -429,7 +430,10 @@ def download(
 
     logger.info(f"Downloading: {url}")
     try:
-        process = subprocess.Popen(
+        # popen_with_retry (fix-plan #26): a winget shim / AV filter driver
+        # intermittently returns FileNotFoundError on spawn; an 8-hour VOD
+        # download must survive that transient.
+        process = popen_with_retry(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -608,6 +612,21 @@ def download(
             # paths still wait for them. Threads exit when their pipes close
             # (next block), so the join is bounded; a missed join could leak
             # the daemon thread's pipe reads until process exit on Windows.
+            #
+            # Kill-first (fix-plan #1): on any path that ISN'T one of the
+            # four explicit kills above (an unexpected exception from the
+            # progress callback, KeyboardInterrupt, OSError, ...) the yt-dlp
+            # child would otherwise survive us — an orphaned process keeps
+            # draining network→disk for hours while the GUI reports the
+            # download as finished/failed. Only the failure paths kill the
+            # process explicitly; on success it has already exited (the loop
+            # breaks on poll() is not None) so this is a no-op.
+            if process.poll() is None:
+                try:
+                    process.kill()
+                    process.wait(timeout=5)
+                except Exception:
+                    logger.debug("final yt-dlp reap failed", exc_info=True)
             stdout_thread.join(timeout=2)
             stderr_thread.join(timeout=2)
             for pipe in (process.stdout, process.stderr):

@@ -32,6 +32,12 @@ logger = logging.getLogger("stream2video")
 console = Console()
 app = typer.Typer(help="Compress stream recordings by removing silence")
 
+# Tracks the SIGINT handler THIS module installed so cli.py can detect
+# a double-main() run by identity rather than by a fragile name/module
+# heuristic (fix-plan #19: a refactor that renames the closure breaks
+# the name check silently).
+_installed_sigint_handler: Callable[..., None] | None = None
+
 # ``ParameterSource`` tells us whether a CLI flag came from the command
 # line or a default. Its import path has moved across typer/click
 # releases. Use a defensive try/except chain so the module keeps
@@ -70,6 +76,9 @@ def _make_sigint_cancel() -> tuple[threading.Event, Callable[[], bool]]:
 
     def _handler(signum: Any, frame: Any) -> None:
         event.set()
+
+    global _installed_sigint_handler
+    _installed_sigint_handler = _handler
 
     try:
         signal.signal(signal.SIGINT, _handler)

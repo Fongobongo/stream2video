@@ -318,6 +318,15 @@ class Stream2VideoGUI(
             # silently skipped — log at warning so it isn't invisible.
             logger.warning("start disk preflight skipped", exc_info=True)
 
+        # Snapshot config for the worker thread (fix-plan #11): the
+        # main thread keeps mutating ``self.config`` as the user moves
+        # sliders AFTER Start, and the worker reads ~30 keys off the
+        # same dict — a race that produced mixed runs (new threshold,
+        # old min_silence). ``dict()`` is O(n) and atomic-under-GIL for
+        # this purpose; the nested ``encoders`` list (if any) is shared
+        # but never mutated by the GUI after startup.
+        config_snapshot = dict(self.config)
+
         self._ui_update_output(output_dir)
 
         self._log(
@@ -347,6 +356,7 @@ class Stream2VideoGUI(
                 force,
                 per_video_dir,
                 delete_after,
+                config_snapshot,
             ),
             daemon=True,
         ).start()
@@ -363,6 +373,7 @@ class Stream2VideoGUI(
         force: bool,
         per_video_dir: bool = False,
         delete_after: bool = False,
+        config_snapshot: dict | None = None,
     ) -> None:
         """Worker thread: delegates to
         :class:`stream2video.pipeline_worker.PipelineWorker` which owns
@@ -394,7 +405,10 @@ class Stream2VideoGUI(
             per_video_dir=per_video_dir,
             delete_after=delete_after,
         )
-        worker = PipelineWorker(_PipelineGuiCallbacksAdapter(self), self.config)
+        worker = PipelineWorker(
+            _PipelineGuiCallbacksAdapter(self),
+            config_snapshot if config_snapshot is not None else self.config,
+        )
         self._pipeline_start = time.monotonic()
         try:
             worker.run(params)

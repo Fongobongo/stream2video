@@ -371,6 +371,18 @@ def _run_batch_concat(
                             if source_has_audio
                             else []
                         ),
+                        *(
+                            # P0.9: ``fps`` in the filter graph can
+                            # duplicate frames past the keep window's
+                            # duration while the audio branch is clamped
+                            # by ``atrim=0:{e-s}`` — without ``-shortest``
+                            # the muxer writes the longer video tail and
+                            # the chunk runs long (frozen tail frames at
+                            # every concat join).
+                            ["-shortest"]
+                            if source_has_audio and output_fps != "source"
+                            else []
+                        ),
                         str(chunk_path),
                     ],
                     progress_callback=_chunk_prog,

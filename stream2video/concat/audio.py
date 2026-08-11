@@ -17,6 +17,7 @@ from stream2video.concat.constants import (
 from stream2video.config import OUTPUT_FORMAT_SPECS
 from stream2video.memory import MemoryMonitor
 from stream2video.tools import ffmpeg_path
+from stream2video.utils import get_video_start_time
 
 logger = logging.getLogger(__name__)
 
@@ -189,6 +190,14 @@ def _run_audio_extract(
         encoded_keep = 0.0
         skipped = 0
 
+        # start_time compensation (P1.16) — same rationale as the segment
+        # path: keep_segments are in detected PTS time, input-side -ss
+        # positions by file position. Subtract the container start_time
+        # once (no-op on clean sources).
+        start_offset = get_video_start_time(video_path)
+        if start_offset < 0.0:
+            start_offset = 0.0
+
         for i, (start, end) in enumerate(keep_segments):
             if cancel_callback and cancel_callback():
                 raise _c.CancelledError("audio extract cancelled")
@@ -237,11 +246,11 @@ def _run_audio_extract(
                     "-progress",
                     "pipe:1",
                     "-ss",
-                    f"{start:.3f}",
+                    f"{max(0.0, start - start_offset):.6f}",
                     "-i",
                     str(video_path),
                     "-t",
-                    f"{dur:.3f}",
+                    f"{dur:.6f}",
                     "-map",
                     "0:a:0",
                     "-vn",

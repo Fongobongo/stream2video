@@ -261,8 +261,12 @@ def _run_gapless_segment_concat(
     def _report_tree_progress() -> None:
         if progress_callback is None or total_groups_est == 0 or total_duration <= 0:
             return
-        frac = completed_groups / max(1, total_groups_est)
-        progress_callback(0.9 + frac * 0.08)
+        # The estimate ``total_groups_est`` is computed from the INITIAL
+        # max_inputs; deeper levels can shrink max_inputs below it, so
+        # completed_groups can overshoot 1.0 — clamp so the UI never sees
+        # the bar regress past the 0.98 tree-phase ceiling (fix-plan #18).
+        frac = min(completed_groups / max(1, total_groups_est), 1.0)
+        progress_callback(min(0.9 + frac * 0.08, 0.98))
 
     # Estimate per-group duration so the batch map below can budget the
     # whole tree (groups G0..Gn are 0.9..0.98). The per-group figure is
@@ -288,24 +292,19 @@ def _run_gapless_segment_concat(
                 raise _c.CancelledError(f"gapless tree L{level} cancelled")
             reuse = inter.exists() and inter.stat().st_size >= _MIN_PART_BYTES
             if reuse:
-                # P1: cheap "size is enough" check is insufficient — a
-                # mid-write crash leaves a file that passes the byte
-                # threshold but has no moov / corrupt stream, and the
-                # concat demuxer would happily embed it into the final
-                # file. The segment path has done ffprobe validation for
-                # a long time (segment.py:119); the tree path had the
-                # gap. Every intermediate carries a video stream (the
-                # gapless path only runs when the source has audio, so
-                # both streams are always present), so validate on
-                # ``stream_type="v"``. A failed validation is NOT fatal:
-                # like every other resume check in the codebase
-                # (segment.py / batch.py / audio.py), we simply re-encode
-                # the group instead of aborting the whole run.
+                # fix-plan #18: video-stream-only validation accepts an
+                # intermediate whose AUDIO track was truncated by a
+                # mid-write crash (moov-less audio body). The gapless path
+                # only runs on sources with audio, so both streams must
+                # probe cleanly before we reuse the file.
                 try:
-                    if not _ffprobe_is_valid_media(inter, stream_type="v"):
+                    _audio_ok = _ffprobe_is_valid_media(inter, stream_type="a")
+                    _video_ok = _ffprobe_is_valid_media(inter, stream_type="v")
+                    if not (_video_ok and _audio_ok):
                         logger.warning(
                             f"gapless tree L{level}: intermediate {inter.name} "
-                            f"failed ffprobe validation; re-encoding group {g}"
+                            f"failed ffprobe validation "
+                            f"(video={_video_ok} audio={_audio_ok}); re-encoding group {g}"
                         )
                         reuse = False
                 except Exception:

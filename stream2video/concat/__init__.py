@@ -88,6 +88,11 @@ from stream2video.concat.manifest import (
     _validate_manifest,
     _write_manifest,
 )
+from stream2video.concat.output_lock import (
+    ConcatLockError,
+    acquire_output_lock,
+    release_output_lock,
+)
 from stream2video.concat.probing import (
     _ffprobe_duration_ok,
     _ffprobe_is_valid_media,
@@ -180,6 +185,7 @@ __all__ = [
     "_X264_CRF",
     "CancelledError",
     "ConcatError",
+    "ConcatLockError",
     "EncoderUnavailableError",
     "FFmpegError",
     "FFmpegOutOfMemoryError",
@@ -216,6 +222,7 @@ __all__ = [
     "_with_libx264_fallback",
     "_write_manifest",
     "_x264_low_memory_opts",
+    "acquire_output_lock",
     "check_encoder",
     "cut_and_concat",
     "drain_stderr_lines",
@@ -230,5 +237,6 @@ __all__ = [
     "looks_like_oom",
     "popen_with_retry",
     "read_lines_queue",
+    "release_output_lock",
     "run_with_retry",
 ]
