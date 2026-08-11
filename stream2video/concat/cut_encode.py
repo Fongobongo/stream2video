@@ -210,7 +210,23 @@ def _run_cut_then_encode(
         # Reuse _run_final_concat but point it at raw_concat.mkv instead
         # of the final output. The progress span for this step is small
         # (0.4..0.5) because it's a stream copy.
-        if not raw_concat_path.exists() or not _c._ffprobe_is_valid_mp4(raw_concat_path):
+        # Resume gate: validate BOTH streams, not just video. Phase-2 is a
+        # stream-copy join of video+audio; a crash between the AAC body
+        # write and the moov finalize leaves a file whose video validates
+        # but whose audio is truncated/absent — and the final encode below
+        # would silently swallow it, producing an out.mp4 with no sound.
+        # segment.py / batch.py already do the dual probe for their parts;
+        # this is the same check for the raw concat (mirrors the audio
+        # probe on the cut parts earlier in this function).
+        if not (
+            raw_concat_path.exists()
+            and raw_concat_path.stat().st_size >= min_part_bytes
+            and _c._ffprobe_is_valid_mp4(raw_concat_path)
+            and (
+                not source_has_audio
+                or _c._ffprobe_is_valid_media(raw_concat_path, stream_type="a")
+            )
+        ):
             _c._run_final_concat(
                 cut_dir,
                 raw_concat_path,

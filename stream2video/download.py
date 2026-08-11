@@ -11,7 +11,13 @@ from pathlib import Path
 from typing import NamedTuple
 
 from stream2video.tools import popen_with_retry
-from stream2video.utils import CANCEL_POLL_INTERVAL, no_window_kwargs, registered_process
+from stream2video.utils import (
+    _STDERR_HEAD_LINES,
+    _STDERR_TAIL_LINES,
+    CANCEL_POLL_INTERVAL,
+    no_window_kwargs,
+    registered_process,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +47,19 @@ class DownloadError(Exception):
 
 
 class DownloadCancelledError(DownloadError):
-    """Download was cancelled by user (not a real failure)."""
+    """Download was cancelled by user (not a real failure).
+
+    ``partial`` marks "the process had already produced bytes when the
+    cancel landed" — i.e. the file on disk is truncated relative to
+    whatever yt-dlp was going to write. The pipeline controller uses
+    this to decide whether the file is safe to leave behind for resume
+    (``partial=False``: a fully-written source the user may want to
+    reuse) or should be unlinked as garbage (``partial=True``).
+    """
+
+    def __init__(self, message: str = "Download cancelled", *, partial: bool = True) -> None:
+        super().__init__(message)
+        self.partial = partial
 
 
 class URLValidationError(DownloadError):
@@ -417,7 +435,13 @@ def download(
             f"|%(progress.speed)s|%(progress.eta)s"
         ),
         "--output",
-        str(out_dir / "%(id)s.%(ext)s"),
+        # %(epoch)s makes the filename unique per invocation so two runs
+        # pointed at the same URL (or a rerun against an abandoned .part
+        # fragment from a previous run) can never write into / resume the
+        # same file. The stdout ``after_move:filepath`` report still gives
+        # us the exact path, and _find_downloaded_file's stem-glob matches
+        # "<id>-NNN.*" under the "<id>.*" prefix (newest mtime wins).
+        str(out_dir / "%(id)s-%(epoch)s.%(ext)s"),
         "--format",
         format_str,
         "--print",
@@ -512,6 +536,17 @@ def download(
             for line in stderr:
                 last_activity_time[0] = time.monotonic()
                 stderr_chunks.append(line)
+                # Bound the hoard: mirror the ring in drain_stderr_lines
+                # (a corrupt source can spam stderr for the whole stall
+                # window, eating the same RAM the download is supposed
+                # to guard). Head (error classification) + tail are kept.
+                max_lines = _STDERR_HEAD_LINES + 1 + _STDERR_TAIL_LINES
+                if len(stderr_chunks) > max_lines:
+                    stderr_chunks[:] = [
+                        *stderr_chunks[:_STDERR_HEAD_LINES],
+                        "... (middle stderr dropped)\n",
+                        *stderr_chunks[-_STDERR_TAIL_LINES:],
+                    ]
 
         stdout_thread = threading.Thread(target=_drain_stdout, daemon=True)
         stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
@@ -525,12 +560,29 @@ def download(
                     break
                 if cancel_callback and cancel_callback():
                     process.kill()
-                    process.wait()
-                    raise DownloadCancelledError("Download cancelled by user")
+                    try:
+                        process.wait(timeout=30)
+                    except subprocess.TimeoutExpired:
+                        pass
+                    raise DownloadCancelledError(
+                        "Download cancelled by user",
+                        # partial=True: cancel fired while the process was
+                        # alive, when we have no evidence the file is
+                        # complete. The caller treats it as truncated and
+                        # unlinks rather than surfacing as a valid source.
+                        partial=True,
+                    )
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     process.kill()
-                    process.wait()
+                    try:
+                        # Bounded reap: TerminateProcess is async on
+                        # Windows; an unbounded wait() would hang the
+                        # download worker if the OS-level kill blocks
+                        # (network share, AV filter driver).
+                        process.wait(timeout=30)
+                    except subprocess.TimeoutExpired:
+                        pass
                     stdout_thread.join(timeout=2)
                     stderr_thread.join(timeout=2)
                     raise _timeout_error(
@@ -552,7 +604,10 @@ def download(
                     idle_for = now - max(start_time, last_activity_time[0])
                     if idle_for > connect_timeout:
                         process.kill()
-                        process.wait()
+                        try:
+                            process.wait(timeout=30)
+                        except subprocess.TimeoutExpired:
+                            pass
                         stdout_thread.join(timeout=2)
                         stderr_thread.join(timeout=2)
                         raise _timeout_error(
@@ -565,7 +620,10 @@ def download(
                     silent_for = now - last_progress_time[0]
                     if silent_for > no_progress_timeout:
                         process.kill()
-                        process.wait()
+                        try:
+                            process.wait(timeout=30)
+                        except subprocess.TimeoutExpired:
+                            pass
                         stdout_thread.join(timeout=2)
                         stderr_thread.join(timeout=2)
                         raise _timeout_error(

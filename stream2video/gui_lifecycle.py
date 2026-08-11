@@ -310,6 +310,11 @@ class LifecycleMixin:
             answer = messagebox.askyesno(
                 "Quit?",
                 "Pipeline is running. Stop and quit?",
+                # parent=self: an unparented dialog can fall behind the
+                # main window — the user then clicks X again, re-enters
+                # _on_close and gets a second dialog, and it looks like
+                # the app "won't close". Mirrored from gui.py:215.
+                parent=self,
             )
             if not answer:
                 return

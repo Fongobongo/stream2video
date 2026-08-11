@@ -255,7 +255,7 @@ class WaveformInteractionsMixin:
             self._waveform_view_end,
             frac,
         )
-        if new_start == self._waveform_view_start:
+        if abs(new_start - self._waveform_view_start) < 1e-9:
             return
         self._waveform_view_start = new_start
         self._waveform_view_end = new_end
@@ -274,7 +274,14 @@ class WaveformInteractionsMixin:
         if duration <= 0 or view_duration >= duration:
             return
         new_start = max(0.0, min(duration - view_duration, float(value)))
-        if new_start == self._waveform_view_start:
+        # Epsilon guard, not ``==``: CTkSlider without an explicit
+        # ``number_of_steps`` quantises its value onto the canvas-pixel
+        # grid, so a ``set()`` followed by ``command`` fires with a
+        # value that differs from what we asked for by one ULP-ish
+        # amount. A strict equality guard misses that and queues a
+        # redundant render loop (compute→apply→slider-update→command→
+        # compute) on every drag tick.
+        if abs(new_start - self._waveform_view_start) < 1e-9:
             return
         self._waveform_view_start = new_start
         self._waveform_view_end = new_start + view_duration

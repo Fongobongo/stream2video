@@ -666,6 +666,11 @@ def main(
         _json_handler = install_json_handler(logger, level=log_level.upper())
         # install_json_handler attached the handler to the app ``logger``.
         # basicConfig below re-roots the same handler for the root logger.
+        # ``logger.propagate`` defaults to True, so without the line below
+        # every app record fires the handler TWICE (once directly, once
+        # via propagation to the same handler at the root) and stdout
+        # JSON is duplicated line-by-line — breaking ``| jq .`` pipes.
+        logger.propagate = False
         logging.basicConfig(
             level=logging.DEBUG,
             handlers=[_json_handler],
@@ -1090,13 +1095,19 @@ def main(
                             shutil.move(str(log_file), str(new_log))
                         new_fh = _make_file_handler(new_log)
                     except OSError as e:
-                        # Re-atach the old handler so the run isn't left
-                        # logless mid-pipeline (the old file may already
-                        # be moved, but the logger still records to the
-                        # console, and the finally below won't double-
-                        # close).
-                        logger.addHandler(old_fh)
-                        fh = old_fh
+                        # The old handler is closed by now; re-attaching
+                        # IT would leave the logger feeding a dead stream
+                        # (every record dies in logging.handleError for the
+                        # rest of the run). Re-open whichever file exists:
+                        # the moved one wins when step 2 succeeded and the
+                        # failure happened at step 3, otherwise the original.
+                        fallback_log = new_log if new_log.exists() else log_file
+                        try:
+                            fh = _make_file_handler(fallback_log)
+                        except OSError:
+                            fh = None
+                        if fh is not None:
+                            logger.addHandler(fh)
                         logger.warning(
                             f"Could not move log file to project dir ({e}); "
                             f"log continues on the original path where possible"

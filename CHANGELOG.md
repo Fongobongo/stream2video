@@ -1,5 +1,26 @@
 # Changelog
 
+## [Unreleased] - 2026-08-12
+
+### Fixed
+
+- **Log file no longer dies silently on a project-dir move failure** — the old file handler was closed but re-attached on rollback, which made `logging.handleError` swallow every subsequent record for the rest of the run. The handler is now reconstructed via `_make_file_handler` on the moved (or original) file.
+- **`cut_then_encode` resume gate validates the audio stream** of the intermediate `raw_concat.mkv`, not just video — a crash mid-write could previously reuse a video-valid-but-audio-truncated file and produce a silent-video output.
+- **Output lock now fires before any probe / encoder smoke-test**, so two concurrent runs (GUI + CLI) fail fast for the loser instead of each spawning ffprobe/ffmpeg first (`api.py`).
+- **Downloaded file is per-run unique** (`%(id)s-%(epoch)s.%(ext)s`) — two pipelines pointed at the same URL no longer write into the same yt-dlp output file.
+- **Bounded reaps after kills.** All `process.wait()` after `process.kill()` calls (concat runner, silencedetect, download timeout paths) now use a 30s ceiling; an unbounded `wait()` could hang the worker on a wedged Windows child.
+- **Pipeline cancellations keep a completed source file.** A Ctrl+C after the download phase no longer unlinks a fully-fetched multi-GB VOD — only a genuinely-partial download is removed.
+- **Stderr capture is ring-capped.** ffmpeg / yt-dlp spam from a corrupt source no longer grows into GBs between stall-checks (head+tail kept, middle dropped); the captured text is still enough for error classification.
+- **Sample-verify passes the clip duration to the parser** — a trailing `silence_start` inside the 60s sample window is no longer dropped, eliminating a false-positive "mismatch → full re-detect" fallback.
+- **GUI threads-safety fixes**:
+  - Waveform live-overlay now uses the resolved path as the store key (previously a raw `./path` lookup always missed, so the overlay was dead).
+  - Stale live-segments are dropped in a `finally:` on every pipeline exit path, not just success/cancel.
+  - `messagebox` dialogs are given `parent=` so they can't hide behind the main window while blocking input.
+  - Waveform-slider / pan epsilon-guard makes the CTkSlider readout ack no longer trigger redundant re-renders.
+  - `_on_close`'s Quit dialog, file-info stat, rmtree of large project dirs, and the waveform preview's `cancel_process` no longer block the Tk main loop.
+- **`--log-format json` no longer double-prints** — `install_json_handler` sets `logger.propagate = False` before the root-handler attach.
+- **Docs:** `memory_reserve_mb` README corrected — the OS reserve is a warning floor mid-run (only the per-process RSS budget cancels); pre-flight still refuses a fresh heavy phase.
+
 ## [Unreleased] - 2026-08-11
 
 ### Added

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import threading
 from pathlib import Path
 from tkinter import messagebox
 
@@ -151,17 +152,44 @@ class RecentProjectsMixin:
         )
         if not ok:
             return
-        try:
-            shutil.rmtree(path)
-            self._log(f"Deleted project: {path}")
-        except OSError as e:
-            self._log(f"[ERROR] Failed to delete {path}: {e}")
-            messagebox.showerror("Delete failed", f"Could not delete {path}:\n{e}")
-            return
-        self.config["recent_projects"] = [
-            p for p in self.config.get("recent_projects", []) if p != path_str
-        ]
-        self._render_recent_projects()
+        # rmtree of a multi-GB project dir (source video + caches + log)
+        # would freeze the UI for tens of seconds — long enough for
+        # Windows to mark the window "Not responding". Run it in a
+        # daemon thread; the list update + log marshalled back onto the
+        # main loop when it's done. The dialog above captures `path` by
+        # value, so a concurrent "delete again" can't mutate it mid-run.
+        self._log(f"Deleting project: {path} ...")
+
+        def _rmtree_worker() -> None:
+            err: OSError | None = None
+            try:
+                shutil.rmtree(path)
+            except OSError as e:
+                err = e
+
+            def _finish() -> None:
+                if err is not None:
+                    self._log(f"[ERROR] Failed to delete {path}: {err}")
+                    messagebox.showerror(
+                        "Delete failed", f"Could not delete {path}:\n{err}",
+                        parent=self.winfo_toplevel(),
+                    )
+                    return
+                self._log(f"Deleted project: {path}")
+                self.config["recent_projects"] = [
+                    p for p in self.config.get("recent_projects", []) if p != path_str
+                ]
+                self._render_recent_projects()
+
+            try:
+                self.winfo_toplevel().after(0, _finish)
+            except Exception:
+                # Toplevel already destroyed mid-shutdown; nothing to
+                # marshal back to. The delete already happened (or the
+                # error is lost — acceptable during shutdown).
+                pass
+
+        threading.Thread(target=_rmtree_worker, daemon=True, name=f"rmtree:{path.name}").start()
 
     def _open_in_explorer(self, path_str: str) -> None:
         """Open the project directory in the platform's file manager."""

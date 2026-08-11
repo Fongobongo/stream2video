@@ -136,9 +136,16 @@ def detect_silence_stream(
                     # Kill immediately: falling through to
                     # ``proc.wait(timeout=timeout)`` would block up to a
                     # SECOND full timeout (~10h by default) on an ffmpeg
-                    # that has already proven itself hung.
+                    # that has already proven itself hung. Bound the reap
+                    # too: on Windows TerminateProcess is async and a
+                    # wedged child can ignore it, leaving an unbounded
+                    # wait() here blocked forever (the runner.py paths all
+                    # use a 30s bound for the same reason).
                     proc.kill()
-                    proc.wait()
+                    try:
+                        proc.wait(timeout=30)
+                    except subprocess.TimeoutExpired:
+                        pass
                     raise SilenceDetectionError(
                         f"ffmpeg timeout after {timeout}s (no stderr output)"
                     ) from None
@@ -565,14 +572,25 @@ def _run_silencedetect(
                         "may be truncated"
                     )
                 return list(progressive_segments)
-            # Batch path: the parser closes a trailing silence_start
-            # at the media duration when we know it (the canonical
-            # pipeline probes it via ``_probe_duration``), so the CLI's
-            # no-callback path and the GUI's progressive path now produce
-            # the same cut plan on trailing silence. Falls back to
-            # dropping the dangling start (with a warning) when duration
-            # is unavailable — the preview path.
-            return _parse_ffmpeg_output("".join(stderr_lines), duration=duration)
+            # Batch path: the parser closes a trailing silence_start at
+            # the *effective* media duration when we know it. When a
+            # ``duration_limit`` clip was applied (sample-verify probes
+            # with ``-t``), the clip end — not the full container
+            # duration — is the right ceiling: without it a trailing
+            # silence_start inside the sample window is DROPPED by the
+            # parser even though the source genuinely has it, and the
+            # downstream sample-vs-full verify in silence/pipeline.py
+            # then fires a false-positive mismatch (price: full re-detect
+            # on the video, hours on a multi-hour VOD). Falls back to
+            # the true ``duration`` and then to dropping the dangling
+            # start (with a warning) when neither is known — the preview
+            # path.
+            effective_duration = (
+                duration_limit if duration_limit is not None else duration
+            )
+            return _parse_ffmpeg_output(
+                "".join(stderr_lines), duration=effective_duration
+            )
 
     finally:
         if not drain_done:

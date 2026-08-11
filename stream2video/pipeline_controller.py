@@ -236,7 +236,19 @@ class PipelineError(Exception):
 
 
 class PipelineCancelled(PipelineError):
-    """User cancelled the pipeline (cancel_event set)."""
+    """User cancelled the pipeline (cancel_event set).
+
+    ``partial`` carries the download-phase signal through to ``run()``'s
+    cleanup: ``partial=True`` means the cancel fired while yt-dlp was
+    still writing the source file (so the on-disk bytes are truncated
+    and safe to unlink); ``False`` means the source was already fully
+    downloaded and should be kept for the user's next retry. Post-
+    download cancels always set ``partial=False``.
+    """
+
+    def __init__(self, message: str = "Pipeline cancelled", *, partial: bool = False) -> None:
+        super().__init__(message)
+        self.partial = partial
 
 
 class PipelineDownloadError(PipelineError):
@@ -400,6 +412,13 @@ class PipelineController:
     # they're still populated up to the point where the failure occurred.
     _download_path: Path | None = field(default=None, init=False)
     _output_path: Path | None = field(default=None, init=False)
+    # Latched True once the download phase returns with a file on disk
+    # (``download_result.is_downloaded``). From that point the source is
+    # a fully-downloaded user asset; a subsequent cancel/error in the
+    # silence/concat phases must NOT unlink it — the cost of re-fetching
+    # a multi-GB VOD dwarfs the disk cost of keeping it. ``False``
+    # throughout a local-file run and until the download phase returns.
+    _download_complete: bool = field(default=False, init=False)
     # Resolved per-run output directory (per_video_dir project dir when
     # enabled, else cfg.output_dir). Declared explicitly instead of being
     # set ad-hoc in _run_download_phase and read back via getattr — the
@@ -430,16 +449,31 @@ class PipelineController:
                 (plan.download_end, plan.silence_end, plan.cut_end, plan.concat_end)
             )
 
-    def _cleanup_download_path(self) -> None:
+    def _cleanup_download_path(self, *, partial_only: bool = False) -> None:
         """Remove the downloaded source file (when we downloaded one).
 
         ``_download_path`` is only set when the download phase wrote a
         fresh file (``download_result.is_downloaded``). For local files
         it's always None, so this is a no-op — the user's local file is
         never touched (ownership check).
+
+        When ``partial_only`` is True, only files that are known-truncated
+        are removed: a user Ctrl+C or a stall/watchdog kill mid-pipeline
+        must not nuke a fully-downloaded 15 GB source the user may want
+        to reuse on the next run (the download is over by then, and the
+        cost of re-fetching dwarfs the cost of short-term disk use).
+        ``partial_only`` is therefore the right mode for the post-download
+        phases; the download phase itself, which calls this before any
+        later phase runs, omits the flag and still cleans up a genuine
+        partial byte-sink.
         """
         if self._download_path is not None and self._download_path.exists():
-            _unlink_with_retry(self._download_path)
+            if partial_only and (self._download_complete or self._download_was_real):
+                self.cb.on_log(
+                    f"Keeping completed download for possible reuse: {self._download_path}"
+                )
+            else:
+                _unlink_with_retry(self._download_path)
         self._download_path = None
 
     def _cleanup_partial_output(self) -> None:
@@ -521,37 +555,56 @@ class PipelineController:
             )
             output_path = self._run_concat_phase(video_path, silence_segments, keep_dur)
             return self._finish(video_path, output_path, src_size_bytes, src_duration, keep_dur)
+        except PipelineCancelled as e:
+            # A mid-download cancel is the only case where the file on
+            # disk is known-truncated; any later phase's cancel arrives
+            # after the download is complete, and unlinking it would
+            # cost the user a multi-GB re-fetch. ``partial`` carries the
+            # distinction through the phase wrapper.
+            self._cleanup_download_path(partial_only=not e.partial)
+            self._cleanup_partial_output()
+            raise
         except PipelineError:
             # Already mapped by a phase method (PipelineDownloadError,
-            # PipelineSilenceError, PipelineConcatError, PipelineCancelled).
-            # Re-raise as-is so the caller sees the specific phase that
-            # failed, not a generic PipelineUnexpectedError.
-            # Clean up the incomplete download so a failed run doesn't
-            # leave a stale file on disk.
-            self._cleanup_download_path()
+            # PipelineSilenceError, PipelineConcatError). Re-raise as-is
+            # so the caller sees the specific phase that failed. These
+            # always fire after ``_run_download_phase`` returned, so the
+            # source (when downloaded) is complete — ``partial_only``,
+            # and the latched ``_download_complete`` flag keeps it.
+            self._cleanup_download_path(partial_only=True)
             self._cleanup_partial_output()
             raise
         except (CancelledError, SilenceCancelledError, DownloadCancelledError) as e:
-            self._cleanup_download_path()
+            # DownloadCancelledError.partial=True means the cancel fired
+            # while yt-dlp was still writing; anything else surfaced from
+            # a later phase where the file is complete. ``not partial``
+            # keeps the file on disk for retry.
+            self._cleanup_download_path(
+                partial_only=not (
+                    isinstance(e, DownloadCancelledError) and e.partial
+                )
+            )
             self._cleanup_partial_output()
             raise PipelineCancelled(str(e)) from e
         except DownloadError as e:
             # URLValidationError is a DownloadError subclass — no separate
-            # clause needed.
-            self._cleanup_download_path()
+            # clause needed. Only a download-time failure should purge
+            # what may still be a partial byte-sink; once silence/concat
+            # is underway the file is complete.
+            self._cleanup_download_path(partial_only=True)
             self._cleanup_partial_output()
             raise PipelineDownloadError(str(e)) from e
         except SilenceDetectionError as e:
-            self._cleanup_download_path()
+            self._cleanup_download_path(partial_only=True)
             self._cleanup_partial_output()
             raise PipelineSilenceError(str(e)) from e
         except ConcatError as e:
-            self._cleanup_download_path()
+            self._cleanup_download_path(partial_only=True)
             self._cleanup_partial_output()
             raise PipelineConcatError(str(e)) from e
         except Exception as e:
             logger.exception("Pipeline unexpected error")
-            self._cleanup_download_path()
+            self._cleanup_download_path(partial_only=True)
             self._cleanup_partial_output()
             raise PipelineUnexpectedError(str(e)) from e
 
@@ -582,7 +635,10 @@ class PipelineController:
                 proxy=self.cfg.proxy,
             )
         except DownloadCancelledError as e:
-            raise PipelineCancelled(str(e)) from e
+            # Mid-download cancel leaves a truncated file; surface that
+            # through the pipeline-level exception so ``run()``'s
+            # cleanup can decide partial-vs-complete.
+            raise PipelineCancelled(str(e), partial=e.partial) from e
         except (
             VideoNotAvailableError,
             DownloadTimeoutError,
@@ -609,6 +665,11 @@ class PipelineController:
 
         self._download_path = video_path if download_result.is_downloaded else None
         self._download_was_real = download_result.is_downloaded
+        # From here on the download, when one happened, is *complete*:
+        # the phases above (see ``_cleanup_download_path`` docstring)
+        # switch to partial-only cleanup so a later cancel/error leaves
+        # the file for the user's next retry.
+        self._download_complete = download_result.is_downloaded
 
         # Fire the mid-pipeline hook so the GUI can update its
         # recent-projects panel, output label, and file-info widgets

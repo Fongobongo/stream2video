@@ -37,8 +37,15 @@ def completion_chime_path(kind: str = "success") -> Path:
 def ensure_completion_chime(path: Path | None = None, *, kind: str = "success") -> Path:
     """Create the bundled-free completion chime if needed and return it."""
     out = path or completion_chime_path(kind)
-    if out.exists() and out.stat().st_size > 44:
-        return out
+    # Single stat, TOCTOU-free: the file may vanish between an
+    # ``exists()`` and a ``stat()`` (antivirus quarantine, temp cleanup
+    # from a sibling run) — collapse both into one try and treat any
+    # OSError as "needs to be (re)written".
+    try:
+        if out.stat().st_size > 44:  # WAV header is 44 bytes
+            return out
+    except OSError:
+        pass
 
     out.parent.mkdir(parents=True, exist_ok=True)
     samples = _build_chime_samples(kind)

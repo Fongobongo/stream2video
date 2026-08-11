@@ -20,10 +20,16 @@ class FileInfoMixin:
     """Populates the left-panel Info labels from a source path."""
 
     def _update_file_info(self, path: Path) -> None:
-        if not path.exists():
+        # TOCTOU-tolerant: drop the exists() gate and stat directly. A file
+        # deleted (or a network share dropped) between exists() and stat()
+        # would otherwise raise FileNotFoundError on the GUI main thread
+        # via ``_browse_from``'s chain. A slow network path also belongs
+        # off the main loop — keep the existing thread below.
+        try:
+            size = path.stat().st_size
+        except OSError:
             return
         self.lbl_file.configure(text=f"File: {path.name}")
-        size = path.stat().st_size
         self.lbl_size.configure(text=f"Size: {fmt_size(size)}")
         self.lbl_duration.configure(text="Duration: ...")
 

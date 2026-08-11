@@ -63,6 +63,11 @@ class ProgressUiMixin:
         self.running: bool = False
         self._cancel_event: threading.Event = threading.Event()
         self._last_status_update: float = 0.0
+        # Separate throttle for the "Step N/4 · Phase (NN%)" label so a
+        # force=True ``_ui_status`` (from a download progress burst) can't
+        # steal the clock and leave the step label stale for the rest of
+        # the phase.
+        self._last_step_status_update: float = 0.0
         self._pipeline_start: float | None = None
         self._output_path: Path | None = None
         self._download_path: Path | None = None
@@ -260,9 +265,9 @@ class ProgressUiMixin:
         if not hasattr(self, "_current_step") or self._current_step is None:
             return
         now = time.monotonic()
-        if not should_update_status(self._last_status_update, now):
+        if not should_update_status(self._last_step_status_update, now):
             return
-        self._last_status_update = now
+        self._last_step_status_update = now
         self._set_static_status(
             build_phase_line(self._current_step, round(self._phase_progress * 100))
         )

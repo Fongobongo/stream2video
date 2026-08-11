@@ -526,16 +526,24 @@ def save_user_defaults(values: dict[str, Any]) -> None:
             payload[key] = values[key]
     path = user_defaults_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
+    # tempfile.mkstemp instead of a deterministic `<name>.tmp`: a
+    # GUI-close autosave racing a "Save current as defaults" click in
+    # the same process used to open the same pathname twice and
+    # interleave writes, leaving a mixed JSON that ``load_user_defaults``
+    # then failed to decode → user lost their defaults. mkstemp gives
+    # each call its own file and ``os.replace`` serialises publication.
+    import contextlib
+    import tempfile
+
+    fd, tmp_str = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    tmp = Path(tmp_str)
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
         os.replace(tmp, path)
     except Exception:
-        try:
-            tmp.unlink(missing_ok=True)
-        except OSError:
-            pass
+        with contextlib.suppress(OSError):
+            tmp.unlink()
         raise
 
 

@@ -217,6 +217,11 @@ class Stream2VideoGUI(
                 "ffmpeg and ffprobe are required to process video.\n\n"
                 "Install: winget install Gyan.FFmpeg\n"
                 "Or run: setup.ps1 (Windows)",
+                # parent locks the dialog to our window so it can't fall
+                # behind it (Windows + CTk child-window stacking is loose
+                # for unparented messagebox calls, see the same fix in
+                # gui_recent_projects.py).
+                parent=self,
             )
             return
 
@@ -308,7 +313,9 @@ class Stream2VideoGUI(
                         f"{'worst ' + _fmt(worst) if not ok_worst else 'typical ' + _fmt(typ)} "
                         f"(need ~{_fmt(short)} more)"
                     )
-                    if not messagebox.askokcancel("Low disk space — may fail", msg, icon="warning"):
+                    if not messagebox.askokcancel(
+                        "Low disk space — may fail", msg, icon="warning", parent=self
+                    ):
                         self._log("Start cancelled — low disk space")
                         self._set_running(False)
                         return
@@ -596,7 +603,12 @@ class _PipelineGuiCallbacksAdapter:
         self._gui._tk_after(0, lambda: self._gui.lbl_progress_meta.configure(text=""))
 
     def show_complete_popup(self, text: str) -> None:
-        self._gui._tk_after(0, lambda: messagebox.showinfo("Complete", text))
+        # parent=self._gui keeps the completion dialog on top of the
+        # main window — an unparented dialog can fall behind it on
+        # Windows and look like the app froze before any click passed.
+        self._gui._tk_after(
+            0, lambda: messagebox.showinfo("Complete", text, parent=self._gui)
+        )
 
     def set_running(self, running: bool) -> None:
         self._gui._tk_after(0, lambda: self._gui._set_running(running))

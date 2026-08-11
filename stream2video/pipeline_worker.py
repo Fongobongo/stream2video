@@ -432,8 +432,6 @@ class PipelineWorker:
             )
 
             controller.run()
-            if video_path_ref[0] is not None:
-                self._gui.pop_live_segments(video_path_ref[0])
             # NOTE: source-file deletion on ``delete_after=True`` is owned
             # by ``PipelineController._finish`` — it unlinks the path AND
             # clears ``_download_path`` to None, so re-checking it here
@@ -442,9 +440,11 @@ class PipelineWorker:
             # but only ever fired under the test fake whose ``run()`` was a
             # no-op (never reached ``_finish``); on the real success path
             # it was unreachable. Do NOT duplicate the deletion here.
+            # Live-segment cleanup moved to ``finally:`` below so every
+            # exit path (success / cancel / any typed PipelineError) drops
+            # the stale overlay snapshot instead of leaking it into the
+            # next waveform-open on the same file.
         except PipelineCancelled:
-            if video_path_ref[0] is not None:
-                self._gui.pop_live_segments(video_path_ref[0])
             self._gui.log("Pipeline cancelled")
             self._gui.ui_status("Cancelled", force=True)
             self._gui.ui_set_failure_style()
@@ -482,4 +482,14 @@ class PipelineWorker:
             self._gui.ui_set_failure_style()
             self._play_completion_sound("attention")
         finally:
+            # Always drop the live-segments snapshot, even when a typed
+            # Pipeline*Error skipped the success path above. Stale
+            # entries would otherwise sit in the store until process
+            # exit and resurface as a half-populated overlay the next
+            # time the user opens the waveform popup on the same file.
+            if video_path_ref[0] is not None:
+                try:
+                    self._gui.pop_live_segments(video_path_ref[0])
+                except Exception:
+                    logger.debug("pop_live_segments failed", exc_info=True)
             self._gui.set_running(False)

@@ -379,8 +379,14 @@ def _run_ffmpeg(
         except subprocess.TimeoutExpired as e:
             process.kill()
             try:
-                process.wait()  # reap so stderr can finish draining and the
-                # next rmtree(work_dir) doesn't hit WinError 32.
+                # Bounded reap: on Windows TerminateProcess is async and a
+                # wedged ffmpeg (network-share I/O, AV lock) would hang an
+                # unbounded wait() here forever, stranding the worker
+                # thread. Mirrors the timeout bound everywhere else in the
+                # pipeline (_kill_and_raise/_wait_with_cancel use 30s).
+                process.wait(timeout=30)  # reap so stderr can finish
+                # draining and the next rmtree(work_dir) doesn't hit
+                # WinError 32.
             except subprocess.TimeoutExpired:
                 pass
             if memory_monitor is not None and memory_monitor.hard_exceeded:
@@ -409,6 +415,20 @@ def _run_ffmpeg(
                             else ""
                         )
                     )
+            # Unconditional-reap guard: if every kill() path above failed
+            # (AccessDenied, transient handle ownership) the child is
+            # still alive here. Closing stdout/stderr below would strand
+            # the reader/drain daemon threads in ``readline`` forever
+            # (no EOF while any writer exists) and leak one pipe HANDLE
+            # per stuck run, exactly the pattern download.py's finally
+            # guards against. Best-effort: any failure is already logged
+            # by the originating path, so a no-op kill is acceptable.
+            if process.poll() is None:
+                try:
+                    process.kill()
+                    process.wait(timeout=5)
+                except Exception:
+                    pass
             if not drain_done:
                 wait_for_drain()
             if process.stdout is not None:

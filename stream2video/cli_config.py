@@ -83,6 +83,16 @@ def load_config(config_file: Path | None, console: Any) -> dict:
     for key, (min_val, max_val) in CONFIG_RANGES.items():
         if key in config:
             original = config[key]
+            # ``bool`` is a subclass of ``int`` and ``float(True) == 1.0``,
+            # so without this guard a YAML ``batch_chunk_size: true`` slips
+            # past ``float()`` and into ``PipelineConfig`` as a bool on an
+            # int-typed slot — a subtle downstream mismatch the
+            # cli_resolver-path keys don't get to audit.
+            if isinstance(original, bool):
+                console.print(
+                    f"[red]Invalid {key}:[/red] {original} is a bool, expected a number"
+                )
+                raise typer.Exit(1)
             try:
                 value = float(original)
 

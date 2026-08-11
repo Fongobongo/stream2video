@@ -81,8 +81,16 @@ class WaveformRenderMixin:
             return
 
         # Cancel any previous preview process so two renders don't
-        # compete for audio decode bandwidth.
-        cancel_process("preview", timeout=2.0)
+        # compete for audio decode bandwidth. ``cancel_process`` blocks
+        # up to ``timeout`` seconds waiting for the killed process to
+        # reap; on a wedged ffmpeg that would freeze the Tk main loop
+        # here, so defer the actual wait to the worker thread started
+        # below.
+        def _cancel_previous() -> None:
+            try:
+                cancel_process("preview", timeout=2.0)
+            except Exception:
+                _logger.debug("cancel preview failed", exc_info=True)
 
         # Need an input file (must be a local file — previewing a fresh
         # download would be a separate flow). Local file → reuse it.
@@ -93,6 +101,18 @@ class WaveformRenderMixin:
         in_path = Path(input_raw)
         if not in_path.is_file():
             self._log(f"Input not a local file (downloads not previewable): {input_raw}")
+            return
+        # Normalise to the same form the pipeline_worker uses as the
+        # live-segments store key (resolved, symlinks forward). The
+        # store.put runs from the pipeline thread with a *resolved*
+        # path; a raw ``./video.mp4`` here would never match it, leaving
+        # the overlay permanently empty and the final "Waveform updated"
+        # log silent. Matches the pre-existing normalization in
+        # gui_waveform_window.py:81-84.
+        try:
+            in_path = in_path.expanduser().resolve()
+        except OSError as e:
+            self._log(f"Could not resolve input path ({e}); preview disabled")
             return
 
         # Read current slider values (sync first in case FocusOut didn't fire).
@@ -118,6 +138,7 @@ class WaveformRenderMixin:
         self._log("Waveform preview: loading audio from source video...")
 
         def _run() -> None:
+            _cancel_previous()
             try:
                 # Phase 1: read peaks. When the pipeline has already run,
                 # the cached {stem}_audio.wav (16 kHz mono PCM) holds the
@@ -459,6 +480,12 @@ class WaveformRenderMixin:
             else:
                 out_dir = self._waveform_output_dir
                 if out_dir is None:
+                    # Don't silently abandon the popup's "Rendering
+                    # overlay..." status — publish the terminal state so
+                    # the user sees the run ended with nothing detected.
+                    if not state.get("stopped_logged"):
+                        state["stopped_logged"] = True
+                        self._safe_status_set("Cancelled / no segments detected")
                     return
                 config = {
                     "threshold": float(self.config["threshold"]),
@@ -472,6 +499,13 @@ class WaveformRenderMixin:
                     state["last_view"] = current_view
                     state["stopped_logged"] = True
                     self._log(f"  Pipeline finished — waveform locked at {len(cached)} silences")
+                elif cached is None and not state.get("stopped_logged"):
+                    # No live snapshot, no cache on disk — the run was
+                    # cancelled mid-detection (or the detect never ran).
+                    # Surface the terminal state instead of leaving the
+                    # "Rendering overlay..." placeholder forever.
+                    state["stopped_logged"] = True
+                    self._safe_status_set("Cancelled / no segments detected")
             return
 
         raw = self._take_live_snapshot(in_path)

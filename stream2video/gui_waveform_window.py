@@ -347,7 +347,14 @@ class WaveformWindowMixin:
                 self._wave_window.after_cancel(self._waveform_resize_after_id)
             except Exception:
                 pass
-        self._waveform_resize_after_id = self._wave_window.after_idle(self._apply_view)
+            self._waveform_resize_after_id = None
+        try:
+            self._waveform_resize_after_id = self._wave_window.after_idle(self._apply_view)
+        except Exception:
+            # Window torn down between the Configure event and the
+            # after_idle call (Tk is single-threaded but a destroy can
+            # land mid-callback chain). Leave the id None — no reschedule.
+            pass
 
     def _compute_waveform_render_size(self) -> tuple[int, int]:
         """Image size for the next render, derived from the popup window size."""

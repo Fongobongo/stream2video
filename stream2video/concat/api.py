@@ -71,6 +71,90 @@ def cut_and_concat(
             f"(use {' or '.join(repr(f) for f in VALID_OUTPUT_FORMATS)})"
         )
 
+    # fix-plan #6: an exclusive lock file prevents a second concurrent
+    # run (GUI + CLI, two CLIs) from interleaving -y writes into the
+    # same output_path and silently corrupting each other. It MUST be
+    # taken before any probe/encoder work below (ffprobe, generate_keep,
+    # encoder smoke-test) — otherwise a losing second run still spawns
+    # subprocesses and burns GPU/CPU seconds before acquiring the lock
+    # and failing, which violates the "fail fast" design intent and
+    # makes GUI+CLI collisions look "stuck" during the other run's pre-
+    # ambles. All body code below is inside the try/finally that drops
+    # the lock on every exit path.
+    _lock_path = acquire_output_lock(output_path)
+    try:
+        return _run_locked(
+            video_path=video_path,
+            silence_segments=silence_segments,
+            output_path=output_path,
+            progress_callback=progress_callback,
+            on_phase=on_phase,
+            method=method,
+            encoder=encoder,
+            video_quality=video_quality,
+            audio_quality=audio_quality,
+            cancel_callback=cancel_callback,
+            software_fallback=software_fallback,
+            x264_preset=x264_preset,
+            encoder_threads=encoder_threads,
+            fallback_consent=fallback_consent,
+            output_fps=output_fps,
+            output_format=output_format,
+            x264_low_memory=x264_low_memory,
+            use_crf=use_crf,
+            gapless_concat=gapless_concat,
+            low_process_priority=low_process_priority,
+            rlimit_as_mb=rlimit_as_mb,
+            segment_encode_timeout=segment_encode_timeout,
+            final_concat_timeout=final_concat_timeout,
+            stall_kill_timeout=stall_kill_timeout,
+            stall_warning_timeout=stall_warning_timeout,
+            batch_chunk_size=batch_chunk_size,
+            min_part_bytes=min_part_bytes,
+            memory_limit_mb=memory_limit_mb,
+            memory_reserve_mb=memory_reserve_mb,
+        )
+    finally:
+        release_output_lock(_lock_path)
+
+
+def _run_locked(
+    video_path: Path,
+    silence_segments: "list[SilenceSegment]",
+    output_path: Path,
+    progress_callback: Callable[[float], None] | None,
+    on_phase: Callable[[str, float], None] | None,
+    method: str,
+    encoder: str,
+    video_quality: str,
+    audio_quality: str,
+    cancel_callback: Callable[[], bool] | None,
+    software_fallback: str,
+    x264_preset: str,
+    encoder_threads: str | int,
+    fallback_consent: Callable[[], bool] | None,
+    output_fps: str,
+    output_format: str,
+    x264_low_memory: bool,
+    use_crf: bool,
+    gapless_concat: bool,
+    low_process_priority: bool,
+    rlimit_as_mb: int,
+    segment_encode_timeout: int,
+    final_concat_timeout: int,
+    stall_kill_timeout: int,
+    stall_warning_timeout: int,
+    batch_chunk_size: int,
+    min_part_bytes: int,
+    memory_limit_mb: str | int,
+    memory_reserve_mb: int,
+) -> Path:
+    """Body of :func:`cut_and_concat` that runs under the output lock.
+
+    Split out of the public entry so the lock-acquire lands before ANY
+    subprocess work (ffprobe, encoder smoke-test); see the comment at
+    the ``acquire_output_lock`` call site.
+    """
     keep_segments = _c.generate_keep_segments(video_path, silence_segments)
     memory_monitor_factory = _c._make_memory_monitor_factory(memory_limit_mb, memory_reserve_mb)
 
@@ -89,6 +173,7 @@ def cut_and_concat(
     # ``output_fps`` / ``x264_*`` choices are irrelevant here, so the
     # video encoder isn't even probed. See OUTPUT_FORMAT_SPECS in
     # config.py for the codec/container mapping.
+    # The output lock is held by the caller — no second acquire here.
     if output_format != "video":
         source_has_audio = _c.has_audio_stream(video_path)
         if not source_has_audio:
@@ -96,28 +181,23 @@ def cut_and_concat(
                 f"Source {video_path.name} has no audio stream -- cannot "
                 f"produce {output_format} output"
             )
-        # Same output-file guard as the video path below (#6).
-        _audio_lock = acquire_output_lock(output_path)
-        try:
-            _c._run_audio_extract(
-                video_path,
-                keep_segments,
-                output_path,
-                output_format,
-                progress_callback=progress_callback,
-                cancel_callback=cancel_callback,
-                audio_quality=audio_quality,
-                segment_encode_timeout=segment_encode_timeout,
-                final_concat_timeout=final_concat_timeout,
-                stall_kill=stall_kill_timeout,
-                stall_warning=stall_warning_timeout,
-                min_part_bytes=min_part_bytes,
-                low_process_priority=low_process_priority,
-                rlimit_as_mb=rlimit_as_mb,
-                memory_monitor_factory=memory_monitor_factory,
-            )
-        finally:
-            release_output_lock(_audio_lock)
+        _c._run_audio_extract(
+            video_path,
+            keep_segments,
+            output_path,
+            output_format,
+            progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
+            audio_quality=audio_quality,
+            segment_encode_timeout=segment_encode_timeout,
+            final_concat_timeout=final_concat_timeout,
+            stall_kill=stall_kill_timeout,
+            stall_warning=stall_warning_timeout,
+            min_part_bytes=min_part_bytes,
+            low_process_priority=low_process_priority,
+            rlimit_as_mb=rlimit_as_mb,
+            memory_monitor_factory=memory_monitor_factory,
+        )
         return output_path
 
     # Honest source bitrate probe when quality==source in bitrate mode.
@@ -218,45 +298,39 @@ def cut_and_concat(
 
         inner_progress = _wrap
 
-    # fix-plan #6: an exclusive lock file prevents a second concurrent
-    # run (GUI + CLI, two CLIs) from interleaving -y writes into the
-    # same output_path and silently corrupting each other. Acquired
-    # BEFORE any concat work (so the failing run exits before burning
-    # GPU minutes), released on every exit path.
-    _lock_path = acquire_output_lock(output_path)
-    try:
-        _c._run_with_fallback(
-            video_path,
-            keep_segments,
-            output_path,
-            vcodec,
-            vcodec_opts,
-            method,
-            inner_progress,
-            cancel_callback,
-            video_quality=video_quality,
-            audio_quality=audio_quality,
-            software_fallback=software_fallback,
-            fallback_consent=fallback_consent,
-            x264_preset=x264_preset,
-            encoder_threads=encoder_threads,
-            source_has_audio=source_has_audio,
-            output_fps=output_fps,
-            x264_low_memory=x264_low_memory,
-            use_crf=use_crf,
-            source_bitrate=source_bitrate,
-            gapless_concat=gapless_concat,
-            low_process_priority=low_process_priority,
-            rlimit_as_mb=rlimit_as_mb,
-            segment_encode_timeout=segment_encode_timeout,
-            final_concat_timeout=final_concat_timeout,
-            stall_kill=stall_kill_timeout,
-            stall_warning=stall_warning_timeout,
-            batch_chunk_size=batch_chunk_size,
-            min_part_bytes=min_part_bytes,
-            memory_monitor_factory=memory_monitor_factory,
-        )
-    finally:
-        release_output_lock(_lock_path)
+    # The output lock is held by the caller (cut_and_concat); this helper
+    # runs entirely under it, so by this point the loser run already
+    # raised ConcatLockError before any subprocess was spawned.
+    _c._run_with_fallback(
+        video_path,
+        keep_segments,
+        output_path,
+        vcodec,
+        vcodec_opts,
+        method,
+        inner_progress,
+        cancel_callback,
+        video_quality=video_quality,
+        audio_quality=audio_quality,
+        software_fallback=software_fallback,
+        fallback_consent=fallback_consent,
+        x264_preset=x264_preset,
+        encoder_threads=encoder_threads,
+        source_has_audio=source_has_audio,
+        output_fps=output_fps,
+        x264_low_memory=x264_low_memory,
+        use_crf=use_crf,
+        source_bitrate=source_bitrate,
+        gapless_concat=gapless_concat,
+        low_process_priority=low_process_priority,
+        rlimit_as_mb=rlimit_as_mb,
+        segment_encode_timeout=segment_encode_timeout,
+        final_concat_timeout=final_concat_timeout,
+        stall_kill=stall_kill_timeout,
+        stall_warning=stall_warning_timeout,
+        batch_chunk_size=batch_chunk_size,
+        min_part_bytes=min_part_bytes,
+        memory_monitor_factory=memory_monitor_factory,
+    )
 
     return output_path

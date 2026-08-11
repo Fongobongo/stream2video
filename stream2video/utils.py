@@ -315,6 +315,18 @@ def has_audio_stream(video_path: Path) -> bool:
     return bool(result.stdout.strip())
 
 
+# Bound on stderr accumulation. A corrupt source can make ffmpeg spam
+# "error while decoding MB ..." thousands of lines/sec for the whole
+# stall window, and we otherwise keep it all in RAM just to truncate it
+# to _STDERR_TRUNCATE chars at error time — the hoard itself can drive
+# the encode's RSS over the memory-monitor budget. We keep the HEAD
+# (first lines carry the encoder banner + the root error for
+# ``looks_like_oom``/``classify_error``) and the TAIL (the final lines
+# say what *actually* died); the middle is dropped with a marker.
+_STDERR_HEAD_LINES = 200
+_STDERR_TAIL_LINES = 800
+
+
 def drain_stderr_lines(
     pipe: IO[bytes],
     sink: list[str],
@@ -358,6 +370,17 @@ def drain_stderr_lines(
                 else:
                     line = raw
                 sink.append(line)
+                # Ring trim: once past head + marker + tail, drop the
+                # middle so a spammy source (corrupt input, "error while
+                # decoding MB" thousands of lines/sec for hundreds of
+                # seconds) can't grow the list unboundedly — it would
+                # otherwise sit in RAM until the stall-kill fires and
+                # eat into the very budget the memory monitor watches.
+                max_lines = _STDERR_HEAD_LINES + 1 + _STDERR_TAIL_LINES
+                if len(sink) > max_lines:
+                    head = sink[:_STDERR_HEAD_LINES]
+                    tail = sink[-_STDERR_TAIL_LINES:]
+                    sink[:] = [*head, "... (middle stderr dropped)\n", *tail]
                 if on_line is not None:
                     try:
                         on_line(line)

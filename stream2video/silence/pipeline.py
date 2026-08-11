@@ -153,16 +153,16 @@ def detect_silence(
         else:
             logger.info("No valid resume cache — starting fresh")
         # Move the checkpoint out of the way (don't delete): a subsequent
-        # crash before the first new checkpoint keeps the data recoverable.
-        for p in (resume_cache_path, inuse_path):
-            if p.exists():
-                try:
-                    # If we already consumed an .inuse file, just drop the
-                    # canonical name; otherwise rename canonical → .inuse.
-                    if p == resume_cache_path and p.exists():
-                        os.replace(p, inuse_path)
-                except OSError as e:
-                    logger.debug(f"Resume cache rename failed (non-fatal): {e}")
+        # crash before the first new checkpoint keeps the data
+        # recoverable. ``os.replace`` is atomic on a single volume, so no
+        # exists-guard is needed (the old one carried a TOCTOU window if
+        # an AV scanner removed the file between the check and the
+        # replace).
+        try:
+            if resume_cache_path.exists():
+                os.replace(resume_cache_path, inuse_path)
+        except OSError as e:
+            logger.debug(f"Resume cache rename failed (non-fatal): {e}")
 
     duration = _c._probe_duration(video_path)
 

@@ -48,10 +48,27 @@ def save_settings(config: dict[str, Any]) -> None:
     """
     path = settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
-    os.replace(str(tmp), str(path))
+    # tempfile.mkstemp: a GUI-close autosave racing a "Save current as
+    # defaults" click otherwise opens the same deterministic pathname
+    # twice and interleaves writes, leaving a mixed JSON that
+    # ``load_settings`` then drops entirely. mkstemp isolates each
+    # write; ``os.replace`` serialises publication. No cleanup on
+    # failure — the caller (gui_lifecycle/_on_close) logs it and
+    # continues shutdown; the orphan tmp is GC'd on next start.
+    import tempfile
+
+    fd, tmp_str = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    tmp = os.fsdecode(tmp_str)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, str(path))
+    except Exception:
+        import contextlib
+
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def load_settings() -> dict[str, Any]:
