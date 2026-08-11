@@ -362,15 +362,17 @@ def main(
         "CQ/QP-style modes, and MF uses quality mode. File size varies by "
         "content and encoder. Default off (bitrate parity between encoders).",
     ),
-    gapless_concat: bool = typer.Option(
-        False,
+    gapless_concat: bool | None = typer.Option(
+        None,
         "--gapless-concat/--no-gapless-concat",
         help="Re-encode audio in the final concat pass so per-segment AAC "
         "priming (~21ms per segment) doesn't accumulate as A/V drift on "
-        "multi-segment outputs. Default off (concat demuxer, faster). "
-        "Video is stream-copied; only audio is re-encoded. Equivalent to "
-        "cut_then_encode's gapless property but with frame accuracy "
-        "(cut_then_encode sacrifices it via -c copy keyframe snap).",
+        "multi-segment outputs. Default on (follows gapless_concat in the "
+        "config file, which defaults to true). Video is stream-copied; only "
+        "audio is re-encoded. Use --no-gapless-concat for the faster "
+        "concat-demuxer (stream copy) join at the cost of per-segment drift "
+        "on very long multi-segment outputs. For lossless video + gapless "
+        "audio in a single pass use --method cut_then_encode instead.",
     ),
     low_process_priority: bool = typer.Option(
         False,

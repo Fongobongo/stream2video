@@ -7,11 +7,17 @@ Downloads VOD from YouTube/Twitch, detects silence via audio analysis, cuts out 
 ## Features
 
 - **Automatic silence detection** — ffmpeg `silencedetect` filter
-- **Cut methods**: `segment` (fast, per-segment encode + concat demuxer) or `batch` (frame-exact, trim+concat filter)
+- **Cut methods**: `segment` (fast, per-segment encode + concat demuxer), `batch` (frame-exact, trim+concat filter), or `cut_then_encode` (lossless cut + single final encode, best quality)
 - **Hardware encoders**: NVIDIA NVENC, AMD AMF, Windows Media Foundation
 - **Safe encoder fallback policy** — `ask` (default) refuses silent fallback to libx264; the user must consent before a CPU-heavy encode runs. `disabled` raises immediately, `enabled` preserves the legacy silent-fallback behaviour.
-- **Audio quality presets** — `source` (codec defaults + native rate/channels), `high` (256k), `medium` (192k, default), `low` (128k). A 192k/256k/320k source is no longer silently downgraded to 128k without the user's choice.
+- **Audio quality presets** — `source` (codec defaults + native rate/channels, default), `high` (256k), `medium` (192k), `low` (128k). A 192k/256k/320k source is no longer silently downgraded to 128k without the user's choice.
 - **Output FPS policy** — `source` (default) preserves the input's frame cadence without duplication; `24`/`25`/`30`/`50`/`60` force CFR conversion via the `fps` filter (duplicated frames warn about file-size cost).
+- **Gapless audio by default** — re-encodes audio in the final join pass so per-segment AAC priming (~21ms) doesn't accumulate as A/V drift on multi-segment outputs. Disable with `--no-gapless-concat` for the faster stream-copy join.
+- **Dry run** — `--dry-run` shows what would be cut without encoding, so you can tune `threshold` / `min_silence` / `margin` against a real video in seconds.
+- **Proxy support** — `--proxy` (HTTP / SOCKS5) for downloads on restricted networks.
+- **JSON logging** — `--log-format json` emits one JSON object per line for ELK / Splunk / Loki.
+- **`--doctor`** — quick environment diagnostic (Python, ffmpeg, available encoders, RAM, config location) without running the pipeline.
+- **Shell completion** — `stream2video --install-completion` for Bash / Zsh / Fish / PowerShell.
 - **Resume integrity** — segment/batch working directories contain a `_manifest.json` that snapshots (source path/size/mtime, encoder, quality, keep segments, pipeline version); a mismatch wipes the work dir so old artifacts from an incompatible run cannot be reused. Each resumed chunk is ffprobe-validated for missing moov atoms.
 - **Download watchdog** — `_CONNECT_TIMEOUT` (5 min, first byte), `_NO_PROGRESS_TIMEOUT` (30 min, mid-download stall), and `_DOWNLOAD_TIMEOUT` (8 h, absolute ceiling) catch hung connections before the user stares at a frozen bar. All three are now configurable via `--download-timeout` / `--connect-timeout` / `--no-progress-timeout`.
 - **Memory monitor** — optional `psutil`-based watchdog (`[monitor]` extra) cancels a runaway encode when RSS exceeds a configurable budget or when available RAM drops below the OS reserve. Soft threshold (80% of budget) warns; hard threshold (95% or reserve violation) cancels via the existing cancel path.
@@ -85,13 +91,13 @@ stream2video --show-completion      # Print the completion script for manual ins
 | `-vq, --video-quality` | `source` | Encode quality preset: `source` (encoder defaults, default), `high` (10000k / CRF 18), `medium` (7000k / CRF 23), `low` (3500k / CRF 28) |
 | `-aq, --audio-quality` | `source` | Audio quality preset: `source` (codec defaults + native rate/channels, default), `high` (256k), `medium` (192k), `low` (128k) |
 | `-dq, --download-quality` | `best` | Download quality preset (Twitch/YouTube, ignored for local files): `best`, `1080p`, `720p`, `480p`, `360p` |
-| `-m, --method` | `segment` | `segment` (per-segment encode + concat demuxer) or `batch` (frame-exact trim+concat filter) |
+| `-m, --method` | `segment` | `segment` (per-segment encode + concat demuxer), `batch` (frame-exact trim+concat filter), or `cut_then_encode` (lossless cut + single final encode, best quality) |
 | `--software-fallback` | `ask` | What happens when the requested HW encoder is unavailable or fails mid-run: `ask` (refuse silent fallback — the run fails with a clear error), `disabled` (fail immediately), `enabled` (silently retry with libx264, legacy behaviour) |
 | `--x264-preset` | `medium` | libx264 preset: `ultrafast`/`superfast`/`veryfast`/`faster`/`fast`/`medium`/`slow`/`slower`. Faster presets reduce CPU load at the cost of file size / quality. Use `ultrafast` or `veryfast` on an unstable / overclocked CPU. |
 | `--encoder-threads` | `auto` | Encoder thread count: `auto` (let ffmpeg pick, usually one per logical core) or a positive int to cap libx264's thread pool. Lowering this reduces peak CPU at the cost of slower encode. |
 | `--output-fps` | `source` | Output FPS policy: `source` (preserve input cadence, no frame duplication) or `24`/`25`/`30`/`50`/`60` (force CFR conversion via `fps` filter; duplicated frames inflate size). |
 | `--output-format` | `video` | Output container/codec: `video` (H.264 + AAC MP4, default) or an audio-only format — `mp3` (libmp3lame), `opus` (libopus), `aac` (m4a), `wav` (PCM 16-bit, lossless), `flac` (lossless). Audio-only outputs drop the video stream entirely; `audio_quality` controls bitrate on lossy formats, ignored on lossless. |
-| `--gapless-concat` / `--no-gapless-concat` | off | Re-encode audio in the final concat pass so per-segment AAC priming (~21ms per segment) doesn't accumulate as A/V drift on multi-segment outputs. Video is re-encoded too (one generation loss); for lossless video + gapless audio use `cut_then_encode` instead. Default off (concat demuxer, faster). |
+| `--gapless-concat` / `--no-gapless-concat` | on | Re-encode audio in the final concat pass so per-segment AAC priming (~21ms per segment) doesn't accumulate as A/V drift on multi-segment outputs. Video is stream-copied; only audio is re-encoded. Turn off with `--no-gapless-concat` for the faster stream-copy join (concat demuxer); for lossless video + gapless audio in one pass use `cut_then_encode` instead. |
 | `--low-process-priority` / `--no-low-process-priority` | off | Spawn ffmpeg at a lower scheduling priority so a long-running encode doesn't starve interactive applications. On Windows: `BELOW_NORMAL_PRIORITY_CLASS`; on Linux/macOS: nice +10. Useful for unattended batch processing on shared/desktop machines. Default off (normal priority, faster encoding). |
 | `--rlimit-as-mb` | `0` (off) | POSIX-only. When >0, cap each spawned ffmpeg subprocess's virtual address space to this many MiB via `RLIMIT_AS` in `preexec_fn`. `malloc`/`mmap` return `ENOMEM` (and ffmpeg bails) before the OS swaps or the Linux OOM killer kicks in — a hard, kernel-enforced complement to `--memory-limit-mb` (which samples RSS between polls and can miss a fast spike). On Windows this flag is ignored. Default 0 disables the cap. |
 | `--memory-limit-mb` | `auto` | RAM budget for the encode: `auto` (60% of total RAM at run start), a positive MB value, or `0` to disable the budget check (the OS reserve still applies). Requires psutil ([monitor]/[gui] extra). |
@@ -108,10 +114,15 @@ stream2video --show-completion      # Print the completion script for manual ins
 | `--batch-chunk-size` | `40` | Number of keep-segments per batch filter invocation. Scaled down dynamically for large segment counts. |
 | `--min-part-bytes` | `1024` | Minimum bytes for a resumed part to be considered valid. Smaller files are re-encoded. |
 | `-f, --force` | — | Re-detect silence, ignore cache |
+| `-n, --dry-run` | — | Run silence detection and print a "what would be cut" summary (segment count, total length removed, expected output duration) without encoding |
 | `-c, --config` | — | YAML config file |
 | `--delete-after` | — | Delete downloaded source after successful compression |
 | `--per-video-dir` / `--no-per-video-dir` | (follows `per_video_dir` config) | Group all artifacts into `{output_dir}/{stem}/` |
+| `--proxy` | (follows `proxy` config) | Proxy server for downloads, e.g. `http://127.0.0.1:8080` or `socks5://user:pass@host:1080`. Empty = direct connection |
 | `-l, --log-level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
+| `--log-format` | `rich` | `rich` (default, human-readable) or `json` (one JSON object per line, for ELK/Splunk/Loki) |
+| `--doctor` | — | Print environment diagnostics (Python version, ffmpeg/encoders, RAM, config location) and exit. Works without an input path |
+| `--install-completion` | — | Install shell completion for Bash / Zsh / Fish / PowerShell (powered by Typer). `--show-completion` prints the script for manual install |
 
 ### Examples
 
@@ -130,6 +141,12 @@ stream2video video.mp4 --config my_config.yaml
 
 # Extract audio only (mp3; also: opus, aac, wav, flac)
 stream2video video.mp4 --output-format mp3 --audio-quality high
+
+# See what would be cut without encoding (tune threshold/min_silence first)
+stream2video video.mp4 --dry-run
+
+# Best quality (lossless cut + single final encode)
+stream2video video.mp4 --method cut_then_encode --video-quality high
 ```
 
 ## Configuration
@@ -147,15 +164,15 @@ margin: 0.15
 | `threshold` (dB) | -60 to -5 | -30.0 | Audio below this level = silence |
 | `min_silence` (s) | 0.1 to 60 | 2.0 | Minimum silence duration to cut |
 | `margin` (s) | -3 to 5 | 0.5 | How much to shrink silence zones. Positive = shrink silence (keep more audio around phrases). Negative = expand silence (cut more aggressively). `0` = no adjustment. |
-| `video_quality` | `source`/`high`/`medium`/`low` | `medium` | Encode quality preset. `source` omits stream2video's bitrate/CRF policy and lets encoder defaults apply; other presets set bitrate for HW encoders (10000k/7000k/3500k) or CRF for libx264 (18/23/28). Also settable via `--video-quality`. |
-| `audio_quality` | `source`/`high`/`medium`/`low` | `medium` | Audio quality preset. `source` omits `-b:a` and preserves native sample rate/channel layout where the output codec allows it; other presets set bitrate: `high` (256k), `medium` (192k), `low` (128k). Also settable via `--audio-quality`. |
+| `video_quality` | `source`/`high`/`medium`/`low` | `source` | Encode quality preset. `source` omits stream2video's bitrate/CRF policy and lets encoder defaults apply (probes the source's own bitrate for HW encoders); other presets set bitrate for HW encoders (10000k/7000k/3500k) or CRF for libx264 (18/23/28). Also settable via `--video-quality`. |
+| `audio_quality` | `source`/`high`/`medium`/`low` | `source` | Audio quality preset. `source` omits `-b:a` and preserves native sample rate/channel layout where the output codec allows it; other presets set bitrate: `high` (256k), `medium` (192k), `low` (128k). Also settable via `--audio-quality`. |
 | `download_quality` | `best`/`1080p`/`720p`/`480p`/`360p` | `best` | Max resolution to download from Twitch/YouTube (ignored for local files). Also settable via `--download-quality`. |
 | `software_fallback` | `ask`/`disabled`/`enabled` | `ask` | What happens when the requested HW encoder is unavailable or fails mid-run. `ask` (default) refuses silent fallback to libx264; `disabled` raises immediately; `enabled` preserves the legacy silent-fallback behaviour. |
 | `x264_preset` | `ultrafast`..`slower` | `medium` | libx264 preset. Faster presets reduce CPU load at the cost of file size / quality. |
 | `encoder_threads` | `auto` or positive int | `auto` | Caps libx264's thread pool. `auto` lets ffmpeg pick (usually one per logical core). |
 | `output_fps` | `source`/`24`/`25`/`30`/`50`/`60` | `source` | Output FPS policy. `source` preserves the input's cadence without duplication; numeric values force CFR conversion via the `fps` filter. |
 | `output_format` | `video`/`mp3`/`opus`/`aac`/`wav`/`flac` | `video` | Output container/codec. `video` produces H.264 + AAC MP4; the audio-only values drop the video stream and produce a standalone audio file (mp3=libmp3lame, opus=libopus, aac=m4a, wav=PCM 16-bit lossless, flac=lossless). `audio_quality` controls bitrate on lossy formats, ignored on lossless. |
-| `gapless_concat` | bool | `false` | When True, the segment path's final join uses the `concat` filter (re-encode) instead of the `concat` demuxer (stream copy) so per-segment AAC priming (~21ms per segment) doesn't accumulate as A/V drift on multi-segment outputs. Video is re-encoded (one generation loss); for lossless video + gapless audio use `cut_then_encode`. Default off (faster). |
+| `gapless_concat` | bool | `true` | When True (default), the segment path's final join re-encodes audio via the `concat` filter so per-segment AAC priming (~21ms per segment) doesn't accumulate as A/V drift on multi-segment outputs. Video is stream-copied; only audio is re-encoded. Set to `false` for the faster `concat` demuxer (stream copy, but per-segment drift may be audible on very long multi-segment outputs). For lossless video + gapless audio in a single pass use `cut_then_encode`. |
 | `low_process_priority` | bool | `false` | When True, spawned ffmpeg subprocesses use `BELOW_NORMAL_PRIORITY_CLASS` on Windows and nice +10 on POSIX so a long encode doesn't starve interactive applications. See `subprocess_kwargs` in utils.py. Default off (faster). |
 | `rlimit_as_mb` | int | `0` (off) | POSIX-only. When >0, cap each spawned ffmpeg subprocess's virtual address space to this many MiB via `RLIMIT_AS`. See `subprocess_kwargs` in utils.py. Default 0 disables. No-op on Windows. |
 | `preset` | `low_memory`/`low_cpu`/`balanced`/`maximum_performance` | `balanced` | Resource preset — a bundle of tunables (`x264_preset`, `x264_low_memory`, `encoder_threads`, `memory_limit_mb`, `batch_chunk_size`, `low_process_priority`) applied as a baseline before any explicit override. `balanced` reproduces the historical defaults (empty override dict). See `PRESETS` / `apply_preset` in config.py. Explicit keys in the config file or `--flag` on the CLI win on a per-key basis. |
@@ -173,6 +190,9 @@ margin: 0.15
 | `batch_chunk_size` | positive int (1-500) | `40` | Number of keep-segments per batch filter invocation. Scaled down dynamically for large segment counts. |
 | `min_part_bytes` | positive int (1-10485760) | `1024` | Minimum bytes for a resumed part to be considered valid. Smaller files are re-encoded. |
 | `per_video_dir` | bool | `true` | When true, all artifacts (downloaded source, WAV, JSON, log, compressed, temp dirs) are collected into `{output_dir}/{stem}/` instead of living in the base `output_dir`. Local source files are never moved/copied — they stay where you put them. |
+| `proxy` | string | `` (off) | Proxy server for downloads, e.g. `http://127.0.0.1:8080` or `socks5://user:pass@host:1080`. Empty = no proxy. Passed to yt-dlp only while `proxy_active` is true. Also settable via `--proxy`. |
+| `proxy_active` | bool | `false` | When true, the address in `proxy` is actually used for downloads (`yt-dlp --proxy ...`). When false, the address is kept (so a temporarily-disabled proxy isn't lost) but no proxy is applied. The GUI has a checkbox and a "Set proxy" dialog; the CLI's `--proxy` flag turns this on automatically. |
+| `log_format` | `rich`/`json` | `rich` | Console log format. `rich` (default, human-readable markup) or `json` (one JSON object per line, for log aggregation). Also settable via `--log-format`. |
 
 ## Project directory
 
@@ -286,7 +306,7 @@ python -m stream2video.gui
 - **Output**: Select output directory (defaults to `./processed_videos`)
 - **Sliders**: Threshold, Min Silence, Margin
 - **Per-video project directory** checkbox — group all of a video's artifacts into `{output_dir}/{stem}/`
-- **Method**: segment (per-segment encode + concat demuxer) or batch (frame-exact select/aselect)
+- **Method**: segment (per-segment encode + concat demuxer), batch (frame-exact select/aselect), or cut_then_encode (lossless cut + single final encode, best quality)
 - **Encoder**: h264_nvenc, h264_amf, h264_mf, libx264
 - **Video quality**: source / high / medium / low (encoder defaults, or bitrate for HW encoders / CRF for libx264)
 - **Audio quality**: source / high / medium / low (codec defaults + native rate/channels, or explicit bitrate)
@@ -302,7 +322,8 @@ python -m stream2video.gui
 - **Status line** — shows `elapsed / remaining` time per phase
 - **Bottom overall label** — `Elapsed: X | Remaining: ~Y + ?` (or `Total: X` on completion)
 - **Waveform preview tab** — visualises the audio with detected silence regions overlaid, so you can tune `threshold` / `min_silence` / `margin` without running a full encode
-- **Completion sound** — optional short chime on success and a different attention sound on cancel/failure. Generated on first use (no bundled audio assets, no licensing); persisted in settings. Backends: Windows `winsound`, macOS `afplay`, Linux `paplay` / `aplay` / `ffplay` (first found in PATH; install `pulseaudio-utils` / `alsa-utils` if neither is present)
+- **Completion sound** — optional short chime on success and a different attention sound on cancel/failure ("Sound when done" checkbox, on by default). Generated on first use (no bundled audio assets, no licensing); persisted in settings. Backends: Windows `winsound`, macOS `afplay`, Linux `paplay` / `aplay` / `ffplay` (first found in PATH; install `pulseaudio-utils` / `alsa-utils` if neither is present)
+- **Download proxy** — "Set proxy" button + checkbox in the Info panel (HTTP / SOCKS5), persisted in settings and honoured by yt-dlp on the next download
 
 ## Output
 
