@@ -10,7 +10,6 @@ delete incomplete output, save settings, destroy).
 from __future__ import annotations
 
 import logging
-import subprocess
 from pathlib import Path
 from tkinter import messagebox
 from typing import Any
@@ -32,7 +31,7 @@ from stream2video.settings_io import (
     write_cli_config_yaml,
 )
 from stream2video.slider_widgets import format_slider_entry_value
-from stream2video.utils import get_active_process
+from stream2video.utils import cancel_process, list_active_owners
 
 _logger = logging.getLogger("stream2video.gui")
 
@@ -315,13 +314,15 @@ class LifecycleMixin:
             if not answer:
                 return
         self._cancel_event.set()
-        proc = get_active_process()
-        if proc is not None and proc.returncode is None:
-            proc.kill()
+        # Kill ALL registered processes, not just the default owner —
+        # a running waveform preview (owner="preview") or a mid-flight
+        # download otherwise survives for its full timeout (up to 300s)
+        # holding the user's media file open.
+        for owner in list_active_owners():
             try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                pass
+                cancel_process(owner, timeout=3)
+            except Exception:
+                _logger.debug("cancel_process(%r) on close failed", owner, exc_info=True)
         # Clean up incomplete output file
         if self._output_path is not None and self._output_path.exists():
             try:

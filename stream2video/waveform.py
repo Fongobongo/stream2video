@@ -88,7 +88,9 @@ def read_peaks_from_stream(
     parallel is irrelevant. For preview-only use, this is faster and
     simpler than threading stderr parsing.
     """
-    if target_buckets <= 0 or not Path(input_path).is_file():
+    if not Path(input_path).is_file():
+        return [], 0.0
+    if target_buckets <= 0:
         return [], 0.0
 
     cmd = [
@@ -158,6 +160,13 @@ def read_peaks_from_stream(
                 chunk = proc.stdout.read(_READ_CHUNK_BYTES)
                 if not chunk:
                     break
+                # ffmpeg's s16le output byte length is always even (2
+                # bytes per sample). A partial-read odd-length chunk
+                # would drop half a sample and silently break the last
+                # bucket — truncate to the last even byte so the
+                # frombytes call never sees a misaligned tail.
+                if len(chunk) & 1:
+                    chunk = chunk[:-1]
                 n_samples = len(chunk) // 2
                 if n_samples == 0:
                     continue

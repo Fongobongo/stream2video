@@ -247,6 +247,11 @@ class WaveformRenderMixin:
                     poll_state = {
                         "last_count": len(segments),
                         "last_view": (self._waveform_view_start, self._waveform_view_end),
+                        # Flipped the first time the pipeline is observed
+                        # not-running: gates the "waveform locked" log so
+                        # a cache count == live count coincidence doesn't
+                        # swallow the finished notice.
+                        "stopped_logged": False,
                     }
                     self._tk_after(
                         1000,
@@ -433,10 +438,16 @@ class WaveformRenderMixin:
             raw = self._take_live_snapshot(in_path)
             if raw is not None:
                 segments = apply_margin(raw, margin)
-                if len(segments) != state["last_count"] or current_view != state["last_view"]:
+                # The count equality used to skip the "locked" log line
+                # whenever luck would have it that the cache and live
+                # snapshot have the same segment count. Treat the stop
+                # as a distinct state — the pipeline is no longer
+                # running, so any *later* content change must surface.
+                if not state.get("stopped_logged"):
                     self._apply_view(segments)
                     state["last_count"] = len(segments)
                     state["last_view"] = current_view
+                    state["stopped_logged"] = True
                     self._log(f"  Pipeline finished — waveform locked at {len(segments)} silences")
             else:
                 out_dir = self._waveform_output_dir
@@ -448,10 +459,11 @@ class WaveformRenderMixin:
                     "margin": margin,
                 }
                 cached = load_silence_cache(in_path, out_dir, config)
-                if cached is not None and len(cached) != state["last_count"]:
+                if cached is not None and not state.get("stopped_logged"):
                     self._apply_view(list(cached))
                     state["last_count"] = len(cached)
                     state["last_view"] = current_view
+                    state["stopped_logged"] = True
                     self._log(f"  Pipeline finished — waveform locked at {len(cached)} silences")
             return
 

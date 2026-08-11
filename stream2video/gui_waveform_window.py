@@ -145,10 +145,19 @@ class WaveformWindowMixin:
             self._log("Set a local input file before opening the waveform preview")
             return
         wave_win_existing = getattr(self, "_wave_window", None)
-        if wave_win_existing is not None and wave_win_existing.winfo_exists():
-            wave_win_existing.focus_force()
-            wave_win_existing.lift()
-            return
+        # Wrap winfo_exists() in try — a Toplevel caught mid-destroy on
+        # Windows raises TclError("invalid command name") here, and the
+        # pre-existing guard 20 lines up returns False only for the
+        # already-destroyed case, not the destroying case.
+        if wave_win_existing is not None:
+            try:
+                alive = bool(wave_win_existing.winfo_exists())
+            except Exception:
+                alive = False
+            if alive:
+                wave_win_existing.focus_force()
+                wave_win_existing.lift()
+                return
 
         win = ctk.CTkToplevel(self)
         win.title("Waveform preview")

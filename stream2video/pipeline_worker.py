@@ -399,6 +399,11 @@ class PipelineWorker:
                 self._gui.ui_update_output(out_dir)
                 self._gui.ui_update_file_info(vpath)
                 self._gui.log(f"Project directory: {out_dir}")
+                # Show the requested encoder, marked so the user knows a
+                # software-fallback consent may swap it. The controller
+                # passes ``(fallback_encoder, quality)`` to
+                # ``on_fallback_consent`` if a swap happens — the GUI's
+                # natural place to update the indicator is there.
                 self._gui.set_encoder_label(params.encoder, params.video_quality)
 
             cb = PipelineCallbacks(

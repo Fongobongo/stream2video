@@ -42,11 +42,31 @@ def ensure_completion_chime(path: Path | None = None, *, kind: str = "success") 
 
     out.parent.mkdir(parents=True, exist_ok=True)
     samples = _build_chime_samples(kind)
-    with wave.open(str(out), "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(SAMPLE_RATE)
-        wav.writeframes(b"".join(struct.pack("<h", sample) for sample in samples))
+    # Write via a temp file + atomic rename so two GUI instances that
+    # race past the ``st_size > 44`` early-out above don't leave a
+    # half-written WAV that the *other* process then plays as static.
+    tmp = out.parent / f".{out.name}.{Path(__file__).name}"
+    try:
+        with wave.open(str(tmp), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(SAMPLE_RATE)
+            wav.writeframes(b"".join(struct.pack("<h", sample) for sample in samples))
+        tmp.replace(out)
+    except OSError:
+        # If the rename fails (file locked by another player), fall back
+        # to the un-atomic path — the chime is non-critical.
+        with wave.open(str(out), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(SAMPLE_RATE)
+            wav.writeframes(b"".join(struct.pack("<h", sample) for sample in samples))
+    finally:
+        # Clean the temp file if the rename never ran.
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
     return out
 
 

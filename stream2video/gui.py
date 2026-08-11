@@ -518,6 +518,20 @@ class _PipelineGuiCallbacksAdapter:
         if not answered.wait(timeout=60):
             self._gui._log("[WARN] Encoder-fallback dialog timed out — refusing fallback")
             return False
+        if consent[0]:
+            # The on-screen encoder label still shows the *requested*
+            # encoder; a "yes" here silently swaps to libx264 below the
+            # surface. Refresh it so the UI reflects what's actually
+            # running.
+            try:
+                self._gui._tk_after(
+                    0,
+                    lambda: self._gui.lbl_encoder.configure(
+                        text="Encoder: libx264 (fallback)"
+                    ),
+                )
+            except Exception:
+                pass
         return consent[0]
 
     def ui_progress(self, value: float) -> None:
