@@ -104,6 +104,18 @@ class SlidersMixin:
         entry_val.bind("<Return>", on_entry_confirm)
         entry_val.bind("<FocusOut>", on_entry_confirm)
         slider.configure(command=on_change)
+        # Remember the real min/max so ``_sync_slider_entries`` can clamp
+        # a typed-but-never-confirmed value (e.g. the user hits "Start"
+        # before FocusOut fires) instead of leaking an out-of-range raw
+        # value into the pipeline config. ``setdefault`` keeps this robust
+        # when the mixin is composed into a test double without __init__.
+        bounds_map: dict[str, tuple[float, float]] | None = getattr(
+            self, "_slider_bounds", None
+        )
+        if bounds_map is None:
+            bounds_map = {}
+            self._slider_bounds: dict[str, tuple[float, float]] = bounds_map
+        bounds_map[key] = (min_v, max_v)
 
     def _reset_default(self, default: float, slider: Any, entry: Any, key: str) -> None:
         slider.set(default)
@@ -115,12 +127,21 @@ class SlidersMixin:
         # Build the entries dict the pure
         # :func:`stream2video.slider_widgets.sync_slider_entries` expects,
         # keyed by the slider panel's three keys. The GUI owns the
-        # widget reads; the helper owns the parse + round.
+        # widget reads; the helper owns the parse + clamp + round. The
+        # clamp matters when the user typed an out-of-range value and
+        # clicked Start before the entry's FocusOut handler could
+        # confirm/revert it — without it the pipeline would run with a
+        # config that doesn't match what the sliders show.
+        bounds: dict[str, tuple[float, float]] = getattr(self, "_slider_bounds", {})
         entries: dict[str, str] = {}
         for key in ("threshold", "min_silence", "margin"):
             slider = getattr(self, f"_slider_{key}", None)
             if slider and hasattr(slider, "_entry_val"):
                 entries[key] = slider._entry_val.get()
-        updates = sync_slider_entries(entries)
+                if key not in bounds:
+                    # Fallback for tests that build sliders without
+                    # calling ``_add_slider``: use the widget range.
+                    bounds[key] = (float(slider.cget("from_")), float(slider.cget("to")))
+        updates = sync_slider_entries(entries, bounds)
         for key, val in updates.items():
             self.config[key] = val

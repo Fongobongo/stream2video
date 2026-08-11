@@ -105,10 +105,28 @@ def build_save_settings_snapshot(widgets: dict[str, Any]) -> dict[str, Any]:
     Returns a new dict containing exactly the keys in
     ``SAVE_SETTINGS_KEYS`` (in that order) so the on-disk JSON stays
     stable across runs. Pure: no widget reads, no I/O.
+
+    A missing widget key used to raise ``KeyError`` here and — because
+    the caller wrapped the whole save in one ``except`` — silently
+    discard the *entire* settings snapshot on behalf of a single
+    absent field. Use ``widgets.get(key)`` instead: the missing key
+    is serialized as ``null`` and everything else still persists.
     """
     snapshot: dict[str, Any] = {}
+    missing: list[str] = []
     for key in SAVE_SETTINGS_KEYS:
-        snapshot[key] = widgets[key]
+        if key in widgets:
+            snapshot[key] = widgets[key]
+        else:
+            snapshot[key] = None
+            missing.append(key)
+    if missing:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "build_save_settings_snapshot: widgets missing keys %s — serializing as null",
+            missing,
+        )
     return snapshot
 
 

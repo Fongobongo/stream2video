@@ -7,8 +7,11 @@ functions are also easier to reason about and unit-test.
 """
 
 
-def fmt_size(bytez: int) -> str:
-    size = float(bytez)
+def fmt_size(bytez: int | float) -> str:
+    """Human-readable byte size. Negative values are clamped to 0 — a
+    caller that subtracts two file sizes (e.g. "reduction") shouldn't
+    be able to print ``-1.0 B`` through here."""
+    size = max(0.0, float(bytez))
     for unit in ("B", "KB", "MB", "GB"):
         if size < 1024:
             return f"{size:.1f} {unit}"
@@ -92,13 +95,20 @@ def fmt_completion_summary(
     dst_time_str = fmt_clock_time(keep_duration)
     dst_size_str = fmt_size(dst_size_bytes)
 
-    # Reduction percent: (src - dst) / src * 100. Only show when both
-    # sizes are non-zero — a zero-byte source (empty file) would divide
-    # by zero.
+    # Reduction percent: (src - dst) / src * 100. A negative percentage
+    # (larger output than source — e.g. an aggressive preset upscaled a
+    # small input) used to render as "[-12% reduction]" which reads as a
+    # *decrease*; show it as an increase instead so the summary tells
+    # the truth either way. Only show when src size is non-zero — a
+    # zero-byte source (empty file) would divide by zero.
     if src_size_bytes > 0:
-        reduction_pct = 100.0 * (src_size_bytes - dst_size_bytes) / src_size_bytes
+        delta_pct = 100.0 * (src_size_bytes - dst_size_bytes) / src_size_bytes
+        if delta_pct >= 0:
+            label = f"{delta_pct:.0f}% reduction"
+        else:
+            label = f"{-delta_pct:.0f}% increase"
         lines.append(
-            f"   Output: {dst_time_str} ({dst_size_str})  [{reduction_pct:.0f}% reduction]"
+            f"   Output: {dst_time_str} ({dst_size_str})  [{label}]"
         )
     else:
         lines.append(f"   Output: {dst_time_str} ({dst_size_str})")

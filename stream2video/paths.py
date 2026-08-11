@@ -47,7 +47,13 @@ def truncate_recent_name(text: str, max_len: int = RECENT_NAME_MAX) -> str:
     """
     if len(text) <= max_len:
         return text
-    return text[: max_len - 1] + "\u2026"
+    prefix = text[: max_len - 1]
+    # A lone high-surrogate at the end of the prefix means we sliced
+    # inside a surrogate pair — drop it so the ellipsis doesn't sit
+    # next to an invalid half-character (Tk renders it as a box glyph).
+    while prefix and 0xD800 <= ord(prefix[-1]) <= 0xDBFF:
+        prefix = prefix[:-1]
+    return prefix + "\u2026"
 
 
 def project_dir(output_dir: Path, video_stem: str, per_video_dir: bool) -> Path:

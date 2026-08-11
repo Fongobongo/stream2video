@@ -31,6 +31,10 @@ class Tooltip:
     leaves the widget or the tooltip itself. The hide is delayed so a
     user flicking the cursor onto the tooltip (to copy a value, for
     instance) doesn't make it disappear mid-action.
+
+    The tooltip holds ``after`` timers on the widget; call
+    :meth:`destroy` when the host row/widget is being torn down so the
+    timers don't fire against a partially-destroyed widget.
     """
 
     _SHOW_DELAY_MS = 400
@@ -41,22 +45,35 @@ class Tooltip:
         self.text = text
         self._tip: ctk.CTkToplevel | None = None
         self._after_id: str | None = None
+        self._hide_after_id: str | None = None
         widget.bind("<Enter>", self._schedule_show, add="+")
         widget.bind("<Leave>", self._schedule_hide, add="+")
 
     def _schedule_show(self, event: Any = None) -> None:
+        # Cancel BOTH pending timers — a rapid Enter after a Leave used to
+        # leave the hide timer running, which destroyed the tooltip while
+        # the cursor was still on it.
         self._cancel_scheduled()
         self._after_id = self.widget.after(self._SHOW_DELAY_MS, self._show)
 
     def _schedule_hide(self, event: Any = None) -> None:
         self._cancel_scheduled()
         if self._tip:
-            self.widget.after(self._HIDE_DELAY_MS, self._hide)
+            self._hide_after_id = self.widget.after(self._HIDE_DELAY_MS, self._hide)
 
     def _cancel_scheduled(self) -> None:
         if self._after_id:
-            self.widget.after_cancel(self._after_id)
+            try:
+                self.widget.after_cancel(self._after_id)
+            except Exception:
+                pass  # widget already destroyed; nothing left to cancel
             self._after_id = None
+        if self._hide_after_id:
+            try:
+                self.widget.after_cancel(self._hide_after_id)
+            except Exception:
+                pass
+            self._hide_after_id = None
 
     def _show(self, event: Any = None) -> None:
         self._after_id = None
@@ -82,10 +99,30 @@ class Tooltip:
         tw.bind("<Leave>", self._schedule_hide, add="+")
 
     def _hide(self, event: Any = None) -> None:
+        self._hide_after_id = None
         tw = self._tip
         self._tip = None
         if tw:
-            tw.destroy()
+            try:
+                tw.destroy()
+            except Exception:
+                pass  # already gone
+
+    def destroy(self) -> None:
+        """Cancel pending timers, hide the tooltip, and unbind events.
+
+        Rows re-rendered by ``_render_recent_projects`` destroy the old
+        child widgets — without this the tooltip's ``after`` timers keep
+        firing against the destroyed widget (TclError in the Tk event
+        loop) and the ``<Enter>``/``<Leave>`` bindings leak.
+        """
+        self._cancel_scheduled()
+        self._hide()
+        try:
+            self.widget.unbind("<Enter>")
+            self.widget.unbind("<Leave>")
+        except Exception:
+            pass
 
 
 # Back-compat alias so existing imports of ``_Tooltip`` (inside gui.py

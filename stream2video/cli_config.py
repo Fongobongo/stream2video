@@ -75,11 +75,16 @@ def load_config(config_file: Path | None, console: Any) -> dict:
                 console.print(f"[red]Error loading config file:[/red] {e}")
                 raise typer.Exit(1) from None
 
-    # Validate numeric ranges.
+    # Validate numeric ranges. Preserve the input's int/float type —
+    # ``float(config[key])`` silently converts every integer-keyed
+    # tunable (``batch_chunk_size`` etc.) to float, and a resolver that
+    # later hands ``PipelineConfig(batch_chunk_size=40.0)`` an int
+    # slot gets a subtle type mismatch.
     for key, (min_val, max_val) in CONFIG_RANGES.items():
         if key in config:
+            original = config[key]
             try:
-                value = float(config[key])
+                value = float(original)
 
                 if not min_val <= value <= max_val:
                     console.print(
@@ -87,7 +92,12 @@ def load_config(config_file: Path | None, console: Any) -> dict:
                     )
                     raise typer.Exit(1)
 
-                config[key] = value
+                # Only rewrite when the type changed meaningfully —
+                # YAML ``40`` parses as int and should stay int.
+                if isinstance(original, int) and value.is_integer():
+                    config[key] = original
+                else:
+                    config[key] = value
 
             except (ValueError, TypeError):
                 console.print(f"[red]Invalid {key}:[/red] {config[key]} is not a number")

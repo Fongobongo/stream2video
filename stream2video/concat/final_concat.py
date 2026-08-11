@@ -57,42 +57,52 @@ def _run_final_concat(
             progress_callback(min(seconds / total_duration * 0.1, 0.1) + 0.9)
 
     label_text = label
-    _c._run_ffmpeg(
-        [
-            ffmpeg_path(),
-            "-y",
-            "-loglevel",
-            "error",
-            "-progress",
-            "pipe:1",
-            # -fflags +genpts is a *demuxer* flag, so it goes BEFORE -i,
-            # not as an output option after -i (P1 audit v0.3 §5.3). It
-            # tells the concat demuxer to generate missing PTS values
-            # for packets whose timestamps got dropped/duplicated at the
-            # segment boundaries. As an output option (the historical
-            # position after -i) it was effectively ignored for the PTS
-            # rebuild contract — the muxer honoured it only on its own
-            # output writes, which fire AFTER the demuxer has already
-            # assembled the packet stream and parsed (or missed) PTS.
-            "-fflags",
-            "+genpts",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(list_path),
-            "-c",
-            "copy",
-            str(output_path),
-        ],
-        progress_callback=_concat_prog,
-        timeout=timeout,
-        label=label_text,
-        cancel_callback=cancel_callback,
-        memory_monitor=_c._new_memory_monitor(memory_monitor_factory, label_text),
-        stall_kill=stall_kill,
-        stall_warning=stall_warning,
-        low_process_priority=low_process_priority,
-        rlimit_as_mb=rlimit_as_mb,
-    )
+    try:
+        _c._run_ffmpeg(
+            [
+                ffmpeg_path(),
+                "-y",
+                "-loglevel",
+                "error",
+                "-progress",
+                "pipe:1",
+                # -fflags +genpts is a *demuxer* flag, so it goes BEFORE -i,
+                # not as an output option after -i (P1 audit v0.3 §5.3). It
+                # tells the concat demuxer to generate missing PTS values
+                # for packets whose timestamps got dropped/duplicated at the
+                # segment boundaries. As an output option (the historical
+                # position after -i) it was effectively ignored for the PTS
+                # rebuild contract — the muxer honoured it only on its own
+                # output writes, which fire AFTER the demuxer has already
+                # assembled the packet stream and parsed (or missed) PTS.
+                "-fflags",
+                "+genpts",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(list_path),
+                "-c",
+                "copy",
+                str(output_path),
+            ],
+            progress_callback=_concat_prog,
+            timeout=timeout,
+            label=label_text,
+            cancel_callback=cancel_callback,
+            memory_monitor=_c._new_memory_monitor(memory_monitor_factory, label_text),
+            stall_kill=stall_kill,
+            stall_warning=stall_warning,
+            low_process_priority=low_process_priority,
+            rlimit_as_mb=rlimit_as_mb,
+        )
+    finally:
+        # ``concat.txt`` is a pure-derive artifact of this run. Leaving it
+        # behind on failure used to be invisible (the work dir is kept
+        # for resume anyway), but if the caller later clears the manifest
+        # manually the stale list would silently drive the next concat.
+        try:
+            list_path.unlink(missing_ok=True)
+        except OSError as e:
+            logger.debug(f"could not remove concat list {list_path}: {e}")

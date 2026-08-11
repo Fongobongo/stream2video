@@ -38,6 +38,13 @@ class RecentProjectsMixin:
         that asks for confirmation before deleting the whole subdirectory.
         """
         for child in self.recent_frame.winfo_children():
+            # Each row owns a Tooltip with pending Tk ``after`` timers —
+            # destroy it first so those timers don't fire against a
+            # half-destroyed widget pane (TclError) or leak bindings.
+            for widget in child.winfo_children():
+                tooltip = getattr(widget, "_tooltip_ref", None)
+                if tooltip is not None:
+                    tooltip.destroy()
             child.destroy()
         pruned = prune_recent_projects(self.config.get("recent_projects", []))
         if pruned != self.config.get("recent_projects", []):
@@ -65,7 +72,9 @@ class RecentProjectsMixin:
                 "<Button-1>",
                 lambda e, p=path_str: self._open_in_explorer(p),
             )
-            _Tooltip(lbl, path_str)
+            # Keep a reachable reference so the row-teardown above can
+            # cancel the tooltip's timers before the widget goes away.
+            lbl._tooltip_ref = _Tooltip(lbl, path_str)
             del_btn = ctk.CTkButton(
                 row,
                 text="X",
@@ -133,7 +142,13 @@ class RecentProjectsMixin:
             f"and the log file.\n\n"
             f"This cannot be undone."
         )
-        ok = messagebox.askyesno("Delete project?", msg, icon="warning")
+        # Parent the dialog so it's modal w.r.t. this window — an
+        # unparented messagebox can be hidden behind the main window
+        # while still blocking input, and lets the user get a second
+        # click in on a "delete" that wasn't answered yet.
+        ok = messagebox.askyesno(
+            "Delete project?", msg, icon="warning", parent=self.winfo_toplevel()
+        )
         if not ok:
             return
         try:

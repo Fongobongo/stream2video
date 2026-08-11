@@ -296,7 +296,14 @@ def _run_silencedetect(
     progress_divisor: float | None
     progress_offset_us: float = 0.0
     if base_divisor is not None and resume_from is not None:
-        progress_divisor = max(0.0, base_divisor - resume_from)
+        # ``resume_from >= duration`` (a stale resume file asking to skip
+        # past the end) would underflow the divisor to 0 and turn every
+        # subsequent fraction into inf/NaN instead of a clean no-progress
+        # signal. Treat a non-positive remainder as "nothing useful left"
+        # and disable the callback — the caller's logging already explains
+        # why no progress fires.
+        remaining = base_divisor - resume_from
+        progress_divisor = remaining if remaining > 0 else None
         progress_offset_us = resume_from * 1_000_000
     else:
         progress_divisor = base_divisor

@@ -133,13 +133,23 @@ class Stream2VideoGUI(
         geom = self.config.get("window_geometry")
         if geom:
             try:
-                gw = int(geom.split("x")[0])
-                gh = int(geom.split("x")[1].split("+")[0])
+                # Strict parse: reject malformed strings ("abcxdef",
+                # "-100x50", empty pieces) up-front so we don't feed Tk
+                # a geometry it'll reject with TclError mid-startup.
+                import re as _re
+
+                m = _re.fullmatch(r"(\d+)x(\d+)(?:[+-]\d+[+-]\d+)?", str(geom).strip())
+                if not m:
+                    raise ValueError(f"malformed geometry: {geom!r}")
+                gw, gh = int(m.group(1)), int(m.group(2))
+                if gw <= 0 or gh <= 0:
+                    raise ValueError(f"non-positive dimension in geometry: {geom!r}")
                 if gw <= sw and gh <= sh:
                     self.geometry(geom)
                 else:
                     self.geometry(f"{win_w}x{win_h}")
             except Exception:
+                logger.debug(f"window_geometry {geom!r} rejected; using default size")
                 self.geometry(f"{win_w}x{win_h}")
         else:
             self.geometry(f"{win_w}x{win_h}")

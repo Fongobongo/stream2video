@@ -28,7 +28,6 @@ from __future__ import annotations
 import logging
 import os
 import shutil
-import struct
 import subprocess
 import time
 from functools import cache
@@ -197,9 +196,35 @@ def _createprocess_probe(exe: str) -> str:
         # A zeroed buffer without ``cb`` set is rejected by CreateProcessW
         # with ERROR_INVALID_PARAMETER — which would mask the REAL spawn
         # failure (winerror 2/3/5, winget-shim-vanished, AV-block) that
-        # this probe exists to diagnose. Set cb = sizeof(STARTUPINFOW).
-        si = (ctypes.c_byte * 112)()  # STARTUPINFOW storage
-        struct.pack_into("<I", si, 0, 104)  # cb field: 104 on x64, 68 on x86
+        # this probe exists to diagnose. Derive ``cb`` from the actual
+        # struct size instead of hard-coding 104 — on a 32-bit Python
+        # STARTUPINFOW is 68 bytes and the wrong cb is rejected with
+        # ERROR_INVALID_PARAMETER, which is the exact failure mode this
+        # probe is supposed to diagnose (not cause).
+        class STARTUPINFOW(ctypes.Structure):
+            _fields_: ClassVar[list[tuple[str, Any]]] = [
+                ("cb", wintypes.DWORD),
+                ("lpReserved", wintypes.LPWSTR),
+                ("lpDesktop", wintypes.LPWSTR),
+                ("lpTitle", wintypes.LPWSTR),
+                ("dwX", wintypes.DWORD),
+                ("dwY", wintypes.DWORD),
+                ("dwXSize", wintypes.DWORD),
+                ("dwYSize", wintypes.DWORD),
+                ("dwXCountChars", wintypes.DWORD),
+                ("dwYCountChars", wintypes.DWORD),
+                ("dwFillAttribute", wintypes.DWORD),
+                ("dwFlags", wintypes.DWORD),
+                ("wShowWindow", wintypes.WORD),
+                ("cbReserved2", wintypes.WORD),
+                ("lpReserved2", ctypes.POINTER(ctypes.c_byte)),
+                ("hStdInput", wintypes.HANDLE),
+                ("hStdOutput", wintypes.HANDLE),
+                ("hStdError", wintypes.HANDLE),
+            ]
+
+        si = STARTUPINFOW()
+        si.cb = ctypes.sizeof(STARTUPINFOW)
 
         class PROCESS_INFORMATION(ctypes.Structure):
             _fields_: ClassVar[list[tuple[str, Any]]] = [
@@ -220,13 +245,17 @@ def _createprocess_probe(exe: str) -> str:
             0,
             None,
             None,
-            ctypes.cast(si, ctypes.c_void_p),
+            ctypes.byref(si),
             ctypes.byref(pi),
         )
         if ok:
+            # Wait for the child to exit so we don't leak a live ffmpeg
+            # on the user's machine just for a diagnostic — and so AV
+            # software sees a complete spawn+exit, not an orphan.
+            kernel32.WaitForSingleObject(pi.hProcess, 2000)
             kernel32.CloseHandle(pi.hProcess)
             kernel32.CloseHandle(pi.hThread)
-            return f"CreateProcessW OK (exists={exists}); wait, spawn just worked?!"
+            return f"CreateProcessW OK (exists={exists}); spawn succeeded"
         err = ctypes.get_last_error()
         return f"CreateProcessW failed: winerror={err} ({ctypes.FormatError(err).strip()}); exists={exists}"
     except Exception as e:  # pragma: no cover - probe must never kill the caller

@@ -786,7 +786,12 @@ class PipelineController:
         try:
             from stream2video.utils import estimate_disk_need as _estimate_need
 
-            src_size = video_path.stat().st_size if video_path.exists() else 0
+            src_size = 0
+            try:
+                if video_path.exists():
+                     src_size = video_path.stat().st_size
+            except OSError:
+                pass
             required_typical, required_worst = _estimate_need(
                 src_size, self._src_duration, keep_dur, self.cfg.method
             )
@@ -965,7 +970,15 @@ class PipelineController:
     ) -> PipelineResult:
         """Build the success summary and clean up."""
         self.cb.on_progress(self._progress_plan.concat_end)
-        dst_size_bytes = output_path.stat().st_size
+        try:
+            dst_size_bytes = output_path.stat().st_size
+        except OSError:
+            # The output was there a moment ago (cut_and_concat returned
+            # successfully on it) — an antivirus or the user removed it
+            # in the gap between encode-finish and this stat. Report 0
+            # rather than crashing the whole pipeline at the 100% mark;
+            # the summary's other fields still describe a real success.
+            dst_size_bytes = 0
         total_elapsed = time.monotonic() - self._pipeline_start
 
         summary = {

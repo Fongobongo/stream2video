@@ -95,9 +95,12 @@ def encoder_opts(
     ``medium``/``low`` affect bitrate (HW encoders) and CRF (libx264).
     ``source`` means "keep source bitrate" — for HW encoders the probed
     source bit_rate is passed via ``source_bitrate`` and emitted as
-    ``-b:v``; for libx264 it still omits CRF (defaults apply). ``medium``
-    reproduces the previously hard-coded options exactly so existing
-    output is unchanged.
+    ``-b:v``; libx264 gets the same constrained ``-b:v`` so source parity
+    is encoder-independent. ``medium`` reproduces the previously
+    hard-coded options exactly so existing output is unchanged. When
+    ``use_crf=True`` there is no CRF equivalent of "keep source bitrate",
+    so ``source`` is treated as an alias for ``high`` and a warning is
+    logged to make the substitution explicit.
 
     ``x264_preset`` (libx264 only): one of ``VALID_X264_PRESETS``. Default
     ``medium`` preserves historical behaviour; users with unstable /
@@ -133,6 +136,15 @@ def encoder_opts(
         )
     threads_opt = _threads_opt(encoder_threads)
     effective_quality = "high" if quality == "source" else quality
+    if use_crf and quality == "source":
+        # CRF mode has no honest "match the source" mode — a CRF value
+        # fixes quality, not bits. Substituting ``high`` silently would
+        # make the user think they got source parity when they actually
+        # got a quality-fixed encode, so say it out loud.
+        logger.warning(
+            "quality='source' with use_crf=True has no source-parity mode "
+            "(CRF fixes quality, not bitrate) — encoding with CRF=high instead"
+        )
 
     if use_crf:
         # Quality-fixed mode. x264/NVENC/AMF use CRF/QP-like values;

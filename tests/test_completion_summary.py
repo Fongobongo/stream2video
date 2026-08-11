@@ -84,9 +84,10 @@ class TestCompletionSummary:
         )
         assert "50% reduction" in out
 
-    def test_larger_output_shows_negative_reduction(self) -> None:
+    def test_larger_output_shows_increase_not_negative_reduction(self) -> None:
         """When output is larger than source (e.g. re-encode at high
-        bitrate), the percent is negative — still displayed correctly."""
+        bitrate), the summary says "increase" — not the old, misleading
+        ``-50% reduction``."""
         out = fmt_completion_summary(
             src_duration=60.0,
             src_size_bytes=1_000,
@@ -95,7 +96,8 @@ class TestCompletionSummary:
             keep_duration=60.0,
             pipeline_seconds=10.0,
         )
-        assert "-50% reduction" in out
+        assert "50% increase" in out
+        assert "reduction" not in out
 
     def test_fmt_dry_run_summary_placeholder(self) -> None:
         """Smoke test: fmt_dry_run_summary exists and produces output."""

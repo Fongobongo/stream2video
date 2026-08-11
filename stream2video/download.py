@@ -368,7 +368,10 @@ def download(
     """
     if _is_local_file(url):
         path = Path(url)
-        size = path.stat().st_size
+        try:
+            size = path.stat().st_size
+        except OSError as e:
+            raise DownloadError(f"Cannot read local file {path}: {e}") from e
         logger.info(f"Using local file: {url} ({size // 1024 // 1024} MB)")
         return DownloadResult(path, is_downloaded=False)
 

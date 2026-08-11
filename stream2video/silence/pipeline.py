@@ -169,7 +169,7 @@ def detect_silence(
                 resume_save_config=current_config,
                 timeout=effective_timeout,
             )
-        elif wav_path.exists() and wav_path.stat().st_mtime >= _stat_mtime(video_path):
+        elif wav_path.exists() and _stat_mtime(wav_path) >= _stat_mtime(video_path):
             # The WAV exists and is fresh but carries no ``.verified``
             # sidecar — it was extracted by a run that was cancelled or
             # crashed before the broken-PTS sample-verify could run (or

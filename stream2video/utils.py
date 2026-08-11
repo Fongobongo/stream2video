@@ -140,6 +140,7 @@ def get_video_duration(video_path: Path) -> float | None:
         subprocess.TimeoutExpired,
         ValueError,
         FileNotFoundError,
+        OSError,
     ) as e:
         logger.warning(f"Could not determine video duration: {e}")
         return None

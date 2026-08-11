@@ -140,6 +140,14 @@ def _run_doctor(config_file: Path | None = None) -> bool:
     tbl = Table(show_header=False, box=None, padding=(0, 1))
     tbl.add_column("status", width=4)
     tbl.add_column("check")
+    # Structured mirror of every check row so --log-format=json can emit
+    # line-per-object records without scraping Rich cells (fragile across
+    # Rich versions). Each entry: (status, plain-label).
+    checks: list[tuple[str, str]] = []
+
+    def _row(status_glyph: str, status: str, rich_label: str, plain_label: str) -> None:
+        tbl.add_row(status_glyph, rich_label)
+        checks.append((status, plain_label))
 
     # Redirected stdout on Windows decodes via the OEM/ANSI codepage
     # (cp1251/cp866), which can't encode the ✓/✗/— glyphs below. Rich
@@ -158,9 +166,11 @@ def _run_doctor(config_file: Path | None = None) -> bool:
     # Python version
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     ok = sys.version_info >= (3, 13)
-    tbl.add_row(
+    _row(
         "[green]✓[/green]" if ok else "[red]✗[/red]",
+        "ok" if ok else "fail",
         f"Python {py_ver}" + ("" if ok else "  [red](3.13+ required)[/red]"),
+        f"Python {py_ver}" + ("" if ok else " (3.13+ required)"),
     )
     if not ok:
         all_critical_ok = False
@@ -177,13 +187,16 @@ def _run_doctor(config_file: Path | None = None) -> bool:
                     .stdout.splitlines()[0]
                     .strip()
                 )
-                tbl.add_row("[green]✓[/green]", f"{tool}: {out} ({exe})")
+                _row("[green]✓[/green]", "ok", f"{tool}: {out} ({exe})", f"{tool}: {out} ({exe})")
             except Exception as e:
-                tbl.add_row(
-                    "[green]✓[/green]", f"{tool}: found at {exe} [dim](version unknown: {e})[/dim]"
+                _row(
+                    "[green]✓[/green]",
+                    "ok",
+                    f"{tool}: found at {exe} [dim](version unknown: {e})[/dim]",
+                    f"{tool}: found at {exe} (version unknown: {e})",
                 )
         else:
-            tbl.add_row("[red]✗[/red]", f"{tool}: not found in PATH")
+            _row("[red]✗[/red]", "fail", f"{tool}: not found in PATH", f"{tool}: not found in PATH")
             all_critical_ok = False
 
     # GPU encoder availability (smoke test via the existing check_encoder).
@@ -194,7 +207,12 @@ def _run_doctor(config_file: Path | None = None) -> bool:
     enc_rows: list[str] = []
     for enc_name in ("h264_nvenc", "h264_amf", "h264_mf"):
         enc_rows.append(f"{enc_name}={'ok' if check_encoder(enc_name) else 'no'}")
-    tbl.add_row("[green]✓[/green]", f"GPU encoders: {', '.join(enc_rows)}")
+    _row(
+        "[green]✓[/green]",
+        "ok",
+        f"GPU encoders: {', '.join(enc_rows)}",
+        f"GPU encoders: {', '.join(enc_rows)}",
+    )
 
     # RAM
     try:
@@ -208,38 +226,71 @@ def _run_doctor(config_file: Path | None = None) -> bool:
             avail_mb = _available_ram_mb()
             budget_mb = int(total_mb * 0.60)  # 60% default auto policy
             avail_s = f"{avail_mb:.0f} MB" if avail_mb is not None else "?"
-            tbl.add_row(
+            _row(
                 "[green]✓[/green]",
+                "ok",
+                f"RAM: {total_mb / 1024:.0f} GB (60% budget = {budget_mb / 1024:.1f} GB, "
+                f"available now: {avail_s})",
                 f"RAM: {total_mb / 1024:.0f} GB (60% budget = {budget_mb / 1024:.1f} GB, "
                 f"available now: {avail_s})",
             )
         else:
-            tbl.add_row(
+            _row(
                 "[yellow]![/yellow]",
+                "warn",
+                "RAM: psutil not installed (no memory guardrail; install with `pip install stream2video[monitor]`)",
                 "RAM: psutil not installed (no memory guardrail; install with `pip install stream2video[monitor]`)",
             )
     except Exception as e:
-        tbl.add_row("[yellow]![/yellow]", f"RAM: could not query ({e})")
+        _row(
+            "[yellow]![/yellow]",
+            "warn",
+            f"RAM: could not query ({e})",
+            f"RAM: could not query ({e})",
+        )
 
     # Config file (YAML or user_defaults.json)
     if config_file is not None:
         # User explicitly passed --config: report whether it loaded.
         if config_file.exists():
-            tbl.add_row("[green]✓[/green]", f"Config file: {config_file}")
+            _row("[green]✓[/green]", "ok", f"Config file: {config_file}", f"Config file: {config_file}")
         else:
-            tbl.add_row(
+            _row(
                 "[yellow]![/yellow]",
+                "warn",
                 f"Config file: {config_file} [yellow](not found — using defaults)[/yellow]",
+                f"Config file: {config_file} (not found — using defaults)",
             )
     user_cfg = user_defaults_path()
     if user_cfg.exists():
-        tbl.add_row("[green]✓[/green]", f"User defaults: {user_cfg}")
+        _row("[green]✓[/green]", "ok", f"User defaults: {user_cfg}", f"User defaults: {user_cfg}")
     else:
-        tbl.add_row("[dim]i[/dim]", f"User defaults: {user_cfg} [dim](none — defaults used)[/dim]")
+        _row(
+            "[dim]i[/dim]",
+            "info",
+            f"User defaults: {user_cfg} [dim](none — defaults used)[/dim]",
+            f"User defaults: {user_cfg} (none — defaults used)",
+        )
 
     # Output dir (settings file location — informational)
-    tbl.add_row("[dim]i[/dim]", f"Settings: {settings_path()}")
-    tbl.add_row("[dim]i[/dim]", f"Base dir: {_base_dir()}")
+    _row("[dim]i[/dim]", "info", f"Settings: {settings_path()}", f"Settings: {settings_path()}")
+    _row("[dim]i[/dim]", "info", f"Base dir: {_base_dir()}", f"Base dir: {_base_dir()}")
+
+    if _JSON_LOG_MODE:
+        # JSON mode: line-per-object output so a downstream consumer
+        # doesn't have to parse Rich markup/ANSI. Each check is one
+        # record; the final record carries the overall verdict.
+        import json as _json
+
+        print(_json.dumps({"doctor": "begin"}, ensure_ascii=False))
+        for status, label in checks:
+            print(
+                _json.dumps(
+                    {"doctor": "check", "status": status, "check": label}, ensure_ascii=False
+                )
+            )
+        print(_json.dumps({"doctor": "end", "ok": all_critical_ok}, ensure_ascii=False))
+        return all_critical_ok
 
     console.print("\n[bold cyan]stream2video doctor[/bold cyan]\n")
     console.print(tbl)
@@ -665,6 +716,23 @@ def main(
     # pair exists for embedding hosts that want to poll it (the signal
     # handler keeps it alive via closure even though we don't keep a name).
     _, cancel_cb = _make_sigint_cancel()
+    # When a host calls ``main()`` twice in the same process, the second
+    # invocation would otherwise read *our own* handler back via
+    # ``getsignal`` and then restore a stale cancel-event closure on exit.
+    # Marking the installed handler's owner lets the ``finally`` block
+    # detect that case and restore ``SIG_DFL`` instead, which is the only
+    # well-defined "previous" state a bare script had before the CLI ran.
+    # Detect by identity: our helpers install a closure literally named
+    # ``_handler`` in ``cli_helpers`` — module-qualified so a coincidental
+    # same-named function elsewhere isn't misclassified.
+    _ours = getattr(prev_handler, "__module__", "") == "stream2video.cli_helpers" and getattr(
+        prev_handler, "__name__", ""
+    ) == "_handler"
+    if _ours:
+        # A previous in-process main() call never restored. Treat the
+        # pre-CLI state as SIG_DFL rather than restoring our own stale
+        # closure (which would keep the old cancel event alive forever).
+        prev_handler = signal.SIG_DFL
 
     fh = None
     try:
@@ -1047,8 +1115,32 @@ def main(
                     # of restarting from t=0. Without this the CLI
                     # silently discarded any resume state the GUI had
                     # written for the same source/output_dir pair (see
-                    # P1.8 in the fix plan).
-                    resume_cache_path = output_dir / f"{video_path.stem}_silence_cache.json.resume"
+                    # P1.8 in the fix plan). The filename embeds a hash
+                    # of the resolved source path so two videos that
+                    # share a stem but live in different directories
+                    # don't share one resume file; threshold/margin
+                    # mismatches are still caught by the in-file config
+                    # check in silence.pipeline.
+                    import hashlib as _hashlib
+
+                    _stem = video_path.stem
+                    _path_key = _hashlib.sha256(
+                        str(video_path.resolve()).encode("utf-8", "replace")
+                    ).hexdigest()[:8]
+                    resume_cache_path = (
+                        output_dir / f"{_stem}_{_path_key}_silence_cache.json.resume"
+                    )
+                    # Migrate a legacy (path-unkeyed) resume file written
+                    # by previous versions so a user resuming after an
+                    # upgrade doesn't lose their checkpoint.
+                    _legacy_resume = output_dir / f"{_stem}_silence_cache.json.resume"
+                    if _legacy_resume.exists() and not resume_cache_path.exists():
+                        try:
+                            _legacy_resume.replace(resume_cache_path)
+                        except OSError:
+                            # Fall back to the legacy path so progress
+                            # isn't lost even when the rename can't run.
+                            resume_cache_path = _legacy_resume
                     # ``--force`` invalidates the resume cache the same
                     # way it invalidates the final cache, so a forced
                     # re-detection doesn't pick up segments from a
@@ -1296,6 +1388,10 @@ def main(
         # restored just like any other handler: skipping them would leave
         # our temporary ``_handler`` installed, so a host that had SIGINT
         # ignored would see it point at a stale cancel event afterwards.
+        # ``prev_handler`` was already de-own'd above when it pointed at
+        # our own handler from a previous in-process run — restoring that
+        # closure would keep the old cancel event alive forever, and the
+        # handler would trip over a disposed context on the next SIGINT.
         restore_to: Any = signal.SIG_DFL if prev_handler is None else prev_handler
         if restore_to is not None:
             try:

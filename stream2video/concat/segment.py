@@ -96,11 +96,19 @@ def _run_segment_concat(
             # Resume: skip already encoded segments. Require both a
             # minimum size AND a successful ffprobe read so a crash
             # artifact (missing moov atom) doesn't get reused and
-            # corrupt the final concat in the middle.
+            # corrupt the final concat in the middle. When the source
+            # has audio, also probe the audio stream — a segment killed
+            # between the moov header write and the AAC body pass can
+            # validate as video-but-not-audio and would otherwise inject
+            # a broken track into the final concat (mirrors the audio
+            # check cut_encode.py already does for `_cut_*.mp4`).
             if (
                 seg_path.exists()
                 and seg_path.stat().st_size >= min_part_bytes
                 and _c._ffprobe_is_valid_mp4(seg_path)
+                and (
+                    not source_has_audio or _c._ffprobe_is_valid_media(seg_path, stream_type="a")
+                )
             ):
                 skipped += 1
                 encoded_keep += dur

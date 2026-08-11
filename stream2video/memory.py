@@ -198,7 +198,6 @@ class MemoryMonitor:
                     soft_mb = self.memory_limit_mb * self.soft_threshold_frac
                     hard_mb = self.memory_limit_mb * self.hard_threshold_frac
                     if rss >= hard_mb and not self.hard_exceeded:
-                        self.hard_exceeded = True
                         msg = (
                             f"{self.label} RSS={rss:.0f}MB >= hard limit "
                             f"{hard_mb:.0f}MB ({self.hard_threshold_frac * 100:.0f}% of "
@@ -210,14 +209,27 @@ class MemoryMonitor:
                                 self.on_warning(msg)
                             except Exception:
                                 logger.debug("on_warning raised", exc_info=True)
+                        # Set the flag only *after* attempting the cancel so
+                        # a cancel_callback that never ran doesn't leave the
+                        # pipeline thinking the memory kill already armed
+                        # (which would misreport a normal failure as OOM).
+                        cancel_attempted = False
                         if self.cancel_callback is not None:
                             try:
                                 # cancel_callback returns True when the
                                 # cancel took effect; the pipeline's
                                 # own wait loop will reap the process.
                                 self.cancel_callback()
+                                cancel_attempted = True
                             except Exception:
                                 logger.debug("cancel_callback raised", exc_info=True)
+                        else:
+                            # No callback registered — the flag still
+                            # reflects "we saw the limit", even if
+                            # there's nothing to cancel.
+                            cancel_attempted = True
+                        if cancel_attempted:
+                            self.hard_exceeded = True
                         return
                     if rss >= soft_mb and not warned_soft:
                         warned_soft = True

@@ -147,6 +147,14 @@ class EncoderTester:
                     self._running = False
                 # Defer the button restoration to the Tk main loop so
                 # all widget writes happen from the same thread (P1.10).
-                self._cb.schedule_after(0, lambda: self._cb.set_test_button_state(running=False))
+                # If the GUI is being torn down right now (scheduler
+                # raises), don't crash the daemon thread on top of that —
+                # the button state is moot when its window is gone.
+                try:
+                    self._cb.schedule_after(
+                        0, lambda: self._cb.set_test_button_state(running=False)
+                    )
+                except Exception:
+                    logger.debug("schedule_after raised during shutdown", exc_info=True)
 
         threading.Thread(target=_run, daemon=True).start()

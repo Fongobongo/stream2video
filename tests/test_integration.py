@@ -1231,9 +1231,20 @@ class TestSegmentResumeSkipCrashArtifact:
             # First segment is corrupt (crash artifact), second is valid.
             return Path(path).name != "seg_000000.mp4"
 
+        # The resume check now also probes the audio stream for sources
+        # with audio (mirrors cut_encode.py). Return True so the extra
+        # probe doesn't re-encode "valid" segments; the test's intent is
+        # to exercise the video-stream gate, not ffmpeg detail probing.
+        def fake_ffprobe_any_stream(path, stream_type="v"):
+            return fake_ffprobe(path)
+
         with (
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
             patch("stream2video.concat._ffprobe_is_valid_mp4", side_effect=fake_ffprobe),
+            patch(
+                "stream2video.concat._ffprobe_is_valid_media",
+                side_effect=fake_ffprobe_any_stream,
+            ),
             patch("stream2video.concat._run_final_concat"),
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
@@ -1284,6 +1295,9 @@ class TestSegmentResumeSkipCrashArtifact:
         with (
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
             patch("stream2video.concat._ffprobe_is_valid_mp4", return_value=True),
+            # Resume check also probes the audio stream — stub it so
+            # valid-video segments still count as fully valid.
+            patch("stream2video.concat._ffprobe_is_valid_media", return_value=True),
             patch("stream2video.concat._run_final_concat"),
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):

@@ -79,7 +79,10 @@ def parse_slider_entry_value(text: str, min_v: float, max_v: float) -> float | N
     return round(val, SLIDER_VALUE_PRECISION)
 
 
-def sync_slider_entries(entries: dict[str, str]) -> dict[str, float]:
+def sync_slider_entries(
+    entries: dict[str, str],
+    bounds: dict[str, tuple[float, float]] | None = None,
+) -> dict[str, float]:
     """Parse the GUI's slider entry text into a config update.
 
     ``entries`` maps each key in :data:`SLIDER_KEYS` to the entry's
@@ -89,12 +92,15 @@ def sync_slider_entries(entries: dict[str, str]) -> dict[str, float]:
     for those (mirrors the original ``except ValueError: pass``
     semantics).
 
-    Pure: no widget reads, no I/O, no clamp (the GUI's
-    ``_sync_slider_entries`` only rounds, never clamps — the slider is
-    the source of truth for the bounds; the entry text is the user's
-    free-form input, accepted as-is if numeric). The clamp lives in
-    :func:`parse_slider_entry_value` which the explicit confirm-on-
-    Return / FocusOut handler uses.
+    ``bounds`` (optional): per-key ``(min_v, max_v)`` the value is
+    clamped to before rounding. The GUI passes the sliders' real
+    ranges so a value typed but never confirmed (e.g. the user clicks
+    "Start" before FocusOut fires) still lands inside the valid range
+    instead of leaking a raw ``-100`` threshold into the pipeline
+    config. When omitted, legacy no-clamp behaviour is preserved for
+    callers that only sync already-confirmed entries.
+
+    Pure: no widget reads, no I/O.
     """
     result: dict[str, float] = {}
     for key, text in entries.items():
@@ -102,5 +108,8 @@ def sync_slider_entries(entries: dict[str, str]) -> dict[str, float]:
             val = float(text.replace(",", "."))
         except (ValueError, AttributeError):
             continue
+        if bounds is not None and key in bounds:
+            min_v, max_v = bounds[key]
+            val = max(min_v, min(max_v, val))
         result[key] = round(val, SLIDER_VALUE_PRECISION)
     return result

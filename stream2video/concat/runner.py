@@ -115,7 +115,7 @@ def _run_ffmpeg(
             os.environ.get("PATH", "")[:200],
         )
         raise FFmpegError(
-            f"ffmpeg not found in PATH "
+            f"executable not found in PATH "
             f"(attempted: {cmd[0]!r}, exists={Path(cmd[0]).is_file()}, "
             f"winerror={getattr(e, 'winerror', '?')}, "
             f"filename={getattr(e, 'filename', '?')!r}, "
@@ -437,7 +437,7 @@ def _run_subprocess_cmd(
         )
     except FileNotFoundError as e:
         raise FFmpegError(
-            f"ffmpeg not found in PATH "
+            f"executable not found in PATH "
             f"(attempted: {cmd[0]!r}, winerror={getattr(e, 'winerror', '?')}, "
             f"filename={getattr(e, 'filename', '?')!r})"
         ) from e
@@ -496,6 +496,11 @@ def _wait_with_cancel(
         except subprocess.TimeoutExpired:
             if cancel_callback and cancel_callback():
                 process.kill()
-                process.wait()  # reap — same WinError-32 rationale as in
-                # the inline stall/cancel paths above.
+                try:
+                    process.wait(timeout=30)  # reap — same WinError-32
+                    # rationale as the inline stall/cancel paths above;
+                    # kill() is async on Windows so a bare wait() could
+                    # block forever on a wedged child.
+                except subprocess.TimeoutExpired:
+                    pass  # already dead or un-killable; nothing more to reap
                 raise CancelledError(f"{label} cancelled") from None

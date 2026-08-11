@@ -156,11 +156,19 @@ def _run_batch_concat(
             # Resume: skip already encoded chunks. Require both a minimum
             # size AND a successful ffprobe read so a crash artifact
             # (missing moov atom) doesn't get reused and produce a
-            # corrupt chunk in the middle of the file.
+            # corrupt chunk in the middle of the file. When the source
+            # has audio, probe the audio stream too — a chunk killed
+            # after the moov write but before the AAC body validates as
+            # video-but-not-audio and would inject a broken track into
+            # the final concat (mirrors the cut_encode.py audio check).
             if (
                 chunk_path.exists()
                 and chunk_path.stat().st_size >= min_part_bytes
                 and _c._ffprobe_is_valid_mp4(chunk_path)
+                and (
+                    not source_has_audio
+                    or _c._ffprobe_is_valid_media(chunk_path, stream_type="a")
+                )
                 and _c._ffprobe_duration_ok(chunk_path, sum(e - s for s, e in chunk))
             ):
                 skipped += 1
