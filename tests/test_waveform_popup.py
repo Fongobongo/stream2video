@@ -1,28 +1,36 @@
 """Tests for stream2video.waveform_popup.LiveSegmentsStore.
 
-The store replaces the GUI's inline ``self._live_segments`` dict +
-``self._live_segments_lock`` pair with a tiny unit-testable class.
-The contract pinned here:
+The store replaced the GUI's inline ``self._live_segments`` dict +
+``self._live_segments_lock`` pair back in Этап 10 with a tiny
+unit-testable class. In v0.3+ it was *path-keyed*; that let a popup
+opened on the typed input path miss every live publish from a
+URL-pipeline run (which is keyed by the *resolved download path*).
+The store is now keyed by a monotonically-increasing **run id**: each
+pipeline Start bumps the id, the popup polls "the current run"
+without naming any path.
+
+Contract pinned here:
 
   * Producer (pipeline worker) calls :meth:`set` from its stderr drain
     thread; consumer (waveform popup poller) calls
     :meth:`take_snapshot` from the Tk main loop — they exchange data
     across threads; a shallow copy keeps each side stable.
-  * ``take_snapshot`` returns ``None`` for a never-published path and
-    ``[]`` (a real empty list) once the producer has begun — the
-    renderer distinguishes the two (" Nothing yet" vs "0 silences").
-  * ``pop`` removes the entry so a re-open of the popup doesn't see a
-    stale previous-run view; returns ``None`` if never set.
-  * ``is_known`` returns True iff the producer has published at least
-    once for the path.
-  * The lock is held around the dict op, NOT around the caller's
+  * ``take_snapshot`` returns ``None`` when nothing has been
+    published yet and ``[]`` (a real empty list) once a run has
+    begun — the renderer distinguishes the two ("run detect first"
+    vs "0 silences so far").
+  * ``clear`` drops the current run's data so a re-open of the popup
+    doesn't see a stale previous-run view.
+  * :meth:`set` with a stale ``run_id`` is refused — a slow worker
+    finishing after the user pressed Start again cannot clobber the
+    newer run's state.
+  * The lock is held around the slot op, NOT around the caller's
     follow-up work — concurrent set + snapshot don't crash.
 """
 
 from __future__ import annotations
 
 import threading
-from pathlib import Path
 
 from stream2video.silence import SilenceSegment
 from stream2video.waveform_popup import LiveSegmentsStore
@@ -37,19 +45,20 @@ def _seg(start: float, end: float) -> SilenceSegment:
 
 
 class TestLiveSegmentsStoreSetTake:
-    def test_take_returns_none_for_never_set_path(self) -> None:
+    def test_take_returns_none_before_any_run(self) -> None:
         store = LiveSegmentsStore()
-        assert store.take_snapshot(Path("never")) is None
+        assert store.take_snapshot() is None
 
-    def test_take_returns_empty_list_once_started_detect(self) -> None:
-        # Producer has sent an empty list (detection started, zero
-        # silences found so far). The renderer must NOT confuse this
-        # with "never started": an overlay with zero silences is
-        # different from "run detect first."
+    def test_take_returns_empty_list_once_run_started(self) -> None:
+        # Producer has sent an empty list for the current run
+        # (detection started, zero silences found so far). The
+        # renderer must NOT confuse this with "never started": an
+        # overlay with zero silences is different from "run detect
+        # first."
         store = LiveSegmentsStore()
-        path = Path("video.mp4")
-        store.set(path, [])
-        snapshot = store.take_snapshot(path)
+        run_id = store.begin_run()
+        store.set(run_id, [])
+        snapshot = store.take_snapshot()
         assert snapshot is not None
         assert snapshot == []
 
@@ -59,10 +68,10 @@ class TestLiveSegmentsStoreSetTake:
         # snapshot we return must be a shallow copy so a later
         # mutation doesn't surface to the consumer.
         store = LiveSegmentsStore()
-        path = Path("video.mp4")
+        run_id = store.begin_run()
         original = [_seg(0.0, 5.0), _seg(10.0, 15.0)]
-        store.set(path, original)
-        snapshot = store.take_snapshot(path)
+        store.set(run_id, original)
+        snapshot = store.take_snapshot()
         assert snapshot is not None and len(snapshot) == 2
         # Same start/end as the originals.
         assert snapshot[0].start == 0.0 and snapshot[0].end == 5.0
@@ -71,66 +80,73 @@ class TestLiveSegmentsStoreSetTake:
         original.append(_seg(20.0, 25.0))
         assert len(snapshot) == 2  # still the original two segments
 
-    def test_set_replaces_previous_segments(self) -> None:
+    def test_set_replaces_previous_segments_same_run(self) -> None:
         # Each ``on_live_segment`` callback sends the FULL latest list
         # (not an incremental append), so repeated sets should
         # overwrite — not accumulate.
         store = LiveSegmentsStore()
-        path = Path("v")
-        store.set(path, [_seg(0, 5)])
-        store.set(path, [_seg(0, 5), _seg(10, 15), _seg(20, 25)])
-        snap = store.take_snapshot(path)
+        run_id = store.begin_run()
+        store.set(run_id, [_seg(0, 5)])
+        store.set(run_id, [_seg(0, 5), _seg(10, 15), _seg(20, 25)])
+        snap = store.take_snapshot()
         assert snap is not None
         assert len(snap) == 3
 
 
-class TestLiveSegmentsStorePop:
-    def test_pop_returns_none_for_never_set_path(self) -> None:
+class TestLiveSegmentsStoreClear:
+    def test_clear_before_publish_leaves_none(self) -> None:
         store = LiveSegmentsStore()
-        assert store.pop(Path("never")) is None
+        store.clear()
+        assert store.take_snapshot() is None
 
-    def test_pop_returns_segments_then_removes_entry(self) -> None:
-        # ``SilenceSegment`` doesn't implement ``__eq__`` (it's a plain
-        # class with start / end / duration fields), so compare by
-        # those fields instead of with ``==``.
+    def test_clear_after_publish_resets_to_none(self) -> None:
         store = LiveSegmentsStore()
-        path = Path("v")
-        store.set(path, [_seg(0, 5)])
-        popped = store.pop(path)
-        assert popped is not None and len(popped) == 1
-        assert popped[0].start == 0.0 and popped[0].end == 5.0
-        # Subsequent snapshots return None — the entry is gone.
-        assert store.take_snapshot(path) is None
+        run_id = store.begin_run()
+        store.set(run_id, [_seg(0, 5)])
+        store.clear()
+        assert store.take_snapshot() is None
 
-    def test_pop_after_pop_returns_none(self) -> None:
-        # Idempotent on the same path; second pop is a no-op.
+    def test_clear_is_idempotent(self) -> None:
         store = LiveSegmentsStore()
-        path = Path("v")
-        store.set(path, [_seg(0, 5)])
-        store.pop(path)
-        assert store.pop(path) is None
+        store.clear()
+        store.clear()
+        assert store.take_snapshot() is None
 
 
-class TestLiveSegmentsStoreEviction:
-    def test_oldest_key_evicted_beyond_cap(self) -> None:
-        # URL-pipeline runs publish under a new resolved download path
-        # every run; without a cap the store grows one entry per URL
-        # processed with the popup open.
-        store = LiveSegmentsStore(max_keys=3)
-        for i in range(5):
-            store.set(Path(f"run_{i}.mp4"), [_seg(i, i + 1)])
-        # Oldest two (run_0, run_1) are gone.
-        assert store.take_snapshot(Path("run_0.mp4")) is None
-        assert store.take_snapshot(Path("run_1.mp4")) is None
-        assert store.take_snapshot(Path("run_2.mp4")) is not None
-        assert store.take_snapshot(Path("run_4.mp4")) is not None
+class TestLiveSegmentsStoreRunIds:
+    def test_begin_run_increments(self) -> None:
+        store = LiveSegmentsStore()
+        assert store.begin_run() == 1
+        assert store.begin_run() == 2
+        assert store.begin_run() == 3
 
-    def test_re_set_does_not_eject_existing_key_when_under_cap(self) -> None:
-        store = LiveSegmentsStore(max_keys=2)
-        p = Path("same.mp4")
-        store.set(p, [_seg(0, 1)])
-        store.set(p, [_seg(0, 2)])
-        assert len(store.take_snapshot(p) or []) == 1
+    def test_set_with_stale_run_id_refused(self) -> None:
+        # A slow worker finishing after the user pressed Start again
+        # must not clobber the newer run's state.
+        store = LiveSegmentsStore()
+        old_id = store.begin_run()
+        store.set(old_id, [_seg(0, 5)])
+        # User pressed Start again — run 2 begins and clears the slot.
+        new_id = store.begin_run()
+        assert new_id == old_id + 1
+        assert store.take_snapshot() is None
+        # The old worker tries to publish late: refused.
+        assert store.set(old_id, [_seg(1, 2)]) is False
+        # The new run's set works.
+        assert store.set(new_id, [_seg(3, 4)]) is True
+        snap = store.take_snapshot()
+        assert snap is not None and snap[0].start == 3.0
+
+    def test_set_with_future_run_id_refused(self) -> None:
+        # Defensive: a run id greater than the current one can't
+        # legitimately exist (the worker only ever uses the id it was
+        # given by begin_run).
+        store = LiveSegmentsStore()
+        run_id = store.begin_run()
+        store.set(run_id, [_seg(0, 5)])
+        assert store.set(run_id + 1, [_seg(9, 10)]) is False
+        snap = store.take_snapshot()
+        assert snap is not None and snap[0].start == 0.0
 
 
 class TestLiveSegmentsStoreConcurrency:
@@ -138,10 +154,10 @@ class TestLiveSegmentsStoreConcurrency:
         # Smoke: hammer the store from two threads (one producer, one
         # consumer) for a short window. Past implementations sometimes
         # raised ``KeyError: [...]`` or skipped the lock around the
-        # pop+copy dance; the test pins that no concurrent access
+        # set+copy dance; the test pins that no concurrent access
         # raises.
         store = LiveSegmentsStore()
-        path = Path("stress.mp4")
+        run_id = store.begin_run()
         stop = threading.Event()
         errors: list[BaseException] = []
 
@@ -149,7 +165,7 @@ class TestLiveSegmentsStoreConcurrency:
             i = 0
             while not stop.is_set():
                 try:
-                    store.set(path, [_seg(j, j + 1) for j in range(i % 50)])
+                    store.set(run_id, [_seg(j, j + 1) for j in range(i % 50)])
                     i += 1
                 except BaseException as e:
                     errors.append(e)
@@ -158,15 +174,15 @@ class TestLiveSegmentsStoreConcurrency:
         def _reader() -> None:
             while not stop.is_set():
                 try:
-                    store.take_snapshot(path)
+                    store.take_snapshot()
                 except BaseException as e:
                     errors.append(e)
                     return
 
-        def _popper() -> None:
+        def _clearer() -> None:
             while not stop.is_set():
                 try:
-                    store.pop(path)
+                    store.clear()
                 except BaseException as e:
                     errors.append(e)
                     return
@@ -174,7 +190,7 @@ class TestLiveSegmentsStoreConcurrency:
         threads = [
             threading.Thread(target=_writer, daemon=True),
             threading.Thread(target=_reader, daemon=True),
-            threading.Thread(target=_popper, daemon=True),
+            threading.Thread(target=_clearer, daemon=True),
         ]
         for t in threads:
             t.start()

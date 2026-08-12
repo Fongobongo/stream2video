@@ -194,15 +194,12 @@ def _parse_progress_line(line: str) -> DownloadProgress | None:
     if not line.startswith(_PROGRESS_PREFIX):
         return None
     parts = line[len(_PROGRESS_PREFIX) :].split("|")
-    # Old-format line (pre-progress.* template, 4 fields) — fall back to
-    # the historical layout ``downloaded|total_estimate|speed|eta`` so a
-    # partial download from an earlier yt-dlp version still parses. The
-    # first run after upgrade emits the new 5-field format and this
-    # branch stops firing. Previously this branch was dead (the condition
-    # ``if len(parts) < 5 and len(parts) < 4`` was equivalent to ``< 4``),
-    # and even if it fired the field mapping was wrong
-    # (total_estimate←speed, speed←eta). See P1 audit v0.3 §5.1.
-    if len(parts) < 4:
+    # The template we pass to yt-dlp always emits 5 fields
+    # (``%(progress.*)s`` was available long before our minimum supported
+    # yt-dlp version; the 4-field "legacy" layout was a pre-template
+    # experiment that no supported yt-dlp emits, and was removed here
+    # after the audit showed it was dead code in production paths).
+    if len(parts) != 5:
         return None
 
     def _f(v: str) -> float | None:
@@ -221,18 +218,10 @@ def _parse_progress_line(line: str) -> DownloadProgress | None:
         return f
 
     downloaded = _f(parts[0])
-    if len(parts) == 4:
-        # Legacy 4-field line: downloaded|total_estimate|speed|eta.
-        total = None
-        total_estimate = _f(parts[1])
-        speed = _f(parts[2])
-        eta = _f(parts[3])
-    else:
-        # Current 5-field line: downloaded|total|total_estimate|speed|eta.
-        total = _f(parts[1])
-        total_estimate = _f(parts[2])
-        speed = _f(parts[3])
-        eta = _f(parts[4])
+    total = _f(parts[1])
+    total_estimate = _f(parts[2])
+    speed = _f(parts[3])
+    eta = _f(parts[4])
 
     # Prefer the exact total; fall back to yt-dlp's estimate when the
     # exact value isn't known (live streams, chunked transfers, etc).

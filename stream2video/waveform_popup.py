@@ -2,117 +2,112 @@
 extracted from ``gui.py`` (Этап 10 incremental refactor).
 
 The pipeline worker's ``on_live_segment`` callback receives segments as
-``detect_silence`` discovers them and stores them under the resolved
-video path. The waveform popup's poller reads them back every second
-so the overlay tracks the running detection. They communicate through a
-plain ``dict[Path, list[SilenceSegment]]`` guarded by a single
-``threading.Lock`` — the lock matters because *the producer (the
-pipeline's stderr drain thread) and the consumer (the popup's poller
-thread) are different.* Without it the consumer could iterate the list
-while the producer swaps it.
+``detect_silence`` discovers them and publishes them to whoever is
+listening; the waveform popup's poller reads them back every second so
+the overlay tracks the running detection.
 
-Extracted here as :class:`LiveSegmentsStore` so:
-
-  * The two consumers (pipeline worker + waveform popup) share a tiny,
-    unit-testable object instead of carrying the GUI's ``self.*`` state
-    around.
-  * The semantics (shallow-copy on read, pop-or-no-op semantics, lock
-    held inside the read / pop, owner-by-path keying) are pinned by
-    tests without needing the GUI's Tk event loop.
-  * The GUI shrinks — ``__init__``'s ``self._live_segments = {}`` /
-    ``self._live_segments_lock = threading.Lock()`` pair becomes one
-    owned instance, and the 4 inline lock-and-dict patterns
-    (``_take_live_snapshot``, the worker's ``_on_live_segment`` /
-    ``pop``, the waveform popup's ``apply_view`` fallback) all delegate
-    here.
-
-The class is intentionally small: a Python ``dict`` guarded by a
-``Lock`` covers the use cases; a fancier concurrent data structure
-(queue.Queue, multiprocessing.Manager) would either over-serialize or
-add IPC overhead without buying anything for a 2-thread producer-
-consumer relationship under the GIL.
+Historically the store was keyed by *resolved video path* — but the
+popup is opened against whatever path the user typed into the input
+entry, while the pipeline worker publishes under the *resolved
+download path* (``<id>-<epoch>.mp4`` after ``apply_per_video_dir``).
+The two keys never matched for URL-runs, so the live overlay stayed
+frozen. The store is therefore keyed by **run id** instead: a
+monotonically-increasing counter that the pipeline worker bumps at the
+start of every run. The popup subscribes to "the current run" via
+:meth:`LiveSegmentsStore.take_snapshot` without naming any path —
+URL and local-file runs behave identically, and a second Start can't
+collide with a stale first-run snapshot (the new run_id invalidates
+the old entry).
 """
 
 from __future__ import annotations
 
 import threading
-from pathlib import Path
 
 from stream2video.silence import SilenceSegment
 
-# Cap on live-segment entries kept between runs. A URL-pipeline run
-# publishes under the *resolved download path* — a new key every time —
-# so an unbounded dict grows by one entry (~a few KB of SilenceSegment
-# lists) per URL processed with a popup open. 32 generations is far
-# beyond any realistic session (popup key-miss only matters when the
-# popup stays open across runs); evicting the oldest entry keeps the
-# store at a few hundred KB worst-case.
-_MAX_LIVE_KEYS = 32
-
 
 class LiveSegmentsStore:
-    """Thread-safe ``Path → list[SilenceSegment]`` store.
+    """Single-slot, run-keyed, thread-safe silence-segment store.
 
-    The lock is held only around the collect / put / pop — never around
-    the actual manager callbacks the pipeline invokes. The lock duration
-    is short (one dict lookup + a shallow copy on read, a list copy on
-    put); the only memory cost is the snapshot copy the consumer gets
-    back, which is fine because the consumer (the waveform renderer)
-    needs a stable list anyway — iterating while the producer appends
-    would otherwise race.
+    Instead of mapping ``Path → segments``, the store holds ONE entry
+    per pipeline run, tagged with a monotonically increasing
+    ``run_id``. The worker calls :meth:`begin_run` at the start of
+    every pipeline; any previous run's segments are discarded on that
+    call. The waveform popup polls :meth:`take_snapshot` — no path
+    argument — so a popup opened on a *typed* input path still picks up
+    segments published under the *resolved* download path of a URL-run
+    (the historical path-keyed dict could never match those two).
 
-    Insertion order (``dict`` preserves it) is used as a poor-man's LRU:
-    the oldest keys are evicted past ``_MAX_LIVE_KEYS``.
+    The lock is held only around the read / write — never around the
+    actual pipeline callbacks. The lock duration is tiny (one
+    attribute swap + a list copy on the read side); the copy the
+    consumer gets back is stable because the producer only ever calls
+    :meth:`set` (which replaces the list), never mutates it in place.
     """
 
-    def __init__(self, max_keys: int = _MAX_LIVE_KEYS) -> None:
-        self._segments: dict[Path, list[SilenceSegment]] = {}
+    def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._max_keys = max_keys
+        # ``_current`` is None when no run has published anything yet.
+        self._current: tuple[int, list[SilenceSegment]] | None = None
+        self._next_run_id = 0
 
-    def set(self, video_path: Path, segments: list[SilenceSegment]) -> None:
-        """Replace the segment list for ``video_path``.
+    def begin_run(self) -> int:
+        """Allocate the next run id and clear any previous run's data.
 
-        Called from the pipeline worker's stderr drain thread when a
-        new ``silence_*`` line arrives; the caller is responsible for
-        passing the *full* latest list (not an incremental append) —
-        the controller publishes the cumulative set as detect runs.
+        Called by the pipeline worker exactly once per ``Start``
+        button press (before the controller starts publishing
+        segments). Returns the new ``run_id`` so the worker can pass
+        it to subsequent :meth:`set` calls — a stale worker finishing
+        after a newer run has begun is then unable to clobber the
+        newer run's data with out-of-date segments.
         """
         with self._lock:
-            # Defensive copy: the controller might keep mutating its
-            # own list; ours must be stable until the next set / pop.
-            self._segments[video_path] = list(segments)
-            # Unbounded growth guard: drop the oldest keys past the cap.
-            while len(self._segments) > self._max_keys:
-                oldest = next(iter(self._segments))
-                del self._segments[oldest]
+            self._next_run_id += 1
+            self._current = None
+            return self._next_run_id
 
-    def take_snapshot(self, video_path: Path) -> list[SilenceSegment] | None:
-        """Return a shallow copy of the current segments for
-        ``video_path``, or ``None`` if the producer has never published
-        state for it.
+    def set(self, run_id: int, segments: list[SilenceSegment]) -> bool:
+        """Publish ``segments`` as the current state of run ``run_id``.
 
-        ``None`` is distinct from ``[]``: ``[]`` means "the producer has
-        started detection and detected nothing yet", whereas ``None``
-        means "the producer hasn't started" — the waveform popup uses
-        the difference to decide whether to show "No silence cache —
-        run detect" or "0 silences loaded".
-
-        The copy happens inside the lock — a future in-place mutation
-        (``.extend(...)``) on the producer side would otherwise race
-        the iteration on the consumer side.
+        Returns ``True`` when the store accepted the publish —
+        i.e. ``run_id`` is still the latest run. A stale ``run_id``
+        (a previous pipeline finishing after the user pressed Start
+        again) is dropped silently; the popup polls *the* current run
+        without naming an id, so showing the old run's data would just
+        be confusing.
         """
         with self._lock:
-            segs = self._segments.get(video_path)
-            return list(segs) if segs is not None else None
+            if run_id != self._next_run_id:
+                return False
+            # Defensive copy: the controller may keep mutating its own
+            # list; ours must be stable until the next set / clear.
+            self._current = (run_id, list(segments))
+            return True
 
-    def pop(self, video_path: Path) -> list[SilenceSegment] | None:
-        """Like :meth:`take_snapshot` but also removes the entry.
+    def take_snapshot(self) -> list[SilenceSegment] | None:
+        """Return the current run's segments, or None if none published.
 
-        Called by the pipeline worker after a successful run so a
-        re-open of the waveform popup for the same path doesn't show
-        the previous run's stale mid-detect state. Returns ``None`` if
-        no state has ever been published for the path.
+        ``None`` is distinct from ``[]``: ``[]`` means "a run is in
+        flight and has detected nothing yet", whereas ``None`` means
+        "no run has published anything" — the popup uses the
+        difference to decide between "0 silences so far" and "run the
+        pipeline to detect".
         """
         with self._lock:
-            return self._segments.pop(video_path, None)
+            if self._current is None:
+                return None
+            return list(self._current[1])
+
+    def clear(self) -> None:
+        """Drop the current run's data without starting a new run.
+
+        Called by the pipeline worker's ``finally``: the run that just
+        finished (success / cancel / error) shouldn't leave its
+        half-populated segments to resurface the next time the user
+        opens the waveform popup on an unrelated run. The next
+        :meth:`begin_run` would clear it anyway, but doing it here
+        keeps the store small between runs.
+        """
+        with self._lock:
+            self._current = None

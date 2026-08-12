@@ -199,7 +199,7 @@ class WaveformRenderMixin:
                 margin = float(config["margin"])
                 self._waveform_margin = margin
                 self._waveform_output_dir = out_dir
-                live_segs = self._take_live_snapshot(in_path)
+                live_segs = self._take_live_snapshot()
                 cached_segs = load_silence_cache(in_path, out_dir, config)
                 raw_segments = live_segs if live_segs is not None else cached_segs
                 if raw_segments is None:
@@ -287,9 +287,15 @@ class WaveformRenderMixin:
 
         threading.Thread(target=_run, daemon=True).start()
 
-    def _take_live_snapshot(self, video_path: Path) -> list[SilenceSegment] | None:
-        """Thin forward to :meth:`LiveSegmentsStore.take_snapshot`."""
-        return self._live_segments_store.take_snapshot(video_path)
+    def _take_live_snapshot(self) -> list[SilenceSegment] | None:
+        """Poll the run-keyed store.
+
+        The popup polls "the current run" without naming a path: the
+        pipeline worker publishes under a ``run_id`` allocated at
+        Start, so a URL-run's resolved download path no longer needs
+        to match the input-entry path the popup was opened against.
+        """
+        return self._live_segments_store.take_snapshot()
 
     def _apply_view(self, segments: list[SilenceSegment] | None = None) -> None:
         """Render the waveform for the current view (view_start → view_end)
@@ -325,7 +331,7 @@ class WaveformRenderMixin:
         )
 
         if segments is None and self._waveform_video_path is not None:
-            raw = self._take_live_snapshot(self._waveform_video_path)
+            raw = self._take_live_snapshot()
             if raw is not None:
                 segments = apply_margin(raw, self._waveform_margin)
             elif self._waveform_last_segments:
@@ -468,7 +474,7 @@ class WaveformRenderMixin:
             # and a dead poller would freeze the overlay on whatever the
             # previous run concluded. The worker's own polls see the new
             # ``running`` state on the next tick.
-            raw = self._take_live_snapshot(in_path)
+            raw = self._take_live_snapshot()
             if raw is not None:
                 segments = apply_margin(raw, margin)
                 # Snapshot changed? Reflect it (a new run's detect is
@@ -526,7 +532,7 @@ class WaveformRenderMixin:
         # gets its own log/summary line.
         state["stopped_logged"] = False
 
-        raw = self._take_live_snapshot(in_path)
+        raw = self._take_live_snapshot()
         if raw is not None:
             segments = apply_margin(raw, margin)
             count_changed = len(segments) != state["last_count"]

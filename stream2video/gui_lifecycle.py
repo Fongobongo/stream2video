@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 from tkinter import messagebox
-from typing import Any
+from typing import Any, cast
 
 import customtkinter as ctk
 
@@ -313,8 +313,12 @@ class LifecycleMixin:
                 # parent=self: an unparented dialog can fall behind the
                 # main window — the user then clicks X again, re-enters
                 # _on_close and gets a second dialog, and it looks like
-                # the app "won't close". Mirrored from gui.py:215.
-                parent=self,
+                # the app "won't close". Mirrors gui.py's Uncaught-Exception
+                # dialog. The host (``Stream2VideoGUI``) is always a CTk at
+                # runtime; the cast only helps mypy see that (the mixin is
+                # deliberately not subclassing CTk so its runtime MRO stays
+                # flat).
+                parent=cast(ctk.CTk, self),
             )
             if not answer:
                 return

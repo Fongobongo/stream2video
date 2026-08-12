@@ -129,10 +129,19 @@ class PipelineGuiCallbacks(Protocol):
 
     def set_running(self, running: bool) -> None: ...
 
-    # Live-segments store the worker threads data into.
-    def set_live_segments(self, video_path: Path, segments: list[SilenceSegment]) -> None: ...
+    # Live-segments store the worker threads data into. Run-keyed
+    # (not path-keyed): the worker calls ``begin_live_segments_run``
+    # once at Start to get a fresh ``run_id``, publishes with
+    # ``set_live_segments(run_id, segments)``, and clears with
+    # ``pop_live_segments()``. The popup polls the "current run"
+    # through the same store, so a URL-run whose resolved download
+    # path differs from the typed input entry still surfaces its
+    # live overlay.
+    def begin_live_segments_run(self) -> int: ...
 
-    def pop_live_segments(self, video_path: Path) -> list[SilenceSegment] | None: ...
+    def set_live_segments(self, run_id: int, segments: list[SilenceSegment]) -> None: ...
+
+    def pop_live_segments(self) -> None: ...
 
     # ``ask``-policy encoder fallback — GUI shows a yes/no dialog from
     # the worker thread (dispatched through ``_tk_after`` in the adapter).
@@ -359,6 +368,11 @@ class PipelineWorker:
         # / the success cleanup read it after.
         video_path_ref: list[Path | None] = [None]
 
+        # New live-segments run. Bumps the store's run_id and clears any
+        # previous run's snapshot so a stale worker can't publish against
+        # it later. Called before any detect callback can fire.
+        live_run_id = self._gui.begin_live_segments_run()
+
         # Wrap the *whole* body (config build + validation + controller
         # construction + run) in the try/finally so a KeyError raised by a
         # corrupt settings.json shape in ``build_pipeline_config_from_snapshot``
@@ -391,7 +405,13 @@ class PipelineWorker:
 
             def _on_live_segment(seg_list: list[SilenceSegment]) -> None:
                 if video_path_ref[0] is not None:
-                    self._gui.set_live_segments(video_path_ref[0], list(seg_list))
+                    # Run-keyed store: publishes under the run id
+                    # allocated above, NOT under the resolved video
+                    # path — so a popup opened on the *typed* input
+                    # path still tracks a URL-run's detect progress
+                    # (the resolved download path never matched the
+                    # typed input path before).
+                    self._gui.set_live_segments(live_run_id, list(seg_list))
 
             def _on_output_resolved(out_dir: Path, vpath: Path, is_dl: bool) -> None:
                 video_path_ref[0] = vpath
@@ -483,13 +503,11 @@ class PipelineWorker:
             self._play_completion_sound("attention")
         finally:
             # Always drop the live-segments snapshot, even when a typed
-            # Pipeline*Error skipped the success path above. Stale
-            # entries would otherwise sit in the store until process
-            # exit and resurface as a half-populated overlay the next
-            # time the user opens the waveform popup on the same file.
-            if video_path_ref[0] is not None:
-                try:
-                    self._gui.pop_live_segments(video_path_ref[0])
-                except Exception:
-                    logger.debug("pop_live_segments failed", exc_info=True)
+            # Pipeline*Error skipped the success path above. Run-keyed
+            # (not path-keyed) so this clears *this* run even if the
+            # popup's poller is pointing at an unrelated input file.
+            try:
+                self._gui.pop_live_segments()
+            except Exception:
+                logger.debug("pop_live_segments failed", exc_info=True)
             self._gui.set_running(False)

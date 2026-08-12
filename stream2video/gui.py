@@ -615,11 +615,15 @@ class _PipelineGuiCallbacksAdapter:
     def set_running(self, running: bool) -> None:
         self._gui._tk_after(0, lambda: self._gui._set_running(running))
 
-    def set_live_segments(self, video_path: Path, segments: list[SilenceSegment]) -> None:
-        self._gui._live_segments_store.set(video_path, segments)
+    def set_live_segments(self, run_id: int, segments: list[SilenceSegment]) -> None:
+        self._gui._live_segments_store.set(run_id, segments)
 
-    def pop_live_segments(self, video_path: Path) -> list[SilenceSegment] | None:
-        return self._gui._live_segments_store.pop(video_path)
+    def pop_live_segments(self) -> None:
+        self._gui._live_segments_store.clear()
+
+    def begin_live_segments_run(self) -> int:
+        """Allocate the run_id the worker will publish live segments under."""
+        return self._gui._live_segments_store.begin_run()
 
 
 def main() -> None:

@@ -395,8 +395,9 @@ class _FakeGuiCallbacks:
         self.logs: list[str] = []
         self.status_calls: list[tuple[str, bool]] = []
         self.running_state_changes: list[bool] = []
-        self.live_segments_sets: list[tuple[Path, int]] = []
-        self.live_segments_pops: list[Path] = []
+        self.live_segments_sets: list[tuple[int, int]] = []
+        self.live_segments_runs: int = 0
+        self.live_segments_pops: int = 0
         self.recent_added: list[Path] = []
         self.encoder_labels: list[tuple[str, str]] = []
         self.failure_style_count = 0
@@ -443,12 +444,15 @@ class _FakeGuiCallbacks:
     def set_running(self, running: bool) -> None:
         self.running_state_changes.append(running)
 
-    def set_live_segments(self, video_path: Path, segments: list[Any]) -> None:
-        self.live_segments_sets.append((video_path, len(segments)))
+    def begin_live_segments_run(self) -> int:
+        self.live_segments_runs += 1
+        return self.live_segments_runs
 
-    def pop_live_segments(self, video_path: Path) -> list[Any] | None:
-        self.live_segments_pops.append(video_path)
-        return None
+    def set_live_segments(self, run_id: int, segments: list[Any]) -> None:
+        self.live_segments_sets.append((run_id, len(segments)))
+
+    def pop_live_segments(self) -> None:
+        self.live_segments_pops += 1
 
     def ask_fallback_consent(self) -> bool:
         # Tests: always refuse so the ``ask`` policy raises (we'd need a
@@ -502,9 +506,12 @@ class TestPipelineWorkerRun:
         assert callable(_FakePipelineController.last_instance.kwargs["on_output_resolved"])
         # Button state restored to "not running" in finally.
         assert gui.running_state_changes[-1] is False
-        # The fake controller never resolves a video path, so the worker
-        # must not pop Path('.') from the live-segment store.
-        assert gui.live_segments_pops == []
+        # The finally-block always clears the live store, even for a
+        # no-op controller run — with the path-keyed store we used to
+        # skip this when no video path was ever resolved.
+        assert gui.live_segments_pops == 1
+        # A run must have been begun before any controller callback fires.
+        assert gui.live_segments_runs == 1
 
     def test_pipeline_cancelled_sets_status_and_logs(self):
         # Cancellation: the user hit Cancel; the controller raised
