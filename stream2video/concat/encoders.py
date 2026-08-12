@@ -362,6 +362,15 @@ def check_encoder(name: str) -> bool:
                     "lavfi",
                     "-i",
                     "color=c=black:s=64x64:d=0.1",
+                    # Match the real pipeline's pixel format: lavfi `color`
+                    # produces RGB, and min-cut ffmpeg builds without the
+                    # auto-inserted format conversion would fail libx264
+                    # (yuv420p-only encoder) here even though the actual
+                    # encode commands (`vcodec_opts` add `-pix_fmt yuv420p`)
+                    # would succeed -- a false-negative that then raised
+                    # EncoderUnavailableError on a working ffmpeg.
+                    "-pix_fmt",
+                    "yuv420p",
                     "-c:v",
                     name,
                     "-frames:v",

@@ -40,6 +40,15 @@ from pathlib import Path
 
 from stream2video.silence import SilenceSegment
 
+# Cap on live-segment entries kept between runs. A URL-pipeline run
+# publishes under the *resolved download path* — a new key every time —
+# so an unbounded dict grows by one entry (~a few KB of SilenceSegment
+# lists) per URL processed with a popup open. 32 generations is far
+# beyond any realistic session (popup key-miss only matters when the
+# popup stays open across runs); evicting the oldest entry keeps the
+# store at a few hundred KB worst-case.
+_MAX_LIVE_KEYS = 32
+
 
 class LiveSegmentsStore:
     """Thread-safe ``Path → list[SilenceSegment]`` store.
@@ -51,11 +60,15 @@ class LiveSegmentsStore:
     back, which is fine because the consumer (the waveform renderer)
     needs a stable list anyway — iterating while the producer appends
     would otherwise race.
+
+    Insertion order (``dict`` preserves it) is used as a poor-man's LRU:
+    the oldest keys are evicted past ``_MAX_LIVE_KEYS``.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_keys: int = _MAX_LIVE_KEYS) -> None:
         self._segments: dict[Path, list[SilenceSegment]] = {}
         self._lock = threading.Lock()
+        self._max_keys = max_keys
 
     def set(self, video_path: Path, segments: list[SilenceSegment]) -> None:
         """Replace the segment list for ``video_path``.
@@ -69,6 +82,10 @@ class LiveSegmentsStore:
             # Defensive copy: the controller might keep mutating its
             # own list; ours must be stable until the next set / pop.
             self._segments[video_path] = list(segments)
+            # Unbounded growth guard: drop the oldest keys past the cap.
+            while len(self._segments) > self._max_keys:
+                oldest = next(iter(self._segments))
+                del self._segments[oldest]
 
     def take_snapshot(self, video_path: Path) -> list[SilenceSegment] | None:
         """Return a shallow copy of the current segments for

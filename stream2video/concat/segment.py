@@ -122,9 +122,7 @@ def _run_segment_concat(
                 seg_path.exists()
                 and seg_path.stat().st_size >= min_part_bytes
                 and _c._ffprobe_is_valid_mp4(seg_path)
-                and (
-                    not source_has_audio or _c._ffprobe_is_valid_media(seg_path, stream_type="a")
-                )
+                and (not source_has_audio or _c._ffprobe_is_valid_media(seg_path, stream_type="a"))
             ):
                 skipped += 1
                 encoded_keep += dur
@@ -246,9 +244,7 @@ def _run_segment_concat(
                         # extends the segment by the duplicated tail and
                         # the final concat plays longer than the keep
                         # window (frozen video over silence at each join).
-                        ["-shortest"]
-                        if source_has_audio and output_fps != "source"
-                        else []
+                        ["-shortest"] if source_has_audio and output_fps != "source" else []
                     ),
                     str(seg_path),
                 ],

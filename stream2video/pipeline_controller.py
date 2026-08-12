@@ -44,6 +44,7 @@ from stream2video.download import (
     DownloadError,
     DownloadProgress,
     DownloadTimeoutError,
+    FileBusyError,
     PermissionDeniedError,
     URLValidationError,
     VideoNotAvailableError,
@@ -580,9 +581,7 @@ class PipelineController:
             # a later phase where the file is complete. ``not partial``
             # keeps the file on disk for retry.
             self._cleanup_download_path(
-                partial_only=not (
-                    isinstance(e, DownloadCancelledError) and e.partial
-                )
+                partial_only=not (isinstance(e, DownloadCancelledError) and e.partial)
             )
             self._cleanup_partial_output()
             raise PipelineCancelled(str(e)) from e
@@ -644,6 +643,7 @@ class PipelineController:
             DownloadTimeoutError,
             DiskSpaceError,
             PermissionDeniedError,
+            FileBusyError,
             DownloadError,
             URLValidationError,
         ) as e:
@@ -875,7 +875,7 @@ class PipelineController:
             src_size = 0
             try:
                 if video_path.exists():
-                     src_size = video_path.stat().st_size
+                    src_size = video_path.stat().st_size
             except OSError:
                 pass
             required_typical, required_worst = _estimate_need(

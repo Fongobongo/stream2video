@@ -52,6 +52,7 @@ from stream2video.download import (
     DownloadError,
     DownloadProgress,
     DownloadTimeoutError,
+    FileBusyError,
     PermissionDeniedError,
     URLValidationError,
     VideoNotAvailableError,
@@ -266,7 +267,12 @@ def _run_doctor(config_file: Path | None = None) -> bool:
     if config_file is not None:
         # User explicitly passed --config: report whether it loaded.
         if config_file.exists():
-            _row("[green]✓[/green]", "ok", f"Config file: {config_file}", f"Config file: {config_file}")
+            _row(
+                "[green]✓[/green]",
+                "ok",
+                f"Config file: {config_file}",
+                f"Config file: {config_file}",
+            )
         else:
             _row(
                 "[yellow]![/yellow]",
@@ -975,7 +981,9 @@ def main(
                     progress.update(
                         task1,
                         total=p.total_bytes,
-                        completed=p.downloaded_bytes or 0.0,
+                        # clamp completed to total so the bar caps at 100%
+                        # even when the server under-reports Content-Length.
+                        completed=min(p.downloaded_bytes or 0.0, p.total_bytes),
                     )
                 else:
                     # Unknown total — show indeterminate bar (no total) so
@@ -996,7 +1004,10 @@ def main(
                     total_bytes=p.total_bytes,
                     speed=p.speed,
                     eta=p.eta,
-                    pct=(100.0 * (p.downloaded_bytes or 0.0) / p.total_bytes)
+                    # clamp: a server under-reporting Content-Length can
+                    # yield downloaded>total, which otherwise renders a
+                    # >100% ("250.0%") progress label.
+                    pct=min(100.0, 100.0 * (p.downloaded_bytes or 0.0) / p.total_bytes)
                     if p.total_bytes
                     else None,
                 )
@@ -1052,6 +1063,10 @@ def main(
             except PermissionDeniedError as e:
                 console.print(f"[red]Permission denied:[/red] {e}")
                 console.print("  Check file permissions and try again.")
+                raise typer.Exit(1) from None
+            except FileBusyError as e:
+                console.print(f"[red]File in use:[/red] {e}")
+                console.print("  Close the program using the file and try again.")
                 raise typer.Exit(1) from None
             except DownloadError as e:
                 console.print(f"[red]Download failed:[/red] {e}")
@@ -1127,7 +1142,7 @@ def main(
             if not check_memory_reserve(resolved_memory_reserve_mb, "silence detection"):
                 console.print(
                     f"[red]Not enough free RAM:[/red] below reserve "
-                    f"{resolved_memory_reserve_mb} MB — refusing to start silence detection."
+                    f"{resolved_memory_reserve_mb} MB -- refusing to start silence detection."
                 )
                 raise typer.Exit(1)
 
@@ -1266,7 +1281,7 @@ def main(
                 if not check_memory_reserve(resolved_memory_reserve_mb, "concat phase"):
                     console.print(
                         f"[red]Not enough free RAM:[/red] below reserve "
-                        f"{resolved_memory_reserve_mb} MB — refusing to start concat."
+                        f"{resolved_memory_reserve_mb} MB -- refusing to start concat."
                     )
                     raise typer.Exit(1)
                 output_video = output_dir / f"{video_path.stem}_{output_suffix}"

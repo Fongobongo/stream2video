@@ -14,6 +14,7 @@ from stream2video.download import (
     DownloadProgress,
     DownloadResult,
     DownloadTimeoutError,
+    FileBusyError,
     PermissionDeniedError,
     URLValidationError,
     VideoNotAvailableError,
@@ -206,6 +207,29 @@ class TestClassifyError:
 
     def test_permission_denied(self):
         assert isinstance(_classify_error("Permission denied: /video.mp4"), PermissionDeniedError)
+
+    def test_file_busy_windows(self):
+        """[WinError 32] <> Permission denied — the remediation differs
+        (close the program holding the file, not chmod)."""
+        assert isinstance(
+            _classify_error(
+                "ERROR: unable to rename file: [WinError 32] The process "
+                "cannot access the file because it is being used by another process"
+            ),
+            FileBusyError,
+        )
+
+    def test_file_busy_posix_ebusy(self):
+        assert isinstance(
+            _classify_error("OSError: [Errno 16] Device or resource busy"),
+            FileBusyError,
+        )
+
+    def test_file_busy_not_permission(self):
+        # Regressions: "being used by another process" used to fall into
+        # the generic PermissionDenied bucket.
+        err = _classify_error("ERROR: file is being used by another process")
+        assert not isinstance(err, PermissionDeniedError)
 
     def test_generic(self):
         e = _classify_error("Some unknown error")

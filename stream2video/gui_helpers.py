@@ -271,6 +271,10 @@ def build_download_status(
             # Caller didn't compute percent — derive it here so the
             # status line stays self-contained.
             pct = 100.0 * (downloaded_bytes or 0.0) / total_bytes
+        # clamp: yt-dlp can report downloaded>total when the server
+        # under-reports Content-Length (chunked / unknown size), which
+        # otherwise renders "Downloading 250.0% (...)".
+        pct = max(0.0, min(100.0, pct))
         return f"Downloading {pct:.1f}% ({downloaded_s} / {total_s}) at {speed_s} ETA {eta_s}"
     return f"Downloading {downloaded_s} at {speed_s}"
 

@@ -223,8 +223,7 @@ def _run_cut_then_encode(
             and raw_concat_path.stat().st_size >= min_part_bytes
             and _c._ffprobe_is_valid_mp4(raw_concat_path)
             and (
-                not source_has_audio
-                or _c._ffprobe_is_valid_media(raw_concat_path, stream_type="a")
+                not source_has_audio or _c._ffprobe_is_valid_media(raw_concat_path, stream_type="a")
             )
         ):
             _c._run_final_concat(

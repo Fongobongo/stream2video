@@ -30,6 +30,7 @@ from stream2video.concat.errors import (
     FFmpegOutOfMemoryError,
 )
 from stream2video.memory import MemoryMonitor
+from stream2video.tools import popen_with_retry
 from stream2video.utils import (
     CANCEL_POLL_INTERVAL,
     cancel_monitor,
@@ -87,7 +88,14 @@ def _run_ffmpeg(
         f"cwd={os.getcwd()!r}, shell={os.getenv('COMSPEC', '?')}"
     )
     try:
-        process = subprocess.Popen(
+        # popen_with_retry (fix-plan #26 parity with download.py): a
+        # winget shim / AV filter driver can transiently report
+        # FileNotFoundError for a binary that exists on the next
+        # spawn attempt; the helper re-resolves the path and retries
+        # before surfacing. Tests still intercept at
+        # ``stream2video.concat.subprocess.Popen`` because the helper
+        # delegates to that exact symbol.
+        process = popen_with_retry(
             cmd,
             # stdin=DEVNULL is CRITICAL on Windows when the parent is a
             # pythonw.exe (GUI subsystem) launched from cmd.exe with an
@@ -266,8 +274,7 @@ def _run_ffmpeg(
                                     )
                                 )
                             if not got_first_progress and (
-                                pre_progress_end is not None
-                                and time.monotonic() > pre_progress_end
+                                pre_progress_end is not None and time.monotonic() > pre_progress_end
                             ):
                                 _kill_and_raise(
                                     FFmpegError(
@@ -467,13 +474,11 @@ def _run_subprocess_cmd(
     segment index for progress.
     """
     try:
-        # Bypass ``popen_with_retry`` here: tests patch
-        # ``stream2video.concat.subprocess.Popen`` directly (it is the
-        # same module object as this module's ``subprocess`` import) to
-        # simulate spawn failures / fast-exit processes; routing through
-        # the retry helper would let real subprocesses leak through
-        # when the test expected interception.
-        process = subprocess.Popen(
+        # popen_with_retry here as well (fix-plan #26 parity): the
+        # transient winget-shim FNF is just as fatal for the cut phase.
+        # Tests still intercept at ``stream2video.concat.subprocess.Popen``
+        # (the helper delegates to that symbol).
+        process = popen_with_retry(
             cmd,
             # Same rationale as ``_run_ffmpeg``: inheriting a
             # console-mode stdin under pythonw.exe triggers a

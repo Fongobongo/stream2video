@@ -155,8 +155,21 @@ class _Resolver:
 
         if kind == "bool":
             # Tri-state CLI flag: None means "no explicit choice".
-            # The resolved value is bool(value) — YAML's type-checked
-            # bool passes through unchanged.
+            # YAML's type-checked bool passes through unchanged. A stray
+            # *string* ("" / "false") would otherwise be coerced by Python's
+            # truthiness to True/"False" silently — a config authored as
+            # ``force: "false"`` (quoted) used to resolve to True.
+            if value is None:
+                return False
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                v = value.strip().lower()
+                if v in ("1", "true", "yes", "on"):
+                    return True
+                if v in ("0", "false", "no", "off", ""):
+                    return False
+                self._fail(name, value, "(must be a boolean: true/false/yes/no/1/0)")
             return bool(value)
 
         if kind == "int":

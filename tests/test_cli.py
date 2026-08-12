@@ -11,6 +11,38 @@ import pytest
 import typer
 
 from stream2video.cli import load_config
+from stream2video.cli_resolver import make_resolver
+
+
+class _FakeConsole:
+    def print(self, *a, **kw):
+        pass
+
+
+class TestResolverBoolStringCoercion:
+    """``resolve()``'s bool kind must not let quoted YAML strings
+    (``force: "false"``) fall through Python truthiness to ``True``."""
+
+    def _resolve(self, config: dict, name: str, flag_value):
+        return make_resolver(None, config, _FakeConsole()).resolve(name, flag_value)
+
+    def test_quoted_false_resolves_false(self):
+        assert self._resolve({"force": "false"}, "force", None) is False
+
+    def test_quoted_true_resolves_true(self):
+        assert self._resolve({"force": "true"}, "force", None) is True
+
+    def test_real_bool_passes_through(self):
+        assert self._resolve({"force": True}, "force", None) is True
+        assert self._resolve({"force": False}, "force", None) is False
+
+    def test_none_falls_through_to_false(self):
+        # No config key AND no CLI flag -> default False for force.
+        assert self._resolve({}, "force", None) is False
+
+    def test_garbage_string_rejected(self):
+        with pytest.raises(typer.Exit):
+            self._resolve({"force": "banana"}, "force", None)
 
 
 class TestCliMemoryReservePreflight:

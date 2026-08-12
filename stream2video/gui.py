@@ -251,16 +251,6 @@ class Stream2VideoGUI(
         # extension and the audio-extract short-circuit in cut_and_concat,
         # so a stale self.config value would produce the wrong output.
         self.config["output_format"] = self.combo_output_format.get()
-        # Apply resource preset BEFORE individual widget reads override
-        # the preset's per-key values. The preset is a baseline; the
-        # explicit checkboxes below (x264_low_memory, gapless_concat,
-        # low_process_priority) write to self.config AFTER apply_preset,
-        # so they win on a per-key basis (matches the CLI's
-        # --preset-before-flag precedence).
-        preset_name = self.combo_preset.get()
-        if preset_name:
-            self.config = apply_preset(self.config, preset_name)
-        self.config["preset"] = preset_name
         self.config["gapless_concat"] = bool(self.chk_gapless_concat.get())
         self.config["low_process_priority"] = bool(self.chk_low_process_priority.get())
         self.config["x264_low_memory"] = bool(self.chk_x264_low_memory.get())
@@ -269,6 +259,22 @@ class Stream2VideoGUI(
         force = bool(self.chk_force.get())
         per_video_dir = bool(self.chk_per_video_dir.get())
         delete_after = bool(self.chk_delete.get())
+
+        # Build the run's config in a *copy* (fix R4): ``apply_preset``
+        # returns a dict with the PRESET_MANAGED_KEYS forced to the preset
+        # values — merging that back into ``self.config`` would let the
+        # preset overwrite the user's explicit checkbox choices (e.g. an
+        # unchecked low_process_priority vs low_memory's low=True) and
+        # then leak those into user_defaults on the next "Save defaults".
+        # ``self.config`` keeps the widget state; the run gets its own
+        # preset-applied snapshot.
+        preset_name = self.combo_preset.get()
+        run_config = dict(self.config)
+        if preset_name:
+            run_config = apply_preset(run_config, preset_name)
+        # Show the preset's effective values in the run log, not the
+        # stale widget-state ones.
+        run_config["preset"] = preset_name
 
         # Pre-flight disk space warning on Start click (before any work).
         # Uses the same estimator as the in-pipeline check so the numbers
@@ -329,10 +335,9 @@ class Stream2VideoGUI(
         # main thread keeps mutating ``self.config`` as the user moves
         # sliders AFTER Start, and the worker reads ~30 keys off the
         # same dict — a race that produced mixed runs (new threshold,
-        # old min_silence). ``dict()`` is O(n) and atomic-under-GIL for
-        # this purpose; the nested ``encoders`` list (if any) is shared
-        # but never mutated by the GUI after startup.
-        config_snapshot = dict(self.config)
+        # old min_silence). ``run_config`` is already the preset-applied
+        # copy; snapshot it so the worker sees a stable view.
+        config_snapshot = dict(run_config)
 
         self._ui_update_output(output_dir)
 
@@ -340,12 +345,13 @@ class Stream2VideoGUI(
             f"Starting pipeline: input={input_raw}, output_dir={output_dir}, "
             f"method={method}, encoder={encoder}, "
             f"video_quality={video_quality}, download_quality={download_quality}, "
-            f"output_format={self.config['output_format']}, "
-            f"use_crf={self.config['use_crf']}, "
+            f"output_format={config_snapshot['output_format']}, "
+            f"use_crf={config_snapshot['use_crf']}, "
             f"force={force}, "
-            f"threshold={self.config['threshold']}, "
-            f"min_silence={self.config['min_silence']}, "
-            f"margin={self.config['margin']}, "
+            f"threshold={config_snapshot['threshold']}, "
+            f"min_silence={config_snapshot['min_silence']}, "
+            f"margin={config_snapshot['margin']}, "
+            f"preset={config_snapshot.get('preset')}, "
             f"delete_after={delete_after}, "
             f"per_video_dir={per_video_dir}"
         )
@@ -547,9 +553,7 @@ class _PipelineGuiCallbacksAdapter:
             try:
                 self._gui._tk_after(
                     0,
-                    lambda: self._gui.lbl_encoder.configure(
-                        text="Encoder: libx264 (fallback)"
-                    ),
+                    lambda: self._gui.lbl_encoder.configure(text="Encoder: libx264 (fallback)"),
                 )
             except Exception:
                 pass
@@ -606,9 +610,7 @@ class _PipelineGuiCallbacksAdapter:
         # parent=self._gui keeps the completion dialog on top of the
         # main window — an unparented dialog can fall behind it on
         # Windows and look like the app froze before any click passed.
-        self._gui._tk_after(
-            0, lambda: messagebox.showinfo("Complete", text, parent=self._gui)
-        )
+        self._gui._tk_after(0, lambda: messagebox.showinfo("Complete", text, parent=self._gui))
 
     def set_running(self, running: bool) -> None:
         self._gui._tk_after(0, lambda: self._gui._set_running(running))

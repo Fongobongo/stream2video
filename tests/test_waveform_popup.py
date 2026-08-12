@@ -111,6 +111,28 @@ class TestLiveSegmentsStorePop:
         assert store.pop(path) is None
 
 
+class TestLiveSegmentsStoreEviction:
+    def test_oldest_key_evicted_beyond_cap(self) -> None:
+        # URL-pipeline runs publish under a new resolved download path
+        # every run; without a cap the store grows one entry per URL
+        # processed with the popup open.
+        store = LiveSegmentsStore(max_keys=3)
+        for i in range(5):
+            store.set(Path(f"run_{i}.mp4"), [_seg(i, i + 1)])
+        # Oldest two (run_0, run_1) are gone.
+        assert store.take_snapshot(Path("run_0.mp4")) is None
+        assert store.take_snapshot(Path("run_1.mp4")) is None
+        assert store.take_snapshot(Path("run_2.mp4")) is not None
+        assert store.take_snapshot(Path("run_4.mp4")) is not None
+
+    def test_re_set_does_not_eject_existing_key_when_under_cap(self) -> None:
+        store = LiveSegmentsStore(max_keys=2)
+        p = Path("same.mp4")
+        store.set(p, [_seg(0, 1)])
+        store.set(p, [_seg(0, 2)])
+        assert len(store.take_snapshot(p) or []) == 1
+
+
 class TestLiveSegmentsStoreConcurrency:
     def test_concurrent_set_and_snapshot_dont_raise(self) -> None:
         # Smoke: hammer the store from two threads (one producer, one

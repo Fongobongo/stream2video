@@ -311,6 +311,19 @@ class TestBuildDownloadStatus:
         )
         assert "99.9%" in s
 
+    def test_over_100_percent_clamped(self):
+        # A server that under-reports Content-Length (chunked transfer,
+        # unknown initial size) can give downloaded > total — the UI used
+        # to render "250.0%".
+        s = build_download_status(
+            downloaded_bytes=250.0,
+            total_bytes=100.0,
+            speed=1024.0,
+            eta=0.0,
+        )
+        assert "100.0%" in s
+        assert "250.0%" not in s
+
 
 class TestBuildEtaTail:
     def test_known_remaining_last_phase(self):

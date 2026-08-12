@@ -171,7 +171,8 @@ class RecentProjectsMixin:
                 if err is not None:
                     self._log(f"[ERROR] Failed to delete {path}: {err}")
                     messagebox.showerror(
-                        "Delete failed", f"Could not delete {path}:\n{err}",
+                        "Delete failed",
+                        f"Could not delete {path}:\n{err}",
                         parent=self.winfo_toplevel(),
                     )
                     return

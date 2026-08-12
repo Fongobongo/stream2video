@@ -25,6 +25,7 @@ from stream2video.silence.parser import (
     _parse_ffmpeg_output,
     _to_float,
 )
+from stream2video.tools import popen_with_retry
 from stream2video.utils import (
     CANCEL_POLL_INTERVAL,
     cancel_monitor,
@@ -98,7 +99,7 @@ def detect_silence_stream(
     ]
 
     try:
-        proc = _c.subprocess.Popen(
+        proc = popen_with_retry(
             cmd,
             stdout=_c.subprocess.DEVNULL,
             stderr=_c.subprocess.PIPE,
@@ -326,7 +327,7 @@ def _run_silencedetect(
             f"threshold={threshold}dB ({noise}), min_silence={min_silence}s"
             + (f", resume_from={resume_from:.2f}s" if resume_from else "")
         )
-        process = _c.subprocess.Popen(
+        process = popen_with_retry(
             cmd,
             stdout=_c.subprocess.PIPE,
             stderr=_c.subprocess.PIPE,
@@ -366,9 +367,7 @@ def _run_silencedetect(
     # segments still restarts from the probe frontier instead of t=0
     # (fix-plan #3b -- previously a clean source's hours-long scan was
     # lost because ``resume_from`` was derived only from segment ends).
-    last_progress_pos: list[float] = [
-        float(resume_from) if resume_from is not None else 0.0
-    ]
+    last_progress_pos: list[float] = [float(resume_from) if resume_from is not None else 0.0]
 
     pending_start: list[float | None] = [None]  # mutable container so the
     # closure can assign without `nonlocal`.
@@ -407,9 +406,7 @@ def _run_silencedetect(
         # AND the probe moved (a clean source accumulates no segments but
         # still scans forward — that progress must be checkpointed, or a
         # multi-hour silent scan is lost on cancel (fix-plan #3b)).
-        moved = last_progress_pos[0] - (
-            float(resume_from) if resume_from is not None else 0.0
-        )
+        moved = last_progress_pos[0] - (float(resume_from) if resume_from is not None else 0.0)
         if new_count <= 0 and not (moved > 0 and now - last_save_time[0] >= _RESUME_THROTTLE_S):
             return
         if (
@@ -585,12 +582,8 @@ def _run_silencedetect(
             # the true ``duration`` and then to dropping the dangling
             # start (with a warning) when neither is known — the preview
             # path.
-            effective_duration = (
-                duration_limit if duration_limit is not None else duration
-            )
-            return _parse_ffmpeg_output(
-                "".join(stderr_lines), duration=effective_duration
-            )
+            effective_duration = duration_limit if duration_limit is not None else duration
+            return _parse_ffmpeg_output("".join(stderr_lines), duration=effective_duration)
 
     finally:
         if not drain_done:
@@ -656,7 +649,7 @@ def _extract_audio_wav(
             f"Extracting audio: {video_path.name} → {wav_path.name} "
             f"(16kHz mono pcm_s16le, -fflags +copyts)"
         )
-        process = _c.subprocess.Popen(
+        process = popen_with_retry(
             cmd,
             # stdout=DEVNULL when nobody consumes -progress; otherwise the
             # 64KB OS pipe buffers fill and ffmpeg blocks on write → hang

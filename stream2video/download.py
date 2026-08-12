@@ -82,6 +82,10 @@ class PermissionDeniedError(DownloadError):
     """Permission denied."""
 
 
+class FileBusyError(DownloadError):
+    """File locked by another process (e.g. opened in a media player)."""
+
+
 def _validate_url(url: str) -> bool:
     """Validate if string is an http(s) URL.
 
@@ -275,6 +279,20 @@ def _classify_error(stderr: str) -> DownloadError:
         return VideoNotAvailableError("Video not available")
     if "no space left" in msg or "disk full" in msg or "errno 28" in msg:
         return DiskSpaceError("Insufficient disk space")
+    # Windows file-lock and POSIX EBUSY mean "close the player/browser tab
+    # holding this file" — a different remediation than chmod/permissions,
+    # so classify before the generic PermissionDenied branch.
+    if (
+        "winerror 32" in msg
+        or "being used by another process" in msg
+        or "resource busy" in msg
+        or "device or resource busy" in msg
+        or "errno 16" in msg
+    ):
+        return FileBusyError(
+            "A file is locked by another program "
+            "(close the media player / browser tab using it and retry)"
+        )
     if "permission denied" in msg or "errno 13" in msg:
         return PermissionDeniedError("Permission denied")
     # Keep the message prefix-free: both the CLI ("Download failed: {e}")

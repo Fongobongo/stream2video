@@ -463,50 +463,68 @@ class WaveformRenderMixin:
 
         current_view = (self._waveform_view_start, self._waveform_view_end)
         if not self.running:
+            # Keep the poller alive: the user can press Start again
+            # (self.running flips back to True) while the popup is open,
+            # and a dead poller would freeze the overlay on whatever the
+            # previous run concluded. The worker's own polls see the new
+            # ``running`` state on the next tick.
             raw = self._take_live_snapshot(in_path)
             if raw is not None:
                 segments = apply_margin(raw, margin)
-                # The count equality used to skip the "locked" log line
-                # whenever luck would have it that the cache and live
-                # snapshot have the same segment count. Treat the stop
-                # as a distinct state — the pipeline is no longer
-                # running, so any *later* content change must surface.
-                if not state.get("stopped_logged"):
+                # Snapshot changed? Reflect it (a new run's detect is
+                # already writing to the same path).
+                if len(segments) != state.get("last_count") or current_view != state.get(
+                    "last_view"
+                ):
                     self._apply_view(segments)
                     state["last_count"] = len(segments)
                     state["last_view"] = current_view
+                if not state.get("stopped_logged"):
                     state["stopped_logged"] = True
                     self._log(f"  Pipeline finished — waveform locked at {len(segments)} silences")
             else:
                 out_dir = self._waveform_output_dir
                 if out_dir is None:
-                    # Don't silently abandon the popup's "Rendering
-                    # overlay..." status — publish the terminal state so
-                    # the user sees the run ended with nothing detected.
+                    # No live state and no output dir -> terminal.
                     if not state.get("stopped_logged"):
                         state["stopped_logged"] = True
                         self._safe_status_set("Cancelled / no segments detected")
-                    return
-                config = {
-                    "threshold": float(self.config["threshold"]),
-                    "min_silence": float(self.config["min_silence"]),
-                    "margin": margin,
-                }
-                cached = load_silence_cache(in_path, out_dir, config)
-                if cached is not None and not state.get("stopped_logged"):
-                    self._apply_view(list(cached))
-                    state["last_count"] = len(cached)
-                    state["last_view"] = current_view
-                    state["stopped_logged"] = True
-                    self._log(f"  Pipeline finished — waveform locked at {len(cached)} silences")
-                elif cached is None and not state.get("stopped_logged"):
-                    # No live snapshot, no cache on disk — the run was
-                    # cancelled mid-detection (or the detect never ran).
-                    # Surface the terminal state instead of leaving the
-                    # "Rendering overlay..." placeholder forever.
-                    state["stopped_logged"] = True
-                    self._safe_status_set("Cancelled / no segments detected")
+                else:
+                    config = {
+                        "threshold": float(self.config["threshold"]),
+                        "min_silence": float(self.config["min_silence"]),
+                        "margin": margin,
+                    }
+                    cached = load_silence_cache(in_path, out_dir, config)
+                    if cached is not None:
+                        if len(cached) != state.get("last_count") or current_view != state.get(
+                            "last_view"
+                        ):
+                            self._apply_view(list(cached))
+                            state["last_count"] = len(cached)
+                            state["last_view"] = current_view
+                        if not state.get("stopped_logged"):
+                            state["stopped_logged"] = True
+                            self._log(
+                                f"  Pipeline finished — waveform locked at {len(cached)} silences"
+                            )
+                    elif not state.get("stopped_logged"):
+                        state["stopped_logged"] = True
+                        self._safe_status_set("Cancelled / no segments detected")
+            # Reschedule: the popup stays "live" so a new Start flips
+            # back into the active branch above.
+            try:
+                self.after(
+                    1000,
+                    lambda: self._poll_live_segments(in_path, margin, token, state),
+                )
+            except Exception:
+                pass
             return
+
+        # running: reset the "stopped" latch so a *subsequent* stop
+        # gets its own log/summary line.
+        state["stopped_logged"] = False
 
         raw = self._take_live_snapshot(in_path)
         if raw is not None:

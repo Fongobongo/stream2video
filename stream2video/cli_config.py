@@ -89,9 +89,7 @@ def load_config(config_file: Path | None, console: Any) -> dict:
             # int-typed slot — a subtle downstream mismatch the
             # cli_resolver-path keys don't get to audit.
             if isinstance(original, bool):
-                console.print(
-                    f"[red]Invalid {key}:[/red] {original} is a bool, expected a number"
-                )
+                console.print(f"[red]Invalid {key}:[/red] {original} is a bool, expected a number")
                 raise typer.Exit(1)
             try:
                 value = float(original)

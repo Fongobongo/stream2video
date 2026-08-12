@@ -166,8 +166,7 @@ def _run_batch_concat(
                 and chunk_path.stat().st_size >= min_part_bytes
                 and _c._ffprobe_is_valid_mp4(chunk_path)
                 and (
-                    not source_has_audio
-                    or _c._ffprobe_is_valid_media(chunk_path, stream_type="a")
+                    not source_has_audio or _c._ffprobe_is_valid_media(chunk_path, stream_type="a")
                 )
                 and _c._ffprobe_duration_ok(chunk_path, sum(e - s for s, e in chunk))
             ):
@@ -379,9 +378,7 @@ def _run_batch_concat(
                             # the muxer writes the longer video tail and
                             # the chunk runs long (frozen tail frames at
                             # every concat join).
-                            ["-shortest"]
-                            if source_has_audio and output_fps != "source"
-                            else []
+                            ["-shortest"] if source_has_audio and output_fps != "source" else []
                         ),
                         str(chunk_path),
                     ],

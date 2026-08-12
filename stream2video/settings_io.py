@@ -205,9 +205,7 @@ def write_cli_config_yaml(
     # (``subdir/cfg.yaml``) is caught above; this check is the last
     # line of defence against platform quirks (e.g. 8.3 short names).
     if config_path.parent != out_dir.resolve():
-        raise ValueError(
-            f"filename resolves outside the output directory: {filename!r}"
-        )
+        raise ValueError(f"filename resolves outside the output directory: {filename!r}")
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
         config_yaml = f"threshold: {threshold}\nmin_silence: {min_silence}\nmargin: {margin}\n"

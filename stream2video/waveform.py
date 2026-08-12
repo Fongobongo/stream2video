@@ -198,6 +198,10 @@ def read_peaks_from_stream(
                         bucket_count = 0
         except Exception:
             proc.kill()
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
             proc.wait()
             return [], 0.0
         proc.stdout.close()
@@ -205,6 +209,10 @@ def read_peaks_from_stream(
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
             proc.wait()
             return [], 0.0
         if proc.returncode != 0 or total_samples == 0:

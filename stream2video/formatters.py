@@ -12,11 +12,11 @@ def fmt_size(bytez: int | float) -> str:
     caller that subtracts two file sizes (e.g. "reduction") shouldn't
     be able to print ``-1.0 B`` through here."""
     size = max(0.0, float(bytez))
-    for unit in ("B", "KB", "MB", "GB"):
+    for unit in ("B", "KB", "MB", "GB", "TB", "PB"):
         if size < 1024:
             return f"{size:.1f} {unit}"
         size /= 1024
-    return f"{size:.1f} TB"
+    return f"{size:.1f} EB"
 
 
 def fmt_speed(bytes_per_sec: float | None) -> str:
@@ -107,9 +107,7 @@ def fmt_completion_summary(
             label = f"{delta_pct:.0f}% reduction"
         else:
             label = f"{-delta_pct:.0f}% increase"
-        lines.append(
-            f"   Output: {dst_time_str} ({dst_size_str})  [{label}]"
-        )
+        lines.append(f"   Output: {dst_time_str} ({dst_size_str})  [{label}]")
     else:
         lines.append(f"   Output: {dst_time_str} ({dst_size_str})")
 

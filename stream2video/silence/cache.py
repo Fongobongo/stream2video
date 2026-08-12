@@ -20,9 +20,7 @@ def build_resume_cache_path(video_path: Path, output_dir: Path) -> Path:
     resume file. Prior to this helper the CLI hashed the path while the
     GUI didn't, so neither front-end ever saw the other's checkpoints.
     """
-    path_key = hashlib.sha256(
-        str(video_path.resolve()).encode("utf-8", "replace")
-    ).hexdigest()[:8]
+    path_key = hashlib.sha256(str(video_path.resolve()).encode("utf-8", "replace")).hexdigest()[:8]
     return output_dir / f"{video_path.stem}_{path_key}_silence_cache.json.resume"
 
 

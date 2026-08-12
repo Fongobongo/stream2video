@@ -109,9 +109,7 @@ class SlidersMixin:
         # before FocusOut fires) instead of leaking an out-of-range raw
         # value into the pipeline config. ``setdefault`` keeps this robust
         # when the mixin is composed into a test double without __init__.
-        bounds_map: dict[str, tuple[float, float]] | None = getattr(
-            self, "_slider_bounds", None
-        )
+        bounds_map: dict[str, tuple[float, float]] | None = getattr(self, "_slider_bounds", None)
         if bounds_map is None:
             bounds_map = {}
             self._slider_bounds: dict[str, tuple[float, float]] = bounds_map
