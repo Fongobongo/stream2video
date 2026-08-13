@@ -24,6 +24,7 @@ from stream2video.download import (
     _is_local_file,
     _parse_progress_line,
     _resolve_reported_download_path,
+    _sweep_partial_fragments,
     _timeout_error,
     _validate_url,
     download,
@@ -643,3 +644,58 @@ class TestDownloadCancelDuringMerge:
                 cancel_callback=lambda: True,
             )
         assert killed, "subprocess.kill() was not called — process would be orphaned"
+
+
+class TestSweepPartialFragments:
+    """P2 audit regression: cancelled downloads must not leak .part/.ytdl/.temp.
+
+    The download loop raises ``DownloadCancelledError(partial=True)`` before
+    stdout→path resolution, so the controller's cleanup never learns the
+    partial's path. ``_sweep_partial_fragments`` runs in the finally block of
+    ``download()`` — the one place that knows both the directory and the
+    activity window of the attempt.
+    """
+
+    def test_deletes_fresh_part_fragments(self):
+        import time
+
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            fragment = out / "vid-12345.webm.part"
+            fragment.write_bytes(b"partial data")
+            # mtime now → definitely newer than the sweep's start window.
+            now = time.time()
+            os_utime = fragment.stat().st_mtime
+            assert now - os_utime < 1.0  # sanity: file is fresh
+
+            _sweep_partial_fragments(out, time.monotonic() - 10.0)
+            assert not fragment.exists()
+
+    def test_keeps_old_fragments(self):
+        import time
+
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            old = out / "old-12345.webm.part"
+            old.write_bytes(b"old")
+            # Backdate the mtime so it predates the sweep's start window.
+            old_time = time.time() - 3600.0
+            import os
+
+            os.utime(old, (old_time, old_time))
+
+            _sweep_partial_fragments(out, time.monotonic() - 10.0)
+            assert old.exists()
+
+    def test_keeps_non_fragment_files(self):
+        import time
+
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            keep = out / "finished.mp4"
+            keep.write_bytes(b"complete")
+            _sweep_partial_fragments(out, time.monotonic() - 10.0)
+            assert keep.exists()
+
+    def test_missing_dir_is_noop(self):
+        _sweep_partial_fragments(Path("does-not-exist-xyz"), 0.0)

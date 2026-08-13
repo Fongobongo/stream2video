@@ -104,6 +104,49 @@ class TestApplyMargin:
         assert result[1].start == 4.2
         assert result[1].end == 4.8
 
+    def test_negative_margin_clamps_to_loud_gap(self):
+        """P2 audit regression: a negative margin can't expand one silence
+        across a keep gap into the next silence. Without the neighbour
+        clamp, ``[(50,60),(66,80)]`` with margin=-10 expanded into
+        ``[(50,70),(56,90)]`` then merged into ``[(50,90)]``, eating 6s
+        of speech the detector had marked as loud.
+        """
+        seg1 = SilenceSegment(50.0, 60.0)
+        seg2 = SilenceSegment(66.0, 80.0)
+        result = apply_margin([seg1, seg2], -10.0)
+        # Midpoint of the (60..66) loud gap is 63. Each expanded silence
+        # touches that midpoint and stops; merge sees no overlap.
+        assert len(result) == 2
+        assert result[0].start == 40.0  # 50 - 10
+        assert result[0].end == 63.0  # min(70, midpoint=63)
+        assert result[1].start == 63.0  # max(56, midpoint=63)
+        assert result[1].end == 90.0  # 80 + 10
+        # The two silences join at exactly one point (63s); no merge.
+        assert result[0].end <= result[1].start
+
+    def test_negative_margin_merges_when_raw_segments_touch(self):
+        """When raw silences share an endpoint (no loud gap between them)
+        a negative margin can still close the implicit 0-width gap and
+        merge the two — this is the legacy behaviour tested by
+        ``test_overlapping_segments_merge_after_expand``."""
+        # 1..2.5 and 2.0..3.5 overlap in raw → no gap → clamp skipped.
+        seg1 = SilenceSegment(1.0, 2.5)
+        seg2 = SilenceSegment(2.0, 3.5)
+        result = apply_margin([seg1, seg2], -0.3)
+        assert len(result) == 1
+        assert result[0].start == 0.7
+        assert result[0].end == 3.8
+
+    def test_negative_margin_respects_duration_when_no_neighbour(self):
+        """Single-segment expansion clamps to ``duration`` only (right
+        edge of media) — unchanged behaviour, pins the no-neighbour
+        case."""
+        seg = SilenceSegment(50.0, 60.0)
+        result = apply_margin([seg], -3.0, duration=120.0)
+        assert len(result) == 1
+        assert result[0].start == 47.0
+        assert result[0].end == 63.0
+
 
 class TestDetectSilenceValidation:
     """Test silence detection parameter validation."""

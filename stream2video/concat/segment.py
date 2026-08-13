@@ -118,11 +118,21 @@ def _run_segment_concat(
             # validate as video-but-not-audio and would otherwise inject
             # a broken track into the final concat (mirrors the audio
             # check cut_encode.py already does for `_cut_*.mp4`).
+            #
+            # Duration check: a segment whose MP4 moov reports a
+            # plausible duration but whose body was truncated by a
+            # mid-flush kill produces a "valid" ffprobe header read yet
+            # a duration shorter than the requested ``dur``. Without
+            # this probe the resume path would lock the broken segment
+            # into the manifest and the final concat would silently
+            # drop the missing tail. Mirrors ``batch.py`` (slack=1.0)
+            # and ``cut_encode.py`` (slack=1.0 after the P2 audit).
             if (
                 seg_path.exists()
                 and seg_path.stat().st_size >= min_part_bytes
                 and _c._ffprobe_is_valid_mp4(seg_path)
                 and (not source_has_audio or _c._ffprobe_is_valid_media(seg_path, stream_type="a"))
+                and _c._ffprobe_duration_ok(seg_path, dur)
             ):
                 skipped += 1
                 encoded_keep += dur

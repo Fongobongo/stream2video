@@ -189,11 +189,34 @@ class MemoryMonitor:
     def _run(self) -> None:
         warned_soft = False
         warned_reserve = False
+        # P2 audit: ``_process_rss_mb`` returns None when ``psutil``
+        # raises ``NoSuchProcess`` (the watched ffmpeg has exited) or
+        # ``AccessDenied`` (privilege boundary crossed on Windows when
+        # the parent runs elevated differently from the child). Without
+        # an exit guard the loop kept spinning on None forever — the
+        # docstring promises "stops automatically when the process
+        # exits", but the loop only slept and re-checked. Track
+        # consecutive None readings and exit after 2 in a row so a
+        # single transient None (AccessDenied during a brief permission
+        # probe) doesn't abort the monitor, but a genuinely gone PID
+        # releases the thread within ``2*_POLL_INTERVAL``.
+        consecutive_none = 0
         while not self._stop_event.wait(_POLL_INTERVAL):
             rss = _process_rss_mb(self.pid)
-            if rss is not None:
-                if rss > self.peak_rss_mb:
-                    self.peak_rss_mb = rss
+            if rss is None:
+                consecutive_none += 1
+                if consecutive_none >= 2:
+                    logger.debug(
+                        "MemoryMonitor: pid=%s unavailable for %d consecutive "
+                        "polls (process exited or access denied) — stopping monitor",
+                        self.pid,
+                        consecutive_none,
+                    )
+                    return
+                continue
+            consecutive_none = 0
+            if rss > self.peak_rss_mb:
+                self.peak_rss_mb = rss
                 if self.memory_limit_mb is not None and self.memory_limit_mb > 0:
                     soft_mb = self.memory_limit_mb * self.soft_threshold_frac
                     hard_mb = self.memory_limit_mb * self.hard_threshold_frac

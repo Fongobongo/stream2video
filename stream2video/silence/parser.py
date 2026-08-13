@@ -209,22 +209,48 @@ def apply_margin(
 
     ``duration`` (optional) is the source media duration in seconds — when
     supplied, ``end`` is clamped to it so a negative margin can't expand a
-    silence segment past the right neighbour (which the detector marked as
-    loud) or past the end of the media. ``start`` is always clamped to 0.
-    Without this, ``apply_margin([(1, 2)], -10)`` would return ``(0, 12)``,
-    inventing silence over audio the detector said was loud. When
-    ``duration`` is None the right clamp is skipped (callers that don't
-    know the duration keep their old behaviour — namely the GUI's preview
-    overlay path, where over-expansion is harmless and `duration` may not
-    be known).
+    silence segment past the end of the media. ``start`` is always clamped to 0.
+
+    Neighbour clamping (P2 audit): a negative margin that would expand
+    one silence past the start of the next (eating the loud keep region
+    between them and merging the two silences together) is clamped to
+    the midpoint of the loud gap. Two expanding silences meet at the
+    midpoint instead of overlapping — the loud gap collapses to a
+    single shared boundary rather than disappearing entirely (and the
+    final merge step therefore never merges the two). Without it,
+    ``[(50,60),(66,80)]`` with ``margin=-10`` expanded to
+    ``[(50,70),(56,90)]`` then merged into ``[(50,90)]``, eating the
+    full 6s of speech between the two silences (the user asked for at
+    most 6s total of trimming across both boundaries, not 30s).
     """
     if not segments:
         return segments
 
     expanded = []
-    for seg in segments:
+    for i, seg in enumerate(segments):
         start = max(0.0, seg.start + margin)
         end = seg.end - margin
+        # Neighbour clamp (P2 audit): a negative margin expands silence
+        # into the adjacent loud region. When two raw silences are
+        # separated by a loud keep gap (``seg[i].end < seg[i+1].start``)
+        # the expansion may overlap the next silence and the merge step
+        # would then collapse both silences into one, eating the entire
+        # keep gap in between. That contradicts what the detector found
+        # (a loud region between two silences) and what the user asked
+        # for (drop at most ``|margin|`` seconds at each boundary).
+        #
+        # Clamp each boundary to the midpoint of the loud gap between
+        # adjacent silences — so two expanding silences meet exactly
+        # in the middle and the gap collapses to a single shared
+        # boundary instead of disappearing entirely. This preserves
+        # roughly half of the loud region the detector marked as keep,
+        # never letting negative margins eat it whole.
+        if i + 1 < len(segments) and seg.end < segments[i + 1].start:
+            mid = (seg.end + segments[i + 1].start) / 2.0
+            end = min(end, mid)
+        if i > 0 and segments[i - 1].end < seg.start:
+            mid = (segments[i - 1].end + seg.start) / 2.0
+            start = max(start, mid)
         if duration is not None:
             end = min(end, float(duration))
         if start < end:
@@ -239,7 +265,13 @@ def apply_margin(
     current = expanded[0]
 
     for seg in expanded[1:]:
-        if seg.start <= current.end:
+        # Strict ``<`` (not ``<=``): two silences that meet at exactly
+        # one shared boundary point (e.g. ``(40, 63), (63, 90)`` after
+        # midpoint clamping) are NOT merged — they're two distinct
+        # silences joined at a single time instant. ``<=`` would
+        # collapse them into one, hiding the original two-detector
+        # boundary and giving the wrong keep-oracle view.
+        if seg.start < current.end:
             current = SilenceSegment(current.start, max(current.end, seg.end))
         else:
             merged.append(current)

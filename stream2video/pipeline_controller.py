@@ -61,6 +61,7 @@ from stream2video.silence import (
     build_resume_cache_path,
     detect_silence,
     load_silence_cache,
+    resume_inuse_path,
     save_silence_cache,
 )
 from stream2video.utils import check_disk_space as _check_disk_space
@@ -761,6 +762,20 @@ class PipelineController:
                 self.cb.on_log("Cleared stale resume cache (force re-detect)")
             except OSError as e:
                 self.cb.on_log(f"[WARN] Could not clear resume cache: {e}")
+        # P2 audit: a leftover ``.inuse`` from a crashed previous run
+        # takes precedence over ``.resume`` in ``detect_silence``
+        # (see silence/pipeline.py). Wiping only the canonical ``.resume``
+        # left the ``.inuse`` checkpoint behind, so a ``--force``
+        # re-detect silently continued from the old, possibly-shifted
+        # timeline instead of starting fresh. Clear both on force.
+        if self.cfg.force:
+            inuse_path = resume_inuse_path(resume_cache_path)
+            if inuse_path.exists():
+                try:
+                    inuse_path.unlink()
+                    self.cb.on_log("Cleared stale resume cache .inuse (force re-detect)")
+                except OSError as e:
+                    self.cb.on_log(f"[WARN] Could not clear .inuse cache: {e}")
 
         cache = None if self.cfg.force else load_silence_cache(video_path, output_dir, config)
         if cache is not None:

@@ -1626,7 +1626,7 @@ class TestCutThenEncodeCutPhaseProtection:
         keep = [(0.0, 1.0), (1.0, 2.0)]
         calls: list[str] = []
 
-        def fake_helper(cmd, *, timeout, label, **kwargs):
+        def fake_ffmpeg_helper(cmd, *, timeout, label, **kwargs):
             # Track the "cut phase segment N" calls only — out_path is last arg.
             out = str(cmd[-1])
             calls.append(out)
@@ -1634,10 +1634,17 @@ class TestCutThenEncodeCutPhaseProtection:
             return None
 
         with (
-            patch("stream2video.concat._run_subprocess_cmd", side_effect=fake_helper),
+            # Phase-1 cut now runs each segment through _run_ffmpeg (the
+            # lossless ``-ss``→``-t``→``-c:v`` encode needs the progress
+            # pump + stall watchdog + memory monitor that ``_run_ffmpeg``
+            # provides). Phase-3 mux uses the lighter ``_run_subprocess_cmd``
+            # for the ``-c copy`` rewrite — keep it mocked as a no-op.
+            patch("stream2video.concat._run_ffmpeg", side_effect=fake_ffmpeg_helper),
+            patch("stream2video.concat._run_subprocess_cmd"),
             patch("stream2video.concat._run_final_concat"),
             patch("stream2video.concat._ffprobe_is_valid_mp4", return_value=True),
-            patch("stream2video.concat._run_ffmpeg"),
+            patch("stream2video.concat._ffprobe_is_valid_media", return_value=True),
+            patch("stream2video.concat._ffprobe_duration_ok", return_value=True),
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
             from stream2video.concat import _run_cut_then_encode
@@ -1651,8 +1658,9 @@ class TestCutThenEncodeCutPhaseProtection:
                 None,
                 None,
                 encoder="libx264",
+                source_has_audio=False,
             )
-        # Phase-1 cut-фаза runs exactly once per keep segment.
+        # Phase-1 cut encode runs exactly once per keep segment.
         assert len(calls) == 2, calls
 
     def test_cut_phase_concat_distance_wraps_in_concat_error(self, tmp_path: Path):
@@ -1666,11 +1674,15 @@ class TestCutThenEncodeCutPhaseProtection:
         keep = [(0.0, 1.0)]
 
         def failed_helper(cmd, *, timeout, label, **kwargs):
-            # Simulate a corrupt-source ffmpeg failure during cut.
+            # Simulate a corrupt-source ffmpeg failure during phase-1 cut encode.
             raise ConcatError(f"{label} failed (rc=1): Streamcopy failed at sub-zero pts")
 
         with (
-            patch("stream2video.concat._run_subprocess_cmd", side_effect=failed_helper),
+            # Phase-1 cut encode now runs via _run_ffmpeg; phase-3 mux
+            # uses _run_subprocess_cmd — keep both mocked as no-ops so the
+            # test only observes the deliberate failure in phase 1.
+            patch("stream2video.concat._run_ffmpeg", side_effect=failed_helper),
+            patch("stream2video.concat._run_subprocess_cmd"),
             patch("stream2video.concat._ensure_fresh_work_dir"),
             pytest.raises(ConcatError, match="cut phase segment"),
         ):
@@ -1683,6 +1695,7 @@ class TestCutThenEncodeCutPhaseProtection:
                 None,
                 None,
                 encoder="libx264",
+                source_has_audio=False,
             )
 
     def test_cut_phase_cancel_raises_cancelled_error(self, tmp_path: Path):
@@ -1699,7 +1712,13 @@ class TestCutThenEncodeCutPhaseProtection:
             raise CancelledError("cut cancelled")
 
         with (
-            patch("stream2video.concat._run_subprocess_cmd", side_effect=cancelled_helper),
+            # Phase-1 cut now uses _run_ffmpeg (frame-accurate encode
+            # with the chosen codec), so the CancelledError surfaces
+            # there; phase-3 mux uses _run_subprocess_cmd and is mocked
+            # as a no-op (the test never reaches phase 3 because the
+            # cut phase aborts first).
+            patch("stream2video.concat._run_ffmpeg", side_effect=cancelled_helper),
+            patch("stream2video.concat._run_subprocess_cmd"),
             patch("stream2video.concat._ensure_fresh_work_dir"),
             pytest.raises(CancelledError),
         ):
@@ -1712,6 +1731,7 @@ class TestCutThenEncodeCutPhaseProtection:
                 None,
                 None,
                 encoder="libx264",
+                source_has_audio=False,
             )
 
     def test_cut_phase_timeout_raises_ffmpeg_error(self, tmp_path: Path):
@@ -1728,7 +1748,11 @@ class TestCutThenEncodeCutPhaseProtection:
             raise FFmpegError(f"{label} timeout after 600s")
 
         with (
-            patch("stream2video.concat._run_subprocess_cmd", side_effect=timeout_helper),
+            # Phase-1 cut encode is the only path that runs _run_ffmpeg;
+            # mock _run_subprocess_cmd as a no-op so the test never
+            # exercises phase-3.
+            patch("stream2video.concat._run_ffmpeg", side_effect=timeout_helper),
+            patch("stream2video.concat._run_subprocess_cmd"),
             patch("stream2video.concat._ensure_fresh_work_dir"),
             pytest.raises(FFmpegError, match="timeout"),
         ):
@@ -1741,4 +1765,5 @@ class TestCutThenEncodeCutPhaseProtection:
                 None,
                 None,
                 encoder="libx264",
+                source_has_audio=False,
             )

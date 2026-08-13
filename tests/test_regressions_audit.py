@@ -112,7 +112,7 @@ class TestCutEncodeResumeDuration:
         keep = [(10.0, 20.0)]  # dur=10
         cut_dir = output.parent / "_out_cut"
         cut_dir.mkdir(parents=True)
-        (cut_dir / "cut_000000.mkv").write_bytes(b"\x00" * 2048)
+        (cut_dir / "cut_000000.mp4").write_bytes(b"\x00" * 2048)
 
         cut_calls: list[list[str]] = []
 
@@ -134,6 +134,104 @@ class TestCutEncodeResumeDuration:
                 None, None, encoder="libx264", source_has_audio=False,
             )
         assert len(cut_calls) == 1, "stale-duration part was reused, not re-cut"
+
+
+# ── #B5 ── force re-detect must clear both .resume and .resume.inuse ────
+class TestForceClearsInUseCheckpoint:
+    """P2 audit regression: ``--force`` previously wiped only the
+    canonical ``.resume`` cache file but left a ``.resume.inuse``
+    checkpoint behind from a crashed previous run. ``detect_silence``
+    prefers the ``.inuse`` over ``.resume`` (see silence/pipeline.py:
+    "A leftover .inuse takes precedence"), so a forced re-detect
+    silently continued from the old, possibly-shifted timeline
+    instead of starting fresh. The controller must wipe both."""
+
+    def test_force_deletes_inuse_alongside_resume(self, tmp_path: Path):
+        import sys
+        import threading
+        from pathlib import Path as _Path
+
+        # Reuse the shared helper from test_pipeline_controller
+        sys.path.insert(0, str(_Path(__file__).parent))
+        from test_pipeline_controller import _valid_config  # noqa: E402
+
+        from stream2video.pipeline_controller import (
+            PipelineCallbacks,
+            PipelineController,
+            PipelineUnexpectedError,
+        )
+        from stream2video.silence import build_resume_cache_path, resume_inuse_path
+
+        # Setup: a fake output dir with a video file + both checkpoint
+        # artifacts left behind by a crashed previous run.
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"source")
+
+        cfg = _valid_config(
+            output_dir=tmp_path,
+            input_raw=str(video),
+            force=True,
+        )
+        out = cfg.output_dir
+
+        resume_path = build_resume_cache_path(video, out)
+        resume_path.parent.mkdir(parents=True, exist_ok=True)
+        resume_path.write_text("{}")
+        inuse_path = resume_inuse_path(resume_path)
+        inuse_path.write_text("{}")
+
+        assert resume_path.exists() and inuse_path.exists()
+
+        log_messages: list[str] = []
+
+        cb = PipelineCallbacks(
+            on_progress=lambda _f: None,
+            on_status=lambda _t, **_k: None,
+            on_log=log_messages.append,
+            on_info=lambda _t: None,
+            on_overall=lambda _a, _b, _c: None,
+            on_total=lambda _a, **_k: None,
+            on_download_progress=lambda _p: None,
+            on_pipeline_complete=lambda _d: None,
+        )
+
+        from unittest.mock import MagicMock, patch
+
+        with (
+            patch(
+                "stream2video.pipeline_controller.download",
+                side_effect=lambda *a, **k: MagicMock(path=video, is_downloaded=False),
+            ),
+            patch(
+                "stream2video.pipeline_controller.get_video_duration", return_value=10.0
+            ),
+            patch(
+                "stream2video.pipeline_controller.apply_per_video_dir",
+                return_value=(out, video),
+            ),
+            # detect_silence raises a generic exception so the controller
+            # wraps it in PipelineUnexpectedError and we exit. The force
+            # cleanup happens BEFORE detect_silence is called, so the
+            # checkpoint files are already gone by that point.
+            patch(
+                "stream2video.pipeline_controller.detect_silence",
+                side_effect=RuntimeError("intentional stop"),
+            ),
+            patch(
+                "stream2video.pipeline_controller.generate_keep_segments",
+                return_value=[(0.0, 10.0)],
+            ),
+            pytest.raises(PipelineUnexpectedError),
+        ):
+            PipelineController(
+                cfg=cfg, cb=cb, cancel_event=threading.Event()
+            ).run()
+
+        assert not resume_path.exists(), "force did not clear canonical .resume"
+        assert not inuse_path.exists(), "force did not clear .inuse checkpoint"
+        assert any(
+            "inuse" in m.lower() for m in log_messages
+        ), f"force did not log clearing .inuse; logs: {log_messages}"
 
 
 # ── #6 ── output lock ──────────────────────────────────────────────────

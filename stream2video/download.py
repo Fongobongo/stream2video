@@ -333,6 +333,61 @@ def _timeout_error(message: str, stderr_chunks: list[str]) -> DownloadTimeoutErr
     return DownloadTimeoutError(message)
 
 
+def _sweep_partial_fragments(out_dir: Path, since_monotonic: float) -> None:
+    """Remove orphaned yt-dlp partial fragments created since ``since_monotonic``.
+
+    yt-dlp's outtmpl leaves ``*.part`` / ``*.ytdl`` / ``*.temp`` behind when a
+    download is cancelled mid-write. The download loop raises
+    ``DownloadCancelledError(partial=True)`` BEFORE the resolver maps
+    stdout to a destination path, so the pipeline controller's cleanup can
+    not unlink a path it never learned (P2 audit: every cancelled download
+    leaked a uniquely-named dead file thanks to the ``%(epoch)s`` template).
+
+    This sweep is the one place inside ``download()`` that knows both the
+    directory AND the windows of the run. We only delete files whose mtime
+    falls after the monotonic start time of THIS attempt — older fragments
+    belonging to unrelated (still-running or abandoned) attempts are kept.
+    """
+    import time
+    import os
+
+    try:
+        entries = list(out_dir.iterdir())
+    except OSError:
+        return
+
+    # Convert ``since_monotonic`` (time.monotonic()) to a wall-clock
+    # reference. ``time.monotonic`` and ``time.time`` are independent
+    # bases, but for age-filtering partial fragments a monotonic-to-wall
+    # delta captured at this moment is accurate enough — the worst-case
+    # misclassification window is bounded by how far the two clocks
+    # drift over the duration of the download, which is well under a
+    # second on any healthy machine (NTP-stepped wallclock excluded).
+    now_wall = time.time()
+    now_mono = time.monotonic()
+    approx_start_wall = now_wall - max(0.0, now_mono - since_monotonic)
+
+    for p in entries:
+        try:
+            name = p.name
+        except OSError:
+            continue
+        if not name.endswith((".part", ".ytdl", ".temp")):
+            continue
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        if st.st_mtime + 1.0 < approx_start_wall:
+            # Pre-dates this download attempt — leave untouched.
+            continue
+        try:
+            p.unlink(missing_ok=True)
+            logger.info(f"Removed orphaned download fragment: {p}")
+        except OSError as e:
+            logger.debug(f"Could not unlink partial fragment {p}: {e}")
+
+
 def _resolve_reported_download_path(
     out_dir: Path, stdout_lines: list[str]
 ) -> tuple[Path | None, Path | None]:
@@ -700,3 +755,25 @@ def download(
                         pipe.close()
                     except OSError:
                         pass
+
+            # P2 audit: ``DownloadCancelledError(partial=True)`` raised
+            # above picks up no resolved path — the resolver that maps
+            # yt-dlp's stdout to a downloaded file runs AFTER the loop.
+            # Exit is caused here, and the pipeline controller's cleanup
+            # can't unlink a path it never learned. yt-dlp template uses
+            # ``%(id)s-%(epoch)s.webm.part`` (epoch second resolution), so
+            # every cancelled download leaks a uniquely-named dead file:
+            # GBs of truncated VOD that a re-run can't reuse, accumulating
+            # across cancelled sessions.
+            #
+            # Sweep ``out_dir`` for *.part / *.ytdl / *.temp fragments
+            # whose mtime is no older than this download attempt. Files
+            # predating ``start_time`` (left by an earlier unrelated run)
+            # are kept; files younger are orphaned by THIS attempt and
+            # are unlinked here. Any OSError is logged at debug because
+            # an AV sweep locking the partial mid-unlink surfaces here,
+            # and elevating it would mask the original cancel exception.
+            try:
+                _sweep_partial_fragments(out_dir, start_time)
+            except Exception:
+                logger.debug("partial-fragment sweep failed", exc_info=True)
