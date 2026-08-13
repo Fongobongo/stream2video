@@ -6,6 +6,8 @@ Tk root (the GUI transitively imports Pillow and customtkinter). Pure
 functions are also easier to reason about and unit-test.
 """
 
+import math
+
 
 def fmt_size(bytez: int | float) -> str:
     """Human-readable byte size. Negative values are clamped to 0 — a
@@ -218,6 +220,12 @@ def fmt_zoom_text(zoom_level: float) -> str:
     and comparing the rounded value against 10 moves the switch
     point to where the user actually sees it.
     """
+    # Non-finite guard (C18 audit): a NaN zoom (0/0 view math on a
+    # degenerate duration) must render as "?" — formatting NaN directly
+    # produces "nanx" in the status line, and ``round(nan)`` raises
+    # ValueError on some Python builds.
+    if not math.isfinite(zoom_level):
+        return "?"
     # Round to 1 decimal (the precision of the sub-10 branch) and
     # compare against 10. 9.94 → 9.9 (sub-10, decimal branch).
     # 9.96 → 10.0 (≥10, int branch). The boundary now matches what

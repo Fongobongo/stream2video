@@ -9,9 +9,57 @@ import pytest
 
 from stream2video.concat import (
     FFmpegOutOfMemoryError,
+    _run_final_concat,
     _run_subprocess_cmd,
     cut_and_concat,
 )
+
+
+def _final_concat_cmd(tmp_path: Path, **kwargs) -> list[str]:
+    """Run ``_run_final_concat`` with mocked ffmpeg and return its args."""
+
+    captured: dict = {}
+
+    def fake_run_ffmpeg(args, **kw):
+        captured["args"] = args
+
+    work = tmp_path / "work"
+    work.mkdir()
+    parts = []
+    for i in range(2):
+        p = work / f"seg_{i:06d}.mp4"
+        p.write_bytes(b"\x00")
+        parts.append(p)
+    with patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg):
+        _run_final_concat(
+            work,
+            tmp_path / "out.mp4",
+            parts,
+            total_duration=4.0,
+            progress_callback=None,
+            cancel_callback=None,
+            label="test",
+            **kwargs,
+        )
+    return captured["args"]
+
+
+def test_final_concat_fresh_set_stream_copies(tmp_path: Path):
+    args = _final_concat_cmd(tmp_path, audio_resync=False)
+    assert args[args.index("-f") + 1] == "concat"
+    assert "-c" in args and args[args.index("-c") + 1] == "copy"
+    assert "aresample" not in args
+
+
+def test_final_concat_mixed_set_resyncs_audio(tmp_path: Path):
+    args = _final_concat_cmd(tmp_path, audio_resync=True, audio_quality="high")
+    # Video stays lossless; only the audio is re-encoded through the
+    # async resampler (B6 audit) with the caller's quality bitrate.
+    assert args[args.index("-c:v") + 1] == "copy"
+    af = args[args.index("-af") + 1]
+    assert af == "aresample=async=1:first_pts=0"
+    assert args[args.index("-c:a") + 1] == "aac"
+    assert args[args.index("-b:a") + 1] == "256k"
 
 
 def test_cut_and_concat_builds_memory_monitor_factory(tmp_path: Path):

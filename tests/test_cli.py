@@ -3,6 +3,7 @@
 import logging
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -443,3 +444,102 @@ class TestCliPerVideoDir:
             assert not (out / "myvideo_audio.wav").exists()
             assert not (out / "myvideo_silence_cache.json").exists()
             assert not (out / "myvideo_compressed.mp4").exists()
+
+
+class TestB11CliSanitization:
+    """B11 audit cluster: CLI validation must match YAML (CONFIG_RANGES
+    ceilings), proxy must be a str, JSON logging must be idempotent
+    across repeated main() calls, and the doctor argv scan must not
+    swallow the next flag as a --config value."""
+
+    def _resolver(self, config: dict):
+        return make_resolver(None, config, _FakeConsole())
+
+    def test_stall_kill_timeout_ceiling_matches_config_ranges(self):
+        # YAML twin (stall_kill_timeout: 99999) is rejected by
+        # cli_config via CONFIG_RANGES; the CLI flag used to accept it.
+        # (With a bare resolver the CLI value rides the same int branch
+        # as the config value — the ceiling check is shared.)
+        with pytest.raises(typer.Exit) as exc:
+            self._resolver({"stall_kill_timeout": 99999}).resolve(
+                "stall_kill_timeout", None
+            )
+        assert exc.value.exit_code == 1
+        # And the boundary value itself is accepted.
+        assert (
+            self._resolver({"stall_kill_timeout": 3600}).resolve(
+                "stall_kill_timeout", None
+            )
+            == 3600
+        )
+
+    def test_final_concat_timeout_ceiling_applied(self):
+        with pytest.raises(typer.Exit):
+            self._resolver({"final_concat_timeout": 604801}).resolve(
+                "final_concat_timeout", None
+            )
+        assert (
+            self._resolver({"final_concat_timeout": 604800}).resolve(
+                "final_concat_timeout", None
+            )
+            == 604800
+        )
+
+    def test_yaml_int_proxy_is_coerced_to_str(self):
+        # ``proxy: 8080`` (number in YAML) must not leak into yt-dlp as
+        # an int — resolver coerces both CLI and YAML sources to str.
+        assert self._resolver({"proxy_active": True, "proxy": 8080}).resolve(
+            "proxy", None
+        ) == "8080"
+
+    def test_json_handler_installation_is_idempotent(self):
+        from stream2video import cli
+        from stream2video.json_logging import install_json_handler
+
+        json_handlers_before = [
+            h
+            for h in cli.logger.handlers
+            if type(h).__name__ == "StreamHandler" and hasattr(h, "formatter")
+            and "JsonFormatter" in type(h.formatter).__name__
+        ]
+        try:
+            first = install_json_handler(cli.logger, level="INFO")
+            second = install_json_handler(cli.logger, level="INFO")
+            # A second main() must not leave BOTH handlers attached —
+            # that duplicates every record line-by-line on stdout.
+            json_handlers = [
+                h
+                for h in cli.logger.handlers
+                if type(h).__name__ == "StreamHandler" and hasattr(h, "formatter")
+                and "JsonFormatter" in type(h.formatter).__name__
+            ]
+            assert len(json_handlers) == 1, (
+                f"expected exactly 1 JSON handler, got {len(json_handlers)}"
+            )
+            assert json_handlers[0] is second
+        finally:
+            for h in list(cli.logger.handlers):
+                if (
+                    type(h).__name__ == "StreamHandler"
+                    and hasattr(h, "formatter")
+                    and "JsonFormatter" in type(h.formatter).__name__
+                ):
+                    cli.logger.removeHandler(h)
+            for h in json_handlers_before:
+                cli.logger.addHandler(h)
+
+    def test_doctor_config_scan_skips_flag_like_value(self, monkeypatch):
+        # ``-c --doctor`` (value is another flag) must NOT become
+        # Path("--doctor"); the scan yields None and does not crash.
+        from stream2video import cli
+
+        def fake_run_doctor(cfg):
+            assert cfg is None, f"expected no config path, got {cfg}"
+            return True
+
+        monkeypatch.setattr(sys, "argv", ["stream2video", "-c", "--doctor", "--doctor"])
+        monkeypatch.setattr(cli, "_run_doctor", fake_run_doctor)
+        monkeypatch.setattr(cli, "_JSON_LOG_MODE", False)
+        with pytest.raises(typer.Exit) as exc:
+            cli._doctor_callback(None, None, True)
+        assert exc.value.exit_code == 0

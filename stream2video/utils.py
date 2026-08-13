@@ -361,7 +361,15 @@ def drain_stderr_lines(
 
     def _run() -> None:
         try:
-            for raw in iter(pipe.readline, b""):
+            # Explicit EOF loop instead of iter(pipe.readline, b""): the
+            # bytes sentinel never matches in text mode, where readline()
+            # returns "" at EOF — the drain would spin forever (bounded
+            # only by the caller's _wait_for_drain timeout) and the
+            # stderr sink would stay partially filled (C14 audit).
+            while True:
+                raw = pipe.readline()
+                if not raw:
+                    break
                 # In text mode (Popen with text=True) ``raw`` is already
                 # a str; in bytes mode it's bytes. Decode bytes only so
                 # text-mode callers don't trigger AttributeError.
@@ -394,7 +402,16 @@ def drain_stderr_lines(
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
 
-    def _wait_for_drain(timeout: float = 5.0) -> None:
+    def _wait_for_drain(timeout: float = 30.0) -> None:
+        # 5s used to be the bound. On a stderr-spammy source (corrupt
+        # input, "error while decoding MB" floods) the drain thread can
+        # still be chewing through the pipe when the wait expires, so
+        # the caller reads a PARTIAL sink and mis-classifies the run —
+        # e.g. an OOM line still in the pipe becomes a generic
+        # FFmpegError and the "lower the memory budget" hint is lost
+        # (C14 audit). The thread always finishes once the pipe closes
+        # (process death), so 30s only stretches the bounded wait; it
+        # never extends the subprocess lifetime.
         stop_event.wait(timeout=timeout)
 
     return _wait_for_drain

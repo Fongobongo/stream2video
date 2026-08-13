@@ -53,6 +53,19 @@ _encoder_check_cache: dict[str, bool] = {}
 _encoder_check_lock = threading.Lock()
 
 
+def reset_encoder_check_cache() -> None:
+    """Drop cached smoke-test results.
+
+    B11 audit: a transient spawn failure (winget shim target briefly
+    blocked by AV/filter drivers) cached ``False`` for the whole process
+    — the encoder then stayed "unavailable" even after the PATH fix the
+    retry logic performed. Called alongside ``reset_tool_cache`` in the
+    spawn-retry path so a re-resolved ffmpeg gets re-smoke-tested.
+    """
+    with _encoder_check_lock:
+        _encoder_check_cache.clear()
+
+
 def _x264_low_memory_opts() -> list[str]:
     """Return extra x264 options that reduce peak memory usage.
 
@@ -386,6 +399,17 @@ def check_encoder(name: str) -> bool:
             )
         except subprocess.TimeoutExpired:
             logger.warning(f"{name} smoke test timed out after {ENCODER_CHECK_TIMEOUT}s")
+            _encoder_check_cache[name] = False
+            return False
+        except FileNotFoundError:
+            # ffmpeg binary missing/blocked at spawn time (winget shim
+            # target, AV filter driver, PATH break). ``run_with_retry``
+            # re-raises after its retries. Report "unavailable" instead
+            # of crashing -- the caller (``--doctor``, encoder tester)
+            # is a diagnostics surface that must degrade gracefully
+            # (B11 audit: ``--doctor`` without ffmpeg crashed with an
+            # unhandled FileNotFoundError).
+            logger.warning(f"{name} smoke test failed to spawn ffmpeg (missing or blocked)")
             _encoder_check_cache[name] = False
             return False
         ok = r.returncode == 0

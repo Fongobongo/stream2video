@@ -25,6 +25,7 @@ import typer
 from stream2video.cli_helpers import ParameterSource
 from stream2video.config import (
     CONFIG_DEFAULTS,
+    CONFIG_RANGES,
     PRESET_NAMES,
     VALID_DOWNLOAD_QUALITIES,
     VALID_ENCODERS,
@@ -75,17 +76,30 @@ PARAM_SPECS: dict[str, dict[str, Any]] = {
     "gapless_concat": {"kind": "bool"},
     "low_process_priority": {"kind": "bool"},
     "completion_sound": {"kind": "bool"},
-    # Plain int parameters (timeouts, sizes).
+    # Plain int parameters (timeouts, sizes). The ``max`` bound comes
+    # from CONFIG_RANGES — the SAME ceiling cli_config applies to YAML,
+    # so ``--stall-kill-timeout 99999`` is rejected exactly like its
+    # YAML twin ``stall_kill_timeout: 99999`` (B11 audit: the CLI used
+    # to accept values the config file rejected — a silent divergence
+    # between the two configuration surfaces).
     "memory_reserve_mb": {"kind": "int", "min": 0},
     "download_timeout": {"kind": "int", "min": 1},
     "connect_timeout": {"kind": "int", "min": 1},
     "no_progress_timeout": {"kind": "int", "min": 1},
-    "silence_timeout": {"kind": "int", "min": 1},
-    "segment_encode_timeout": {"kind": "int", "min": 1},
-    "final_concat_timeout": {"kind": "int", "min": 1},
-    "stall_kill_timeout": {"kind": "int", "min": 1},
-    "batch_chunk_size": {"kind": "int", "min": 1},
-    "min_part_bytes": {"kind": "int", "min": 1},
+    "silence_timeout": {"kind": "int", "min": 1, "max": CONFIG_RANGES["silence_timeout"][1]},
+    "segment_encode_timeout": {
+        "kind": "int",
+        "min": 1,
+        "max": CONFIG_RANGES["segment_encode_timeout"][1],
+    },
+    "final_concat_timeout": {
+        "kind": "int",
+        "min": 1,
+        "max": CONFIG_RANGES["final_concat_timeout"][1],
+    },
+    "stall_kill_timeout": {"kind": "int", "min": 1, "max": CONFIG_RANGES["stall_kill_timeout"][1]},
+    "batch_chunk_size": {"kind": "int", "min": 1, "max": CONFIG_RANGES["batch_chunk_size"][1]},
+    "min_part_bytes": {"kind": "int", "min": 1, "max": CONFIG_RANGES["min_part_bytes"][1]},
     "rlimit_as_mb": {"kind": "int", "min": 0},
     # Auto-or-int: the CLI flag arrives as a string; when COMMANDLINE
     # the resolver tries ``int(value)``, falling back to ``"auto"``
@@ -183,6 +197,9 @@ class _Resolver:
             min_val = spec.get("min")
             if min_val is not None and iv < min_val:
                 self._fail(name, iv, f"(must be >= {min_val})")
+            max_val = spec.get("max")
+            if max_val is not None and iv > max_val:
+                self._fail(name, iv, f"(must be <= {max_val})")
             return iv
 
         if kind == "auto_or_int":
@@ -193,6 +210,9 @@ class _Resolver:
                 min_val = spec.get("min")
                 if min_val is not None and value < min_val:
                     self._fail(name, value, f"(must be >= {min_val} or 'auto')")
+                max_val = spec.get("max")
+                if max_val is not None and value > max_val:
+                    self._fail(name, value, f"(must be <= {max_val} or 'auto')")
                 return value
             # String path: "auto" or parseable int.
             if not isinstance(value, str):
@@ -209,16 +229,24 @@ class _Resolver:
             min_val = spec.get("min")
             if min_val is not None and iv < min_val:
                 self._fail(name, iv, f"(must be >= {min_val} or 'auto')")
+            max_val = spec.get("max")
+            if max_val is not None and iv > max_val:
+                self._fail(name, iv, f"(must be <= {max_val} or 'auto')")
             return iv
 
         if kind == "proxy":
             if from_cli:
-                # CLI --proxy URL explicitly enables the proxy.
-                return value if isinstance(value, str) else ""
+                # CLI --proxy URL explicitly enables the proxy. YAML
+                # numbers (``proxy: 8080``) are coerced to str so yt-dlp
+                # receives a URL-ish value, never an int (B11 audit: an
+                # int proxy leaked into the subprocess argv as "8080" —
+                # yt-dlp then mis-parsed it as an option).
+                return str(value) if value else ""
             # YAML: proxy_active is the gate. Without it the address
             # stays inert — the user can toggle it on in the GUI later.
             if self._config.get("proxy_active", False):
-                return self._config.get("proxy", "")
+                value = self._config.get("proxy", "")
+                return str(value) if value else ""
             return ""
 
         raise AssertionError(f"Unknown ParamKind {kind!r}")

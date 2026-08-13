@@ -31,6 +31,8 @@ def _run_final_concat(
     low_process_priority: bool = False,
     rlimit_as_mb: int = 0,
     memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
+    audio_resync: bool = False,
+    audio_quality: str = "medium",
 ) -> None:
     """Build ``concat.txt`` and run the final concat-demuxer pass.
 
@@ -46,6 +48,21 @@ def _run_final_concat(
     output time across the whole concat, not per-segment) to the last
     10% of the overall progress bar -- both call sites reserve 0..0.9
     for the per-segment encodes and 0.9..1.0 for this final concat.
+
+    **Seam resync (B6 audit).** A mixed part set -- some parts resumed
+    from an earlier run, some freshly encoded -- can carry slightly
+    different audio timebases, so ``-c copy`` joints are audible as
+    A/V drift or clipped samples at the seams. The historically-suggested
+    ``-async 1`` / ``-vsync cfr`` are *no-ops* here: with stream copy
+    there is no encoding to attach them to (``-async`` warns "option is
+    deprecated, use aresample" and applies only to encoded audio;
+    ``-vsync`` only touches encoded video). The operative fix is to
+    re-encode the audio through ``aresample=async=1:first_pts=0``,
+    which stretches/compresses the audio to the video timeline and
+    re-anchors it at 0, while video stays stream-copied (lossless).
+    Callers pass ``audio_resync=True`` only when the part set is mixed
+    (resume + fresh) and the source has audio; a fresh-only set shares
+    one encode session's timebase and needs no correction.
     """
     list_path = work_dir / "concat.txt"
     with open(list_path, "w", encoding="utf-8") as lf:
@@ -56,6 +73,21 @@ def _run_final_concat(
         if progress_callback and total_duration > 0:
             progress_callback(min(seconds / total_duration * 0.1, 0.1) + 0.9)
 
+    if audio_resync:
+        codec_opts = [
+            "-c:v",
+            "copy",
+            # Re-encode audio only: async=1 fills/removes samples to keep
+            # audio locked to the video timeline across seam discontinuities
+            # (per-segment AAC priming), first_pts=0 re-anchors the start.
+            "-af",
+            "aresample=async=1:first_pts=0",
+            "-c:a",
+            "aac",
+            *_c._audio_bitrate_opts(audio_quality),
+        ]
+    else:
+        codec_opts = ["-c", "copy"]
     label_text = label
     try:
         _c._run_ffmpeg(
@@ -83,8 +115,7 @@ def _run_final_concat(
                 "0",
                 "-i",
                 str(list_path),
-                "-c",
-                "copy",
+                *codec_opts,
                 str(output_path),
             ],
             progress_callback=_concat_prog,

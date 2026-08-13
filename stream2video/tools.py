@@ -150,17 +150,25 @@ def _spawn_with_retry(
             # Drop ONLY the CREATE_NO_WINDOW bit (0x08000000): it's the
             # one that composes badly with an inconsistent parent console
             # (CPython #37380 → winerror 206). Zeroing the whole field
-            # (the previous behaviour) also discarded
-            # BELOW_NORMAL_PRIORITY_CLASS — so a low-priority retry
-            # silently ran at normal priority exactly when the machine
-            # was already under the AV/filter-driver load that triggered
-            # the retry in the first place (fix-plan #17).
+            # also discarded BELOW_NORMAL_PRIORITY_CLASS — so a
+            # low-priority retry silently ran at normal priority exactly
+            # when the machine was already under the AV/filter-driver
+            # load that triggered the retry in the first place
+            # (fix-plan #17). On POSIX ``creationflags`` is Windows-only
+            # plumbing: passing a non-zero value raises ValueError
+            # instead of FileNotFoundError, which would hide the retry
+            # path entirely (B11 audit).
             orig_flags = int(kwargs.get("creationflags", 0))
-            try_kwargs = {**kwargs, "creationflags": orig_flags & ~0x08000000}
+            if os.name == "nt":
+                try_kwargs = {**kwargs, "creationflags": orig_flags & ~0x08000000}
+            else:
+                try_kwargs = {k: v for k, v in kwargs.items() if k != "creationflags"}
             logger.warning(
                 "retrying spawn without CREATE_NO_WINDOW (workaround for "
                 "CreateProcess error 206 when parent's console code page "
                 "was changed after spawning with CREATE_NO_WINDOW)"
+                if os.name == "nt"
+                else "retrying spawn after transient FileNotFoundError"
             )
         try:
             return fn(cmd, **try_kwargs)
@@ -179,6 +187,17 @@ def _spawn_with_retry(
             if attempt >= _SPAWN_RETRY_ATTEMPTS:
                 break
             reset_tool_cache()
+            # The spawn failure may have been a transiently-blocked ffmpeg
+            # (winget shim, AV filter). A previously-run smoke test cached
+            # False for the whole process; drop it so the re-resolved
+            # binary gets re-smoke-tested (B11 audit: "encoder unavailable"
+            # used to stick until app restart).
+            try:
+                from stream2video.concat.encoders import reset_encoder_check_cache
+
+                reset_encoder_check_cache()
+            except Exception:
+                logger.debug("reset_encoder_check_cache failed", exc_info=True)
             cmd, _tool = _re_resolve_cmd0(cmd)
             time.sleep(_SPAWN_RETRY_DELAY_S)
     assert last_exc is not None

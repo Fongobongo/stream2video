@@ -106,9 +106,15 @@ def _doctor_callback(ctx: typer.Context, param: Any, value: bool) -> bool:
         # the ``--config=X`` / ``-c=X`` spellings.
         cfg: Path | None = None
         argv = sys.argv[1:]
+        # ``--`` ends option parsing (everything after is positional):
+        # never treat a post-``--`` token as a flag value.
+        argv = argv[: argv.index("--")] if "--" in argv else argv
         for i, arg in enumerate(argv):
             if arg in ("--config", "-c"):
-                if i + 1 < len(argv):
+                # The value must actually be the next token AND not look
+                # like another flag (``-c --doctor`` would otherwise
+                # become Path("--doctor")). (B11 audit.)
+                if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
                     cfg = Path(argv[i + 1])
                 break
             if arg.startswith("--config="):
@@ -713,18 +719,23 @@ def main(
         raise typer.Exit(1)
     _console_handler.setLevel(level)
 
-    # Ensure output directory exists
+    # --doctor: environment diagnostics, no pipeline. Runs BEFORE
+    # output_dir creation so a diagnostics invocation doesn't leave a
+    # side-effect directory behind (B11 audit: mkdir ran earlier and
+    # also fired before config validation, so a bad YAML + --doctor
+    # combination created junk directories and a raw PermissionError
+    # traceback when the target was unwritable).
+    if doctor:
+        _doctor_ok = _run_doctor(config_file)
+        raise typer.Exit(0 if _doctor_ok else 1)
+
+    # Ensure output directory exists (after doctor/config validation).
     output_dir.mkdir(parents=True, exist_ok=True)
     log_file = output_dir / "stream2video.log"
 
     if not _JSON_LOG_MODE:
         console.print("\n[bold cyan]stream2video[/bold cyan] - Compress by removing silence")
         console.print(f"Logs saved to: {log_file}\n")
-
-    # --doctor: environment diagnostics, no pipeline.
-    if doctor:
-        _doctor_ok = _run_doctor(config_file)
-        raise typer.Exit(0 if _doctor_ok else 1)
 
     # ``signal.getsignal`` / ``signal.signal`` can only be called from the
     # interpreter's main thread; a host embedding ``cli.main`` in a worker

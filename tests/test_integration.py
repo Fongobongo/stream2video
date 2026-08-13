@@ -1,5 +1,6 @@
 """Integration tests for stream2video pipeline."""
 
+import json
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -635,6 +636,49 @@ class TestEncoderFallbackCleanup:
         assert calls["cleanup"] == ["h264_mf"], (
             "on_fallback should only fire once (before the libx264 retry)"
         )
+
+    def test_fallback_preserves_parts_and_retags_manifest(self, tmp_path: Path):
+        """C13 audit: the libx264 fallback must NOT wipe the work dir —
+        hours of correctly-encoded HW parts survive as reusable files,
+        and the manifest is retagged to the libx264 identity so the
+        retry's ``_ensure_fresh_work_dir`` accepts the dir and its
+        per-file resume gate decides which parts to re-encode."""
+        from stream2video.concat.fallback import _run_with_fallback
+
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"source")
+        out = tmp_path / "out.mp4"
+        seg_dir = out.parent / "_out_segments"
+        seg_dir.mkdir()
+        (seg_dir / "seg_000000.mp4").write_bytes(b"VALID")
+        (seg_dir / "seg_000001.mp4").write_bytes(b"")  # corrupt write
+        (seg_dir / "_manifest.json").write_text("{}")
+
+        def fake_segment(video_path, keep_segments, output_path, vcodec, vcodec_opts, *args, **kw):
+            if vcodec == "h264_mf":
+                raise ConcatError("moov atom not found")
+            return None
+
+        with patch("stream2video.concat._run_segment_concat", side_effect=fake_segment):
+            _run_with_fallback(
+                src,
+                [(0.0, 2.0), (5.0, 9.0)],
+                out,
+                "h264_mf",
+                ["-c:v", "h264_mf"],
+                "segment",
+                software_fallback="enabled",
+                min_part_bytes=1,
+            )
+
+        # Parts are preserved — the old rmtree would have deleted them.
+        assert (seg_dir / "seg_000000.mp4").read_bytes() == b"VALID"
+        assert (seg_dir / "seg_000001.mp4").exists()
+        # Manifest retagged to the libx264 retry's identity.
+        manifest = json.loads((seg_dir / "_manifest.json").read_text(encoding="utf-8"))
+        assert manifest["encoder"] == "libx264"
+        assert manifest["resolved_encoder"] == "libx264"
+        assert manifest["method"] == "segment"
 
 
 class TestEncoderQualityPresets:

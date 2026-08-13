@@ -421,6 +421,9 @@ def _run_batch_concat(
             low_process_priority=low_process_priority,
             rlimit_as_mb=rlimit_as_mb,
             memory_monitor_factory=memory_monitor_factory,
+            # B6 audit: same mixed-set seam correction as _run_segment_concat.
+            audio_resync=bool(skipped) and source_has_audio,
+            audio_quality=audio_quality,
         )
         logger.info(f"batch: successfully created {output_path}")
 

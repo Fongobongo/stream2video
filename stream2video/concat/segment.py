@@ -343,6 +343,13 @@ def _run_segment_concat(
                 low_process_priority=low_process_priority,
                 rlimit_as_mb=rlimit_as_mb,
                 memory_monitor_factory=memory_monitor_factory,
+                # B6 audit: a mixed part set (some resumed, some freshly
+                # encoded) can carry per-segment AAC priming offsets that
+                # accumulate into audible seam clicks under -c copy; the
+                # aresample re-encode re-anchors the audio. A fresh-only
+                # set shares one encode session's timebase — no correction.
+                audio_resync=bool(skipped) and source_has_audio,
+                audio_quality=audio_quality,
             )
         logger.info(f"Successfully created output: {output_path}")
 

@@ -7,7 +7,6 @@ video pipelines (segment / batch / cut_then_encode).
 """
 
 import logging
-import shutil
 from collections.abc import Callable
 from pathlib import Path
 
@@ -60,10 +59,12 @@ def _run_with_fallback(
     """Run the picked concat method with the primary encoder; fall back to libx264 on failure.
 
     On encoder fallback the per-method working directory (``_<stem>_segments``
-    / ``_<stem>_batch`` / ``_<stem>_cut``) is wiped -- the chunks written by
-    the failing encoder may be corrupt (e.g. h264_mf produces MP4s without a
-    moov atom on some Windows builds) and the resume-skip check in the inner
-    method would otherwise reuse them on the libx264 retry.
+    / ``_<stem>_batch`` / ``_<stem>_cut``) is RETAGGED with the libx264
+    run's manifest identity instead of being wiped (C13 audit) — the
+    retry's per-file resume gate then re-validates every part (size +
+    MP4 probe + audio probe + duration) so a corrupt HW write (e.g.
+    h264_mf MP4s without a moov atom on some Windows builds) is
+    re-encoded while correctly-encoded parts are reused.
 
     ``method`` is one of ``VALID_METHODS`` ("segment", "batch",
     "cut_then_encode"); anything else raises ConcatError.
@@ -88,11 +89,48 @@ def _run_with_fallback(
     work_dir = output_path.parent / f"_{output_path.stem}{work_suffix}"
 
     def _cleanup(failed_enc: str) -> None:
-        if work_dir.exists():
-            logger.info(
-                f"Removing partial {work_suffix[1:]} dir from failed {failed_enc} encode: {work_dir}"
-            )
-            shutil.rmtree(work_dir, ignore_errors=True)
+        # C13 audit: the old behaviour wiped the WHOLE work dir — hours
+        # of correctly-encoded parts went to the bin because ONE segment
+        # failed on the hardware encoder. Now we keep the parts and just
+        # retag the dir with the libx264 run's identity: the retry's
+        # ``_ensure_fresh_work_dir`` then matches (encoder mismatch would
+        # have forced a wipe), and the retry's per-file resume gate
+        # (size + MP4 probe + audio probe + duration) re-validates every
+        # part — a corrupt HW write (missing moov atom, truncated body)
+        # fails the gate and is re-encoded, a valid one is reused.
+        logger.info(
+            f"Retagging {work_suffix[1:]} dir for libx264 retry after {failed_enc} "
+            f"failure (valid parts will be reused)"
+        )
+        libx264_opts = _c.encoder_opts(
+            "libx264",
+            video_quality,
+            x264_preset=x264_preset,
+            encoder_threads=encoder_threads,
+            x264_low_memory=x264_low_memory,
+            use_crf=use_crf,
+            source_bitrate=source_bitrate,
+        )
+        manifest = _c._build_manifest(
+            video_path,
+            keep_segments,
+            method,
+            "libx264",
+            "libx264",
+            libx264_opts,
+            video_quality,
+            audio_quality,
+            x264_preset,
+            encoder_threads,
+            output_fps=output_fps,
+            gapless_concat=gapless_concat,
+            source_has_audio=source_has_audio,
+        )
+        try:
+            work_dir.mkdir(parents=True, exist_ok=True)
+            _c._write_manifest(work_dir, manifest)
+        except OSError as e:
+            logger.warning(f"Could not retag work dir for libx264 retry: {e}")
 
     def _try(enc: str, enc_opts: list[str]) -> None:
         if method == "segment":

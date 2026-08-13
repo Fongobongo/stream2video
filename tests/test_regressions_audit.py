@@ -285,6 +285,51 @@ class TestOutputLock:
         lp2 = acquire_output_lock(out)
         lp2.unlink()
 
+    def test_stale_lock_without_pid_reclaimed(self, tmp_path: Path):
+        """#C15: a lock with no pid line (crashed before write completed)
+        must be reclaimed, not brick the next run forever."""
+        out = tmp_path / "x.mp4"
+        lock = lock_path_for(out)
+        lock.write_text("output=x.mp4\n", encoding="utf-8")
+        lp = acquire_output_lock(out)
+        assert lp.exists()
+        lp.unlink()
+
+    def test_live_lock_with_own_pid_refused(self, tmp_path: Path):
+        """#C15: a lock whose pid is alive is a genuinely concurrent run —
+        the acquire must refuse it (never reclaim a live owner)."""
+        out = tmp_path / "x.mp4"
+        lock = lock_path_for(out)
+        lock.write_text(f"pid={os.getpid()} output=x.mp4\n", encoding="utf-8")
+        with pytest.raises(ConcatLockError):
+            acquire_output_lock(out)
+
+    def test_stale_lock_with_old_mtime_reclaimed(self, tmp_path: Path):
+        """#C15: age-based fallback — a lock older than the 1h threshold
+        is abandoned regardless of pid parsing."""
+        out = tmp_path / "x.mp4"
+        lock = lock_path_for(out)
+        lock.write_text("pid=1 output=x.mp4\n", encoding="utf-8")
+        old = time.time() - 60 * 60 - 60
+        os.utime(lock, (old, old))
+        lp = acquire_output_lock(out)
+        assert lp.exists()
+        lp.unlink()
+
+    def test_stale_lock_with_dead_pid_reclaimed(self, tmp_path: Path):
+        """#C15: pid-based reclaim — a fresh lock owned by a gone process
+        is reclaimed. Needs psutil for the liveness probe; without it the
+        lock is refused and the user gets the manual-cleanup message."""
+        psutil = pytest.importorskip("psutil")
+        out = tmp_path / "x.mp4"
+        lock = lock_path_for(out)
+        pid = 2**31 - 2  # far above any real pid on this machine
+        assert not psutil.pid_exists(pid)
+        lock.write_text(f"pid={pid} output=x.mp4\n", encoding="utf-8")
+        lp = acquire_output_lock(out)
+        assert lp.exists()
+        lp.unlink()
+
     def test_lock_released_on_pipeline_error(self, tmp_path: Path):
         """#6: a pipeline that raises still releases the lock."""
         video = tmp_path / "src.mp4"

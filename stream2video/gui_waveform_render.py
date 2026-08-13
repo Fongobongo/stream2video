@@ -228,6 +228,13 @@ class WaveformRenderMixin:
                             in_path,
                             threshold=float(config["threshold"]),
                             min_silence=float(config["min_silence"]),
+                            # C18 audit: the dry-run detect used the
+                            # module-level 10h silence_timeout fallback —
+                            # a preview decode could sit on a hung ffmpeg
+                            # for hours. The user-configured waveform
+                            # timeout bounds the preview exactly like the
+                            # peak-read paths above.
+                            timeout=self.config.get("waveform_timeout", 300),
                         )
                     except SilenceDetectionError as e:
                         _logger.warning(f"Dry-run detect failed: {e}")

@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import wave
 from pathlib import Path
 
@@ -52,8 +54,16 @@ def ensure_completion_chime(path: Path | None = None, *, kind: str = "success") 
     # Write via a temp file + atomic rename so two GUI instances that
     # race past the ``st_size > 44`` early-out above don't leave a
     # half-written WAV that the *other* process then plays as static.
-    tmp = out.parent / f".{out.name}.{Path(__file__).name}"
+    # The temp name is UNIQUE per process (``mkstemp``), not derived
+    # from ``out.name``: a deterministic name let process A truncate the
+    # file process B was mid-write into, corrupting the WAV after A's
+    # rename (B11 audit).
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{out.name}.", suffix=".tmp", dir=str(out.parent)
+    )
+    tmp = Path(tmp_name)
     try:
+        os.close(fd)
         with wave.open(str(tmp), "wb") as wav:
             wav.setnchannels(1)
             wav.setsampwidth(2)

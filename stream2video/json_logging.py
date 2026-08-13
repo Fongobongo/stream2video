@@ -65,9 +65,11 @@ def install_json_handler(logger: logging.Logger, level: str = "INFO") -> logging
 
     The handler is both attached to ``logger`` and returned so callers
     can detach it in a ``finally:`` block (mirroring how the CLI handles
-    its Rich handler). Existing handlers are left alone — replacing them
-    is the caller's choice (the CLI replaces its Rich console handler
-    explicitly before calling this).
+    its Rich handler). Previously-installed JSON handlers from earlier
+    ``main()`` calls are removed first (repeated CLI invocations in the
+    same process would otherwise double-fire every record); other handler
+    kinds are left alone — replacing them is the caller's choice (the
+    CLI replaces its Rich console handler explicitly before calling this).
 
     The stream is captured as ``sys.stdout`` *at call time* (not stderr)
     so a piped command ``stream2video --log-format json video.mp4 | jq .``
@@ -79,6 +81,16 @@ def install_json_handler(logger: logging.Logger, level: str = "INFO") -> logging
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(getattr(logging, level.upper(), logging.INFO))
     handler.setFormatter(_JsonFormatter())
+    # Idempotency for repeated ``main()`` calls: a previous invocation
+    # attached ITS JSON handler to the app ``logger``; that instance is
+    # still there (``basicConfig(force=True)`` only re-roots the root
+    # logger, it never detaches handlers from the app logger), so a new
+    # handler added below would make every record fire twice — stdout
+    # JSON duplicated line-by-line, breaking ``| jq .`` pipes. Drop the
+    # old JSON handlers before attaching the fresh one.
+    for old in list(logger.handlers):
+        if isinstance(old, logging.StreamHandler) and isinstance(old.formatter, _JsonFormatter):
+            logger.removeHandler(old)
     # Attach here so the function's name honours its contract. Callers
     # that previously did ``logger.addHandler(install_json_handler(...))``
     # still work — ``addHandler`` is idempotent for the same instance.
