@@ -500,6 +500,30 @@ class PipelineController:
         # cleanup) can't chase a stale path.
         self._output_path = None
 
+    def cleanup_incomplete_on_close(self) -> None:
+        """Best-effort removal of artifacts left mid-run when the app closes.
+
+        B9 audit: the GUI's ``_on_close`` historically chased its own
+        ``_output_path`` / ``_download_path`` fields, which were NEVER
+        populated — the real paths live here, stamped by the download
+        and concat phases. The worker registers this controller on the
+        GUI at Start; on close the GUI calls this method instead of the
+        dead fields.
+
+        Reuses the same cleanups the failure paths run, but must never
+        raise (the app is tearing down) and must not nuke a fully
+        downloaded source (``partial_only=True`` — the user may want to
+        reuse it on the next run; only truncated sinks are unlinked).
+        """
+        try:
+            self._cleanup_download_path(partial_only=True)
+        except Exception as e:
+            self.cb.on_log(f"[WARN] Could not clean up download on close: {e}")
+        try:
+            self._cleanup_partial_output()
+        except Exception as e:
+            self.cb.on_log(f"[WARN] Could not clean up output on close: {e}")
+
     def run(self) -> PipelineResult:
         """Run the three-phase pipeline. Raises ``PipelineError`` on failure.
 

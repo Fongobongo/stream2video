@@ -141,7 +141,17 @@ class PipelineGuiCallbacks(Protocol):
 
     def set_live_segments(self, run_id: int, segments: list[SilenceSegment]) -> None: ...
 
-    def pop_live_segments(self) -> None: ...
+    def pop_live_segments(self, run_id: int | None = None) -> None: ...
+
+    def current_live_run_id(self) -> int | None: ...
+
+    # B9 audit: the worker registers the live PipelineController so the
+    # GUI's on-close handler can clean up artifacts through the one
+    # object that knows the resolved paths (the GUI's own fields are
+    # never populated).
+    def set_active_controller(self, controller: object) -> None: ...
+
+    def clear_active_controller(self) -> None: ...
 
     # ``ask``-policy encoder fallback — GUI shows a yes/no dialog from
     # the worker thread (dispatched through ``_tk_after`` in the adapter).
@@ -351,6 +361,23 @@ class PipelineWorker:
         if warning is not None:
             self._gui.log(f"[WARN] {warning}")
 
+    def _is_current_run(self, live_run_id: int) -> bool:
+        """True while this worker's run is still the newest one.
+
+        B10 audit: UI callbacks (status line, failure style, completion
+        sound, running flag) mutate shared GUI state. If the user pressed
+        Start again while a previous worker was still unwinding its error
+        path, that stale worker would otherwise overwrite the NEW run's
+        status / disable the Start button / play an error chime over a
+        healthy run. Compare against the store's current run id.
+        """
+        try:
+            return live_run_id == self._gui.current_live_run_id()
+        except Exception:
+            # A GUI without run tracking (or a broken adapter) must not
+            # gate the error path — fail open.
+            return True
+
     def run(self, params: PipelineWorkerParams) -> None:
         from stream2video.pipeline_controller import (
             PipelineCallbacks,
@@ -451,6 +478,17 @@ class PipelineWorker:
                 on_fallback_consent=self._gui.ask_fallback_consent,
             )
 
+            # B9 audit: the controller owns the REAL resolved paths
+            # (``_download_path`` / ``_output_path``) — the GUI's own
+            # ``_output_path`` / ``_download_path`` fields are never
+            # populated (dead on-close cleanup). Register the active
+            # controller so ``_on_close`` can ask it to remove any
+            # half-written artifacts when the app is closed mid-run.
+            try:
+                self._gui.set_active_controller(controller)
+            except Exception:
+                logger.debug("set_active_controller failed", exc_info=True)
+
             controller.run()
             # NOTE: source-file deletion on ``delete_after=True`` is owned
             # by ``PipelineController._finish`` — it unlinks the path AND
@@ -465,31 +503,39 @@ class PipelineWorker:
             # the stale overlay snapshot instead of leaking it into the
             # next waveform-open on the same file.
         except PipelineCancelled:
-            self._gui.log("Pipeline cancelled")
-            self._gui.ui_status("Cancelled", force=True)
-            self._gui.ui_set_failure_style()
-            self._play_completion_sound("attention")
+            # B10 audit: a STALE worker (a newer Start superseded this
+            # run before the error surfaced) must not overwrite the new
+            # run's status/style/sound. Guard every mutating UI call.
+            if self._is_current_run(live_run_id):
+                self._gui.log("Pipeline cancelled")
+                self._gui.ui_status("Cancelled", force=True)
+                self._gui.ui_set_failure_style()
+                self._play_completion_sound("attention")
         except PipelineDownloadError as e:
-            self._gui.log(f"[ERROR] Download failed: {e}")
-            self._gui.ui_status(f"Failed: {e}", force=True)
-            self._gui.ui_set_failure_style()
-            self._play_completion_sound("attention")
+            if self._is_current_run(live_run_id):
+                self._gui.log(f"[ERROR] Download failed: {e}")
+                self._gui.ui_status(f"Failed: {e}", force=True)
+                self._gui.ui_set_failure_style()
+                self._play_completion_sound("attention")
         except PipelineSilenceError as e:
-            self._gui.log(f"[ERROR] Silence detection failed: {e}")
-            self._gui.ui_status(f"Failed: {e}", force=True)
-            self._gui.ui_set_failure_style()
-            self._play_completion_sound("attention")
+            if self._is_current_run(live_run_id):
+                self._gui.log(f"[ERROR] Silence detection failed: {e}")
+                self._gui.ui_status(f"Failed: {e}", force=True)
+                self._gui.ui_set_failure_style()
+                self._play_completion_sound("attention")
         except PipelineConcatError as e:
-            self._gui.log(f"[ERROR] {e}")
-            self._gui.ui_status(f"Failed: {e}", force=True)
-            self._gui.ui_set_failure_style()
-            self._play_completion_sound("attention")
+            if self._is_current_run(live_run_id):
+                self._gui.log(f"[ERROR] {e}")
+                self._gui.ui_status(f"Failed: {e}", force=True)
+                self._gui.ui_set_failure_style()
+                self._play_completion_sound("attention")
         except PipelineUnexpectedError as e:
-            self._gui.log(f"[ERROR] Unexpected: {e}")
-            logger.exception("Pipeline error")
-            self._gui.ui_status(f"Error: {e}", force=True)
-            self._gui.ui_set_failure_style()
-            self._play_completion_sound("attention")
+            if self._is_current_run(live_run_id):
+                self._gui.log(f"[ERROR] Unexpected: {e}")
+                logger.exception("Pipeline error")
+                self._gui.ui_status(f"Error: {e}", force=True)
+                self._gui.ui_set_failure_style()
+                self._play_completion_sound("attention")
         except Exception as e:
             # Safety net: building the config / controller above raised
             # something outside the typed Pipeline*Error hierarchy (e.g.
@@ -497,17 +543,27 @@ class PipelineWorker:
             # guard the exception escapes ``finally`` below leaving the
             # Start button disabled forever.
             logger.exception("Pipeline startup error")
-            self._gui.log(f"[ERROR] Unexpected error: {e}")
-            self._gui.ui_status(f"Error: {e}", force=True)
-            self._gui.ui_set_failure_style()
-            self._play_completion_sound("attention")
+            if self._is_current_run(live_run_id):
+                self._gui.log(f"[ERROR] Unexpected error: {e}")
+                self._gui.ui_status(f"Error: {e}", force=True)
+                self._gui.ui_set_failure_style()
+                self._play_completion_sound("attention")
         finally:
             # Always drop the live-segments snapshot, even when a typed
             # Pipeline*Error skipped the success path above. Run-keyed
-            # (not path-keyed) so this clears *this* run even if the
-            # popup's poller is pointing at an unrelated input file.
+            # (not path-keyed) so this clears *this* run only — a stale
+            # worker must NOT wipe a newer run's segments (B10 audit).
             try:
-                self._gui.pop_live_segments()
+                self._gui.pop_live_segments(live_run_id)
             except Exception:
                 logger.debug("pop_live_segments failed", exc_info=True)
-            self._gui.set_running(False)
+            try:
+                self._gui.clear_active_controller()
+            except Exception:
+                logger.debug("clear_active_controller failed", exc_info=True)
+            # B10 audit: only the CURRENT run may flip the running flag.
+            # A stale worker setting running=False while a newer run is in
+            # flight would re-enable the Start button mid-run and let the
+            # user launch a third pipeline over a live one.
+            if self._is_current_run(live_run_id):
+                self._gui.set_running(False)

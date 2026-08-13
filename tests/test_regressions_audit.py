@@ -103,6 +103,43 @@ class TestSilenceCacheIdentity:
 
 
 # ── #5 ── cut_encode resume: truncated part is re-cut, not reused ──────
+class TestSegmentResumeDuration:
+    """A3 audit: a segment part whose duration doesn't match the keep
+    window must be re-encoded on resume, not reused."""
+
+    def test_wrong_duration_segment_is_reencoded(self, tmp_path: Path):
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"source")
+        output = tmp_path / "out.mp4"
+        keep = [(0.0, 5.0)]  # dur=5
+        seg_dir = output.parent / "_out_segments"
+        seg_dir.mkdir(parents=True)
+        (seg_dir / "seg_000000.mp4").write_bytes(b"\x00" * 2048)
+
+        from stream2video.concat import _run_segment_concat
+
+        cut_calls: list[list[str]] = []
+
+        def fake_encode(cmd, **kw):
+            cut_calls.append(list(cmd))
+
+        with (
+            patch("stream2video.concat._run_ffmpeg", side_effect=fake_encode),
+            patch("stream2video.concat._run_final_concat"),
+            patch("stream2video.concat._ffprobe_is_valid_mp4", return_value=True),
+            patch("stream2video.concat._ffprobe_is_valid_media", return_value=True),
+            # Duration probe says "wrong length" → must NOT reuse.
+            patch("stream2video.concat._ffprobe_duration_ok", return_value=False),
+            patch("stream2video.concat._ensure_fresh_work_dir"),
+        ):
+            _run_segment_concat(
+                video, keep, output, "libx264", ["-preset", "medium"],
+                None, None, encoder="libx264", source_has_audio=False,
+            )
+        assert len(cut_calls) == 1, "wrong-duration segment was reused, not re-encoded"
+
+
+# ── #5 ── cut_encode resume: truncated part is re-cut, not reused ──────
 class TestCutEncodeResumeDuration:
     def test_wrong_duration_part_is_recut(self, tmp_path: Path):
         """#5: a stale part whose duration is off must be re-encoded."""

@@ -99,7 +99,7 @@ class LiveSegmentsStore:
                 return None
             return list(self._current[1])
 
-    def clear(self) -> None:
+    def clear(self, run_id: int | None = None) -> None:
         """Drop the current run's data without starting a new run.
 
         Called by the pipeline worker's ``finally``: the run that just
@@ -108,6 +108,22 @@ class LiveSegmentsStore:
         opens the waveform popup on an unrelated run. The next
         :meth:`begin_run` would clear it anyway, but doing it here
         keeps the store small between runs.
+
+        ``run_id`` gates the clear (B10 audit): a STALE worker (its run
+        already superseded by a newer ``Start``) must not wipe the newer
+        run's freshly published segments. With ``run_id=None`` the clear
+        is unconditional (historical behaviour, used by tests / popup
+        close paths that don't track a run).
         """
         with self._lock:
+            if run_id is not None and run_id != self._next_run_id:
+                return
             self._current = None
+
+    def current_run_id(self) -> int | None:
+        """Return the most recently allocated run id, or None before the
+        first :meth:`begin_run`. Used by the worker to tell whether it
+        is still the current run before mutating shared UI state
+        (B10 audit)."""
+        with self._lock:
+            return self._next_run_id if self._next_run_id > 0 else None

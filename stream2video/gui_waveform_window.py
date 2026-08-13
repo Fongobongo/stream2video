@@ -41,6 +41,13 @@ class WaveformWindowMixin:
         self.lbl_wave_status: ctk.CTkLabel | None = None
         self._waveform_ctk_image: ctk.CTkImage | None = None
         self._waveform_render_token = 0
+        # Live-poller session token (B8 audit): ``_apply_view`` bumps
+        # ``_waveform_render_token`` on EVERY render (fix-plan #12) to
+        # invalidate in-flight PIL renders, so a live poller that checked
+        # that token died after its first overlay update. This token is
+        # bumped only when a NEW render cycle starts, so the poller can
+        # tell "my session is over" from "someone re-rendered the view".
+        self._waveform_poll_token = 0
         self._waveform_running = False
         # Waveform view state — populated by the renderer when peaks
         # arrive, modified by the zoom/pan controls. Cleared when the

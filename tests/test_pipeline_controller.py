@@ -870,3 +870,89 @@ class TestPipelineControllerTkIsolation:
             "thread (P1.10 violation). Snapshot the value in _start_pipeline "
             "(main thread) and pass it as a positional arg:\n  " + "\n  ".join(violations)
         )
+
+
+class TestCleanupIncompleteOnClose:
+    """B9 audit: the GUI's on-close cleanup used to chase its OWN
+    ``_output_path`` / ``_download_path`` fields — which are NEVER
+    populated (the real paths live in the PipelineController, stamped
+    by the download/concat phases). ``cleanup_incomplete_on_close`` is
+    the controller-side replacement the GUI now calls; it must remove
+    truncated sinks, keep a fully-downloaded source for reuse, and
+    never raise while the app is tearing down."""
+
+    def _make_callbacks(self) -> tuple[PipelineCallbacks, dict]:
+        calls: dict = {"log": []}
+        cb = PipelineCallbacks(
+            on_progress=lambda f: None,
+            on_status=lambda s, force=False: None,
+            on_log=calls["log"].append,
+            on_info=lambda s: None,
+            on_overall=lambda e, r, m: None,
+            on_total=lambda t: None,
+            on_download_progress=lambda p: None,
+            on_pipeline_complete=lambda d: None,
+        )
+        return cb, calls
+
+    def _controller_with_paths(self, tmp_path: Path):
+        cb, calls = self._make_callbacks()
+        cfg = _valid_config(output_dir=tmp_path, input_raw=str(tmp_path / "src.mp4"))
+        controller = PipelineController(
+            cfg=cfg, cb=cb, cancel_event=__import__("threading").Event()
+        )
+        # Stamp the same fields the download/concat phases set.
+        partial = tmp_path / "partial_src.mp4.part"
+        partial.write_bytes(b"partial data")
+        controller._download_path = partial
+        output = tmp_path / "out_compressed.mp4"
+        output.write_bytes(b"output header only")
+        controller._output_path = output
+        return controller, calls, partial, output
+
+    def test_removes_truncated_output_and_clears_slots(self, tmp_path: Path):
+        controller, calls, partial, output = self._controller_with_paths(tmp_path)
+
+        controller.cleanup_incomplete_on_close()
+
+        # The truncated output sink is a genuine artifact — removed.
+        assert not output.exists(), "truncated output survived on-close cleanup"
+        # A completed download is KEPT for reuse (partial_only design —
+        # mid-download fragments are handled by download()'s own sweep,
+        # which _on_close triggers via the cancel event).
+        assert partial.exists(), "completed download must be kept for reuse"
+        # Both slots cleared so a later call can't chase stale paths.
+        assert controller._download_path is None
+        assert controller._output_path is None
+        assert any("Deleted incomplete output" in m for m in calls["log"])
+
+    def test_keeps_completed_download_for_reuse(self, tmp_path: Path):
+        controller, calls, partial, output = self._controller_with_paths(tmp_path)
+        # Download phase finished successfully — the source is complete;
+        # on close (mid concat) we must NOT delete a usable file the user
+        # may want to reuse on the next run.
+        controller._download_complete = True
+        controller._download_was_real = True
+
+        controller.cleanup_incomplete_on_close()
+
+        assert partial.exists(), "completed download was deleted on close"
+        assert not output.exists(), "truncated output survived on-close cleanup"
+        assert any("Keeping completed download" in m for m in calls["log"])
+
+    def test_never_raises_on_cleanup_failure(self, tmp_path: Path):
+        controller, calls, partial, output = self._controller_with_paths(tmp_path)
+
+        def _boom(*args, **kwargs):
+            raise OSError("locked by another process")
+
+        with patch.object(
+            type(controller), "_cleanup_partial_output", side_effect=_boom
+        ):
+            controller.cleanup_incomplete_on_close()
+
+        # The download slot was still processed (kept for reuse) and the
+        # failure was swallowed into a log line — closing the app must
+        # never raise out of the teardown path.
+        assert controller._download_path is None
+        assert any("Could not clean up output" in m for m in calls["log"])

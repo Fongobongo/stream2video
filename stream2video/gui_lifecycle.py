@@ -108,6 +108,7 @@ class LifecycleMixin:
         self.entry_output.delete(0, "end")
         self._output_path = None
         self._download_path = None
+        self._active_controller: object | None = None
 
         self.combo_method.set(self.config["method"])
         self.combo_encoder.set(self.config["encoder"])
@@ -332,20 +333,22 @@ class LifecycleMixin:
                 cancel_process(owner, timeout=3)
             except Exception:
                 _logger.debug("cancel_process(%r) on close failed", owner, exc_info=True)
-        # Clean up incomplete output file
-        if self._output_path is not None and self._output_path.exists():
+        # Clean up incomplete artifacts — the REAL paths live in the
+        # active PipelineController (``_download_path`` / ``_output_path``
+        # there are stamped by the download/concat phases). The GUI's own
+        # ``_output_path`` / ``_download_path`` fields are never populated
+        # (dead on-close cleanup), so ask the controller directly (B9
+        # audit). The controller is registered by the worker at Start and
+        # cleared in its finally; on-close racing that clear is harmless
+        # (both paths are idempotent / exception-guarded).
+        active = getattr(self, "_active_controller", None)
+        if active is not None:
             try:
-                self._output_path.unlink()
-                _logger.info(f"Cleaned up incomplete output: {self._output_path}")
-            except OSError:
-                pass
-        # Clean up incomplete download file
-        if self._download_path is not None and self._download_path.exists():
-            try:
-                self._download_path.unlink()
-                _logger.info(f"Cleaned up incomplete download: {self._download_path}")
-            except OSError:
-                pass
+                cleanup = getattr(active, "cleanup_incomplete_on_close", None)
+                if callable(cleanup):
+                    cleanup()
+            except Exception:
+                _logger.debug("controller cleanup on close failed", exc_info=True)
         # fix-plan #20: flush any uncommitted slider entry text into
         # config BEFORE _save_settings reads it. A user typing into the
         # numeric entry and closing the window (without FocusOut, which

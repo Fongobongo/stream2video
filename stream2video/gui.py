@@ -618,8 +618,17 @@ class _PipelineGuiCallbacksAdapter:
     def set_live_segments(self, run_id: int, segments: list[SilenceSegment]) -> None:
         self._gui._live_segments_store.set(run_id, segments)
 
-    def pop_live_segments(self) -> None:
-        self._gui._live_segments_store.clear()
+    def pop_live_segments(self, run_id: int | None = None) -> None:
+        self._gui._live_segments_store.clear(run_id)
+
+    def current_live_run_id(self) -> int | None:
+        return self._gui._live_segments_store.current_run_id()
+
+    def set_active_controller(self, controller: object) -> None:
+        self._gui._active_controller = controller
+
+    def clear_active_controller(self) -> None:
+        self._gui._active_controller = None
 
     def begin_live_segments_run(self) -> int:
         """Allocate the run_id the worker will publish live segments under."""

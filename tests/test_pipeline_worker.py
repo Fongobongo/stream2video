@@ -398,6 +398,8 @@ class _FakeGuiCallbacks:
         self.live_segments_sets: list[tuple[int, int]] = []
         self.live_segments_runs: int = 0
         self.live_segments_pops: int = 0
+        self.last_pop_run_id: int | None = None
+        self.active_controllers: list[object] = []
         self.recent_added: list[Path] = []
         self.encoder_labels: list[tuple[str, str]] = []
         self.failure_style_count = 0
@@ -451,8 +453,18 @@ class _FakeGuiCallbacks:
     def set_live_segments(self, run_id: int, segments: list[Any]) -> None:
         self.live_segments_sets.append((run_id, len(segments)))
 
-    def pop_live_segments(self) -> None:
+    def pop_live_segments(self, run_id: int | None = None) -> None:
         self.live_segments_pops += 1
+        self.last_pop_run_id = run_id
+
+    def current_live_run_id(self) -> int | None:
+        return self.live_segments_runs if self.live_segments_runs > 0 else None
+
+    def set_active_controller(self, controller: object) -> None:
+        self.active_controllers.append(controller)
+
+    def clear_active_controller(self) -> None:
+        self.active_controllers = []
 
     def ask_fallback_consent(self) -> bool:
         # Tests: always refuse so the ``ask`` policy raises (we'd need a
@@ -548,6 +560,78 @@ class TestPipelineWorkerRun:
         sound.assert_called_once_with(enabled=True, kind="attention")
         # Button restored even on cancel.
         assert gui.running_state_changes[-1] is False
+
+    def test_registers_active_controller_and_clears_it_in_finally(self):
+        """B9 audit: the worker registers the live controller on the GUI
+        (so ``_on_close`` can clean artifacts through it) and clears the
+        reference in ``finally`` — no stale controller survives a run."""
+        gui = _FakeGuiCallbacks()
+        worker = PipelineWorker(gui, {"threshold": -30, "min_silence": 2, "margin": 0})
+
+        with (
+            patch(
+                "stream2video.pipeline_controller.PipelineCallbacks",
+                new=_FakePipelineCallbacks,
+            ),
+            patch(
+                "stream2video.pipeline_controller.PipelineController",
+                new=_FakePipelineController,
+            ),
+        ):
+            worker.run(self._params())
+
+        assert gui.active_controllers == [], (
+            "active controller was not cleared in finally — on-close cleanup "
+            "would chase a dead controller"
+        )
+        # But it WAS registered during the run: a fake that snapshots the
+        # reference at registration time proves the handoff happened.
+        assert _FakePipelineController.last_instance is not None
+        # The pop in finally must carry the worker's own run id (B10: a
+        # stale worker must not wipe a newer run's segments).
+        assert gui.last_pop_run_id == gui.live_segments_runs
+
+    def test_stale_worker_error_does_not_mutate_ui(self):
+        """B10 audit: a worker whose run was superseded (newer Start) must
+        not overwrite the new run's status / failure style / sound."""
+        gui = _FakeGuiCallbacks()
+        worker = PipelineWorker(
+            gui,
+            {"threshold": -30, "min_silence": 2, "margin": 0, "completion_sound": True},
+        )
+
+        class _FailingController(_FakePipelineController):
+            def run(self) -> None:
+                # A newer run began AFTER this worker started: simulate by
+                # bumping the fake's run counter (current_live_run_id now
+                # differs from this worker's captured id).
+                gui.live_segments_runs += 1
+                from stream2video.pipeline_controller import PipelineCancelled
+
+                raise PipelineCancelled("user cancelled")
+
+        with (
+            patch(
+                "stream2video.pipeline_controller.PipelineCallbacks",
+                new=_FakePipelineCallbacks,
+            ),
+            patch(
+                "stream2video.pipeline_controller.PipelineController",
+                new=_FailingController,
+            ),
+            patch("stream2video.pipeline_worker.play_completion_sound") as sound,
+        ):
+            worker.run(self._params())
+
+        # No status line, no failure style, no chime from the stale worker.
+        assert not any(text == "Cancelled" for text, _ in gui.status_calls), gui.status_calls
+        assert gui.failure_style_count == 0, "stale worker styled the UI as failed"
+        sound.assert_not_called()
+        # The stale worker must NOT clear the newer run's live segments.
+        assert gui.last_pop_run_id == gui.live_segments_runs - 1
+        # running flag: the stale worker must not disable the NEW run's
+        # button state — only the newest worker's finally may do that.
+        assert gui.running_state_changes == [], gui.running_state_changes
 
     def test_pipeline_download_error_logs_failure_message(self):
         gui = _FakeGuiCallbacks()

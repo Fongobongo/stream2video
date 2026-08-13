@@ -50,6 +50,7 @@ class WaveformRenderMixin:
         _waveform_output_dir: Path | None
         _waveform_last_segments: list[SilenceSegment]
         _waveform_render_token: int
+        _waveform_poll_token: int
         _waveform_running: bool
 
     def _render_waveform_preview(self) -> None:
@@ -133,6 +134,11 @@ class WaveformRenderMixin:
 
         token = self._waveform_render_token + 1
         self._waveform_render_token = token
+        # Start a new poller session: any previously-running live poller
+        # (started by an earlier Render click) must retire — it would
+        # otherwise keep re-rendering the overlay on top of this fresh
+        # render cycle (B8 audit).
+        self._waveform_poll_token += 1
         self._waveform_running = True
         self._safe_status_set("Loading...")
         self._log("Waveform preview: loading audio from source video...")
@@ -276,7 +282,9 @@ class WaveformRenderMixin:
                     }
                     self._tk_after(
                         1000,
-                        lambda: self._poll_live_segments(in_path, margin, token, poll_state),
+                        lambda: self._poll_live_segments(
+                            in_path, margin, self._waveform_poll_token, poll_state
+                        ),
                     )
             except Exception as e:
                 _logger.exception("Waveform render failed")
@@ -462,7 +470,14 @@ class WaveformRenderMixin:
     ) -> None:
         """Re-read the in-memory live store every second and re-render
         the overlay if the segment count or visible window changed."""
-        if token != self._waveform_render_token:
+        # B8 audit: compare against the POLL session token, not the
+        # render token. ``_apply_view`` bumps the render token on every
+        # render (fix-plan #12) to retire in-flight PIL renders; if this
+        # poller checked that one it would die right after its first
+        # overlay update. The poll token only moves when a new render
+        # cycle starts (Render click), which is what should retire a
+        # stale poller.
+        if token != self._waveform_poll_token:
             return
         if not self._wave_window_alive():
             return

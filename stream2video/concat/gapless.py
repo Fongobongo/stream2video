@@ -92,6 +92,16 @@ def _concat_filter_one_pass(
             "-c:a",
             audio_codec,
             *audio_opts,
+            # B16 audit: the concat filter joins video frames and audio
+            # PCM whose lengths can differ by a fraction of a frame at the
+            # tail (per-part encode rounding, AAC priming, dropped final
+            # frame). Without ``-shortest`` the muxer extends the output to
+            # the LONGER stream — a frozen last video frame held over
+            # silence, or a silent audio tail — making the output play
+            # longer than the keep window at every join. ``-shortest``
+            # truncates at the shorter stream, matching the segment
+            # path's per-part guard (segment.py P0.9).
+            "-shortest",
             *_movflags,
             str(output_path),
         ],
@@ -308,13 +318,19 @@ def _run_gapless_segment_concat(
                         )
                         reuse = False
                 except Exception:
-                    # ffprobe missing / timed out — fall back to the size
-                    # check. A crash mid-write here doesn't *create* a
-                    # corrupt file; we just don't detect it.
-                    logger.debug(
-                        f"gapless tree L{level}: ffprobe validation skipped for {inter}",
+                    # ffprobe missing / timed out / unexpected error — the
+                    # file's integrity cannot be verified. A crash mid-write
+                    # here does NOT *create* a corrupt file (the ffprobe
+                    # probe is read-only), but NOT detecting one would let a
+                    # truncated intermediate sneak into the output — the
+                    # very hole the probe exists to close. Re-encode instead
+                    # of silently trusting the size check (B7 audit).
+                    logger.warning(
+                        f"gapless tree L{level}: ffprobe validation failed for {inter}; "
+                        f"re-encoding group {g} to be safe",
                         exc_info=True,
                     )
+                    reuse = False
             if reuse:
                 next_level.append(inter)
                 completed_groups += 1
