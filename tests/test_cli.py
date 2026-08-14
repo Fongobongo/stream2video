@@ -168,6 +168,19 @@ class TestLoadConfigBoolValidation:
         with pytest.raises(typer.Exit):
             load_config(cfg)
 
+    def test_debug_config_dump_masks_proxy_password(self, tmp_path: Path, caplog):
+        # Regression: the DEBUG "Final config" dump used to print the
+        # whole config dict including the proxy URL with credentials.
+        # The proxy value must be masked so secrets never hit the log.
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("proxy: socks5://user:super-secret@host:1080\nproxy_active: true\n")
+        with caplog.at_level(logging.DEBUG, logger="stream2video"):
+            loaded = load_config(cfg)
+        assert loaded["proxy"] == "socks5://user:super-secret@host:1080"
+        for record in caplog.records:
+            assert "super-secret" not in record.getMessage()
+        assert any("socks5://***:***@host:1080" in r.getMessage() for r in caplog.records)
+
 
 class TestCliUseCrf:
     def test_use_crf_flag_reaches_cut_and_concat(self, tmp_path: Path):

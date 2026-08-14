@@ -8,6 +8,7 @@ effects, no I/O.
 
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 from stream2video.gui_helpers import (
@@ -24,6 +25,8 @@ from stream2video.gui_helpers import (
     build_progress_meta_line,
     build_silence_info_line,
     build_total_line,
+    mask_proxy,
+    redact_proxy_in_cli_command,
     should_update_status,
 )
 
@@ -104,6 +107,64 @@ class TestBuildCliCommand:
             proxy="http://127.0.0.1:8080",
         )
         assert "--proxy http://127.0.0.1:8080" in cmd
+
+    def test_proxy_with_space_is_shell_quoted(self):
+        # Regression: a proxy containing a space (e.g. a password with a
+        # space) used to be injected as a raw token, so pasting the
+        # copied command would split it into multiple shell words and
+        # mangle the argument. It must be shlex-quoted like the other
+        # values, and the raw unquoted token must not appear in the
+        # command string.
+        proxy = "socks5://user:pa ss@proxy:1080"
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+            proxy=proxy,
+        )
+        assert f"--proxy {shlex.quote(proxy)}" in cmd
+        assert "--proxy socks5://user:pa ss@proxy:1080" not in cmd
+        assert shlex.split(cmd)[shlex.split(cmd).index("--proxy") + 1] == proxy
+
+    def test_proxy_with_shell_metacharacters_is_quoted_and_roundtrips(self):
+        # Regression: ``;``, ``&``, ``$(...)`` etc. inside the proxy
+        # string must stay one argument when pasted into a shell — a raw
+        # token would terminate the command or execute the rest.
+        proxy = "socks5://user:p;ss&$(touch pwned)@proxy:1080"
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+            proxy=proxy,
+        )
+        # Round-trip: re-splitting the command must yield the proxy
+        # exactly as one argument (no injection, no mangling).
+        tokens = shlex.split(cmd)
+        assert tokens[tokens.index("--proxy") + 1] == proxy
+        # The command must contain no unquoted metacharacters adjacent
+        # to the --proxy flag.
+        assert "--proxy " + proxy + " " not in cmd
+
+    def test_proxy_with_credentials_quoted_in_command(self):
+        proxy = "socks5://user:secret@host:1080"
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+            proxy=proxy,
+        )
+        assert "--proxy socks5://user:secret@host:1080" in cmd
+        tokens = shlex.split(cmd)
+        assert tokens[tokens.index("--proxy") + 1] == proxy
 
     def test_non_default_advanced_flags_appended(self):
         cmd = build_cli_command(
@@ -268,6 +329,99 @@ class TestBuildCliCommand:
         assert "--waveform-timeout 900" in cmd
         assert "--batch-chunk-size 20" in cmd
         assert "--min-part-bytes 2048" in cmd
+
+
+class TestMaskProxy:
+    def test_no_credentials_unchanged(self):
+        # A proxy without user:pass has nothing to hide — shown as-is.
+        assert mask_proxy("http://127.0.0.1:8080") == "http://127.0.0.1:8080"
+
+    def test_user_pass_masked(self):
+        # Regression: the GUI log must not contain the proxy password
+        # in plain text; only the scheme/host survive, credentials
+        # become ***:***.
+        masked = mask_proxy("socks5://user:super-secret@host:1080")
+        assert masked == "socks5://***:***@host:1080"
+        assert "super-secret" not in masked
+        assert "user" not in masked
+
+    def test_password_with_at_sign_fully_masked(self):
+        # An ``@`` inside the password must not leak the tail of the
+        # credentials into the "host" part.
+        masked = mask_proxy("socks5://user:pa@ss@host:1080")
+        assert masked == "socks5://***:***@host:1080"
+        assert "pa@ss" not in masked
+
+    def test_empty_returns_empty(self):
+        assert mask_proxy("") == ""
+
+    def test_password_with_space_and_metacharacters_masked(self):
+        # The report's repro: a password containing a space and shell
+        # metacharacters must be fully hidden, host survives for
+        # troubleshooting.
+        masked = mask_proxy("socks5://user:pa ss;echo PWNED@proxy:1080")
+        assert masked == "socks5://***:***@proxy:1080"
+        assert "pa ss" not in masked
+        assert "PWNED" not in masked
+
+
+class TestRedactProxyInCliCommand:
+    def test_password_not_present_in_redacted_command(self):
+        proxy = "socks5://user:super-secret@host:1080"
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+            proxy=proxy,
+        )
+        redacted = redact_proxy_in_cli_command(cmd, proxy)
+        assert "super-secret" not in redacted
+        assert "socks5://***:***@host:1080" in redacted
+        # The rest of the command survives untouched.
+        assert redacted.startswith("stream2video ")
+        assert "--method segment" in redacted
+
+    def test_empty_proxy_returns_command_unchanged(self):
+        cmd = "stream2video -o out"
+        assert redact_proxy_in_cli_command(cmd, "") == cmd
+        assert redact_proxy_in_cli_command(cmd, None) == cmd
+
+    def test_quoted_proxy_in_command_redacted(self):
+        # Space-containing proxy gets quoted in the command; the
+        # redacted log line must swap that quoted token, not the raw
+        # password.
+        proxy = "socks5://user:pa ss@proxy:1080"
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+            proxy=proxy,
+        )
+        redacted = redact_proxy_in_cli_command(cmd, proxy)
+        assert "pa ss" not in redacted
+        assert "socks5://***:***@proxy:1080" in redacted
+
+    def test_metacharacter_proxy_redacted(self):
+        proxy = "socks5://user:p;ss&$(touch pwned)@proxy:1080"
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+            proxy=proxy,
+        )
+        redacted = redact_proxy_in_cli_command(cmd, proxy)
+        assert "p;ss" not in redacted
+        assert "touch pwned" not in redacted
+        assert "socks5://***:***@proxy:1080" in redacted
 
 
 class TestBuildDownloadStatus:

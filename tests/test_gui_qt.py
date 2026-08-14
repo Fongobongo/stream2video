@@ -405,3 +405,36 @@ class TestCloseWindow:
         assert gui.running
         assert gui.winfo_exists()
         gui._set_running(False)
+
+
+class TestProxySecretHandling:
+    """Proxy credentials must never reach the GUI log (regressions)."""
+
+    def test_set_proxy_logs_masked_value(self, gui):
+        from stream2video.gui_lifecycle import _ProxyInputDialog
+
+        secret = "socks5://user:super-secret@host:1080"
+        with patch.object(_ProxyInputDialog, "get_input", return_value=secret):
+            gui._set_proxy()
+            _flush_events(gui, 200)
+        log_text = gui.txt_log.get("1.0", "end")
+        assert "super-secret" not in log_text
+        assert "socks5://***:***@host:1080" in log_text
+        # The value is still remembered in full for actual use.
+        assert gui.config["proxy"] == secret
+
+    def test_copy_cli_command_logs_redacted_command(self, gui, tmp_path: Path):
+        # Copying the CLI command with an active proxy used to log the
+        # whole command string — password included. The log line must
+        # carry the masked proxy; the copied (clipboard) command keeps
+        # the real one.
+        secret = "socks5://user:super-secret@host:1080"
+        gui.config["proxy"] = secret
+        gui.config["proxy_active"] = True
+        gui.entry_output.delete(0, "end")
+        gui.entry_output.insert(0, str(tmp_path))
+        gui._copy_cli_command()
+        _flush_events(gui, 200)
+        log_text = gui.txt_log.get("1.0", "end")
+        assert "super-secret" not in log_text
+        assert "socks5://***:***@host:1080" in log_text

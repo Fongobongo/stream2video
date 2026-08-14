@@ -25,6 +25,7 @@ from stream2video.config import (
     VALID_SOFTWARE_FALLBACKS,
     VALID_X264_PRESETS,
 )
+from stream2video.gui_helpers import mask_proxy
 
 logger = logging.getLogger("stream2video")
 
@@ -164,5 +165,9 @@ def load_config(config_file: Path | None, console: Any) -> dict:
             )
             raise typer.Exit(1)
 
-    logger.debug(f"Final config: {config}")
+    # Debug dump must not print the proxy credentials (they can embed
+    # user:pass): log a copy with the proxy value masked.
+    _config_log = dict(config)
+    _config_log["proxy"] = mask_proxy(str(_config_log.get("proxy", "")))
+    logger.debug(f"Final config: {_config_log}")
     return config

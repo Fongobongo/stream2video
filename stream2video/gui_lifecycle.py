@@ -21,7 +21,11 @@ from stream2video.config import (
     save_user_defaults,
     user_defaults_path,
 )
-from stream2video.gui_helpers import build_cli_command
+from stream2video.gui_helpers import (
+    build_cli_command,
+    mask_proxy,
+    redact_proxy_in_cli_command,
+)
 from stream2video.gui_platform import fit_to_screen
 from stream2video.gui_settings import load_settings as _load_settings_from_disk
 from stream2video.gui_settings import save_settings as _save_settings_to_disk
@@ -202,7 +206,7 @@ class LifecycleMixin:
             if hasattr(self, "chk_proxy"):
                 self.chk_proxy.select()
         self._save_settings()
-        self._log(f"Download proxy set to: {value or 'off (direct connection)'}")
+        self._log(f"Download proxy set to: {mask_proxy(value) or 'off (direct connection)'}")
 
     def _save_user_defaults(self) -> None:
         """Snapshot the current tunable GUI values to user_defaults.json."""
@@ -270,6 +274,9 @@ class LifecycleMixin:
         if config_path is None:
             self._log("[WARN] Could not write CLI config (out_dir not writable)")
 
+        proxy_value = (
+            self.config.get("proxy", "") if self.config.get("proxy_active", False) else ""
+        )
         cmd = build_cli_command(
             inp,
             out_path,
@@ -296,15 +303,16 @@ class LifecycleMixin:
             batch_chunk_size=self.config.get("batch_chunk_size", 40),
             min_part_bytes=self.config.get("min_part_bytes", 1024),
             config_path=config_path,
-            proxy=self.config.get("proxy", "") if self.config.get("proxy_active", False) else "",
+            proxy=proxy_value,
         )
+        cmd_log = redact_proxy_in_cli_command(cmd, proxy_value)
         self.clipboard_clear()
         self.clipboard_append(cmd)
         if config_path is not None:
             self._log(f"CLI command copied. Config written to: {config_path}")
         else:
-            self._log(f"CLI command copied (config NOT written — see warning): {cmd}")
-        self._log(f"  {cmd}")
+            self._log(f"CLI command copied (config NOT written — see warning): {cmd_log}")
+        self._log(f"  {cmd_log}")
 
     def _on_close(self) -> None:
         if self.running:

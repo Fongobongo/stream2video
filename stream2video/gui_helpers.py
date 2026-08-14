@@ -136,7 +136,7 @@ def build_cli_command(
     parts.extend(["--video-quality", video_quality])
     parts.extend(["--download-quality", download_quality])
     if proxy:
-        parts.extend(["--proxy", proxy])
+        parts.extend(["--proxy", shlex.quote(proxy)])
     # Newer flags — only append when they're not the default so the
     # copied command stays compact. The defaults match CONFIG_DEFAULTS
     # so a user who hasn't touched the advanced panel gets a clean
@@ -188,6 +188,44 @@ def build_cli_command(
     if delete_after:
         parts.append("--delete-after")
     return " ".join(parts)
+
+
+def mask_proxy(proxy: str) -> str:
+    """Redact the credentials embedded in a proxy URL for display/logging.
+
+    ``socks5://user:pass@host:1080`` → ``socks5://***:***@host:1080``.
+    Proxies without a ``user:pass@`` part are returned unchanged (there
+    is nothing secret to hide). The credential cut is made at the LAST
+    ``@`` after the scheme, so a password containing ``@``
+    (``socks5://user:pa@ss@host:1080``) is still fully redacted.
+    """
+    if not proxy:
+        return proxy
+    if "://" in proxy:
+        scheme, _, rest = proxy.partition("://")
+    else:
+        scheme, rest = None, proxy
+    if "@" not in rest:
+        return proxy
+    _, _, host = rest.rpartition("@")
+    return f"{scheme}://***:***@{host}" if scheme else f"***:***@{host}"
+
+
+def redact_proxy_in_cli_command(cmd: str, proxy: str) -> str:
+    """Return *cmd* with the ``--proxy`` value replaced by its masked form.
+
+    The copied command keeps the real proxy (the user pastes and runs
+    it), but a GUI log line must never print the credentials: the proxy
+    token is swapped for the masked form instead. The replacement is
+    exact (``shlex.quote`` output is unique within the command), so only
+    the proxy token is affected.
+    """
+    if not cmd or not proxy:
+        return cmd
+    quoted = shlex.quote(proxy)
+    if quoted not in cmd:
+        return cmd
+    return cmd.replace(quoted, shlex.quote(mask_proxy(proxy)))
 
 
 def _wrap_status_lines(
