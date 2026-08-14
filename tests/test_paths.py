@@ -4,13 +4,18 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from stream2video.paths import (
+    PROJECT_MARKER_FILENAME,
     RECENT_NAME_MAX,
     add_recent_project,
     ensure_project_dir,
+    is_marked_project_dir,
+    is_sensitive_delete_target,
+    mark_project_dir,
     move_into_project,
     project_dir,
     prune_recent_projects,
     truncate_recent_name,
+    validate_project_delete,
 )
 
 
@@ -194,6 +199,122 @@ class TestPruneRecentProjects:
             original = [str(a), "/nonexistent"]
             prune_recent_projects(original)
             assert original == [str(a), "/nonexistent"]
+
+
+class TestProjectMarker:
+    """mark_project_dir / is_marked_project_dir — the app-owns-this-dir claim."""
+
+    def test_mark_writes_marker_file(self):
+        with TemporaryDirectory() as tmp:
+            d = Path(tmp) / "video1"
+            d.mkdir()
+            mark_project_dir(d)
+            assert (d / PROJECT_MARKER_FILENAME).is_file()
+
+    def test_unmarked_dir_is_not_marked(self):
+        with TemporaryDirectory() as tmp:
+            assert not is_marked_project_dir(Path(tmp))
+
+    def test_missing_dir_is_not_marked(self):
+        assert not is_marked_project_dir(Path("/nonexistent/stream2video/xyz"))
+
+    def test_foreign_marker_content_is_not_accepted(self):
+        """A same-named file with foreign content must not mark the dir."""
+        with TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / PROJECT_MARKER_FILENAME).write_text(
+                '{"app": "other", "kind": "project_dir"}', encoding="utf-8"
+            )
+            assert not is_marked_project_dir(d)
+
+    def test_malformed_marker_is_not_accepted(self):
+        with TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / PROJECT_MARKER_FILENAME).write_text("not json", encoding="utf-8")
+            assert not is_marked_project_dir(d)
+
+    def test_ensure_project_dir_marks_created_dir(self):
+        """The pipeline's project-dir creation funnel stamps the marker."""
+        with TemporaryDirectory() as tmp:
+            d = ensure_project_dir(Path(tmp), "video1", True)
+            assert is_marked_project_dir(d)
+
+
+class TestSensitiveDeleteTarget:
+    """is_sensitive_delete_target — never-rmtree paths (defence in depth)."""
+
+    def test_drive_root_is_sensitive(self):
+        assert is_sensitive_delete_target(Path(Path.cwd().anchor))
+
+    def test_home_is_sensitive(self):
+        assert is_sensitive_delete_target(Path.home())
+
+    def test_user_profile_subdirs_are_sensitive(self):
+        assert is_sensitive_delete_target(Path.home() / "Desktop")
+        assert is_sensitive_delete_target(Path.home() / "Downloads")
+
+    def test_app_root_is_sensitive(self):
+        from stream2video.paths import __file__ as paths_file
+
+        assert is_sensitive_delete_target(Path(paths_file).parent.parent)
+
+    def test_ordinary_subdir_is_not_sensitive(self):
+        with TemporaryDirectory() as tmp:
+            assert not is_sensitive_delete_target(Path(tmp))
+
+
+class TestValidateProjectDelete:
+    """The GUI's delete guard — regression net for arbitrary-path rmtree."""
+
+    def test_rejects_missing_path(self):
+        ok, _ = validate_project_delete("/nonexistent/stream2video/xyz")
+        assert not ok
+
+    def test_rejects_foreign_directory(self):
+        """Regression: a foreign path planted in recent_projects (e.g. a
+        swapped settings.json) must never pass the guard, so it can never
+        reach shutil.rmtree()."""
+        with TemporaryDirectory() as tmp:
+            foreign = Path(tmp) / "user_data"
+            foreign.mkdir()
+            (foreign / "precious.txt").write_text("keep me", encoding="utf-8")
+            ok, reason = validate_project_delete(foreign)
+            assert not ok
+            assert "not a project directory" in reason
+            assert (foreign / "precious.txt").read_text() == "keep me"
+            assert foreign.is_dir()
+
+    def test_rejects_sensitive_target_even_with_marker(self, monkeypatch):
+        """The sensitive-path list wins even over a forged marker."""
+        with TemporaryDirectory() as tmp:
+            marked = Path(tmp) / "video1"
+            marked.mkdir()
+            mark_project_dir(marked)
+            monkeypatch.setattr(Path, "home", classmethod(lambda cls: marked))
+            ok, reason = validate_project_delete(marked)
+            assert not ok
+            assert "system or user" in reason
+            assert marked.is_dir()
+
+    def test_rejects_dotdot_trick_to_foreign_dir(self):
+        """'..' in the stored string must not bypass the guard — the
+        resolved (not the raw) path is validated."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            project = ensure_project_dir(root, "video1", True)
+            foreign = root / "foreign"
+            foreign.mkdir()
+            (foreign / "keep.txt").write_text("keep me", encoding="utf-8")
+            trick = str(project / ".." / "foreign")
+            ok, _ = validate_project_delete(trick)
+            assert not ok
+            assert (foreign / "keep.txt").read_text() == "keep me"
+
+    def test_accepts_marked_project_dir(self):
+        with TemporaryDirectory() as tmp:
+            project = ensure_project_dir(Path(tmp), "video1", True)
+            ok, reason = validate_project_delete(project)
+            assert ok, reason
 
 
 class TestTruncateRecentName:

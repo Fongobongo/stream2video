@@ -23,6 +23,7 @@ from stream2video.paths import (
     add_recent_project,
     prune_recent_projects,
     truncate_recent_name,
+    validate_project_delete,
 )
 
 _logger = logging.getLogger("stream2video.gui")
@@ -120,18 +121,45 @@ class RecentProjectsMixin:
 
         self._tk_after(0, _apply_and_persist)
 
+    def _remove_recent_entry(self, path_str: str) -> None:
+        """Drop ``path_str`` from ``recent_projects`` and re-render the panel."""
+        self.config["recent_projects"] = [
+            p for p in self.config.get("recent_projects", []) if p != path_str
+        ]
+        self._render_recent_projects()
+
     def _delete_recent_project(self, path_str: str) -> None:
-        """Confirm with the user, then recursively delete the project dir."""
+        """Confirm with the user, then recursively delete the project dir.
+
+        The path comes from ``recent_projects`` in settings.json — plain,
+        user-editable config data (a swapped settings file can put any
+        path in it) — so it is validated via
+        :func:`~stream2video.paths.validate_project_delete` BEFORE the
+        confirmation dialog and before any rmtree. A foreign or sensitive
+        path is never deleted: the entry is dropped from the list and the
+        user gets a warning instead.
+        """
         if self.running:
             self._log("Cannot delete a project while pipeline is running")
             return
         path = Path(path_str)
         if not path.is_dir():
             self._log(f"Project no longer exists, dropping from list: {path_str}")
-            self.config["recent_projects"] = [
-                p for p in self.config.get("recent_projects", []) if p != path_str
-            ]
-            self._render_recent_projects()
+            self._remove_recent_entry(path_str)
+            return
+        ok, reason = validate_project_delete(path)
+        if not ok:
+            self._log(f"[WARN] Refusing to delete {path}: {reason}")
+            messagebox.showwarning(
+                "Project not deleted",
+                f"{path}\n\n"
+                f"Was NOT deleted: {reason}.\n\n"
+                f"Only directories created by this application as project "
+                f"directories can be deleted from Recent Projects. "
+                f"The entry has been removed from the list.",
+                parent=self.winfo_toplevel(),
+            )
+            self._remove_recent_entry(path_str)
             return
         size_mb = dir_size_mb(path)
         msg = (
@@ -177,10 +205,7 @@ class RecentProjectsMixin:
                     )
                     return
                 self._log(f"Deleted project: {path}")
-                self.config["recent_projects"] = [
-                    p for p in self.config.get("recent_projects", []) if p != path_str
-                ]
-                self._render_recent_projects()
+                self._remove_recent_entry(path_str)
 
             try:
                 self.winfo_toplevel().after(0, _finish)
@@ -202,9 +227,6 @@ class RecentProjectsMixin:
                 "Folder not found",
                 f"Directory no longer exists:\n{path_str}",
             )
-            self.config["recent_projects"] = [
-                p for p in self.config.get("recent_projects", []) if p != path_str
-            ]
-            self._render_recent_projects()
+            self._remove_recent_entry(path_str)
         except OSError as e:
             self._log(f"[ERROR] Could not open {path}: {e}")

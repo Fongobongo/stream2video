@@ -24,8 +24,13 @@ the per-video subdir.
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 import shutil
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Max length of the displayed name in a Recent Projects row. Long
 # filenames (e.g. "<id>_compressed_4_30_<more>") are truncated with
@@ -56,6 +61,134 @@ def truncate_recent_name(text: str, max_len: int = RECENT_NAME_MAX) -> str:
     return prefix + "\u2026"
 
 
+# Marker file written into every directory the application creates or
+# claims as a project dir (``ensure_project_dir``). The GUI's Recent
+# Projects "delete" button only ever rmtree()s a directory that carries
+# this marker: ``recent_projects`` in settings.json is plain config data
+# (hand-editable, and a swapped settings file can put any path in it),
+# so a bare path string must never be trusted as a deletable target.
+# The marker is what turns "a path that was once stored" into "a
+# directory this application created and owns".
+PROJECT_MARKER_FILENAME = ".stream2video_project.json"
+
+# Fixed payload. ``app`` / ``kind`` are validated on read so a
+# coincidental file with the same name in an unrelated directory is
+# not treated as a project marker; ``version`` is reserved for future
+# migrations of the marker format.
+PROJECT_MARKER_PAYLOAD: dict[str, object] = {
+    "app": "stream2video",
+    "kind": "project_dir",
+    "version": 1,
+}
+
+
+def mark_project_dir(path: Path) -> None:
+    """Write the project marker into ``path`` (best-effort).
+
+    Called right after a directory is created/claimed as a project dir.
+    The write is deliberately non-fatal: if it fails, processing still
+    works — the only consumer of the marker is the GUI's Recent Projects
+    delete button, which degrades to "refuse to delete and drop the
+    entry" (a safe failure mode) when the marker is missing.
+    """
+    try:
+        (path / PROJECT_MARKER_FILENAME).write_text(
+            json.dumps(PROJECT_MARKER_PAYLOAD, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as e:
+        logger.warning("Could not write project marker in %s: %s", path, e)
+
+
+def is_marked_project_dir(path: Path) -> bool:
+    """True if ``path`` is a directory carrying the app's project marker.
+
+    The marker file's content is validated (not just its name) so a
+    stray file in an unrelated directory can't make that directory
+    deletable. Returns False on any OSError / unreadable marker — the
+    safe direction for the delete gate.
+    """
+    marker = path / PROJECT_MARKER_FILENAME
+    try:
+        if not marker.is_file():
+            return False
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (
+        isinstance(data, dict)
+        and data.get("app") == PROJECT_MARKER_PAYLOAD["app"]
+        and data.get("kind") == PROJECT_MARKER_PAYLOAD["kind"]
+    )
+
+
+# Standard user-profile subdirectories that must never be recursively
+# deleted even if they somehow carry a marker (defence in depth; the
+# marker check above is the primary gate).
+_USER_SUBDIRS = (
+    "Desktop",
+    "Documents",
+    "Downloads",
+    "Pictures",
+    "Music",
+    "Videos",
+    "AppData",
+    "Application Data",
+)
+
+
+def is_sensitive_delete_target(path: Path) -> bool:
+    """True if ``path`` must never be passed to ``shutil.rmtree``.
+
+    Blocks filesystem roots, the user's home directory, the standard
+    user-profile subdirectories, and the application's own directory
+    (deleting the install/config dir would remove the settings file
+    the GUI is currently writing to). Comparisons are case-insensitive
+    on Windows via ``os.path.normcase``.
+    """
+    try:
+        norm = os.path.normcase(os.path.abspath(str(path)))
+    except (OSError, ValueError):
+        return True
+    blocked = {
+        os.path.normcase(os.path.abspath(str(Path(path.anchor)))),
+        os.path.normcase(os.path.abspath(str(Path.home()))),
+        os.path.normcase(os.path.abspath(str(Path(__file__).parent.parent))),
+    }
+    home = os.path.normcase(os.path.abspath(str(Path.home())))
+    for sub in _USER_SUBDIRS:
+        blocked.add(os.path.join(home, os.path.normcase(sub)))
+    return norm in blocked
+
+
+def validate_project_delete(path: Path | str) -> tuple[bool, str]:
+    """Decide whether ``path`` may be recursively deleted from the GUI.
+
+    Returns ``(True, "")`` only when ``path`` resolves to an existing
+    directory that (a) is not a sensitive target (drive root, home,
+    user-profile subdirs, the app's own directory) and (b) carries the
+    app's project marker — i.e. it was actually created/claimed as a
+    project dir by this application. Any other path is refused with a
+    human-readable reason; the caller must NOT call ``rmtree`` in that
+    case (it may drop the entry from Recent Projects instead).
+
+    ``recent_projects`` is untrusted config data (hand-editable, and a
+    swapped settings.json can put any path in it), so this check — not
+    the stored string — is the boundary for destructive actions.
+    """
+    try:
+        resolved = Path(path).resolve()
+    except OSError:
+        resolved = Path(os.path.abspath(str(path)))
+    if not resolved.is_dir():
+        return False, "directory does not exist"
+    if is_sensitive_delete_target(resolved):
+        return False, "refusing to delete a system or user directory"
+    if not is_marked_project_dir(resolved):
+        return False, "not a project directory created by this application"
+    return True, ""
+
+
 def project_dir(output_dir: Path, video_stem: str, per_video_dir: bool) -> Path:
     """Compute the per-project directory path. Does not create it.
 
@@ -81,6 +214,9 @@ def ensure_project_dir(output_dir: Path, video_stem: str, per_video_dir: bool) -
     """
     p = project_dir(output_dir, video_stem, per_video_dir)
     p.mkdir(parents=True, exist_ok=True)
+    # Record that this directory is an app-owned project dir — the GUI's
+    # Recent Projects delete button only deletes marked directories.
+    mark_project_dir(p)
     return p
 
 
