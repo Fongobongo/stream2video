@@ -1289,6 +1289,10 @@ class TestSegmentResumeSkipCrashArtifact:
                 "stream2video.concat._ffprobe_is_valid_media",
                 side_effect=fake_ffprobe_any_stream,
             ),
+            # Duration gate is patched out — this test exercises the
+            # codec gate; the fail-closed duration gate (unreadable
+            # duration → re-encode) is covered by its own tests.
+            patch("stream2video.concat._ffprobe_duration_ok", return_value=True),
             patch("stream2video.concat._run_final_concat"),
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
@@ -1342,6 +1346,10 @@ class TestSegmentResumeSkipCrashArtifact:
             # Resume check also probes the audio stream — stub it so
             # valid-video segments still count as fully valid.
             patch("stream2video.concat._ffprobe_is_valid_media", return_value=True),
+            # Duration gate is patched out — this test exercises the
+            # codec gate; the fail-closed duration gate (unreadable
+            # duration → re-encode) is covered by its own tests.
+            patch("stream2video.concat._ffprobe_duration_ok", return_value=True),
             patch("stream2video.concat._run_final_concat"),
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
@@ -1517,6 +1525,10 @@ class TestAudioExtractResumeStreamType:
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
             # Pretend the probe accepts every chunk (valid audio).
             patch("stream2video.concat._ffprobe_is_valid_media", return_value=True),
+            # Duration gate is patched out — this test exercises the
+            # codec gate; the fail-closed duration gate (unreadable
+            # duration → re-encode) is covered by its own tests.
+            patch("stream2video.concat._ffprobe_duration_ok", return_value=True),
             patch("stream2video.concat._run_audio_concat_filter") as m_acf,
             patch("stream2video.concat._run_final_concat") as m_fc,
             patch("stream2video.concat._ensure_fresh_work_dir"),

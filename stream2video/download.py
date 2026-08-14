@@ -556,8 +556,13 @@ def download(
         # closure capturing ``last_progress_time`` by reference in a nested
         # function — direct assignment would create a local binding in the
         # drain thread and the main loop wouldn't see updates.
+        #
+        # NOTE: the connect watchdog measures from ``start_time`` ONLY —
+        # ordinary stdout/stderr lines (progress-template chatter, extractor
+        # logs, retry notices) must NOT reset it. A chatty-but-hung yt-dlp
+        # that emits lines without ever delivering a progress event would
+        # otherwise dodge the connect timeout and sit until the 8h ceiling.
         last_progress_time: list[float | None] = [None]
-        last_activity_time: list[float] = [time.monotonic()]
         start_time = time.monotonic()
 
         def _drain_stdout() -> None:
@@ -569,7 +574,6 @@ def download(
                 return
             for line in stdout:
                 text = line.rstrip()
-                last_activity_time[0] = time.monotonic()
                 prog = _parse_progress_line(text)
                 if prog is not None:
                     last_progress_time[0] = time.monotonic()
@@ -595,7 +599,6 @@ def download(
             if stderr is None:
                 return
             for line in stderr:
-                last_activity_time[0] = time.monotonic()
                 stderr_chunks.append(line)
                 # Bound the hoard: mirror the ring in drain_stderr_lines
                 # (a corrupt source can spam stderr for the whole stall
@@ -662,7 +665,7 @@ def download(
                 #      don't enable it, so the watchdog is the only safety.
                 now = time.monotonic()
                 if last_progress_time[0] is None:
-                    idle_for = now - max(start_time, last_activity_time[0])
+                    idle_for = now - start_time
                     if idle_for > connect_timeout:
                         process.kill()
                         try:
@@ -673,7 +676,7 @@ def download(
                         stderr_thread.join(timeout=2)
                         raise _timeout_error(
                             f"Download stalled before first byte: no progress "
-                            f"and no yt-dlp activity within {connect_timeout}s "
+                            f"within {connect_timeout}s of start "
                             "(DNS/TLS/handshake?)",
                             stderr_chunks,
                         )

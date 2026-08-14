@@ -319,6 +319,15 @@ def _run_cut_then_encode(
         # segment.py / batch.py already do the dual probe for their parts;
         # this is the same check for the raw concat (mirrors the audio
         # probe on the cut parts earlier in this function).
+        #
+        # Duration check (audit): a moov-bearing but body-truncated
+        # raw_concat.mp4 (ffmpeg killed mid phase-2 write) passes the
+        # codec probes above — the moov reflects the PLANNED length while
+        # the body is shorter. The phase-3 ``-c copy`` would then rename
+        # that truncated file to the final output with no error. Compare
+        # the probed duration against the full expected keep duration;
+        # slack=1.0 matches the cut-part check above and the other
+        # pipelines.
         if not (
             raw_concat_path.exists()
             and raw_concat_path.stat().st_size >= min_part_bytes
@@ -326,6 +335,7 @@ def _run_cut_then_encode(
             and (
                 not source_has_audio or _c._ffprobe_is_valid_media(raw_concat_path, stream_type="a")
             )
+            and _c._ffprobe_duration_ok(raw_concat_path, total_duration)
         ):
             _c._run_final_concat(
                 cut_dir,

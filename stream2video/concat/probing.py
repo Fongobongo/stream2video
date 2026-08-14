@@ -68,10 +68,11 @@ def _ffprobe_duration_ok(path: Path, expected_seconds: float, *, slack: float = 
     jitter and ffmpeg's own rounding without accepting truncated outputs.
 
     When ffprobe cannot determine the duration (corrupt file, timeout,
-    non-media data), returns ``True`` — the caller's existing
-    ``_ffprobe_is_valid_media`` codec check already gatekeeps those cases,
-    and we don't want to double-reject a file whose codec is fine but
-    whose duration is unreadable for unrelated reasons.
+    non-media data), returns ``False`` — fail-closed so a resume part
+    whose integrity cannot be verified is re-encoded instead of silently
+    accepted. The historical behaviour returned ``True`` (deferring to the
+    caller's codec check), which let a truncated-but-readable resume part
+    pass the integrity gate and inject a hole into the final output.
     """
     try:
         r = run_with_retry(
@@ -91,11 +92,11 @@ def _ffprobe_duration_ok(path: Path, expected_seconds: float, *, slack: float = 
             **no_window_kwargs(),
         )
         if r.returncode != 0:
-            return True  # duration unreadable — fall back to codec check alone
+            return False  # duration unreadable — do not trust the part
         duration_str = r.stdout.strip()
         if not duration_str:
-            return True
+            return False
         actual = float(duration_str)
     except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
-        return True  # duration unreadable — fall back to codec check alone
+        return False  # duration unreadable — do not trust the part
     return abs(actual - expected_seconds) <= slack

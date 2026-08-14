@@ -76,12 +76,15 @@ PARAM_SPECS: dict[str, dict[str, Any]] = {
     "gapless_concat": {"kind": "bool"},
     "low_process_priority": {"kind": "bool"},
     "completion_sound": {"kind": "bool"},
-    # Plain int parameters (timeouts, sizes). The ``max`` bound comes
-    # from CONFIG_RANGES — the SAME ceiling cli_config applies to YAML,
-    # so ``--stall-kill-timeout 99999`` is rejected exactly like its
-    # YAML twin ``stall_kill_timeout: 99999`` (B11 audit: the CLI used
-    # to accept values the config file rejected — a silent divergence
-    # between the two configuration surfaces).
+    # The ``max`` bound comes from CONFIG_RANGES — the SAME ceiling
+    # cli_config applies to YAML, so ``--stall-kill-timeout 99999`` is
+    # rejected exactly like its YAML twin ``stall_kill_timeout: 99999``
+    # (B11 audit: the CLI used to accept values the config file rejected
+    # — a silent divergence between the two configuration surfaces). The
+    # ``min`` bound is mirrored from CONFIG_RANGES the same way: a
+    # ``--stall-timeout 5`` must be rejected like ``stall_kill_timeout:
+    # 5`` in YAML (the 10s floor exists so a typo'd timeout can't turn
+    # the watchdog into a kill-on-startup on slow media).
     "memory_reserve_mb": {"kind": "int", "min": 0},
     "download_timeout": {"kind": "int", "min": 1},
     "connect_timeout": {"kind": "int", "min": 1},
@@ -97,7 +100,11 @@ PARAM_SPECS: dict[str, dict[str, Any]] = {
         "min": 1,
         "max": CONFIG_RANGES["final_concat_timeout"][1],
     },
-    "stall_kill_timeout": {"kind": "int", "min": 1, "max": CONFIG_RANGES["stall_kill_timeout"][1]},
+    "stall_kill_timeout": {
+        "kind": "int",
+        "min": CONFIG_RANGES["stall_kill_timeout"][0],
+        "max": CONFIG_RANGES["stall_kill_timeout"][1],
+    },
     "batch_chunk_size": {"kind": "int", "min": 1, "max": CONFIG_RANGES["batch_chunk_size"][1]},
     "min_part_bytes": {"kind": "int", "min": 1, "max": CONFIG_RANGES["min_part_bytes"][1]},
     "rlimit_as_mb": {"kind": "int", "min": 0},

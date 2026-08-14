@@ -14,12 +14,14 @@ Layout::
 
 # Indirection layer: tests patch ``stream2video.silence.<name>`` for
 # the timeout probes / ffmpeg helpers; keep them as attributes of the
-# package so the patch succeeds. ``subprocess`` and ``time`` are also
-# exposed for the same reason — the original silence.py module-imported
-# them and some tests go through that namespace.
-import queue  # noqa: F401
+# package so the patch succeeds. ``subprocess`` is exposed for the same
+# reason — tests patch ``stream2video.silence.subprocess.Popen`` (the
+# original silence.py module-imported it and some tests go through that
+# namespace). ``queue``/``time`` were likewise exposed historically but
+# no test or production path references them through this namespace —
+# they are imported directly where used (detect.py) — so they were
+# dropped (dead-code audit).
 import subprocess  # noqa: F401
-import time  # noqa: F401
 from pathlib import Path
 
 import stream2video.utils as _utils_mod

@@ -20,7 +20,7 @@ from stream2video.config import (
     VALID_SOFTWARE_FALLBACKS,
     VALID_X264_PRESETS,
 )
-from stream2video.tools import ffmpeg_path
+from stream2video.tools import ffmpeg_path, run_with_retry
 from stream2video.utils import no_window_kwargs
 
 logger = logging.getLogger(__name__)
@@ -363,9 +363,7 @@ def check_encoder(name: str) -> bool:
         if name in _encoder_check_cache:
             return _encoder_check_cache[name]
         try:
-            from stream2video import concat as _c  # lazy to avoid cycle
-
-            r = _c.run_with_retry(
+            r = run_with_retry(
                 [
                     ffmpeg_path(),
                     "-y",

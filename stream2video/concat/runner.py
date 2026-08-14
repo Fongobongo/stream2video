@@ -188,6 +188,16 @@ def _run_ffmpeg(
         # expires. The track_progress loop's inline check is retained as
         # a fast path (it kills ASAP after a stalled line arrives).
         #
+        # The watchdog is ONLY started in the ``track_progress=True``
+        # branch: with ``track_progress=False`` stdout is DEVNULL so no
+        # progress line can ever arrive and ``last_progress_time`` stays
+        # frozen at spawn — an unconditionally-started watchdog would
+        # kill a healthy-but-silent encode (e.g. a per-segment encode
+        # whose ``timeout`` of 10 min exceeds the 5 min ``stall_kill``
+        # window) despite the docstring promising stall detection only
+        # runs when progress is tracked. The wall-clock ``timeout`` still
+        # bounds the silent branch via ``_wait_with_cancel`` below.
+        #
         # ``stall_killed`` is set BEFORE the kill() so the post-mortem
         # rc-analysis can distinguish "watchdog killed a stalled ffmpeg"
         # from a genuine OOM/SIGKILL (rc -9). Without this, a stall-kill
@@ -197,25 +207,29 @@ def _run_ffmpeg(
         stall_stop = threading.Event()
         stall_killed = threading.Event()
 
-        def _stall_watchdog() -> None:
-            while not stall_stop.wait(CANCEL_POLL_INTERVAL):
-                if process.poll() is not None:
-                    return
-                elapsed = time.monotonic() - last_progress_time
-                if elapsed > stall_kill:
-                    logger.error(
-                        f"{label}: stall watchdog firing -- no progress for "
-                        f"{int(elapsed)}s, killing process"
-                    )
-                    stall_killed.set()
-                    try:
-                        process.kill()
-                    except Exception:
-                        logger.exception("stall watchdog: kill() failed")
-                    return
+        if track_progress:
 
-        stall_thread = threading.Thread(target=_stall_watchdog, daemon=True, name=f"stall_{label}")
-        stall_thread.start()
+            def _stall_watchdog() -> None:
+                while not stall_stop.wait(CANCEL_POLL_INTERVAL):
+                    if process.poll() is not None:
+                        return
+                    elapsed = time.monotonic() - last_progress_time
+                    if elapsed > stall_kill:
+                        logger.error(
+                            f"{label}: stall watchdog firing -- no progress for "
+                            f"{int(elapsed)}s, killing process"
+                        )
+                        stall_killed.set()
+                        try:
+                            process.kill()
+                        except Exception:
+                            logger.exception("stall watchdog: kill() failed")
+                        return
+
+            stall_thread = threading.Thread(
+                target=_stall_watchdog, daemon=True, name=f"stall_{label}"
+            )
+            stall_thread.start()
 
         # Helper so every kill-first path in the read loop reaps the child
         # before propagating: on Windows ``kill()`` is asynchronous, and letting

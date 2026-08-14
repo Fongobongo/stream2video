@@ -217,3 +217,65 @@ def test_gapless_real_ffmpeg_long_command_line_fails(tmp_path: Path):
     assert exc_info.value.winerror == 206, (
         f"expected ERROR_FILENAME_EXCED_RANGE but got {exc_info.value.winerror}"
     )
+
+
+class TestFfprobeDurationOkFailClosed:
+    """The resume-part duration gate must fail CLOSED.
+
+    A part whose duration ffprobe cannot read (rc != 0, empty output,
+    non-numeric output, timeout, missing binary) must NOT be accepted —
+    a truncated-but-readable resume part (valid moov, short body) would
+    otherwise pass the integrity gate and inject a hole into the final
+    output (static-audit finding).
+    """
+
+    def _probe(self, tmp_path: Path, result, *, raise_exc=None):
+        from stream2video.concat.probing import _ffprobe_duration_ok
+
+        exc = raise_exc
+
+        def _run(cmd, **kwargs):
+            if exc is not None:
+                raise exc("ffprobe", 30)
+            return result
+
+        with (
+            patch("stream2video.concat.probing.ffprobe_path", return_value="ffprobe"),
+            patch("stream2video.concat.probing.run_with_retry", side_effect=_run),
+        ):
+            return _ffprobe_duration_ok(tmp_path / "part.mp4", expected_seconds=10.0)
+
+    def test_rc_nonzero_is_rejected(self, tmp_path: Path):
+        from subprocess import CompletedProcess
+
+        result = CompletedProcess(args=[], returncode=1, stdout="", stderr="error")
+        assert self._probe(tmp_path, result) is False
+
+    def test_empty_stdout_is_rejected(self, tmp_path: Path):
+        from subprocess import CompletedProcess
+
+        result = CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        assert self._probe(tmp_path, result) is False
+
+    def test_non_numeric_duration_is_rejected(self, tmp_path: Path):
+        from subprocess import CompletedProcess
+
+        result = CompletedProcess(args=[], returncode=0, stdout="N/A\n", stderr="")
+        assert self._probe(tmp_path, result) is False
+
+    def test_timeout_is_rejected(self, tmp_path: Path):
+        from subprocess import TimeoutExpired
+
+        assert self._probe(tmp_path, None, raise_exc=TimeoutExpired) is False
+
+    def test_matching_duration_is_accepted(self, tmp_path: Path):
+        from subprocess import CompletedProcess
+
+        result = CompletedProcess(args=[], returncode=0, stdout="10.5\n", stderr="")
+        assert self._probe(tmp_path, result) is True
+
+    def test_mismatched_duration_is_rejected(self, tmp_path: Path):
+        from subprocess import CompletedProcess
+
+        result = CompletedProcess(args=[], returncode=0, stdout="4.0\n", stderr="")
+        assert self._probe(tmp_path, result) is False

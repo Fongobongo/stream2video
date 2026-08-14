@@ -36,8 +36,7 @@ Layout::
 # Windows error-206 incident). Importing the modules here lets the
 # patch's attribute traversal succeed; the actual runtime work happens
 # inside the submodules below.
-import subprocess
-from typing import Any
+import subprocess  # noqa: F401  (attribute path for ``patch("stream2video.concat.subprocess.Popen")``)
 
 from stream2video.concat import constants as _consts
 from stream2video.concat.api import cut_and_concat
@@ -115,51 +114,47 @@ from stream2video.utils import (
 
 # Surface every constant as an attribute of the package so external
 # callers (and ``patch("stream2video.concat.<CONST>")``) keep working.
-_AUDIO_BITRATE = _consts._AUDIO_BITRATE
-_AUDIO_BITRATES = _consts._AUDIO_BITRATES
-_AUDIO_CHANNELS = _consts._AUDIO_CHANNELS
-_AUDIO_SAMPLE_RATE = _consts._AUDIO_SAMPLE_RATE
-_BATCH_CHUNK_MIN = _consts._BATCH_CHUNK_MIN
-_BATCH_CHUNK_SIZE = _consts._BATCH_CHUNK_SIZE
-_FINAL_CONCAT_TIMEOUT = _consts._FINAL_CONCAT_TIMEOUT
-_MIN_PART_BYTES = _consts._MIN_PART_BYTES
-_OOM_HINT = _consts._OOM_HINT
-_SEGMENT_ENCODE_TIMEOUT = _consts._SEGMENT_ENCODE_TIMEOUT
-_STALL_KILL = _consts._STALL_KILL
-_STALL_WARNING = _consts._STALL_WARNING
-_STDERR_TRUNCATE = _consts._STDERR_TRUNCATE
-_VIDEO_BITRATE = _consts._VIDEO_BITRATE
-ENCODER_CHECK_TIMEOUT = _consts.ENCODER_CHECK_TIMEOUT
+# The values themselves live ONLY in ``concat.constants`` — this loop
+# re-exports them rather than duplicating the table line-by-line (a
+# stale copy in the facade drifted from ``constants.py`` before and
+# silently changed pipeline behaviour for callers that read the
+# package attribute).
+for _name in (
+    "_AUDIO_BITRATE",
+    "_AUDIO_BITRATES",
+    "_AUDIO_CHANNELS",
+    "_AUDIO_SAMPLE_RATE",
+    "_BATCH_CHUNK_MIN",
+    "_BATCH_CHUNK_SIZE",
+    "_FINAL_CONCAT_TIMEOUT",
+    "_MIN_PART_BYTES",
+    "_OOM_HINT",
+    "_SEGMENT_ENCODE_TIMEOUT",
+    "_STALL_KILL",
+    "_STALL_WARNING",
+    "_STDERR_TRUNCATE",
+    "_VIDEO_BITRATE",
+    "ENCODER_CHECK_TIMEOUT",
+):
+    globals()[_name] = getattr(_consts, _name)
+del _name
 
 # ------------------------------------------------------------------
 # Indirection layer preserved for monkey-patching tests.
 #
 # The historical ``concat.py`` module exposed low-level helpers at
-# module scope, so tests could patch ``stream2video.concat.ffmpeg_path``
-# / ``subprocess.Popen`` / ``drain_stderr_lines`` and have the runner
-# honour it. Now that the runner lives in ``concat.runner``, we keep
-# thin indirections here so ``patch("stream2video.concat.<name>")``
-# continues to intercept the call.
+# module scope, so tests could patch ``stream2video.concat.drain_stderr_lines``
+# / ``subprocess.Popen`` and have the runner honour it. Now that the
+# runner lives in ``concat.runner``, we keep thin indirections here so
+# ``patch("stream2video.concat.<name>")`` continues to intercept the
+# call. Only symbols that are actually resolved through this namespace
+# at call time are kept (``looks_like_oom``, the utils probes, the
+# ffprobe validators, the ``_run_*`` pipeline steps); the old
+# ``tools`` proxies (``ffmpeg_path`` / ``ffprobe_path`` /
+# ``popen_with_retry`` / ``run_with_retry``) were dropped — submodules
+# import those from ``stream2video.tools`` directly, and no test patched
+# them through the package namespace (dead-code audit).
 # ------------------------------------------------------------------
-
-import stream2video.tools as _tools_mod  # noqa: E402  (after local imports)
-
-
-def ffmpeg_path() -> str:
-    return _tools_mod.ffmpeg_path()
-
-
-def ffprobe_path() -> str:
-    return _tools_mod.ffprobe_path()
-
-
-def popen_with_retry(cmd: list[str], **kwargs: Any) -> subprocess.Popen[Any]:
-    return _tools_mod.popen_with_retry(cmd, **kwargs)
-
-
-def run_with_retry(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-    return _tools_mod.run_with_retry(cmd, **kwargs)
-
 
 # ------------------------------------------------------------------
 # Constants that aren't tied to a specific submodule and that tests
@@ -227,16 +222,12 @@ __all__ = [
     "cut_and_concat",
     "drain_stderr_lines",
     "encoder_opts",
-    "ffmpeg_path",
-    "ffprobe_path",
     "generate_keep_segments",
     "get_video_duration",
     "get_video_encoder",
     "get_video_start_time",
     "has_audio_stream",
     "looks_like_oom",
-    "popen_with_retry",
     "read_lines_queue",
     "release_output_lock",
-    "run_with_retry",
 ]

@@ -337,15 +337,21 @@ def _run_batch_concat(
                         # P1.4: windowed decode. ``-ss`` before ``-i``
                         # fast-seeks to chunk_start; ``-copyts`` keeps
                         # source PTS so the absolute-time ``trim=...``
-                        # filters below still match. ``-t`` caps the
-                        # demuxer so we don't decode the whole source.
+                        # filters below still match. ``-t`` must also sit
+                        # BEFORE ``-i`` so it is an INPUT option that
+                        # stops the demuxer reading once the chunk's
+                        # window is past — placed after ``-i`` it would
+                        # be an OUTPUT option that only stops the muxer,
+                        # leaving the decoder to chew the whole source
+                        # per chunk (the windowed-decode win silently
+                        # lost on long streams).
                         "-ss",
                         f"{seek_to:.3f}",
+                        "-t",
+                        f"{chunk_dur:.3f}",
                         "-copyts",
                         "-i",
                         str(video_path),
-                        "-t",
-                        f"{chunk_dur:.3f}",
                         "-filter_complex_script",
                         script_path,
                         "-map",
