@@ -61,7 +61,7 @@ from stream2video.download import (
 from stream2video.formatters import fmt_completion_summary, fmt_dry_run_summary
 from stream2video.gui_helpers import build_download_status
 from stream2video.memory import check_memory_reserve
-from stream2video.paths import apply_per_video_dir
+from stream2video.paths import apply_per_video_dir, artifact_stem
 from stream2video.pipeline_controller import PipelineConfig as _PipelineConfig
 from stream2video.pipeline_controller import (
     validate_pipeline_config as _validate_pipeline_config,
@@ -1175,11 +1175,26 @@ def main(
                     # the CLI hashed and the GUI didn't, so neither
                     # front-end ever saw the other's checkpoints.
                     resume_cache_path = build_resume_cache_path(video_path, output_dir)
-                    # Migrate a legacy (path-unkeyed) resume file written
-                    # by previous versions so a user resuming after an
-                    # upgrade doesn't lose their checkpoint.
-                    _legacy_resume = output_dir / f"{video_path.stem}_silence_cache.json.resume"
-                    if _legacy_resume.exists() and not resume_cache_path.exists():
+                    # Migrate a legacy (stem-only, pre-path-keying) resume
+                    # file written by previous versions so a user resuming
+                    # after an upgrade doesn't lose their checkpoint. The
+                    # legacy file can live in the old stem-only project
+                    # dir (``output_dir.parent`` when the current project
+                    # dir is keyed) or flat in ``output_dir``.
+                    _legacy_resume = next(
+                        (
+                            p
+                            for p in (
+                                output_dir
+                                / f"{video_path.stem}_silence_cache.json.resume",
+                                output_dir.parent
+                                / f"{video_path.stem}_silence_cache.json.resume",
+                            )
+                            if p.exists()
+                        ),
+                        None,
+                    )
+                    if _legacy_resume is not None and not resume_cache_path.exists():
                         try:
                             _legacy_resume.replace(resume_cache_path)
                         except OSError:
@@ -1295,7 +1310,7 @@ def main(
                         f"{resolved_memory_reserve_mb} MB -- refusing to start concat."
                     )
                     raise typer.Exit(1)
-                output_video = output_dir / f"{video_path.stem}_{output_suffix}"
+                output_video = output_dir / f"{artifact_stem(video_path)}_{output_suffix}"
 
                 cut_and_concat(
                     video_path,

@@ -167,7 +167,7 @@ def detect_silence(
     duration = _c._probe_duration(video_path)
 
     if output_dir is not None:
-        wav_path = _c._get_wav_cache_path(video_path, output_dir)
+        wav_path = _c.build_wav_cache_path(video_path, output_dir)
         if _c._is_wav_cache_valid(wav_path, video_path):
             logger.debug(f"Using cached WAV: {wav_path}")
             segments = _c._run_silencedetect(

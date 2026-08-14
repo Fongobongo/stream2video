@@ -420,7 +420,10 @@ class TestCliPerVideoDir:
             )
             assert result.exit_code == 0, f"CLI failed: {result.output}"
 
-            project = out / "myvideo"
+            from stream2video.paths import artifact_stem
+
+            stem = artifact_stem(src)
+            project = out / stem
             assert project.is_dir(), f"Project dir not created: {project}"
 
             # The local source itself must stay where the user put it
@@ -436,14 +439,14 @@ class TestCliPerVideoDir:
             )
 
             # WAV + JSON cache + compressed output all in project dir.
-            assert (project / "myvideo_audio.wav").exists()
-            assert (project / "myvideo_silence_cache.json").exists()
-            assert (project / "myvideo_compressed.mp4").exists()
+            assert (project / f"{stem}_audio.wav").exists()
+            assert (project / f"{stem}_silence_cache.json").exists()
+            assert (project / f"{stem}_compressed.mp4").exists()
 
             # And none of them in the base output_dir.
-            assert not (out / "myvideo_audio.wav").exists()
-            assert not (out / "myvideo_silence_cache.json").exists()
-            assert not (out / "myvideo_compressed.mp4").exists()
+            assert not (out / f"{stem}_audio.wav").exists()
+            assert not (out / f"{stem}_silence_cache.json").exists()
+            assert not (out / f"{stem}_compressed.mp4").exists()
 
 
 class TestB11CliSanitization:

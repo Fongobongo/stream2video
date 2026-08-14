@@ -1,12 +1,12 @@
 """Silence cache read/write (final cache and resume checkpoints)."""
 
-import hashlib
 import json
 import logging
 import os
 import tempfile
 from pathlib import Path
 
+from stream2video.paths import artifact_stem
 from stream2video.silence.parser import SilenceSegment
 
 logger = logging.getLogger(__name__)
@@ -15,13 +15,13 @@ logger = logging.getLogger(__name__)
 def build_resume_cache_path(video_path: Path, output_dir: Path) -> Path:
     """Canonical resume-checkpoint path shared by the CLI and GUI.
 
-    The filename embeds a hash of the resolved source path so two videos
-    that share a stem but live in different directories never share one
-    resume file. Prior to this helper the CLI hashed the path while the
-    GUI didn't, so neither front-end ever saw the other's checkpoints.
+    The filename embeds ``artifact_stem`` (stem + hash of the resolved
+    source path) so two videos that share a stem but live in different
+    directories never share one resume file. Prior to this helper the CLI
+    hashed the path while the GUI didn't, so neither front-end ever saw
+    the other's checkpoints.
     """
-    path_key = hashlib.sha256(str(video_path.resolve()).encode("utf-8", "replace")).hexdigest()[:8]
-    return output_dir / f"{video_path.stem}_{path_key}_silence_cache.json.resume"
+    return output_dir / f"{artifact_stem(video_path)}_silence_cache.json.resume"
 
 
 def resume_inuse_path(resume_path: Path) -> Path:
@@ -35,8 +35,14 @@ def resume_inuse_path(resume_path: Path) -> Path:
     return resume_path.with_name(resume_path.name + ".inuse")
 
 
-def _get_wav_cache_path(video_path: Path, output_dir: Path) -> Path:
-    return output_dir / f"{video_path.stem}_audio.wav"
+def build_wav_cache_path(video_path: Path, output_dir: Path) -> Path:
+    """Canonical cached-audio path (keyed by stem + source-path hash).
+
+    Same keying as the project dir, the final silence cache and the
+    output file: two same-named sources in different directories get
+    independent WAV caches instead of overwriting each other's.
+    """
+    return output_dir / f"{artifact_stem(video_path)}_audio.wav"
 
 
 def _get_wav_verified_path(wav_path: Path) -> Path:
@@ -78,8 +84,26 @@ def _is_wav_cache_valid(wav_path: Path, video_path: Path) -> bool:
     return wav_path.stat().st_mtime >= video_path.stat().st_mtime
 
 
-def _get_cache_path(video_path: Path, output_dir: Path) -> Path:
-    return output_dir / f"{video_path.stem}_silence_cache.json"
+def build_silence_cache_path(video_path: Path, output_dir: Path) -> Path:
+    """Canonical final silence-cache path (keyed by stem + source-path hash)."""
+    return output_dir / f"{artifact_stem(video_path)}_silence_cache.json"
+
+
+def legacy_silence_cache_paths(video_path: Path, output_dir: Path) -> list[Path]:
+    """Candidate locations of a pre-keying (stem-only) silence cache.
+
+    Covers the two layouts a previous version could have written: the
+    legacy per-video project dir (``output_dir.parent/<stem>/`` when the
+    current project dir is keyed) and the flat layout (``output_dir``
+    itself). These are read-only fallbacks — nothing is ever saved to
+    them, so a foreign legacy cache is never overwritten with our data
+    and a future run of a different same-stem source won't hit it.
+    """
+    stem = video_path.stem
+    return [
+        output_dir.parent / stem / f"{stem}_silence_cache.json",
+        output_dir / f"{stem}_silence_cache.json",
+    ]
 
 
 def _save_cache(
@@ -157,7 +181,7 @@ def save_silence_cache(
     output_dir: Path,
     config: dict,
 ) -> None:
-    cache_path = _get_cache_path(video_path, output_dir)
+    cache_path = build_silence_cache_path(video_path, output_dir)
     _save_cache(cache_path, video_path, segments, config)
     logger.info(f"Silence cache saved to {cache_path}")
 
@@ -170,12 +194,23 @@ def load_silence_cache(
     """Load the final silence cache for `video_path` if fresh and config-matching.
 
     Convenience wrapper around `_load_silence_cache_from_path` that
-    constructs the canonical final cache path. Returns margin-applied
+    constructs the canonical final cache path. On a keyed-cache miss, a
+    legacy stem-only cache (written by pre-keying versions) is tried as a
+    read-only fallback so an upgrade doesn't lose a user's detected
+    segments; legacy paths are never written to. Returns margin-applied
     segments (margin is part of the cache key, so any hit was built
     with this exact margin).
     """
-    cache_path = _get_cache_path(video_path, output_dir)
+    cache_path = build_silence_cache_path(video_path, output_dir)
     segments = _load_silence_cache_from_path(cache_path, video_path, config)
+    if segments is None:
+        for legacy in legacy_silence_cache_paths(video_path, output_dir):
+            if legacy == cache_path:
+                continue
+            segments = _load_silence_cache_from_path(legacy, video_path, config)
+            if segments is not None:
+                logger.info(f"Loaded silence segments from legacy cache: {legacy}")
+                break
     if segments is not None:
         logger.info(f"Loaded {len(segments)} silence segments from cache")
     return segments

@@ -117,7 +117,7 @@ stream2video --show-completion      # Print the completion script for manual ins
 | `-n, --dry-run` | — | Run silence detection and print a "what would be cut" summary (segment count, total length removed, expected output duration) without encoding |
 | `-c, --config` | — | YAML config file |
 | `--delete-after` | — | Delete downloaded source after successful compression |
-| `--per-video-dir` / `--no-per-video-dir` | (follows `per_video_dir` config) | Group all artifacts into `{output_dir}/{stem}/` |
+| `--per-video-dir` / `--no-per-video-dir` | (follows `per_video_dir` config) | Group all artifacts into `{output_dir}/{stem}_{hash}/` |
 | `--proxy` | (follows `proxy` config) | Proxy server for downloads, e.g. `http://127.0.0.1:8080` or `socks5://user:pass@host:1080`. Empty = direct connection |
 | `-l, --log-level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `--log-format` | `rich` | `rich` (default, human-readable) or `json` (one JSON object per line, for ELK/Splunk/Loki) |
@@ -189,7 +189,7 @@ margin: 0.15
 | `waveform_timeout` | positive int (10-3600) | `300` | Waveform preview decode timeout in seconds (5 min). |
 | `batch_chunk_size` | positive int (1-500) | `40` | Number of keep-segments per batch filter invocation. Scaled down dynamically for large segment counts. |
 | `min_part_bytes` | positive int (1-10485760) | `1024` | Minimum bytes for a resumed part to be considered valid. Smaller files are re-encoded. |
-| `per_video_dir` | bool | `true` | When true, all artifacts (downloaded source, WAV, JSON, log, compressed, temp dirs) are collected into `{output_dir}/{stem}/` instead of living in the base `output_dir`. Local source files are never moved/copied — they stay where you put them. |
+| `per_video_dir` | bool | `true` | When true, all artifacts (downloaded source, WAV, JSON, log, compressed, temp dirs) are collected into `{output_dir}/{stem}_{hash}/` instead of living in the base `output_dir`. Local source files are never moved/copied — they stay where you put them. |
 | `proxy` | string | `` (off) | Proxy server for downloads, e.g. `http://127.0.0.1:8080` or `socks5://user:pass@host:1080`. Empty = no proxy. Passed to yt-dlp only while `proxy_active` is true. Also settable via `--proxy`. |
 | `proxy_active` | bool | `false` | When true, the address in `proxy` is actually used for downloads (`yt-dlp --proxy ...`). When false, the address is kept (so a temporarily-disabled proxy isn't lost) but no proxy is applied. The GUI has a checkbox and a "Set proxy" dialog; the CLI's `--proxy` flag turns this on automatically. |
 | `log_format` | `rich`/`json` | `rich` | Console log format. `rich` (default, human-readable markup) or `json` (one JSON object per line, for log aggregation). Also settable via `--log-format`. |
@@ -200,15 +200,17 @@ Set `per_video_dir: true` in config (or tick the checkbox in the GUI) to keep ea
 
 ```
 output_dir/
-└── myvideo/                       # per-video project dir
-    ├── myvideo.mp4                # downloaded source (or local file untouched)
-    ├── myvideo_audio.wav          # cached audio extract
-    ├── myvideo_silence_cache.json
-    ├── myvideo_compressed.mp4     # final output
+└── myvideo_ab12cd34/              # per-video project dir (stem + source-path hash)
+    ├── myvideo_ab12cd34.mp4       # downloaded source (or local file untouched)
+    ├── myvideo_ab12cd34_audio.wav # cached audio extract
+    ├── myvideo_ab12cd34_silence_cache.json
+    ├── myvideo_ab12cd34_compressed.mp4  # final output
     ├── stream2video.log           # per-video log
-    ├── _myvideo_segments/         # temp dir (segment method), cleaned on success
-    └── _myvideo_batch/            # temp dir (batch method), cleaned on success
+    ├── _myvideo_ab12cd34_segments/      # temp dir (segment method), cleaned on success
+    └── _myvideo_ab12cd34_batch/         # temp dir (batch method), cleaned on success
 ```
+
+The short hash suffix comes from the resolved source path, so two local files that share a name but live in different folders (e.g. `/videos/channel_a/clip.mp4` and `/archive/channel_b/clip.mp4`) each get their own project dir and never overwrite each other's output or caches.
 
 Useful for keeping many videos in one `output_dir` without mixing their WAVs / logs / temp segments. Cache behavior is the same — just lives one level deeper. Local source files are never moved or copied.
 
@@ -238,17 +240,17 @@ stream2video caches work in two layers so that re-running on the same video is f
 
 ### Two cache files
 
-By default the cache files live in `{output_dir}/`. If `per_video_dir: true` is set, they live in `{output_dir}/{stem}/` instead (see "Project directory" below).
+By default the cache files live in `{output_dir}/`. If `per_video_dir: true` is set, they live in `{output_dir}/{stem}_{hash}/` instead (see "Project directory" below).
 
 | File | Key | What it stores |
 |------|-----|----------------|
-| `{stem}_audio.wav` | Source video mtime | Mono 16 kHz PCM audio extracted from the video (~10 MB per hour). Reused for any silence-detect parameters, and ready-made input for Phase 2 STT. |
-| `{stem}_silence_cache.json` | `(threshold, min_silence, margin)` | Parsed silence segments. Skip re-running ffmpeg entirely when parameters haven't changed. |
+| `{stem}_{hash}_audio.wav` | Source video mtime | Mono 16 kHz PCM audio extracted from the video (~10 MB per hour). Reused for any silence-detect parameters, and ready-made input for Phase 2 STT. |
+| `{stem}_{hash}_silence_cache.json` | `(threshold, min_silence, margin)` | Parsed silence segments. Skip re-running ffmpeg entirely when parameters haven't changed. |
 
 ### What happens on each run
 
 **1st run, new video** (WAV cache miss, silence cache miss)
-1. Extract audio to `{stem}_audio.wav` (with `-copyts` to preserve original timestamps).
+1. Extract audio to `{stem}_{hash}_audio.wav` (with `-copyts` to preserve original timestamps).
 2. Run ffmpeg `silencedetect` on the **WAV** (fast — audio-only, small file).
 3. **Sample-verify**: run ffmpeg `silencedetect` on the **first 60 s of the original video** (with `-t 60`) and compare against the corresponding window of the WAV-based result.
    - Match → trust the WAV result, keep the cache.
@@ -305,7 +307,7 @@ python -m stream2video.gui
 - **Input**: Local file (Browse) or URL
 - **Output**: Select output directory (defaults to `./processed_videos`)
 - **Sliders**: Threshold, Min Silence, Margin
-- **Per-video project directory** checkbox — group all of a video's artifacts into `{output_dir}/{stem}/`
+- **Per-video project directory** checkbox — group all of a video's artifacts into `{output_dir}/{stem}_{hash}/`
 - **Method**: segment (per-segment encode + concat demuxer), batch (frame-exact select/aselect), or cut_then_encode (lossless cut + single final encode, best quality)
 - **Encoder**: h264_nvenc, h264_amf, h264_mf, libx264
 - **Video quality**: source / high / medium / low (encoder defaults, or bitrate for HW encoders / CRF for libx264)

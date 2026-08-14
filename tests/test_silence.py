@@ -1,5 +1,6 @@
 """Tests for silence detection module."""
 
+import json
 import os
 import shutil
 import subprocess
@@ -11,19 +12,22 @@ from unittest.mock import patch
 
 import pytest
 
+from stream2video.paths import artifact_stem
 from stream2video.silence import (
     SilenceCancelledError,
     SilenceDetectionError,
     SilenceSegment,
-    _get_wav_cache_path,
     _is_wav_cache_valid,
     _load_silence_cache_from_path,
     _mark_wav_verified,
     _sample_segments_match,
     _save_cache,
     apply_margin,
+    build_silence_cache_path,
+    build_wav_cache_path,
     detect_silence,
     detect_silence_stream,
+    load_silence_cache,
 )
 
 
@@ -272,12 +276,95 @@ class TestSampleSegmentsMatch:
 
 
 class TestWavCachePath:
-    """_get_wav_cache_path naming convention."""
+    """build_wav_cache_path naming convention (stem + source-path hash)."""
 
     def test_path_uses_video_stem(self):
+        from stream2video.paths import artifact_stem
+
         video = Path("/some/dir/myvideo.mp4")
         out = Path("/output")
-        assert _get_wav_cache_path(video, out) == Path("/output/myvideo_audio.wav")
+        assert build_wav_cache_path(video, out) == Path(
+            f"/output/{artifact_stem(video)}_audio.wav"
+        )
+
+    def test_same_stem_different_dirs_get_distinct_caches(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            a = root / "channel_a" / "clip.mp4"
+            b = root / "channel_b" / "clip.mp4"
+            a.parent.mkdir()
+            b.parent.mkdir()
+            a.write_text("a")
+            b.write_text("b")
+            out = root / "out"
+            wav_a = build_wav_cache_path(a, out)
+            wav_b = build_wav_cache_path(b, out)
+            assert wav_a != wav_b
+            assert wav_a.name.startswith("clip_")
+            assert wav_b.name.startswith("clip_")
+            assert build_silence_cache_path(a, out).name != build_silence_cache_path(b, out).name
+
+
+class TestLegacySilenceCacheFallback:
+    """Migration: a pre-keying (stem-only) final cache is read as a
+    read-only fallback, never written back to."""
+
+    def _config(self) -> dict:
+        return {"threshold": -30.0, "min_silence": 2.0, "margin": 0.5}
+
+    def test_loads_legacy_cache_from_keyed_project_dir_parent(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "channel_a" / "clip.mp4"
+            video.parent.mkdir()
+            video.write_text("source")
+            out = root / "out"
+            # Legacy layout: stem-only project dir with a stem-only cache.
+            legacy_dir = out / "clip"
+            legacy_dir.mkdir(parents=True)
+            legacy = legacy_dir / "clip_silence_cache.json"
+            data = {
+                "source": video.name,
+                "source_size": video.stat().st_size,
+                "config": self._config(),
+                "segments": [{"start": 5.0, "end": 10.0}],
+            }
+            legacy.write_text(json.dumps(data), encoding="utf-8")
+            # New run resolves into a keyed project dir (output_dir).
+            keyed_dir = out / artifact_stem(video)
+            keyed_dir.mkdir(parents=True)
+
+            segs = load_silence_cache(video, keyed_dir, self._config())
+            assert segs is not None
+            assert [(s.start, s.end) for s in segs] == [(5.0, 10.0)]
+            # The legacy file must not have been overwritten (read-only).
+            assert json.loads(legacy.read_text(encoding="utf-8")) == data
+            # And nothing was written into the keyed dir.
+            assert not (keyed_dir / f"{artifact_stem(video)}_silence_cache.json").exists()
+
+    def test_legacy_cache_never_hits_a_different_source(self):
+        """A legacy cache belonging to another same-named source (different
+        size) must not be reused via the fallback."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "channel_a" / "clip.mp4"
+            video.parent.mkdir()
+            video.write_text("source-A")
+            out = root / "out"
+            legacy_dir = out / "clip"
+            legacy_dir.mkdir(parents=True)
+            legacy = legacy_dir / "clip_silence_cache.json"
+            data = {
+                "source": "clip.mp4",
+                "source_size": 999999,  # does not match video
+                "config": self._config(),
+                "segments": [{"start": 1.0, "end": 2.0}],
+            }
+            legacy.write_text(json.dumps(data), encoding="utf-8")
+            keyed_dir = out / artifact_stem(video)
+            keyed_dir.mkdir(parents=True)
+
+            assert load_silence_cache(video, keyed_dir, self._config()) is None
 
 
 class TestWavCacheValidity:
@@ -416,7 +503,7 @@ class TestWavCacheFallback:
             video = Path(tmp) / "video.mp4"
             video.write_text("dummy")
             out = Path(tmp)
-            wav = out / "video_audio.wav"
+            wav = build_wav_cache_path(video, out)
             wav.write_text("placeholder")  # pre-existing → D path is taken
             _mark_wav_verified(wav)  # as if a prior run's sample-verify passed
             os.utime(video, (1000, 1000))
@@ -460,7 +547,7 @@ class TestWavCacheFallback:
             video = Path(tmp) / "video.mp4"
             video.write_text("dummy")
             out = Path(tmp)
-            wav = out / "video_audio.wav"
+            wav = build_wav_cache_path(video, out)
             # No pre-existing WAV → extract step will run.
 
             # 4 ffmpeg calls: extract, D (returns shifted segment simulating
@@ -527,7 +614,7 @@ class TestWavCacheFallback:
             video = Path(tmp) / "video.mp4"
             video.write_text("dummy")
             out = Path(tmp)
-            wav = out / "video_audio.wav"
+            wav = build_wav_cache_path(video, out)
 
             # 3 ffmpeg calls: extract, D (full), A-sample. If sample matches
             # D, no full A is run.
@@ -674,7 +761,7 @@ class TestEndToEndRealFfmpeg:
                 assert abs(a.end - d.end) < 0.1, f"end mismatch: {a.end} vs {d.end}"
 
             # WAV cache must exist after D path
-            wav = out / f"{video.stem}_audio.wav"
+            wav = build_wav_cache_path(video, out)
             assert wav.exists(), "WAV cache should be created on first D run"
 
     def test_wav_cache_reused_on_second_run(self, has_ffmpeg):
@@ -699,7 +786,7 @@ class TestEndToEndRealFfmpeg:
 
             # Touch WAV mtime to a known time, then re-run with new params
             # (different params force a re-detect, but WAV is still valid).
-            wav = out / f"{video.stem}_audio.wav"
+            wav = build_wav_cache_path(video, out)
             assert wav.exists()
             first_wav_mtime = wav.stat().st_mtime
 
@@ -776,7 +863,7 @@ class TestEndToEndRealFfmpeg:
                 margin=0,
                 output_dir=out,
             )
-            wav = out / f"{video.stem}_audio.wav"
+            wav = build_wav_cache_path(video, out)
             assert wav.exists(), "WAV must be kept on sample-verify pass"
 
             # 2nd run with different threshold: should hit cache, no verify

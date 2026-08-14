@@ -550,7 +550,9 @@ class TestPipelineControllerRun:
 
         fake_video = tmp_path / "src.mp4"
         fake_video.write_text("dummy")
-        partial_output = tmp_path / "src_compressed.mp4"
+        from stream2video.paths import artifact_stem
+
+        partial_output = tmp_path / f"{artifact_stem(fake_video)}_compressed.mp4"
 
         def fake_download(url, out_dir, **kwargs):
             from stream2video.download import DownloadResult

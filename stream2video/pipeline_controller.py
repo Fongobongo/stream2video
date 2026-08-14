@@ -53,7 +53,7 @@ from stream2video.download import (
 from stream2video.formatters import fmt_size, fmt_time
 from stream2video.gui_helpers import build_silence_info_line
 from stream2video.memory import check_memory_reserve
-from stream2video.paths import apply_per_video_dir
+from stream2video.paths import apply_per_video_dir, artifact_stem
 from stream2video.silence import (
     SilenceCancelledError,
     SilenceDetectionError,
@@ -902,7 +902,10 @@ class PipelineController:
                     f"Internal error: no spec for output_format {self.cfg.output_format!r}"
                 )
             output_suffix = f"compressed.{spec['ext']}"
-        output_path = output_dir / f"{video_path.stem}_{output_suffix}"
+        # Output filename embeds the artifact stem (stem + source-path
+        # hash) so two same-named sources in different directories never
+        # overwrite each other's output even in a flat output dir.
+        output_path = output_dir / f"{artifact_stem(video_path)}_{output_suffix}"
         self._output_path = output_path
 
         # Pre-flight disk space estimate (warning only — does not cancel,

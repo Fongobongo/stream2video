@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 import customtkinter as ctk
 
 from stream2video.formatters import fmt_clock_time, fmt_time, fmt_zoom_text
+from stream2video.paths import artifact_stem
 from stream2video.silence import (
     SilenceDetectionError,
     SilenceSegment,
@@ -130,7 +131,10 @@ class WaveformRenderMixin:
         out_raw = self.entry_output.get().strip() or "./processed_videos"
         out_dir = Path(out_raw).expanduser().resolve()
         if bool(self.chk_per_video_dir.get()):
-            out_dir = out_dir / in_path.stem
+            # Same keyed project-dir naming the pipeline uses (stem +
+            # source-path hash), so the popup finds the pipeline's WAV /
+            # silence cache even for same-named sources in other folders.
+            out_dir = out_dir / artifact_stem(in_path)
 
         token = self._waveform_render_token + 1
         self._waveform_render_token = token
@@ -153,12 +157,12 @@ class WaveformRenderMixin:
                 # to the original video decode when the cache is missing
                 # or stale (mtime older than the source).
                 from stream2video.silence.cache import (
-                    _get_wav_cache_path,
                     _is_wav_cache_valid,
+                    build_wav_cache_path,
                 )
 
                 self._tk_after(0, lambda: self._safe_status_set("Loading..."))
-                wav_cache = _get_wav_cache_path(in_path, out_dir)
+                wav_cache = build_wav_cache_path(in_path, out_dir)
                 if _is_wav_cache_valid(wav_cache, in_path):
                     self._log(f"  Waveform preview: using cached audio ({wav_cache.name})")
                     peaks, duration = read_peaks_from_stream(
@@ -209,7 +213,9 @@ class WaveformRenderMixin:
                 cached_segs = load_silence_cache(in_path, out_dir, config)
                 raw_segments = live_segs if live_segs is not None else cached_segs
                 if raw_segments is None:
-                    cache_path = out_dir / f"{in_path.stem}_silence_cache.json"
+                    from stream2video.silence.cache import build_silence_cache_path
+
+                    cache_path = build_silence_cache_path(in_path, out_dir)
                     # P1.16: dry-run detection.
                     self._tk_after(
                         0,

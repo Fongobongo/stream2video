@@ -7,6 +7,8 @@ from stream2video.paths import (
     PROJECT_MARKER_FILENAME,
     RECENT_NAME_MAX,
     add_recent_project,
+    apply_per_video_dir,
+    artifact_stem,
     ensure_project_dir,
     is_marked_project_dir,
     is_sensitive_delete_target,
@@ -14,6 +16,7 @@ from stream2video.paths import (
     move_into_project,
     project_dir,
     prune_recent_projects,
+    source_path_key,
     truncate_recent_name,
     validate_project_delete,
 )
@@ -199,6 +202,92 @@ class TestPruneRecentProjects:
             original = [str(a), "/nonexistent"]
             prune_recent_projects(original)
             assert original == [str(a), "/nonexistent"]
+
+
+class TestSourceArtifactKey:
+    """source_path_key / artifact_stem — per-source identity for artifacts."""
+
+    def test_same_stem_different_dirs_get_different_keys(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            a = root / "channel_a" / "clip.mp4"
+            b = root / "channel_b" / "clip.mp4"
+            a.parent.mkdir()
+            b.parent.mkdir()
+            a.write_text("a")
+            b.write_text("b")
+            assert source_path_key(a) != source_path_key(b)
+            assert artifact_stem(a) != artifact_stem(b)
+            assert artifact_stem(a).startswith("clip_")
+            assert artifact_stem(b).startswith("clip_")
+
+    def test_same_file_key_is_stable_across_calls(self):
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "clip.mp4"
+            video.write_text("x")
+            assert source_path_key(video) == source_path_key(video)
+            assert artifact_stem(video) == artifact_stem(video)
+
+    def test_same_file_key_stable_across_casing_on_windows(self):
+        with TemporaryDirectory() as tmp:
+            video = Path(tmp) / "clip.mp4"
+            video.write_text("x")
+            upper = Path(tmp) / "CLIP.MP4"
+            # Same file viewed via a different-cased name must not fork
+            # the key (the FS is case-insensitive on Windows).
+            if upper.exists() or str(upper).lower() == str(video).lower():
+                assert source_path_key(upper) == source_path_key(video)
+
+
+class TestSameStemIndependence:
+    """Regression: two local files sharing a name in different dirs must
+    get independent project dirs and caches instead of overwriting each
+    other's artifacts."""
+
+    def test_apply_per_video_dir_gives_distinct_project_dirs(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            a = root / "channel_a" / "clip.mp4"
+            b = root / "channel_b" / "clip.mp4"
+            a.parent.mkdir()
+            b.parent.mkdir()
+            a.write_text("aaa")
+            b.write_text("bbb")
+            out = root / "out"
+
+            out_a, _ = apply_per_video_dir(out, a, is_downloaded=False)
+            out_b, _ = apply_per_video_dir(out, b, is_downloaded=False)
+            assert out_a != out_b
+            assert out_a.is_dir() and out_b.is_dir()
+            assert out_a.parent == out_b.parent == out
+
+    def test_caches_and_output_names_are_independent(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            a = root / "channel_a" / "clip.mp4"
+            b = root / "channel_b" / "clip.mp4"
+            a.parent.mkdir()
+            b.parent.mkdir()
+            a.write_text("aaa")
+            b.write_text("bbb")
+            out = root / "out"
+
+            from stream2video.silence.cache import (
+                build_resume_cache_path,
+                build_silence_cache_path,
+                build_wav_cache_path,
+            )
+
+            wav_a, wav_b = build_wav_cache_path(a, out), build_wav_cache_path(b, out)
+            cache_a, cache_b = build_silence_cache_path(a, out), build_silence_cache_path(b, out)
+            resume_a, resume_b = build_resume_cache_path(a, out), build_resume_cache_path(b, out)
+            assert wav_a != wav_b
+            assert cache_a != cache_b
+            assert resume_a != resume_b
+            # Every artifact for one source shares the same identifier.
+            assert wav_a.name.startswith(artifact_stem(a))
+            assert cache_a.name.startswith(artifact_stem(a))
+            assert resume_a.name.startswith(artifact_stem(a))
 
 
 class TestProjectMarker:

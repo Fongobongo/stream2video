@@ -3,19 +3,25 @@
 When `per_video_dir=True` is set in the config, all artifacts (downloaded
 source, audio WAV, silence cache JSON, compressed output, log file, temp
 segment dirs) for a given video are collected into a single subdirectory
-named after the video stem, instead of living in the user's flat
-`output_dir`.
+named after the video's artifact stem, instead of living in the user's
+flat `output_dir`.
+
+The artifact stem is ``<stem>_<path-hash>``: the file stem plus a short
+hash of the resolved source path. The hash is what makes two local files
+that share a name but live in different directories (``/a/clip.mp4`` vs
+``/b/clip.mp4``) independent — without it they would resolve to the same
+project dir and overwrite each other's output and caches.
 
 Layout comparison (per_video_dir=True):
     output_dir/
-        <stem>/
-            <stem>.mp4           # downloaded source (or local file untouched)
-            <stem>_audio.wav     # cached audio extract
-            <stem>_silence_cache.json
-            <stem>_compressed.mp4
+        <stem>_<path-hash>/
+            <stem>_<path-hash>.mp4    # downloaded source (or local file untouched)
+            <stem>_<path-hash>_audio.wav
+            <stem>_<path-hash>_silence_cache.json
+            <stem>_<path-hash>_compressed.mp4
             stream2video.log
-            _<stem>_segments/    # temp, cleaned on success
-            _<stem>_batch/       # temp, cleaned on success
+            _<stem>_<path-hash>_segments/   # temp, cleaned on success
+            _<stem>_<path-hash>_batch/      # temp, cleaned on success
 
 Local input files are NEVER moved or copied — the source stays where the
 user put it, but WAV / JSON / compressed / log / temp dirs all go into
@@ -24,6 +30,7 @@ the per-video subdir.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -189,6 +196,38 @@ def validate_project_delete(path: Path | str) -> tuple[bool, str]:
     return True, ""
 
 
+def source_path_key(video_path: Path) -> str:
+    """Short hash of the resolved source path — the per-source discriminator.
+
+    Two local files that share a stem but live in different directories
+    (``/a/clip.mp4`` vs ``/b/clip.mp4``) must never share a project dir
+    or artifact names; the stem alone is not a unique source identity
+    for local inputs. The hash is computed from the resolved absolute
+    path, so it is stable across runs for the same file (caches and
+    outputs stay reusable) and case-normalised (``os.path.normcase``) so
+    Windows path-casing differences of the same file don't fork the key.
+    """
+    try:
+        resolved = video_path.expanduser().resolve()
+    except OSError:
+        resolved = Path(os.path.abspath(str(video_path)))
+    digest = hashlib.sha256(
+        os.path.normcase(str(resolved)).encode("utf-8", "replace")
+    ).hexdigest()[:8]
+    return digest
+
+
+def artifact_stem(video_path: Path) -> str:
+    """Per-source base name: ``<stem>_<path-hash>``.
+
+    Drives the whole naming scheme: the project subdirectory, the final
+    output, the WAV cache, the silence cache and the resume cache all
+    embed it, so a single source identifier keeps artifacts of same-named
+    sources in different directories independent.
+    """
+    return f"{video_path.stem}_{source_path_key(video_path)}"
+
+
 def project_dir(output_dir: Path, video_stem: str, per_video_dir: bool) -> Path:
     """Compute the per-project directory path. Does not create it.
 
@@ -320,12 +359,13 @@ def apply_per_video_dir(
     When ``per_video_dir`` is False, the user opted out of per-video
     subdirectories: the function returns its inputs unchanged so callers
     don't need to gate the call themselves. When True (default), a
-    subdirectory named after ``video_path.stem`` is created inside
-    ``output_dir`` and the downloaded source is moved into it.
+    subdirectory named after ``video_path``'s artifact stem (stem +
+    source-path hash) is created inside ``output_dir`` and the
+    downloaded source is moved into it.
     """
     if not per_video_dir:
         return output_dir, video_path
-    project_dir = ensure_project_dir(output_dir, video_path.stem, True)
+    project_dir = ensure_project_dir(output_dir, artifact_stem(video_path), True)
     if project_dir != output_dir:
         if is_downloaded:
             video_path = move_into_project(video_path, project_dir)
