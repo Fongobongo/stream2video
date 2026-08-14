@@ -49,7 +49,7 @@ def _gui_stub(
     g._take_live_snapshot = MagicMock(return_value=None)
 
     if wav_exists:
-        from stream2video.silence.cache import build_wav_cache_path, _mark_wav_verified
+        from stream2video.silence.cache import _mark_wav_verified, build_wav_cache_path
 
         wav = build_wav_cache_path(in_path, out_dir)
         wav.write_bytes(b"\x00" * 100)

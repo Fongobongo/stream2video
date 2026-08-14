@@ -11,7 +11,6 @@ instead of producing a half-overwritten video.
 
 import logging
 import os
-import time
 from pathlib import Path
 
 from stream2video.concat.errors import ConcatError
@@ -27,13 +26,9 @@ def lock_path_for(output_path: Path) -> Path:
     return output_path.with_name(output_path.name + ".lock")
 
 
-# A lock older than this is presumed stale (BSOD / kill -9 / power loss
-# leave no pid to check, so the age is the only signal). Timeouts in the
-# pipeline top out at 7 days for a single phase, but a lock that old
-# with a DEAD pid is unambiguously abandoned.
-_STALE_LOCK_AGE_S = 60 * 60
-
-
+# A lock whose pid can't be verified (no psutil) is NEVER reclaimed:
+# refusing is the safe direction — the user gets the manual-cleanup
+# message instead of the risk of two runs writing one output file.
 def _lock_pid_from_content(lock_path: Path) -> int | None:
     """Parse the pid recorded in the lock file's diagnostic line."""
     try:
@@ -56,7 +51,8 @@ def _pid_is_alive(pid: int) -> bool:
 
         return psutil.pid_exists(pid)
     except Exception:
-        # No psutil or an API hiccup — fall back to the age heuristic.
+        # No psutil or an API hiccup — refuse rather than risk stealing
+        # a live lock: the user gets the manual-cleanup message.
         return True
 
 
@@ -68,54 +64,43 @@ def acquire_output_lock(output_path: Path) -> Path:
     (pid + source path hint) in case a stale lock survives a crash and
     the user wonders what it is.
 
-    Stale-lock handling (C15 audit): a lock whose pid is gone — or that
-    is older than :data:`_STALE_LOCK_AGE_S` — is presumed abandoned
-    (BSOD, ``kill -9``, power loss) and is reclaimed instead of
-    bricking the next run forever. A lock whose pid is ALIVE is refused
-    unconditionally: deleting it would clobber a genuinely concurrent
-    run writing the same output.
+    Stale-lock handling (C15 audit): a lock whose pid is gone — or
+    unreadable — is presumed abandoned (BSOD, ``kill -9``, power loss)
+    and is reclaimed instead of bricking the next run forever. A lock
+    whose pid is ALIVE is refused unconditionally — regardless of the
+    lock file's age: the mtime is never refreshed during a run, so an
+    old mtime only means the run is *long* (final-concat timeouts reach
+    24 h), not that the owner died. Deleting it would clobber a
+    genuinely concurrent run writing the same output.
     """
     lock_path = lock_path_for(output_path)
-    try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        lock_age = 0.0
+    while True:
         try:
-            lock_age = time.time() - lock_path.stat().st_mtime
-        except OSError:
-            pass
-        pid = _lock_pid_from_content(lock_path)
-        stale = (
-            pid is None
-            or not _pid_is_alive(pid)
-            or lock_age >= _STALE_LOCK_AGE_S
-        )
-        if stale:
-            logger.warning(
-                f"Output lock {lock_path} is stale "
-                f"(pid={pid}, age={lock_age:.0f}s) — reclaiming it"
-            )
-            try:
-                lock_path.unlink(missing_ok=True)
-            except OSError as e:
-                raise ConcatLockError(
-                    f"Stale lock {lock_path} could not be removed ({e})"
-                ) from None
-            return acquire_output_lock(output_path)
-        # Refuse to clobber another run's output. The error message
-        # points at the lock so the user can delete it manually after
-        # confirming the other run is really gone.
-        raise ConcatLockError(
-            f"Another stream2video run already holds {lock_path} "
-            f"(output {output_path.name} is being written by it, pid={pid}). "
-            f"If that run crashed, delete the .lock file and retry."
-        ) from None
-    except PermissionError as e:
-        # Windows: an open handle (another process mid-write) can
-        # surface as PermissionError instead of FileExistsError.
-        raise ConcatLockError(
-            f"Could not create output lock {lock_path}: {e}"
-        ) from None
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            pid = _lock_pid_from_content(lock_path)
+            if pid is None or not _pid_is_alive(pid):
+                logger.warning(f"Output lock {lock_path} is stale (pid={pid}) — reclaiming it")
+                try:
+                    lock_path.unlink(missing_ok=True)
+                except OSError as e:
+                    raise ConcatLockError(
+                        f"Stale lock {lock_path} could not be removed ({e})"
+                    ) from None
+                continue
+            # Refuse to clobber another run's output. The error message
+            # points at the lock so the user can delete it manually after
+            # confirming the other run is really gone.
+            raise ConcatLockError(
+                f"Another stream2video run already holds {lock_path} "
+                f"(output {output_path.name} is being written by it, pid={pid}). "
+                f"If that run crashed, delete the .lock file and retry."
+            ) from None
+        except PermissionError as e:
+            # Windows: an open handle (another process mid-write) can
+            # surface as PermissionError instead of FileExistsError.
+            raise ConcatLockError(f"Could not create output lock {lock_path}: {e}") from None
     try:
         os.write(
             fd,

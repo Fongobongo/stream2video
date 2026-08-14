@@ -40,10 +40,17 @@ def _have(*tools: str) -> bool:
 
 
 HAVE_FFMPEG = _have("ffmpeg", "ffprobe")
-pytestmark = pytest.mark.skipif(
-    not HAVE_FFMPEG,
-    reason="ffmpeg/ffprobe not on PATH — media regression tests need them",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        not HAVE_FFMPEG,
+        reason="ffmpeg/ffprobe not on PATH — media regression tests need them",
+    ),
+    # Real encode/decode runs: a slow CI box can exceed the suite-wide
+    # 30s pytest-timeout ceiling (e.g. the 60fps CFR, 5.1-channel and
+    # 100-segment cases). The global timeout stays for hang protection
+    # on the mocked tests; these get a ceiling sized for real ffmpeg.
+    pytest.mark.timeout(600),
+]
 
 
 def _make_source(

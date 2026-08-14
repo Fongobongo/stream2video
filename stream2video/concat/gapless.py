@@ -1,8 +1,9 @@
 """Gapless segment join via concat filter (re-encode both streams).
 
-Supports a binary-tree reduction on Windows when the number of inputs
-would otherwise blow past the Win32 32K CreateProcess command-line
-limit; see the kernel-level docstring for the design.
+Supports a binary-tree reduction when the estimated command line
+would exceed the per-call budget — on Windows that's the Win32 32K
+CreateProcess limit; on POSIX the module-level per-call input cap.
+See the kernel-level docstring for the design.
 """
 
 import logging
@@ -67,7 +68,7 @@ def _concat_filter_one_pass(
             progress_callback(min(seconds / total_duration, 1.0))
 
     # ``-movflags +faststart`` is MP4-only; intermediates are MKV
-    # (ffv1+pcm) and must not carry it.
+    # (libx264 CRF 18 + PCM) and must not carry it.
     _movflags: list[str] = (
         ["-movflags", "+faststart"] if output_path.suffix.lower() == ".mp4" else []
     )
@@ -170,16 +171,18 @@ def _run_gapless_segment_concat(
     command approaches the limit, we cascade the joins into a tree:
     groups of at most ``max_inputs`` parts are joined into
     intermediates, then the intermediates are joined again, etc.
-     Intermediates use lossless PCM audio (no priming is ever written)
-     and lossless ``ffv1`` video (``-c:v copy`` is illegal with a
-     ``-filter_complex`` graph — ffmpeg rejects the combination with
-     "Streamcopy requested for output stream fed from a complex
-     filtergraph"). ``ffv1`` is bit-exact and fast enough for the
-     intermediates; only the final pass to ``output_path`` applies the
-     user's ``audio_quality`` / video codec — the output is identical to
-     what a single-pass would have produced, except the concat filter
-     now runs 2·log(N)-ish times instead of once (lossless intermediates
-     make the extra passes free of quality loss).
+    Intermediates use lossless PCM audio (no priming is ever written)
+    and visually-lossless ``libx264 -crf 18 -preset ultrafast`` video
+    (``-c:v copy`` is illegal with a ``-filter_complex`` graph — ffmpeg
+    rejects the combination with "Streamcopy requested for output
+    stream fed from a complex filtergraph"). ``ffv1`` would be
+    bit-exact but blows up disk 10-30x (measured: 15.2GB source → L0
+    intermediate ~300GB → -28 ENOSPC); only the final pass to
+    ``output_path`` applies the user's ``audio_quality`` / video codec —
+    the output is identical to what a single-pass would have produced,
+    except the concat filter now runs 2·log(N)-ish times instead of once
+    (near-lossless intermediates make the extra passes nearly free of
+    quality loss).
 
      Tree intermediates are kept in ``output_path.parent /
      _gapless_tree_<stem>`` so an interrupted run keeps the working
@@ -215,7 +218,7 @@ def _run_gapless_segment_concat(
 
     max_inputs = _compute_max_inputs(part_paths)
 
-    if n <= max_inputs or os.name != "nt":
+    if n <= max_inputs:
         _c._concat_filter_one_pass(
             part_paths,
             output_path,
@@ -240,7 +243,7 @@ def _run_gapless_segment_concat(
         )
         return
 
-    # ── Tree path (Windows, too many inputs for one pass) ──
+    # ── Tree path (too many inputs for one pass) ──
     tree_dir = output_path.parent / f"_gapless_tree_{output_path.stem}"
     # Gate tree-intermediate reuse on a manifest snapshot identical to the
     # segment path's: ``tree_dir`` lives OUTSIDE the per-run seg_dir, so a

@@ -283,9 +283,7 @@ class TestWavCachePath:
 
         video = Path("/some/dir/myvideo.mp4")
         out = Path("/output")
-        assert build_wav_cache_path(video, out) == Path(
-            f"/output/{artifact_stem(video)}_audio.wav"
-        )
+        assert build_wav_cache_path(video, out) == Path(f"/output/{artifact_stem(video)}_audio.wav")
 
     def test_same_stem_different_dirs_get_distinct_caches(self):
         with TemporaryDirectory() as tmp:

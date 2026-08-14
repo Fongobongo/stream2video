@@ -211,9 +211,9 @@ def source_path_key(video_path: Path) -> str:
         resolved = video_path.expanduser().resolve()
     except OSError:
         resolved = Path(os.path.abspath(str(video_path)))
-    digest = hashlib.sha256(
-        os.path.normcase(str(resolved)).encode("utf-8", "replace")
-    ).hexdigest()[:8]
+    digest = hashlib.sha256(os.path.normcase(str(resolved)).encode("utf-8", "replace")).hexdigest()[
+        :8
+    ]
     return digest
 
 

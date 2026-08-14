@@ -948,9 +948,7 @@ class TestCleanupIncompleteOnClose:
         def _boom(*args, **kwargs):
             raise OSError("locked by another process")
 
-        with patch.object(
-            type(controller), "_cleanup_partial_output", side_effect=_boom
-        ):
+        with patch.object(type(controller), "_cleanup_partial_output", side_effect=_boom):
             controller.cleanup_incomplete_on_close()
 
         # The download slot was still processed (kept for reuse) and the

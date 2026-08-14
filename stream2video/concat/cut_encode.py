@@ -143,8 +143,11 @@ def _run_cut_then_encode(
 
         # ── Phase 1: Cut pass (encode each segment to MP4) ──
         # Progress: 0.0 .. 0.4 (cut is fast, so a small slice of the bar).
-        cut_progress_base = 0.0
+        # The per-segment base advances with the cumulative encoded
+        # duration (same scheme as segment.py) so the bar never rolls
+        # back to zero at the start of a new segment.
         cut_progress_span = 0.4
+        encoded_keep = 0.0
 
         for i, (start, end) in enumerate(keep_segments):
             if cancel_callback and cancel_callback():
@@ -189,6 +192,11 @@ def _run_cut_then_encode(
                 and _c._ffprobe_duration_ok(cut_path, dur)
             ):
                 logger.debug(f"cut_then_encode: reusing cut_{i:06d}.mp4")
+                encoded_keep += dur
+                if progress_callback and total_duration > 0:
+                    progress_callback(
+                        min(encoded_keep / total_duration * cut_progress_span, cut_progress_span)
+                    )
                 continue
 
             # Frame-accurate encode of one keep segment. Input-side
@@ -260,15 +268,25 @@ def _run_cut_then_encode(
                     str(cut_path),
                 ]
             )
+
+            # Per-segment progress: the base is the cumulative duration
+            # already encoded, so the bar advances monotonically through
+            # the whole cut phase (no rollback at each new segment).
+            # ``_dur`` / ``_encoded_keep`` are bound as default args so
+            # the closure doesn't capture the loop variables (B023).
+            def _seg_prog(
+                seconds: float, _dur: float = dur, _encoded_keep: float = encoded_keep
+            ) -> None:
+                if progress_callback and total_duration > 0 and _dur > 0:
+                    seg_frac = min(seconds / _dur, 1.0)
+                    abs_time = _encoded_keep + seg_frac * _dur
+                    progress_callback(
+                        min(abs_time / total_duration * cut_progress_span, cut_progress_span)
+                    )
+
             _c._run_ffmpeg(
                 cmd,
-                progress_callback=(
-                    (lambda s: progress_callback(
-                        cut_progress_base + min(s / max(dur, 1.0), 1.0) / n_segs * cut_progress_span
-                    ))
-                    if progress_callback
-                    else None
-                ),
+                progress_callback=_seg_prog if progress_callback else None,
                 timeout=segment_encode_timeout,
                 label=f"cut_then_encode cut phase segment {i}",
                 cancel_callback=cancel_callback,
@@ -280,8 +298,11 @@ def _run_cut_then_encode(
                 low_process_priority=low_process_priority,
                 rlimit_as_mb=rlimit_as_mb,
             )
-            if progress_callback:
-                progress_callback(cut_progress_base + (i + 1) / n_segs * cut_progress_span)
+            encoded_keep += dur
+            if progress_callback and total_duration > 0:
+                progress_callback(
+                    min(encoded_keep / total_duration * cut_progress_span, cut_progress_span)
+                )
 
         # ── Phase 2: Lossless concat (concat demuxer → raw_concat.mp4) ──
         # Progress: 0.4 .. 0.5 (fast stream-copy join).
@@ -336,9 +357,13 @@ def _run_cut_then_encode(
         # audio quality, and phase 2 joined them losslessly. There is
         # nothing to re-encode here — phase 3 is now a ``-c copy``
         # mux-level rewrite of the intermediate MP4 into the requested
-        # output container. The progress span stays at 0.5..1.0 because
-        # the muxer still touches the whole file (copying the moov +
-        # faststart layout), but it's I/O-bound rather than CPU-bound.
+        # output container. The muxer still touches the whole file
+        # (copying the moov + faststart layout), so progress is mapped
+        # into 0.5..1.0 from ffmpeg's ``out_time``; it's I/O-bound
+        # rather than CPU-bound. ``_run_ffmpeg`` (not the bare
+        # ``_run_subprocess_cmd``) is used because it parses the
+        # ``-progress pipe:1`` stream into a progress callback AND runs
+        # the stall watchdog off it.
         encode_progress_base = 0.5
         encode_progress_span = 0.5
 
@@ -348,15 +373,15 @@ def _run_cut_then_encode(
                 progress_callback(encode_progress_base + frac * encode_progress_span)
 
         label_text = "cut_then_encode mux-to-output"
-        _c._run_subprocess_cmd(
+        _c._run_ffmpeg(
             [
                 ffmpeg_path(),
                 "-y",
                 "-loglevel",
                 "error",
-                # -progress pipe:1 keeps _run_subprocess_cmd feed back
-                # the time-base update (the watchdog would otherwise
-                # flag this stream-copy pass as stalled — see runner.py).
+                # -progress pipe:1 is required here: _run_ffmpeg parses
+                # out_time lines from stdout to drive progress_callback
+                # and to reset its stall watchdog timer.
                 "-progress",
                 "pipe:1",
                 "-i",
@@ -369,9 +394,13 @@ def _run_cut_then_encode(
                 "+faststart",
                 str(output_path),
             ],
+            progress_callback=_encode_prog,
             timeout=final_concat_timeout,
             label=label_text,
             cancel_callback=cancel_callback,
+            memory_monitor=_c._new_memory_monitor(memory_monitor_factory, "cut_then_encode mux"),
+            stall_kill=stall_kill,
+            stall_warning=stall_warning,
             low_process_priority=low_process_priority,
             rlimit_as_mb=rlimit_as_mb,
         )

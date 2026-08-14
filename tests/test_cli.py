@@ -477,36 +477,27 @@ class TestB11CliSanitization:
         # (With a bare resolver the CLI value rides the same int branch
         # as the config value — the ceiling check is shared.)
         with pytest.raises(typer.Exit) as exc:
-            self._resolver({"stall_kill_timeout": 99999}).resolve(
-                "stall_kill_timeout", None
-            )
+            self._resolver({"stall_kill_timeout": 99999}).resolve("stall_kill_timeout", None)
         assert exc.value.exit_code == 1
         # And the boundary value itself is accepted.
         assert (
-            self._resolver({"stall_kill_timeout": 3600}).resolve(
-                "stall_kill_timeout", None
-            )
-            == 3600
+            self._resolver({"stall_kill_timeout": 3600}).resolve("stall_kill_timeout", None) == 3600
         )
 
     def test_final_concat_timeout_ceiling_applied(self):
         with pytest.raises(typer.Exit):
-            self._resolver({"final_concat_timeout": 604801}).resolve(
-                "final_concat_timeout", None
-            )
+            self._resolver({"final_concat_timeout": 604801}).resolve("final_concat_timeout", None)
         assert (
-            self._resolver({"final_concat_timeout": 604800}).resolve(
-                "final_concat_timeout", None
-            )
+            self._resolver({"final_concat_timeout": 604800}).resolve("final_concat_timeout", None)
             == 604800
         )
 
     def test_yaml_int_proxy_is_coerced_to_str(self):
         # ``proxy: 8080`` (number in YAML) must not leak into yt-dlp as
         # an int — resolver coerces both CLI and YAML sources to str.
-        assert self._resolver({"proxy_active": True, "proxy": 8080}).resolve(
-            "proxy", None
-        ) == "8080"
+        assert (
+            self._resolver({"proxy_active": True, "proxy": 8080}).resolve("proxy", None) == "8080"
+        )
 
     def test_json_handler_installation_is_idempotent(self):
         from stream2video import cli
@@ -515,18 +506,20 @@ class TestB11CliSanitization:
         json_handlers_before = [
             h
             for h in cli.logger.handlers
-            if type(h).__name__ == "StreamHandler" and hasattr(h, "formatter")
+            if type(h).__name__ == "StreamHandler"
+            and hasattr(h, "formatter")
             and "JsonFormatter" in type(h.formatter).__name__
         ]
         try:
-            first = install_json_handler(cli.logger, level="INFO")
+            install_json_handler(cli.logger, level="INFO")
             second = install_json_handler(cli.logger, level="INFO")
             # A second main() must not leave BOTH handlers attached —
             # that duplicates every record line-by-line on stdout.
             json_handlers = [
                 h
                 for h in cli.logger.handlers
-                if type(h).__name__ == "StreamHandler" and hasattr(h, "formatter")
+                if type(h).__name__ == "StreamHandler"
+                and hasattr(h, "formatter")
                 and "JsonFormatter" in type(h.formatter).__name__
             ]
             assert len(json_handlers) == 1, (

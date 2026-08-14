@@ -82,8 +82,12 @@ class TestSilenceCacheIdentity:
         out = tmp_path / "out"
         vid = tmp_path / "стрим_запись.mp4"
         vid.write_bytes(b"video")
-        _save_cache(out / f"{vid.stem}_silence_cache.json", vid, [], {
-            "threshold": -30.0, "min_silence": 2.0, "margin": 0.5})
+        _save_cache(
+            out / f"{vid.stem}_silence_cache.json",
+            vid,
+            [],
+            {"threshold": -30.0, "min_silence": 2.0, "margin": 0.5},
+        )
         hit = load_silence_cache(vid, out, {"threshold": -30.0, "min_silence": 2.0, "margin": 0.5})
         assert hit == []
 
@@ -133,8 +137,15 @@ class TestSegmentResumeDuration:
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
             _run_segment_concat(
-                video, keep, output, "libx264", ["-preset", "medium"],
-                None, None, encoder="libx264", source_has_audio=False,
+                video,
+                keep,
+                output,
+                "libx264",
+                ["-preset", "medium"],
+                None,
+                None,
+                encoder="libx264",
+                source_has_audio=False,
             )
         assert len(cut_calls) == 1, "wrong-duration segment was reused, not re-encoded"
 
@@ -157,20 +168,28 @@ class TestCutEncodeResumeDuration:
             cut_calls.append(list(cmd))
 
         with (
-            patch("stream2video.concat._run_subprocess_cmd", side_effect=fake_cut),
+            patch("stream2video.concat._run_ffmpeg", side_effect=fake_cut),
             patch("stream2video.concat._run_final_concat"),
             patch("stream2video.concat._ffprobe_is_valid_mp4", return_value=True),
             patch("stream2video.concat._ffprobe_is_valid_media", return_value=True),
             # Duration probe says "wrong length" → must NOT reuse.
             patch("stream2video.concat._ffprobe_duration_ok", return_value=False),
-            patch("stream2video.concat._run_ffmpeg"),
+            patch("stream2video.concat._run_subprocess_cmd"),
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
             _run_cut_then_encode(
-                video, keep, output, "libx264", ["-preset", "medium"],
-                None, None, encoder="libx264", source_has_audio=False,
+                video,
+                keep,
+                output,
+                "libx264",
+                ["-preset", "medium"],
+                None,
+                None,
+                encoder="libx264",
+                source_has_audio=False,
             )
-        assert len(cut_calls) == 1, "stale-duration part was reused, not re-cut"
+        cut_encodes = [c for c in cut_calls if "cut_000000.mp4" in " ".join(c)]
+        assert len(cut_encodes) == 1, "stale-duration part was reused, not re-cut"
 
 
 # ── #B5 ── force re-detect must clear both .resume and .resume.inuse ────
@@ -190,7 +209,7 @@ class TestForceClearsInUseCheckpoint:
 
         # Reuse the shared helper from test_pipeline_controller
         sys.path.insert(0, str(_Path(__file__).parent))
-        from test_pipeline_controller import _valid_config  # noqa: E402
+        from test_pipeline_controller import _valid_config
 
         from stream2video.pipeline_controller import (
             PipelineCallbacks,
@@ -239,9 +258,7 @@ class TestForceClearsInUseCheckpoint:
                 "stream2video.pipeline_controller.download",
                 side_effect=lambda *a, **k: MagicMock(path=video, is_downloaded=False),
             ),
-            patch(
-                "stream2video.pipeline_controller.get_video_duration", return_value=10.0
-            ),
+            patch("stream2video.pipeline_controller.get_video_duration", return_value=10.0),
             patch(
                 "stream2video.pipeline_controller.apply_per_video_dir",
                 return_value=(out, video),
@@ -260,15 +277,13 @@ class TestForceClearsInUseCheckpoint:
             ),
             pytest.raises(PipelineUnexpectedError),
         ):
-            PipelineController(
-                cfg=cfg, cb=cb, cancel_event=threading.Event()
-            ).run()
+            PipelineController(cfg=cfg, cb=cb, cancel_event=threading.Event()).run()
 
         assert not resume_path.exists(), "force did not clear canonical .resume"
         assert not inuse_path.exists(), "force did not clear .inuse checkpoint"
-        assert any(
-            "inuse" in m.lower() for m in log_messages
-        ), f"force did not log clearing .inuse; logs: {log_messages}"
+        assert any("inuse" in m.lower() for m in log_messages), (
+            f"force did not log clearing .inuse; logs: {log_messages}"
+        )
 
 
 # ── #6 ── output lock ──────────────────────────────────────────────────
@@ -304,12 +319,29 @@ class TestOutputLock:
         with pytest.raises(ConcatLockError):
             acquire_output_lock(out)
 
-    def test_stale_lock_with_old_mtime_reclaimed(self, tmp_path: Path):
-        """#C15: age-based fallback — a lock older than the 1h threshold
-        is abandoned regardless of pid parsing."""
+    def test_live_lock_with_old_mtime_refused(self, tmp_path: Path):
+        """Audit regression: a lock whose pid is ALIVE must be refused
+        even when its mtime is older than the old 1h threshold. The lock
+        mtime is never refreshed during a run, so an old mtime means the
+        run is long (final-concat timeout reaches 24h), not that the
+        owner died — reclaiming it would make two runs write the same
+        output file."""
         out = tmp_path / "x.mp4"
         lock = lock_path_for(out)
-        lock.write_text("pid=1 output=x.mp4\n", encoding="utf-8")
+        lock.write_text(f"pid={os.getpid()} output=x.mp4\n", encoding="utf-8")
+        old = time.time() - 60 * 60 - 60
+        os.utime(lock, (old, old))
+        with pytest.raises(ConcatLockError):
+            acquire_output_lock(out)
+
+    def test_stale_lock_with_old_mtime_reclaimed(self, tmp_path: Path):
+        """A lock whose pid is DEAD is reclaimed regardless of its age."""
+        psutil = pytest.importorskip("psutil")
+        out = tmp_path / "x.mp4"
+        lock = lock_path_for(out)
+        pid = 2**31 - 2  # far above any real pid on this machine
+        assert not psutil.pid_exists(pid)
+        lock.write_text(f"pid={pid} output=x.mp4\n", encoding="utf-8")
         old = time.time() - 60 * 60 - 60
         os.utime(lock, (old, old))
         lp = acquire_output_lock(out)
@@ -513,7 +545,9 @@ class TestManifestHash:
         # Force the same mtime on the rewrite so ONLY the hash differs.
         st = src.stat()
         keep = [(0.0, 1.0)]
-        m1 = _build_manifest(src, keep, "segment", "libx264", "libx264", [], "medium", "medium", "medium", "auto")
+        m1 = _build_manifest(
+            src, keep, "segment", "libx264", "libx264", [], "medium", "medium", "medium", "auto"
+        )
 
         wd = tmp_path / "_work"
         _ensure_fresh_work_dir(wd, m1)
@@ -523,7 +557,9 @@ class TestManifestHash:
         # Rewrite content, restore mtime to fake "same file".
         src.write_bytes(os.urandom(2048))
         os.utime(src, ns=(st.st_atime_ns, st.st_mtime_ns))
-        m2 = _build_manifest(src, keep, "segment", "libx264", "libx264", [], "medium", "medium", "medium", "auto")
+        m2 = _build_manifest(
+            src, keep, "segment", "libx264", "libx264", [], "medium", "medium", "medium", "auto"
+        )
         _ensure_fresh_work_dir(wd, m2)
         assert not marker.exists(), "stale part survived a content swap with preserved mtime"
 
@@ -534,19 +570,26 @@ class TestLogTrimming:
         from stream2video.tk_dispatch import LogQueuePoller, TkDispatcher
 
         class TB:
-            def __init__(self): self.lines: list[str] = []
+            def __init__(self):
+                self.lines: list[str] = []
+
             def configure(self, **_k): ...
             def see(self, _i): ...
             def tag_config(self, *_a, **_k): ...
             def tag_add(self, *_a): ...
-            def index(self, i): return i
-            def insert(self, _i, t): self.lines.extend(t.splitlines())
+            def index(self, i):
+                return i
+
+            def insert(self, _i, t):
+                self.lines.extend(t.splitlines())
+
             def delete(self, a, b=None):
                 n = int(b.split(".")[0]) if b else 1
                 del self.lines[:n]
 
         class R:
-            def after(self, _ms, _fn): return "x"
+            def after(self, _ms, _fn):
+                return "x"
 
         tb = TB()
         poller = LogQueuePoller(tb, TkDispatcher(R()))

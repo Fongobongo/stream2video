@@ -1,11 +1,23 @@
 # Changelog
 
-## [Unreleased] - 2026-08-12
+## [Unreleased]
+
+### Added
+
+- **`--doctor` flag** — print an environment report (Python version, ffmpeg/ffprobe path and version, available encoders, RAM, config file location) and exit. Useful for filing bug reports or checking that everything is wired up before a long run. Works without an input file.
+- **`--dry-run` / `-n` flag** — run only silence detection and print a "what would be cut" summary (number of segments, total length removed, expected output duration) without encoding. Lets you tune `threshold` / `min_silence` / `margin` against a real video in seconds instead of waiting for a full encode.
+- **`--log-format json` flag** — emit every log line as a JSON object (one per line), for log aggregators like ELK / Splunk / Loki. The default `rich` format is unchanged.
+- **`--proxy` CLI flag** — pass an HTTP or SOCKS5 proxy for downloads, matching the existing GUI proxy dialog. `http://127.0.0.1:8080` or `socks5://user:pass@host:1080`.
+- **Shell completion** — `stream2video --install-completion` installs Bash / Zsh / Fish / PowerShell completion (powered by Typer). `--show-completion` prints the script for manual install.
+- **Docker image** — `Dockerfile` plus a CLI-only entrypoint, so you can run the pipeline in a container without a local python/ffmpeg install.
 
 ### Fixed
 
+- **`cut_then_encode` progress bar no longer jumps around** — the cut phase reports a monotonic percentage across segments (cumulative encoded duration instead of restarting from 0 per segment), and the final remux now reports real progress through ffmpeg's `-progress pipe:1` instead of a dead callback.
+- **Output lock is never stolen from a live run** — a lock whose recorded pid is still alive is refused regardless of how old the lock file is (the mtime is never refreshed mid-run, so an old file just means a long run). Only a dead or pid-less lock is reclaimed.
+- **Gapless tree join is no longer Windows-only** — the intermediate tree path triggers whenever the estimated per-call command line exceeds the budget, on any platform.
 - **Log file no longer dies silently on a project-dir move failure** — the old file handler was closed but re-attached on rollback, which made `logging.handleError` swallow every subsequent record for the rest of the run. The handler is now reconstructed via `_make_file_handler` on the moved (or original) file.
-- **`cut_then_encode` resume gate validates the audio stream** of the intermediate `raw_concat.mkv`, not just video — a crash mid-write could previously reuse a video-valid-but-audio-truncated file and produce a silent-video output.
+- **`cut_then_encode` resume gate validates the audio stream** of the intermediate `raw_concat.mp4`, not just video — a crash mid-write could previously reuse a video-valid-but-audio-truncated file and produce a silent-video output.
 - **Output lock now fires before any probe / encoder smoke-test**, so two concurrent runs (GUI + CLI) fail fast for the loser instead of each spawning ffprobe/ffmpeg first (`api.py`).
 - **Downloaded file is per-run unique** (`%(id)s-%(epoch)s.%(ext)s`) — two pipelines pointed at the same URL no longer write into the same yt-dlp output file.
 - **Bounded reaps after kills.** All `process.wait()` after `process.kill()` calls (concat runner, silencedetect, download timeout paths) now use a 30s ceiling; an unbounded `wait()` could hang the worker on a wedged Windows child.
@@ -20,26 +32,14 @@
   - `_on_close`'s Quit dialog, file-info stat, rmtree of large project dirs, and the waveform preview's `cancel_process` no longer block the Tk main loop.
 - **`--log-format json` no longer double-prints** — `install_json_handler` sets `logger.propagate = False` before the root-handler attach.
 - **Docs:** `memory_reserve_mb` README corrected — the OS reserve is a warning floor mid-run (only the per-process RSS budget cancels); pre-flight still refuses a fresh heavy phase.
-
-## [Unreleased] - 2026-08-11
-
-### Added
-
-- **`--doctor` flag** — print an environment report (Python version, ffmpeg/ffprobe path and version, available encoders, RAM, config file location) and exit. Useful for filing bug reports or checking that everything is wired up before a long run. Works without an input file.
-- **`--dry-run` / `-n` flag** — run only silence detection and print a "what would be cut" summary (number of segments, total length removed, expected output duration) without encoding. Lets you tune `threshold` / `min_silence` / `margin` against a real video in seconds instead of waiting for a full encode.
-- **`--log-format json` flag** — emit every log line as a JSON object (one per line), for log aggregators like ELK / Splunk / Loki. The default `rich` format is unchanged.
-- **`--proxy` CLI flag** — pass an HTTP or SOCKS5 proxy for downloads, matching the existing GUI proxy dialog. `http://127.0.0.1:8080` or `socks5://user:pass@host:1080`.
-- **Shell completion** — `stream2video --install-completion` installs Bash / Zsh / Fish / PowerShell completion (powered by Typer). `--show-completion` prints the script for manual install.
-- **Docker image** — `Dockerfile` plus a CLI-only entrypoint, so you can run the pipeline in a container without a local python/ffmpeg install.
-
-### Fixed
-
 - **GUI: waveform rendering no longer freezes the main window** when the preview opens on a long video — decoding now runs fully off the Tk event loop.
 - **Sample-verify on a re-extracted WAV** correctly clears the cached segments, so a re-detect after `--force` no longer reuses stale cut points.
 - **`--doctor` honours `--config`** for its config-file path; previously the flag was silently ignored by the diagnostics entry point.
 - **JSON mode keeps stdout line-per-JSON** — a stray banner or progress bar no longer breaks piping to `jq` / log aggregators.
 - **Gapless tree join** no longer blows up disk on long multi-segment outputs — intermediates now use a near-lossless libx264 pass instead of uncompressed ffv1, and the run refuses to start when free disk space is below the projected intermediate size.
 - **Subprocess hygiene**: registered processes are now reliably killed on GUI crash and on close-during-running; cancel no longer leaves a zombie ffmpeg holding the output file open (which used to trip `WinError 32` on the next cleanup).
+- **Dockerfile**: the test stage now copies `tests/` (previously `pytest -q` ran zero tests), stages are named (`test` / `cli`) so `docker build .` builds the documented default, and the comment about the `[gui]` extra matches reality (`[dev]` does pull it; headless import still skips cleanly).
+- **Doc strings / error messages aligned with behaviour**: gapless tree-intermediate docstring corrected (libx264 CRF 18 + PCM, not ffv1), `raw_concat.mkv` → `raw_concat.mp4` in the changelog, and the `_audio_opts` unknown-quality error lists the same `source/high/medium/low` set as `_audio_bitrate`.
 
 ## [0.3] - 2026-08-01
 

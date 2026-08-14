@@ -84,7 +84,7 @@ def _audio_opts(audio_quality: str = "") -> list[str]:
     if audio_quality not in ("", *_AUDIO_BITRATES):
         raise ConcatError(
             f"Unknown audio quality {audio_quality!r} "
-            f"(use {' or '.join(repr(k) for k in _AUDIO_BITRATES)})"
+            f"(use {' or '.join(repr(k) for k in VALID_QUALITIES)})"
         )
     return ["-ar", _AUDIO_SAMPLE_RATE, "-ac", _AUDIO_CHANNELS]
 

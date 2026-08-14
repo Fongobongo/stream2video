@@ -274,9 +274,7 @@ class LifecycleMixin:
         if config_path is None:
             self._log("[WARN] Could not write CLI config (out_dir not writable)")
 
-        proxy_value = (
-            self.config.get("proxy", "") if self.config.get("proxy_active", False) else ""
-        )
+        proxy_value = self.config.get("proxy", "") if self.config.get("proxy_active", False) else ""
         cmd = build_cli_command(
             inp,
             out_path,

@@ -12,8 +12,8 @@
 # on Windows-specific behaviour (path separators, ctypes, etc).
 #
 # Usage:
-#   docker build -t stream2video-test .
-#   docker run --rm stream2video-test           # runs pytest + ruff + mypy
+#   docker build --target test -t stream2video-test .   # full image
+#   docker run --rm stream2video-test                   # runs pytest + ruff + mypy
 #   docker run --rm stream2video-test stream2video --help
 #   docker run --rm -v "$PWD/sample.mp4:/in.mp4" -v "$PWD/out:/out" \
 #     stream2video-test stream2video /in.mp4 -o /out --encoder libx264
@@ -21,9 +21,10 @@
 # Size: ~250 MB (Python 3.13 slim + ffmpeg + project deps).
 #
 # ── Lightweight CLI-only variant ────────────────────────────────────────
-# For pipelines that only need the transcoding step (no GUI, no tests,
-# no lint): build with the target ``cli`` to get a smaller image.
-#   docker build -t stream2video-cli --target cli .
+# ``docker build .`` (no --target) builds the LAST stage, i.e. ``cli`` —
+# the small runtime-only image below. For pipelines that only need the
+# transcoding step (no GUI, no tests, no lint): plain
+#   docker build -t stream2video-cli .
 #   docker run --rm -v "$PWD/in.mp4:/in.mp4" -v "$PWD/out:/out" \
 #     stream2video-cli /in.mp4 -o /out --dry-run
 #
@@ -31,7 +32,7 @@
 # ``INPUT_VIDEO``. The image omits the dev extras (pytest/ruff/mypy/
 # PySide6) so it's roughly half the size.
 
-FROM python:3.13-slim
+FROM python:3.13-slim AS test
 
 # ffmpeg + ffprobe are required by the pipeline. yt-dlp is installed
 # via pip (declared in pyproject) so we don't duplicate it here.
@@ -51,12 +52,15 @@ WORKDIR /app
 # is copied in the next layer (changed frequently).
 COPY pyproject.toml README.md ./
 COPY stream2video/ stream2video/
+COPY tests/ tests/
 
 # Install in editable mode with the [dev] extra so pytest/ruff/mypy are
-# available. The [gui] extra (Pillow, customtkinter) is intentionally
-# NOT installed — Tk requires a display server and would fail to import
-# in a headless container. test_import_gui skips when Pillow is
-# absent; the rest of the test suite runs headless.
+# available. NOTE: [dev] pulls stream2video[gui] (Pillow, customtkinter)
+# per pyproject.toml — that's fine in this headless container:
+# test_import_gui still skips (pytest.importorskip) when customtkinter's
+# Tk import fails without a display server, and the rest of the suite
+# runs headless. If the extra were NOT pulled, [gui] tests would silently
+# skip, defeating this clean-room check.
 RUN pip install --no-cache-dir -e ".[dev]"
 
 # Default entrypoint: run the full test suite (pytest + ruff + mypy)

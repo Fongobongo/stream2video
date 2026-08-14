@@ -1185,10 +1185,8 @@ def main(
                         (
                             p
                             for p in (
-                                output_dir
-                                / f"{video_path.stem}_silence_cache.json.resume",
-                                output_dir.parent
-                                / f"{video_path.stem}_silence_cache.json.resume",
+                                output_dir / f"{video_path.stem}_silence_cache.json.resume",
+                                output_dir.parent / f"{video_path.stem}_silence_cache.json.resume",
                             )
                             if p.exists()
                         ),

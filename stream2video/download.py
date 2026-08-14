@@ -349,7 +349,6 @@ def _sweep_partial_fragments(out_dir: Path, since_monotonic: float) -> None:
     belonging to unrelated (still-running or abandoned) attempts are kept.
     """
     import time
-    import os
 
     try:
         entries = list(out_dir.iterdir())

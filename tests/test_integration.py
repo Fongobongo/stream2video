@@ -1678,11 +1678,13 @@ class TestCutThenEncodeCutPhaseProtection:
             return None
 
         with (
-            # Phase-1 cut now runs each segment through _run_ffmpeg (the
+            # Phase-1 cut runs each segment through _run_ffmpeg (the
             # lossless ``-ss``→``-t``→``-c:v`` encode needs the progress
             # pump + stall watchdog + memory monitor that ``_run_ffmpeg``
-            # provides). Phase-3 mux uses the lighter ``_run_subprocess_cmd``
-            # for the ``-c copy`` rewrite — keep it mocked as a no-op.
+            # provides). Phase-3 mux (``-c copy`` → output) also uses
+            # ``_run_ffmpeg`` since the review fix wires the real mux
+            # progress through its progress_callback — keep
+            # ``_run_subprocess_cmd`` mocked as a no-op for safety.
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_ffmpeg_helper),
             patch("stream2video.concat._run_subprocess_cmd"),
             patch("stream2video.concat._run_final_concat"),
@@ -1705,7 +1707,8 @@ class TestCutThenEncodeCutPhaseProtection:
                 source_has_audio=False,
             )
         # Phase-1 cut encode runs exactly once per keep segment.
-        assert len(calls) == 2, calls
+        cut_calls = [c for c in calls if "_out_cut" in c]
+        assert len(cut_calls) == 2, calls
 
     def test_cut_phase_concat_distance_wraps_in_concat_error(self, tmp_path: Path):
         from unittest.mock import patch

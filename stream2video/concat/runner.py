@@ -523,6 +523,14 @@ def _run_subprocess_cmd(
                 raise _c.ConcatError(f"{label} failed (rc={process.returncode}): {msg}")
     except subprocess.TimeoutExpired as e:
         process.kill()
+        try:
+            # Bounded reap: on Windows TerminateProcess is async and a
+            # wedged child would hang an unbounded wait() (and the
+            # finally-drain below) forever. Mirrors the timeout bound
+            # used everywhere else in the pipeline (30s).
+            process.wait(timeout=30)  # reap so stderr can finish draining
+        except subprocess.TimeoutExpired:
+            pass  # already dead or un-killable; nothing more to reap
         raise FFmpegError(f"{label} timeout after {e.timeout}s") from None
     finally:
         if not drain_done:
