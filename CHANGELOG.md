@@ -15,6 +15,8 @@
 - **Proxy checkbox ON with an empty address pins direct connection** — the copied command emits `--proxy ''` so a stale address in user defaults cannot sneak back in.
 - **JSON log mode no longer leaks between in-process CLI invocations** — `--log-format json` state (`_JSON_LOG_MODE`, `console.stderr`, logger handlers, `propagate`) is snapshotted at entry and restored in `finally`; the eager `--doctor --log-format json` path resets the flag before exiting. A JSON run followed by a rich run in the same process (embeds, tests) now behaves correctly.
 - **`validate_pipeline_config` reports wrong-typed values** — a string on a numeric key, a bool on an int slot, a non-bool on a toggle, or an int on a float slot is now a validation error instead of being silently skipped and crashing later.
+- **Quoted numbers in YAML for `encoder_threads` / `memory_limit_mb` now load correctly** — a config written as `encoder_threads: "8"` (quotes) previously slipped through validation as a float and was then rejected at startup with "must be 'auto' or an integer" for a value that IS an integer. Quoted numbers are now coerced to `int` like their unquoted / GUI / CLI-flag twins.
+- **`--dry-run` summary survives `python -O`** — the dry-run contract check was an `assert`, which vanishes in optimized mode and fed `None` into the summary formatter; it is now an explicit guard with a clear error message and exit code 1.
 
 
 ### Added
