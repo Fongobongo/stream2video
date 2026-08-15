@@ -144,6 +144,7 @@ def load_config(config_file: Path | None, console: Any) -> dict:
         "use_crf",
         "gapless_concat",
         "low_process_priority",
+        "proxy_active",
     )
     for key in bool_keys:
         if key in file_config:

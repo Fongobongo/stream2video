@@ -20,6 +20,11 @@ from pathlib import Path
 
 from stream2video.config import CONFIG_DEFAULTS, effective_defaults
 from stream2video.formatters import fmt_clock_time, fmt_size, fmt_speed, fmt_time
+from stream2video.param_specs import (
+    CLI_BOOL_FLAG_ORDER,
+    CLI_VALUE_FLAG_ORDER,
+    PARAM_SPECS,
+)
 
 # Maximum length of the GUI's status-line text (per line when wrapped).
 # Kept as a module-level constant so tests can pin it and the GUI can
@@ -179,13 +184,6 @@ def _quote_arg(arg: str, target_shell: str | None = None) -> str:
     return shlex.quote(arg)
 
 
-# Back-compat alias: the historical single-quoter selection for the
-# platform's default shell (used by redact_proxy_in_cli_command and
-# legacy call sites).
-def _quote_cli_arg(arg: str) -> str:
-    return _quote_arg(arg, _default_target_shell())
-
-
 def build_cli_command(
     input_raw: str,
     output_dir: Path,
@@ -200,6 +198,9 @@ def build_cli_command(
     encoder_threads: str | int = CONFIG_DEFAULTS["encoder_threads"],
     output_fps: str = CONFIG_DEFAULTS["output_fps"],
     output_format: str = "video",
+    threshold: float = CONFIG_DEFAULTS["threshold"],
+    min_silence: float = CONFIG_DEFAULTS["min_silence"],
+    margin: float = CONFIG_DEFAULTS["margin"],
     x264_low_memory: bool = False,
     use_crf: bool = False,
     gapless_concat: bool = CONFIG_DEFAULTS["gapless_concat"],
@@ -207,13 +208,18 @@ def build_cli_command(
     preset: str = CONFIG_DEFAULTS["preset"],
     memory_limit_mb: str | int = CONFIG_DEFAULTS["memory_limit_mb"],
     memory_reserve_mb: int = CONFIG_DEFAULTS["memory_reserve_mb"],
+    download_timeout: int = CONFIG_DEFAULTS["download_timeout"],
+    connect_timeout: int = CONFIG_DEFAULTS["connect_timeout"],
+    no_progress_timeout: int = CONFIG_DEFAULTS["no_progress_timeout"],
     segment_encode_timeout: int = CONFIG_DEFAULTS["segment_encode_timeout"],
     final_concat_timeout: int = CONFIG_DEFAULTS["final_concat_timeout"],
     silence_timeout: int = CONFIG_DEFAULTS["silence_timeout"],
     stall_kill_timeout: int = CONFIG_DEFAULTS["stall_kill_timeout"],
+    stall_warning_timeout: int = CONFIG_DEFAULTS["stall_warning_timeout"],
     waveform_timeout: int = CONFIG_DEFAULTS["waveform_timeout"],
     batch_chunk_size: int = CONFIG_DEFAULTS["batch_chunk_size"],
     min_part_bytes: int = CONFIG_DEFAULTS["min_part_bytes"],
+    rlimit_as_mb: int = CONFIG_DEFAULTS["rlimit_as_mb"],
     force: bool = False,
     delete_after: bool = False,
     completion_sound: bool = CONFIG_DEFAULTS["completion_sound"],
@@ -237,7 +243,11 @@ def build_cli_command(
     safely for it (contains ``%``).
 
     The shape mirrors what the CLI actually accepts (see
-    ``stream2video.cli.main``). Defaults are taken from
+    ``stream2video.cli.main``) — the conditional flags are derived from
+    the shared ``param_specs`` table (``PARAM_SPECS`` +
+    ``CLI_VALUE_FLAG_ORDER`` / ``CLI_BOOL_FLAG_ORDER``), the same table
+    the CLI's resolver validates against, so the copied command cannot
+    drift from the CLI's flag names. Defaults are taken from
     ``effective_defaults()`` — CONFIG_DEFAULTS plus any user
     ``user_defaults.json`` overrides, i.e. the exact starting point
     ``cli_config.load_config`` uses — flags are appended only when their
@@ -249,11 +259,11 @@ def build_cli_command(
     ``--no-*`` forms when False, so a GUI that switched them off still
     reproduces in the pasted command.
 
-    ``config_path``: when set, the GUI writes the slider-only values
-    (threshold/min_silence/margin) to this YAML file and passes it via
-    ``-c`` so the copied command stays short. When None, those slider
-    values are NOT in the command (the CLI would then use its own
-    defaults for them); the caller should warn the user.
+    ``config_path``: legacy — when set, appends ``-c <path>`` so a
+    pasted command loads an extra YAML. The GUI no longer needs it (the
+    slider values travel as explicit ``--threshold`` /
+    ``--min-silence`` / ``--margin`` flags), but the parameter stays for
+    back-compat with external callers.
     """
     parts = ["stream2video"]
     if input_raw:
@@ -266,67 +276,64 @@ def build_cli_command(
     parts.extend(["--download-quality", download_quality])
     if proxy:
         parts.extend(["--proxy", _quote_arg(proxy, target_shell)])
-    # Newer flags — only append when they're not the default so the
-    # copied command stays compact. The defaults come from
-    # ``effective_defaults()`` — the same starting point
-    # ``cli_config.load_config`` uses — so a user who hasn't touched the
-    # advanced panel gets a clean command-line reproducing their GUI
-    # choices.
+    # Conditional value flags — appended only when they're not the
+    # effective default so the copied command stays compact. The names,
+    # flag spellings, order and defaults all come from the shared
+    # param_specs table (the same table the CLI's resolver uses), so
+    # the GUI and the CLI cannot drift apart on flag names.
     _defaults = effective_defaults()
-    if audio_quality != _defaults["audio_quality"]:
-        parts.extend(["--audio-quality", audio_quality])
-    if software_fallback != "ask":
-        parts.extend(["--software-fallback", software_fallback])
-    if x264_preset != "medium":
-        parts.extend(["--x264-preset", x264_preset])
-    if encoder_threads != "auto":
-        parts.extend(["--encoder-threads", str(encoder_threads)])
-    if output_fps != "source":
-        parts.extend(["--output-fps", output_fps])
-    if output_format != "video":
-        parts.extend(["--output-format", output_format])
-    if x264_low_memory:
-        parts.append("--x264-low-memory")
-    if use_crf:
-        parts.append("--use-crf")
-    # ``gapless_concat`` / ``per_video_dir`` / ``completion_sound``
-    # default True in the config, and the CLI's own default follows the
-    # config file — so the FALSE state must be spelled out, or the
-    # pasted command would silently run with the config default (True).
-    if not gapless_concat:
-        parts.append("--no-gapless-concat")
-    if low_process_priority:
-        parts.append("--low-process-priority")
-    if preset != _defaults["preset"]:
-        parts.extend(["--preset", preset])
-    if memory_limit_mb != _defaults["memory_limit_mb"]:
-        parts.extend(["--memory-limit-mb", str(memory_limit_mb)])
-    if memory_reserve_mb != _defaults["memory_reserve_mb"]:
-        parts.extend(["--memory-reserve-mb", str(memory_reserve_mb)])
-    # Phase timeouts. Only appended when non-default so the
-    # copied command stays readable when the user hasn't customised.
-    if segment_encode_timeout != _defaults["segment_encode_timeout"]:
-        parts.extend(["--segment-timeout", str(segment_encode_timeout)])
-    if final_concat_timeout != _defaults["final_concat_timeout"]:
-        parts.extend(["--final-concat-timeout", str(final_concat_timeout)])
-    if silence_timeout != _defaults["silence_timeout"]:
-        parts.extend(["--silence-timeout", str(silence_timeout)])
-    if stall_kill_timeout != _defaults["stall_kill_timeout"]:
-        parts.extend(["--stall-timeout", str(stall_kill_timeout)])
-    if waveform_timeout != _defaults["waveform_timeout"]:
-        parts.extend(["--waveform-timeout", str(waveform_timeout)])
-    if batch_chunk_size != _defaults["batch_chunk_size"]:
-        parts.extend(["--batch-chunk-size", str(batch_chunk_size)])
-    if min_part_bytes != _defaults["min_part_bytes"]:
-        parts.extend(["--min-part-bytes", str(min_part_bytes)])
-    if not per_video_dir:
-        parts.append("--no-per-video-dir")
-    if not completion_sound:
-        parts.append("--no-completion-sound")
-    if force:
-        parts.append("-f")
-    if delete_after:
-        parts.append("--delete-after")
+    _values = {
+        "audio_quality": audio_quality,
+        "software_fallback": software_fallback,
+        "x264_preset": x264_preset,
+        "encoder_threads": encoder_threads,
+        "output_fps": output_fps,
+        "output_format": output_format,
+        "threshold": threshold,
+        "min_silence": min_silence,
+        "margin": margin,
+        "memory_limit_mb": memory_limit_mb,
+        "memory_reserve_mb": memory_reserve_mb,
+        "rlimit_as_mb": rlimit_as_mb,
+        "download_timeout": download_timeout,
+        "connect_timeout": connect_timeout,
+        "no_progress_timeout": no_progress_timeout,
+        "segment_encode_timeout": segment_encode_timeout,
+        "final_concat_timeout": final_concat_timeout,
+        "silence_timeout": silence_timeout,
+        "stall_kill_timeout": stall_kill_timeout,
+        "stall_warning_timeout": stall_warning_timeout,
+        "waveform_timeout": waveform_timeout,
+        "batch_chunk_size": batch_chunk_size,
+        "min_part_bytes": min_part_bytes,
+        "preset": preset,
+    }
+    for _name in CLI_VALUE_FLAG_ORDER:
+        _value = _values[_name]
+        if _value != _defaults[_name]:
+            parts.extend([PARAM_SPECS[_name]["flag"], str(_value)])
+    # Bool flags. ``bool_emit`` in the spec table decides the spelling:
+    # "positive" flags are appended when True, "negative" (``--no-*``)
+    # flags when False — a GUI that switched a default-on toggle off
+    # must spell it out or the pasted command would silently run with
+    # the config default (True).
+    _bools = {
+        "x264_low_memory": x264_low_memory,
+        "use_crf": use_crf,
+        "gapless_concat": gapless_concat,
+        "low_process_priority": low_process_priority,
+        "per_video_dir": per_video_dir,
+        "completion_sound": completion_sound,
+        "force": force,
+        "delete_after": delete_after,
+    }
+    for _name in CLI_BOOL_FLAG_ORDER:
+        _spec = PARAM_SPECS[_name]
+        if _spec["bool_emit"] == "negative":
+            if not _bools[_name]:
+                parts.append(_spec["flag"])
+        elif _bools[_name]:
+            parts.append(_spec["flag"])
     return " ".join(parts)
 
 

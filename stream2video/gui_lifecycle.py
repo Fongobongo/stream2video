@@ -17,6 +17,7 @@ from typing import Any, cast
 import customtkinter as ctk
 
 from stream2video.config import (
+    CONFIG_DEFAULTS,
     effective_defaults,
     save_user_defaults,
     user_defaults_path,
@@ -34,7 +35,6 @@ from stream2video.gui_settings import save_settings as _save_settings_to_disk
 from stream2video.settings_io import (
     build_save_settings_snapshot,
     build_user_defaults_snapshot,
-    write_cli_config_yaml,
 )
 from stream2video.slider_widgets import format_slider_entry_value
 from stream2video.utils import cancel_process, list_active_owners
@@ -262,21 +262,22 @@ class LifecycleMixin:
         use_crf = bool(self.chk_use_crf.get())
         gapless_concat = bool(self.chk_gapless_concat.get())
         low_process_priority = bool(self.chk_low_process_priority.get())
+        per_video_dir = bool(self.chk_per_video_dir.get())
+        completion_sound = bool(self.chk_completion_sound.get())
         preset = self.combo_preset.get()
-        memory_limit_mb = self.settings.get("memory_limit_mb", "auto")
-        memory_reserve_mb = self.settings.get("memory_reserve_mb", 2048)
 
+        # Values that have no dedicated widget come from the settings /
+        # defaults snapshot — the SAME source the Start button's
+        # run_config reads — so the copied command reproduces the GUI
+        # run exactly. Previously 10 of these (software_fallback,
+        # x264_preset, encoder_threads, output_fps, completion_sound,
+        # download_timeout, connect_timeout, no_progress_timeout,
+        # rlimit_as_mb, stall_warning_timeout) were silently dropped and
+        # the pasted command ran with different values.
         out_path = Path(out_raw).expanduser()
-        config_path = write_cli_config_yaml(
-            out_path,
-            float(self.settings["threshold"]),
-            float(self.settings["min_silence"]),
-            float(self.settings["margin"]),
+        proxy_value = (
+            self.settings.get("proxy", "") if self.settings.get("proxy_active", False) else ""
         )
-        if config_path is None:
-            self._log("[WARN] Could not write CLI config (out_dir not writable)")
-
-        proxy_value = self.settings.get("proxy", "") if self.settings.get("proxy_active", False) else ""
         # Audit #3: the copied command lands in the clipboard, the shell
         # history and the process list — a proxy password must NOT go
         # there silently. Copy without credentials by default (explicit
@@ -307,35 +308,76 @@ class LifecycleMixin:
             video_quality=video_quality,
             audio_quality=audio_quality,
             download_quality=download_quality,
+            software_fallback=self.settings.get(
+                "software_fallback", CONFIG_DEFAULTS["software_fallback"]
+            ),
+            x264_preset=self.settings.get("x264_preset", CONFIG_DEFAULTS["x264_preset"]),
+            encoder_threads=self.settings.get(
+                "encoder_threads", CONFIG_DEFAULTS["encoder_threads"]
+            ),
+            output_fps=self.settings.get("output_fps", CONFIG_DEFAULTS["output_fps"]),
             output_format=self.combo_output_format.get(),
+            # Slider values are passed as explicit CLI flags — no side-car
+            # YAML file needed (a failed YAML write used to leave the
+            # copied command silently running with different values).
+            threshold=float(self.settings["threshold"]),
+            min_silence=float(self.settings["min_silence"]),
+            margin=float(self.settings["margin"]),
             force=force,
             delete_after=delete_after,
             x264_low_memory=x264_low_memory,
             use_crf=use_crf,
             gapless_concat=gapless_concat,
             low_process_priority=low_process_priority,
+            completion_sound=completion_sound,
             preset=preset,
-            memory_limit_mb=memory_limit_mb,
-            memory_reserve_mb=memory_reserve_mb,
-            segment_encode_timeout=self.settings.get("segment_encode_timeout", 600),
-            final_concat_timeout=self.settings.get("final_concat_timeout", 86400),
-            silence_timeout=self.settings.get("silence_timeout", 36000),
-            stall_kill_timeout=self.settings.get("stall_kill_timeout", 300),
-            waveform_timeout=self.settings.get("waveform_timeout", 300),
-            batch_chunk_size=self.settings.get("batch_chunk_size", 40),
-            min_part_bytes=self.settings.get("min_part_bytes", 1024),
-            config_path=config_path,
+            memory_limit_mb=self.settings.get(
+                "memory_limit_mb", CONFIG_DEFAULTS["memory_limit_mb"]
+            ),
+            memory_reserve_mb=self.settings.get(
+                "memory_reserve_mb", CONFIG_DEFAULTS["memory_reserve_mb"]
+            ),
+            rlimit_as_mb=self.settings.get("rlimit_as_mb", CONFIG_DEFAULTS["rlimit_as_mb"]),
+            download_timeout=self.settings.get(
+                "download_timeout", CONFIG_DEFAULTS["download_timeout"]
+            ),
+            connect_timeout=self.settings.get(
+                "connect_timeout", CONFIG_DEFAULTS["connect_timeout"]
+            ),
+            no_progress_timeout=self.settings.get(
+                "no_progress_timeout", CONFIG_DEFAULTS["no_progress_timeout"]
+            ),
+            segment_encode_timeout=self.settings.get(
+                "segment_encode_timeout", CONFIG_DEFAULTS["segment_encode_timeout"]
+            ),
+            final_concat_timeout=self.settings.get(
+                "final_concat_timeout", CONFIG_DEFAULTS["final_concat_timeout"]
+            ),
+            silence_timeout=self.settings.get(
+                "silence_timeout", CONFIG_DEFAULTS["silence_timeout"]
+            ),
+            stall_kill_timeout=self.settings.get(
+                "stall_kill_timeout", CONFIG_DEFAULTS["stall_kill_timeout"]
+            ),
+            stall_warning_timeout=self.settings.get(
+                "stall_warning_timeout", CONFIG_DEFAULTS["stall_warning_timeout"]
+            ),
+            waveform_timeout=self.settings.get(
+                "waveform_timeout", CONFIG_DEFAULTS["waveform_timeout"]
+            ),
+            batch_chunk_size=self.settings.get(
+                "batch_chunk_size", CONFIG_DEFAULTS["batch_chunk_size"]
+            ),
+            min_part_bytes=self.settings.get(
+                "min_part_bytes", CONFIG_DEFAULTS["min_part_bytes"]
+            ),
             proxy=proxy_copied,
-            per_video_dir=self.settings.get("per_video_dir", True),
+            per_video_dir=per_video_dir,
         )
         cmd_log = redact_proxy_in_cli_command(cmd, proxy_copied)
         self.clipboard_clear()
         self.clipboard_append(cmd)
-        if config_path is not None:
-            self._log(f"CLI command copied. Config written to: {config_path}")
-        else:
-            self._log(f"CLI command copied (config NOT written — see warning): {cmd_log}")
-        self._log(f"  {cmd_log}")
+        self._log(f"CLI command copied: {cmd_log}")
 
     def _on_close(self) -> None:
         if self.running:

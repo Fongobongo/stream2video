@@ -2,7 +2,7 @@
 
 Extracted from ``cli.py`` to reduce the per-parameter ``_resolved_*``
 boilerplate. Each parameter declares its shape once (enum, bool, int,
-auto-or-int, etc.) and the resolver handles:
+float, auto-or-int, etc.) and the resolver handles:
 
   1. CLI flag wins when the user passed it explicitly
      (``ParameterSource.COMMANDLINE``);
@@ -10,144 +10,25 @@ auto-or-int, etc.) and the resolver handles:
      by ``cli_config.load_config``);
   3. Otherwise the ``CONFIG_DEFAULTS`` fallback.
 
-The declarative spec table below is the single source of truth for
-"which parameters exist, what's their type, and what values are
-allowed". Adding a new tunable is a one-line change here (plus the
-matching ``@app.command()`` argument in ``cli.py``).
+The declarative spec table lives in ``param_specs`` — the single source
+of truth for "which parameters exist, what's their type, and what
+values are allowed", shared with ``gui_helpers.build_cli_command`` so
+the CLI flags and the GUI's copied commands can't drift apart. Adding a
+new tunable is a one-line change there (plus the matching
+``@app.command()`` argument in ``cli.py``).
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 import typer
 
 from stream2video.cli_helpers import ParameterSource
-from stream2video.config import (
-    CONFIG_DEFAULTS,
-    CONFIG_RANGES,
-    PRESET_NAMES,
-    VALID_DOWNLOAD_QUALITIES,
-    VALID_ENCODERS,
-    VALID_METHODS,
-    VALID_OUTPUT_FORMATS,
-    VALID_OUTPUT_FPS,
-    VALID_QUALITIES,
-    VALID_SOFTWARE_FALLBACKS,
-    VALID_X264_PRESETS,
-)
+from stream2video.config import CONFIG_DEFAULTS
+from stream2video.param_specs import PARAM_SPECS, ParamKind  # re-exported for back-compat
 
-# Parameter kind determines the resolution + validation strategy.
-#   * ``enum``        — value must be in a whitelist (method, encoder, ...)
-#   * ``bool``        — CLI flag is tri-state (None = fall through to config)
-#   * ``int``         — plain int (timeouts, sizes)
-#   * ``auto_or_int`` — accepts the literal string "auto" OR a positive int
-#                       (encoder_threads, memory_limit_mb)
-#   * ``proxy``       — special: CLI --proxy implies proxy_active=True
-ParamKind = Literal["enum", "bool", "int", "auto_or_int", "proxy"]
-
-
-# The declarative spec table. Order matters only for readability; the
-# resolver iterates over whatever order the caller passes names in.
-#
-# Keys:
-#   kind   — ParamKind (see above)
-#   valid  — for ``enum``: list of allowed values
-#   min    — for ``auto_or_int`` / ``int``: minimum accepted value
-#            (``0`` for "non-negative", ``1`` for "positive")
-PARAM_SPECS: dict[str, dict[str, Any]] = {
-    # String-enum parameters with VALID_* whitelists.
-    "method": {"kind": "enum", "valid": VALID_METHODS},
-    "encoder": {"kind": "enum", "valid": VALID_ENCODERS},
-    "video_quality": {"kind": "enum", "valid": VALID_QUALITIES},
-    "audio_quality": {"kind": "enum", "valid": VALID_QUALITIES},
-    "download_quality": {"kind": "enum", "valid": VALID_DOWNLOAD_QUALITIES},
-    "software_fallback": {"kind": "enum", "valid": VALID_SOFTWARE_FALLBACKS},
-    "x264_preset": {"kind": "enum", "valid": VALID_X264_PRESETS},
-    "output_fps": {"kind": "enum", "valid": VALID_OUTPUT_FPS},
-    "output_format": {"kind": "enum", "valid": VALID_OUTPUT_FORMATS},
-    # Bool toggle parameters. Tri-state on CLI (None = fall back to
-    # config), stored as plain bool in YAML.
-    "force": {"kind": "bool"},
-    "delete_after": {"kind": "bool"},
-    "per_video_dir": {"kind": "bool"},
-    "x264_low_memory": {"kind": "bool"},
-    "use_crf": {"kind": "bool"},
-    "gapless_concat": {"kind": "bool"},
-    "low_process_priority": {"kind": "bool"},
-    "completion_sound": {"kind": "bool"},
-    # The ``min``/``max`` bounds come from CONFIG_RANGES — the SAME
-    # limits cli_config applies to YAML, so ``--stall-kill-timeout
-    # 99999`` is rejected exactly like its YAML twin
-    # ``stall_kill_timeout: 99999`` (the CLI used to accept
-    # values the config file rejected — a silent divergence between the
-    # two configuration surfaces). The floors exist so a typo'd timeout
-    # can't turn the watchdog into a kill-on-startup on slow media.
-    "memory_reserve_mb": {
-        "kind": "int",
-        "min": CONFIG_RANGES["memory_reserve_mb"][0],
-        "max": CONFIG_RANGES["memory_reserve_mb"][1],
-    },
-    "download_timeout": {
-        "kind": "int",
-        "min": CONFIG_RANGES["download_timeout"][0],
-        "max": CONFIG_RANGES["download_timeout"][1],
-    },
-    "connect_timeout": {
-        "kind": "int",
-        "min": CONFIG_RANGES["connect_timeout"][0],
-        "max": CONFIG_RANGES["connect_timeout"][1],
-    },
-    "no_progress_timeout": {
-        "kind": "int",
-        "min": CONFIG_RANGES["no_progress_timeout"][0],
-        "max": CONFIG_RANGES["no_progress_timeout"][1],
-    },
-    "silence_timeout": {"kind": "int", "min": 1, "max": CONFIG_RANGES["silence_timeout"][1]},
-    "segment_encode_timeout": {
-        "kind": "int",
-        "min": 1,
-        "max": CONFIG_RANGES["segment_encode_timeout"][1],
-    },
-    "final_concat_timeout": {
-        "kind": "int",
-        "min": 1,
-        "max": CONFIG_RANGES["final_concat_timeout"][1],
-    },
-    "stall_kill_timeout": {
-        "kind": "int",
-        "min": CONFIG_RANGES["stall_kill_timeout"][0],
-        "max": CONFIG_RANGES["stall_kill_timeout"][1],
-    },
-    "stall_warning_timeout": {
-        "kind": "int",
-        "min": CONFIG_RANGES["stall_warning_timeout"][0],
-        "max": CONFIG_RANGES["stall_warning_timeout"][1],
-    },
-    "waveform_timeout": {
-        "kind": "int",
-        "min": CONFIG_RANGES["waveform_timeout"][0],
-        "max": CONFIG_RANGES["waveform_timeout"][1],
-    },
-    "batch_chunk_size": {"kind": "int", "min": 1, "max": CONFIG_RANGES["batch_chunk_size"][1]},
-    "min_part_bytes": {"kind": "int", "min": 1, "max": CONFIG_RANGES["min_part_bytes"][1]},
-    "rlimit_as_mb": {
-        "kind": "int",
-        "min": CONFIG_RANGES["rlimit_as_mb"][0],
-        "max": CONFIG_RANGES["rlimit_as_mb"][1],
-    },
-    # Auto-or-int: the CLI flag arrives as a string; when COMMANDLINE
-    # the resolver tries ``int(value)``, falling back to ``"auto"``
-    # (case-insensitive). Config values are already coerced.
-    "encoder_threads": {"kind": "auto_or_int", "min": 1},
-    "memory_limit_mb": {"kind": "auto_or_int", "min": 0},
-    # Proxy: CLI --proxy implies proxy_active=True. A YAML proxy without
-    # proxy_active is inert (matches the GUI's checkbox contract).
-    "proxy": {"kind": "proxy"},
-    # Preset: handled separately via apply_preset() after spec resolution,
-    # but listed here so the resolver can validate its enum-ness.
-    "preset": {"kind": "enum", "valid": list(PRESET_NAMES)},
-}
+__all__ = ["PARAM_SPECS", "ParamKind", "is_from_cli", "make_resolver"]
 
 
 def is_from_cli(ctx: typer.Context | None, name: str) -> bool:
@@ -247,6 +128,27 @@ class _Resolver:
                 self._fail(name, iv, f"(must be <= {max_val})")
             return iv
 
+        if kind == "float":
+            # Float-typed keys (threshold / min_silence / margin).
+            # Config-side values are already range-checked by
+            # load_config; CLI values arrive as float (Typer converts
+            # the string) and are range-checked here against the SAME
+            # CONFIG_RANGES bounds the YAML path enforces.
+            if value is None or isinstance(value, bool):
+                self._fail(name, value, "(must be a number)")
+            try:
+                fv = float(value)  # type: ignore[arg-type]
+            except (TypeError, ValueError) as e:
+                self._fail(name, value, "(must be a number)")
+                raise AssertionError("unreachable") from e
+            min_val = spec.get("min")
+            if min_val is not None and fv < min_val:
+                self._fail(name, fv, f"(must be >= {min_val})")
+            max_val = spec.get("max")
+            if max_val is not None and fv > max_val:
+                self._fail(name, fv, f"(must be <= {max_val})")
+            return fv
+
         if kind == "auto_or_int":
             # Config-side values are already coerced by load_config; CLI
             # strings arrive as str and need parsing.
@@ -289,7 +191,14 @@ class _Resolver:
                 return str(value) if value else ""
             # YAML: proxy_active is the gate. Without it the address
             # stays inert — the user can toggle it on in the GUI later.
-            if self._config.get("proxy_active", False):
+            # Strict bool check (NOT plain truthiness): a quoted
+            # ``proxy_active: "false"`` parses to the truthy string
+            # ``"false"`` and would otherwise enable the proxy against
+            # the user's intent. ``load_config`` rejects such values for
+            # YAML, but hosts/tests may feed raw dicts to the resolver.
+            if isinstance(self._config.get("proxy_active"), bool) and self._config[
+                "proxy_active"
+            ]:
                 value = self._config.get("proxy", "")
                 return str(value) if value else ""
             return ""

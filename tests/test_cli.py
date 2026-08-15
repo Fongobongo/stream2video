@@ -477,6 +477,289 @@ class TestCliPerVideoDir:
             assert not (out / f"{stem}_compressed.mp4").exists()
 
 
+class TestCliPresetResolution:
+    """--preset must actually reach the pipeline tunables.
+
+    Regression: the resolver used to be created BEFORE
+    ``apply_preset()`` and kept reading the pre-preset config, so
+    ``--preset low_memory`` silently failed to enable
+    x264_low_memory / batch_chunk_size=20 / low_process_priority.
+    """
+
+    def _invoke_and_capture(self, argv: list[str], tmp_path: Path) -> dict:
+        from typer.testing import CliRunner
+
+        from stream2video.cli import app
+        from stream2video.download import DownloadResult
+
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"source")
+        out_dir = tmp_path / "out"
+        received: dict = {}
+
+        def fake_cut_and_concat(video_path, silence_segments, output_path, **kwargs):
+            received.update(kwargs)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_bytes(b"out")
+            return output_path
+
+        with (
+            patch(
+                "stream2video.pipeline_controller.download",
+                return_value=DownloadResult(src, is_downloaded=False),
+            ),
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=[]),
+            patch(
+                "stream2video.pipeline_controller.cut_and_concat",
+                side_effect=fake_cut_and_concat,
+            ),
+            patch("stream2video.concat.get_video_duration", return_value=10.0),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [str(src), "-o", str(out_dir), "--no-per-video-dir", *argv],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        return received
+
+    def test_low_memory_preset_applies_tunables(self, tmp_path: Path):
+        received = self._invoke_and_capture(["--preset", "low_memory"], tmp_path)
+        assert received["x264_low_memory"] is True
+        assert received["batch_chunk_size"] == 20
+        assert received["low_process_priority"] is True
+
+    def test_maximum_performance_preset_applies_tunables(self, tmp_path: Path):
+        received = self._invoke_and_capture(["--preset", "maximum_performance"], tmp_path)
+        assert received["x264_low_memory"] is False
+        assert received["memory_limit_mb"] == 0
+        assert received["batch_chunk_size"] == 80
+
+    def test_explicit_flag_wins_over_preset(self, tmp_path: Path):
+        # ``--preset low_memory --no-low-process-priority`` keeps the
+        # preset's other tunables but flips low_process_priority back.
+        received = self._invoke_and_capture(
+            ["--preset", "low_memory", "--no-low-process-priority"], tmp_path
+        )
+        assert received["x264_low_memory"] is True
+        assert received["batch_chunk_size"] == 20
+        assert received["low_process_priority"] is False
+
+    def test_yaml_preset_key_applies_tunables(self, tmp_path: Path):
+        # The YAML ``preset: low_memory`` key must be honoured too (the
+        # resolver resolves the preset from the config when no --preset
+        # flag is passed).
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("preset: low_memory\nper_video_dir: false\n", encoding="utf-8")
+        received = self._invoke_and_capture(["-c", str(cfg)], tmp_path)
+        assert received["x264_low_memory"] is True
+        assert received["batch_chunk_size"] == 20
+        assert received["low_process_priority"] is True
+
+
+class TestCliSilenceFlags:
+    """--threshold / --min-silence / --margin must reach the silence
+    detector as explicit flags (no side-car YAML needed)."""
+
+    def test_flags_reach_detect_silence(self, tmp_path: Path):
+        from typer.testing import CliRunner
+
+        from stream2video.cli import app
+        from stream2video.download import DownloadResult
+
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"source")
+        out_dir = tmp_path / "out"
+        detected: dict = {}
+
+        def fake_detect_silence(video_path, **kwargs):
+            detected.update(kwargs)
+            return []
+
+        with (
+            patch(
+                "stream2video.pipeline_controller.download",
+                return_value=DownloadResult(src, is_downloaded=False),
+            ),
+            patch(
+                "stream2video.pipeline_controller.detect_silence",
+                side_effect=fake_detect_silence,
+            ),
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=None),
+            patch("stream2video.pipeline_controller.save_silence_cache", lambda *a, **kw: None),
+            patch("stream2video.pipeline_controller.get_video_duration", return_value=10.0),
+            patch("stream2video.concat.get_video_duration", return_value=10.0),
+            patch("stream2video.pipeline_controller.cut_and_concat") as mock_cut,
+            patch("stream2video.pipeline_controller.check_memory_reserve", return_value=True),
+            patch(
+                "stream2video.pipeline_controller.apply_per_video_dir",
+                side_effect=lambda o, v, d, per_video_dir=False: (o, v),
+            ),
+        ):
+            def _fake_cut(source, silence_segments, output_video, **kwargs):
+                Path(output_video).write_bytes(b"\x00" * 1024)
+
+            mock_cut.side_effect = _fake_cut
+            result = CliRunner().invoke(
+                app,
+                [
+                    str(src),
+                    "-o",
+                    str(out_dir),
+                    "--no-per-video-dir",
+                    "--threshold",
+                    "-40.5",
+                    "--min-silence",
+                    "0.8",
+                    "--margin",
+                    "-1.0",
+                ],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert detected["threshold"] == -40.5
+        assert detected["min_silence"] == 0.8
+        assert detected["margin"] == -1.0
+
+    def test_yaml_values_used_without_flags(self, tmp_path: Path):
+        # Without the flags the YAML values flow through (existing
+        # behaviour preserved).
+        from typer.testing import CliRunner
+
+        from stream2video.cli import app
+        from stream2video.download import DownloadResult
+
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"source")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("threshold: -50\nmin_silence: 3.5\nmargin: 0.2\n", encoding="utf-8")
+        detected: dict = {}
+
+        def fake_detect_silence(video_path, **kwargs):
+            detected.update(kwargs)
+            return []
+
+        with (
+            patch(
+                "stream2video.pipeline_controller.download",
+                return_value=DownloadResult(src, is_downloaded=False),
+            ),
+            patch(
+                "stream2video.pipeline_controller.detect_silence",
+                side_effect=fake_detect_silence,
+            ),
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=None),
+            patch("stream2video.pipeline_controller.save_silence_cache", lambda *a, **kw: None),
+            patch("stream2video.pipeline_controller.get_video_duration", return_value=10.0),
+            patch("stream2video.concat.get_video_duration", return_value=10.0),
+            patch("stream2video.pipeline_controller.cut_and_concat") as mock_cut,
+            patch("stream2video.pipeline_controller.check_memory_reserve", return_value=True),
+            patch(
+                "stream2video.pipeline_controller.apply_per_video_dir",
+                side_effect=lambda o, v, d, per_video_dir=False: (o, v),
+            ),
+        ):
+            def _fake_cut(source, silence_segments, output_video, **kwargs):
+                Path(output_video).write_bytes(b"\x00" * 1024)
+
+            mock_cut.side_effect = _fake_cut
+            result = CliRunner().invoke(
+                app,
+                [str(src), "-o", str(tmp_path / "out"), "-c", str(cfg), "--no-per-video-dir"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert detected["threshold"] == -50.0
+        assert detected["min_silence"] == 3.5
+        assert detected["margin"] == 0.2
+
+    def test_out_of_range_flag_rejected(self, tmp_path: Path):
+        # The CLI flag is range-checked against CONFIG_RANGES exactly
+        # like its YAML twin.
+        from typer.testing import CliRunner
+
+        from stream2video.cli import app
+
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"source")
+        result = CliRunner().invoke(
+            app,
+            [str(src), "-o", str(tmp_path / "out"), "--threshold", "-80"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 1
+        assert "Invalid threshold" in result.output
+
+
+class TestProxyActiveValidation:
+    """``proxy_active`` must be validated as a strict boolean like the
+    other bool config keys — a quoted ``"false"`` used to be truthy and
+    enabled the proxy against the user's intent."""
+
+    def test_quoted_string_false_rejected(self, tmp_path: Path):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text('proxy_active: "false"\nproxy: http://127.0.0.1:8080\n')
+        with pytest.raises(typer.Exit):
+            load_config(cfg)
+
+    def test_int_rejected(self, tmp_path: Path):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("proxy_active: 1\n")
+        with pytest.raises(typer.Exit):
+            load_config(cfg)
+
+    def test_real_bool_passes(self, tmp_path: Path):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("proxy_active: false\nproxy: http://127.0.0.1:8080\n")
+        loaded = load_config(cfg)
+        assert loaded["proxy_active"] is False
+
+    def test_resolver_ignores_non_bool_proxy_active(self):
+        # The resolver itself must not treat a truthy string as active
+        # (hosts/tests may feed raw dicts bypassing load_config).
+        assert (
+            make_resolver(None, {"proxy_active": "false", "proxy": "http://x:1"}, _FakeConsole()).resolve(
+                "proxy", None
+            )
+            == ""
+        )
+        assert (
+            make_resolver(None, {"proxy_active": True, "proxy": "http://x:1"}, _FakeConsole()).resolve(
+                "proxy", None
+            )
+            == "http://x:1"
+        )
+
+
+class TestResolverFloatKind:
+    """The resolver's ``float`` kind range-checks threshold/min_silence/
+    margin exactly like the YAML path."""
+
+    def _resolve(self, config: dict, name: str, flag_value):
+        return make_resolver(None, config, _FakeConsole()).resolve(name, flag_value)
+
+    def test_float_value_passes_through(self):
+        assert self._resolve({"threshold": -40.5}, "threshold", None) == -40.5
+
+    def test_int_config_value_coerced_to_float(self):
+        # YAML ``threshold: -30`` parses as int; the resolver normalises
+        # to float for the float-typed PipelineConfig slot.
+        assert self._resolve({"threshold": -30}, "threshold", None) == -30.0
+
+    def test_out_of_range_rejected(self):
+        with pytest.raises(typer.Exit):
+            self._resolve({"threshold": -80}, "threshold", None)
+        with pytest.raises(typer.Exit):
+            self._resolve({"min_silence": 0.05}, "min_silence", None)
+
+    def test_garbage_rejected(self):
+        with pytest.raises(typer.Exit):
+            self._resolve({"margin": "banana"}, "margin", None)
+
+
 class TestB11CliSanitization:
     """CLI validation must match YAML (CONFIG_RANGES
     ceilings), proxy must be a str, JSON logging must be idempotent

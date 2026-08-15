@@ -433,16 +433,27 @@ class Stream2VideoGUI(
             pass
 
 
-class _EncoderTesterAdapter:
-    """Adapter that exposes the GUI's encoder-test surface to
-    :class:`stream2video.encoder_test.EncoderTester`.
+class _GuiLogAdapterBase:
+    """Shared ``log`` plumbing for adapters that forward the GUI's log.
+
+    Every adapter whose Protocol requires a ``log(message)`` method
+    funnels it through the GUI's ``_log`` — the implementation was
+    previously copy-pasted across ``_EncoderTesterAdapter`` and
+    ``_PipelineGuiCallbacksAdapter``. Both keep their own ``__init__``
+    (they bind extra state); only the log path is shared.
     """
 
-    def __init__(self, gui: Any):
+    def __init__(self, gui: Any) -> None:
         self._gui = gui
 
     def log(self, message: str) -> None:
         self._gui._log(message)
+
+
+class _EncoderTesterAdapter(_GuiLogAdapterBase):
+    """Adapter that exposes the GUI's encoder-test surface to
+    :class:`stream2video.encoder_test.EncoderTester`.
+    """
 
     def schedule_on_main(self, ms: int, func: Callable[..., Any]) -> None:
         # ``_tk_after`` swallows ``TclError`` if the root is destroyed
@@ -468,7 +479,7 @@ class _EncoderTesterAdapter:
         )
 
 
-class _PipelineGuiCallbacksAdapter:
+class _PipelineGuiCallbacksAdapter(_GuiLogAdapterBase):
     """Adapter exposing the GUI's pipeline-run surface to
     :class:`stream2video.pipeline_worker.PipelineWorker`.
 
@@ -485,14 +496,11 @@ class _PipelineGuiCallbacksAdapter:
     """
 
     def __init__(self, gui: Any):
-        self._gui = gui
+        super().__init__(gui)
         # Protocol-expected settable attribute; expose the GUI's event
         # so the worker (and the controller it instantiates) can poll
         # it without going through a dispatcher.
         self.cancel_event = gui._cancel_event
-
-    def log(self, message: str) -> None:
-        self._gui._log(message)
 
     def _fallback_consent_enc_label(self) -> str:
         """Best-effort encoder name for the consent dialog. Falls back to

@@ -469,14 +469,18 @@ def coerce_typed_value(key: str, value: Any) -> Any:
             return value
         return None
     # ``memory_limit_mb`` accepts ``"auto"`` or a non-negative int
-    # (0 = disable). A negative int is rejected; float is coerced to
-    # int since ffmpeg memory budgets are inherently coarse-grained.
+    # (0 = disable). A negative int is rejected; an INTEGRAL float is
+    # coerced to int (ffmpeg memory budgets are inherently
+    # coarse-grained) while a fractional float (``1.9``) is rejected —
+    # silently flooring a limit to 1 MB is a dangerous quiet change.
     if key == "memory_limit_mb":
         if isinstance(value, str) and value == "auto":
             return value
         if isinstance(value, bool):
             return None
-        if isinstance(value, int | float) and value >= 0:
+        if isinstance(value, int) and value >= 0:
+            return value
+        if isinstance(value, float) and value >= 0 and value.is_integer():
             return int(value)
         return None
     if key == "preset":
@@ -491,9 +495,13 @@ def coerce_typed_value(key: str, value: Any) -> Any:
         # default, coerce integral floats back to int so a
         # ``memory_reserve_mb: 2048.0`` doesn't leak a float into an
         # int-typed PipelineConfig slot (mirrors the ``memory_limit_mb``
-        # special case above). Non-integral floats pass through for
-        # float-typed defaults.
+        # special case above). A NON-integral float on an int-typed
+        # key (``download_timeout: 1.9``) is REJECTED rather than
+        # silently floored to ``1`` — for timeouts and limits a quiet
+        # round-down changes behaviour the user never asked for.
         if isinstance(default, int) and isinstance(value, float):
+            if not value.is_integer():
+                return None
             return int(value)
         return value
     if isinstance(default, str):

@@ -643,6 +643,27 @@ def main(
         "Audio-only outputs drop the video stream entirely. If not passed, "
         "the config file's `output_format` key is used.",
     ),
+    threshold: float | None = typer.Option(
+        None,
+        "--threshold",
+        help="Silence detection threshold in dB (default -30, range -60..-5). "
+        "Lower (more negative) values only treat quieter audio as silence. "
+        "If not passed, the config file's `threshold` key is used.",
+    ),
+    min_silence: float | None = typer.Option(
+        None,
+        "--min-silence",
+        help="Minimum silence length in seconds (default 2, range 0.1..60). "
+        "Shorter gaps than this are kept. If not passed, the config file's "
+        "`min_silence` key is used.",
+    ),
+    margin: float | None = typer.Option(
+        None,
+        "--margin",
+        help="Seconds of audio kept around each silence segment (default 0.5, "
+        "range -3..5). Negative values cut into the neighbouring speech. If "
+        "not passed, the config file's `margin` key is used.",
+    ),
 ) -> None:
     """
     Compress stream recording by removing silence segments.
@@ -805,10 +826,14 @@ def main(
         # resolver call below reads the merged config AND checks
         # ``ParameterSource.COMMANDLINE``, so an explicit --flag wins
         # over the preset's override. The preset itself is resolved via
-        # the resolver too — CLI --preset wins, otherwise the YAML key
-        # ``preset`` (if present) is used, else DEFAULT_PRESET.
-        resolver = make_resolver(ctx, config, console)
-        resolved_preset = resolver.resolve("preset", preset)
+        # a throwaway resolver — CLI --preset wins, otherwise the YAML
+        # key ``preset`` (if present) is used, else DEFAULT_PRESET.
+        # The MAIN resolver is created AFTER ``apply_preset()``: a
+        # resolver bound to the pre-preset config would keep resolving
+        # every flag below from the unmerged defaults, so e.g.
+        # ``--preset low_memory`` would silently fail to enable
+        # x264_low_memory / batch_chunk_size=20 / low_process_priority.
+        resolved_preset = make_resolver(ctx, config, console).resolve("preset", preset)
         if resolved_preset not in PRESET_NAMES:
             console.print(
                 f"[red]Invalid preset:[/red] {resolved_preset!r} "
@@ -816,6 +841,7 @@ def main(
             )
             raise typer.Exit(1)
         config = apply_preset(config, resolved_preset)
+        resolver = make_resolver(ctx, config, console)
 
         # Resolve each CLI flag against the config via the generic resolver.
         # A flag that the user passed explicitly (ParameterSource.COMMANDLINE)
@@ -899,6 +925,14 @@ def main(
         # silently change networking (matches the GUI's checkbox contract).
         resolved_proxy: str = resolver.resolve("proxy", proxy)
 
+        # P1: silence-tuning floats. Explicit CLI flags (--threshold /
+        # --min-silence / --margin) win; otherwise the config value
+        # (YAML or defaults) is used — the copied GUI command no longer
+        # needs a side-car YAML to carry the slider values.
+        resolved_threshold: float = resolver.resolve("threshold", threshold)
+        resolved_min_silence: float = resolver.resolve("min_silence", min_silence)
+        resolved_margin: float = resolver.resolve("margin", margin)
+
         # Defensive re-validation through the shared pipeline validator.
         # ``resolver.resolve`` + ``load_config`` already rejected every
         # CLI-visible bad key; this second pass runs the final resolved
@@ -922,9 +956,9 @@ def main(
             force=force,
             delete_after=delete_after,
             per_video_dir=per_video_dir_resolved,
-            threshold=float(config["threshold"]),
-            min_silence=float(config["min_silence"]),
-            margin=float(config["margin"]),
+            threshold=resolved_threshold,
+            min_silence=resolved_min_silence,
+            margin=resolved_margin,
             memory_limit_mb=resolved_memory_limit_mb,
             memory_reserve_mb=resolved_memory_reserve_mb,
             x264_low_memory=resolved_x264_low_memory,

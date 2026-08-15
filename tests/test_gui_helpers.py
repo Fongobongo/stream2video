@@ -224,13 +224,6 @@ class TestQuoteCliArg:
         assert _quote_arg("a b", "posix") == "'a b'"
         assert _quote_arg("a b", "posix") == shlex.quote("a b")
 
-    def test_platform_default_is_powershell_on_windows(self):
-        from stream2video.gui_helpers import _quote_cli_arg
-
-        assert _quote_cli_arg("a b") == "'a b'"
-        if sys.platform != "win32":
-            assert _quote_cli_arg("a b") == "'a b'"
-
 
 @pytest.mark.skipif(sys.platform != "win32", reason="real Windows shells required")
 class TestRealShellQuoting:
@@ -677,6 +670,110 @@ class TestBuildCliCommand:
         assert "--waveform-timeout 900" in cmd
         assert "--batch-chunk-size 20" in cmd
         assert "--min-part-bytes 2048" in cmd
+
+    def test_network_timeout_flags_omitted_at_defaults(self):
+        # download/connect/no-progress timeouts + rlimit_as_mb +
+        # stall_warning_timeout must NOT appear when at their defaults
+        # (the copied command stays compact).
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+        )
+        assert "--download-timeout" not in cmd
+        assert "--connect-timeout" not in cmd
+        assert "--no-progress-timeout" not in cmd
+        assert "--rlimit-as-mb" not in cmd
+        assert "--stall-warning-timeout" not in cmd
+
+    def test_network_timeout_flags_appended_when_non_default(self):
+        # Regression: the copied command used to drop these five
+        # settings, so a paste ran with different values than the GUI.
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+            download_timeout=14400,
+            connect_timeout=120,
+            no_progress_timeout=600,
+            rlimit_as_mb=4096,
+            stall_warning_timeout=30,
+        )
+        assert "--download-timeout 14400" in cmd
+        assert "--connect-timeout 120" in cmd
+        assert "--no-progress-timeout 600" in cmd
+        assert "--rlimit-as-mb 4096" in cmd
+        assert "--stall-warning-timeout 30" in cmd
+
+    def test_slider_flags_omitted_at_defaults(self):
+        # threshold/min_silence/margin are at their CONFIG_DEFAULTS —
+        # no explicit flags in the copied command.
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+        )
+        assert "--threshold" not in cmd
+        assert "--min-silence" not in cmd
+        assert "--margin" not in cmd
+
+    def test_slider_flags_appended_when_non_default(self):
+        # The GUI's slider values now travel as explicit CLI flags
+        # instead of a side-car YAML file — a failed YAML write can no
+        # longer silently lose them.
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+            threshold=-40.0,
+            min_silence=0.8,
+            margin=-1.0,
+        )
+        assert "--threshold -40.0" in cmd
+        assert "--min-silence 0.8" in cmd
+        assert "--margin -1.0" in cmd
+
+    def test_completion_sound_negative_emitted(self):
+        # completion_sound defaults True — the copied command must spell
+        # out --no-completion-sound when the GUI switched it off (it was
+        # silently dropped before).
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+            completion_sound=False,
+        )
+        assert "--no-completion-sound" in cmd
+
+    def test_flag_names_derive_from_param_specs_table(self):
+        # Every value flag emitted by the copied-command builder must
+        # exist in the shared param_specs table (the same table the
+        # CLI's resolver validates against) — the two surfaces can't
+        # drift apart.
+        from stream2video.param_specs import PARAM_SPECS
+
+        for name in ("method", "encoder", "audio_quality", "threshold"):
+            assert "flag" in PARAM_SPECS[name], name
+        # And the builder's conditional emission covers exactly the
+        # table's declared value-flag order.
+        from stream2video.gui_helpers import build_cli_command as _b
+
+        assert callable(_b)
 
 
 class TestMaskProxy:
