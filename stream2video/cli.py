@@ -6,7 +6,6 @@ import logging
 import shutil
 import signal
 import sys
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -33,13 +32,6 @@ from stream2video.cli_helpers import (
     logger,
 )
 from stream2video.cli_resolver import make_resolver
-from stream2video.concat import (
-    CancelledError,
-    ConcatError,
-    cut_and_concat,
-    generate_keep_segments,
-    get_video_duration,
-)
 from stream2video.config import (
     CONFIG_DEFAULTS,
     DEFAULT_PRESET,
@@ -48,31 +40,29 @@ from stream2video.config import (
 )
 from stream2video.download import (
     DiskSpaceError,
-    DownloadCancelledError,
-    DownloadError,
     DownloadProgress,
     DownloadTimeoutError,
     FileBusyError,
     PermissionDeniedError,
     URLValidationError,
     VideoNotAvailableError,
-    download,
 )
 from stream2video.formatters import fmt_completion_summary, fmt_dry_run_summary
 from stream2video.gui_helpers import build_download_status
-from stream2video.memory import check_memory_reserve
-from stream2video.paths import apply_per_video_dir, artifact_stem
-from stream2video.pipeline_controller import PipelineConfig as _PipelineConfig
+from stream2video.pipeline_controller import (
+    PipelineCallbacks,
+    PipelineCancelled,
+    PipelineConcatError,
+    PipelineController,
+    PipelineDownloadError,
+    PipelineSilenceError,
+    PipelineUnexpectedError,
+)
+from stream2video.pipeline_controller import (
+    PipelineConfig as _PipelineConfig,
+)
 from stream2video.pipeline_controller import (
     validate_pipeline_config as _validate_pipeline_config,
-)
-from stream2video.silence import (
-    SilenceCancelledError,
-    SilenceDetectionError,
-    build_resume_cache_path,
-    detect_silence,
-    load_silence_cache,
-    save_silence_cache,
 )
 
 # Module-level flag toggled by --log-format json. When True the human-
@@ -645,7 +635,6 @@ def main(
     2. Detect silence segments
     3. Cut and concatenate video
     """
-    pipeline_start_time = time.monotonic()  # for the final-summary wall-clock line
 
     # Validate log_format BEFORE any logging happens so an unknown format
     # exits cleanly instead of producing half-Rich/half-JSON output.
@@ -747,10 +736,10 @@ def main(
     except (ValueError, OSError) as e:
         logger.warning(f"Could not read current SIGINT handler: {e}")
         prev_handler = None
-    # Only the cancel predicate is used in-process; the event half of the
-    # pair exists for embedding hosts that want to poll it (the signal
-    # handler keeps it alive via closure even though we don't keep a name).
-    _, cancel_cb = _make_sigint_cancel()
+    # SIGINT drives the pipeline controller's cancel_event (the event half
+    # of the pair); the callback half exists for embedding hosts that
+    # want to poll it.
+    cancel_event, _cancel_cb = _make_sigint_cancel()
     # When a host calls ``main()`` twice in the same process, the second
     # invocation would otherwise read *our own* handler back via
     # ``getsignal`` and then restore a stale cancel-event closure on exit.
@@ -814,30 +803,11 @@ def main(
         output_fps = resolver.resolve("output_fps", output_fps)
         output_format = resolver.resolve("output_format", output_format)
 
-        # Output filename extension follows the chosen output_format.
-        # ``video`` keeps the historical ``_compressed.mp4`` name; the
-        # audio-only formats use the codec's native extension (mp3, opus,
-        # m4a, wav, flac). The suffix mapping lives in
-        # ``OUTPUT_FORMAT_SPECS`` so the extension and the codec stay in
-        # sync — a future format added there automatically gets the right
-        # filename here.
-        from stream2video.config import OUTPUT_FORMAT_SPECS
-
-        if output_format == "video":
-            output_suffix = "compressed.mp4"
-        else:
-            spec = OUTPUT_FORMAT_SPECS.get(output_format)
-            if spec is None:
-                # Unreachable: resolver.resolve already validated against
-                # VALID_OUTPUT_FORMATS. Defensive guard so a future
-                # format added to VALID_OUTPUT_FORMATS but missing from
-                # OUTPUT_FORMAT_SPECS produces a clear error rather than
-                # a confusing ``None`` lookup.
-                console.print(
-                    f"[red]Internal error:[/red] no spec for output_format {output_format!r}"
-                )
-                raise typer.Exit(1)
-            output_suffix = f"compressed.{spec['ext']}"
+        # The output filename extension is derived by the controller from
+        # ``output_format`` (``OUTPUT_FORMAT_SPECS``), so the CLI no
+        # longer computes its own suffix here (audit #11) — the old
+        # ``artifact_stem(video_path) + "_" + output_suffix`` naming now
+        # lives in exactly one place.
 
         # Bool and int parameters with a single call site each. The
         # resolver reads the CLI flag value, the YAML config value, and
@@ -937,6 +907,9 @@ def main(
             silence_timeout=resolved_silence_timeout,
             stall_kill_timeout=resolved_stall_kill_timeout,
             min_part_bytes=resolved_min_part_bytes,
+            stall_warning_timeout=int(config.get("stall_warning_timeout", 120)),
+            batch_chunk_size=batch_chunk_size,
+            dry_run=dry_run,
         )
         _cfg_errors = _validate_pipeline_config(_pcfg)
         if _cfg_errors:
@@ -1024,21 +997,13 @@ def main(
                 )
                 progress.update(task1, description=description)
 
-            try:
-                logger.info(f"Processing: {input_video}")
-                download_result = download(
-                    input_video,
-                    output_dir,
-                    cancel_callback=cancel_cb,
-                    quality=download_quality,
-                    progress_callback=_download_progress_cb,
-                    download_timeout=resolved_download_timeout,
-                    connect_timeout=resolved_connect_timeout,
-                    no_progress_timeout=resolved_no_progress_timeout,
-                    proxy=resolved_proxy,
-                )
-                video_path = download_result.path
-                if download_result.is_downloaded:
+            # Step 1.5: the controller resolves the per-video project dir
+            # internally (apply_per_video_dir); the ``on_output_resolved``
+            # hook fires right after so the CLI can mark the download task
+            # done, move the log file into the project dir, and announce it.
+            def _on_output_resolved(out_dir: Path, vpath: Path, is_dl: bool) -> None:
+                nonlocal fh, output_dir
+                if is_dl:
                     progress.update(
                         task1, total=1, completed=1, description="[green]+[/green] Video downloaded"
                     )
@@ -1049,52 +1014,10 @@ def main(
                         completed=1,
                         description="[green]+[/green] Local file (download skipped)",
                     )
-
-            except DownloadCancelledError:
-                console.print("[yellow]Download cancelled.[/yellow]")
-                raise typer.Exit(130) from None
-            except URLValidationError as e:
-                # Caught before the generic DownloadError so the user gets
-                # a clear "this isn't a URL or local file" message.
-                console.print(f"[red]Invalid input:[/red] {e}")
-                console.print("  Expected an http(s):// URL or an existing local file path.")
-                raise typer.Exit(2) from None
-            except VideoNotAvailableError as e:
-                console.print(f"[red]Video unavailable:[/red] {e}")
-                console.print("  The video may be private, deleted, or region-restricted.")
-                raise typer.Exit(1) from None
-            except DownloadTimeoutError as e:
-                console.print(f"[red]Download timed out:[/red] {e}")
-                console.print("  Try again later or check your connection.")
-                raise typer.Exit(1) from None
-            except DiskSpaceError as e:
-                console.print(f"[red]Disk space error:[/red] {e}")
-                console.print("  Free up disk space and try again.")
-                raise typer.Exit(1) from None
-            except PermissionDeniedError as e:
-                console.print(f"[red]Permission denied:[/red] {e}")
-                console.print("  Check file permissions and try again.")
-                raise typer.Exit(1) from None
-            except FileBusyError as e:
-                console.print(f"[red]File in use:[/red] {e}")
-                console.print("  Close the program using the file and try again.")
-                raise typer.Exit(1) from None
-            except DownloadError as e:
-                console.print(f"[red]Download failed:[/red] {e}")
-                logger.exception("Download error")
-                raise typer.Exit(1) from None
-
-            # Step 1.5: Apply per-video project directory. The function
-            # honours the per_video_dir flag itself, so no outer gate.
-            new_output, video_path = apply_per_video_dir(
-                output_dir,
-                video_path,
-                download_result.is_downloaded,
-                per_video_dir=per_video_dir_resolved,
-            )
-            if new_output != output_dir:
-                if download_result.is_downloaded:
-                    logger.info(f"Moved source into project dir: {video_path}")
+                if out_dir == output_dir:
+                    return
+                if is_dl:
+                    logger.info(f"Moved source into project dir: {vpath}")
                 if fh is not None:
                     # Safe swap: the old handler must stay
                     # attached until the new one is proven constructible —
@@ -1111,7 +1034,7 @@ def main(
                     #      step 2 left it and the run continues with the
                     #      new handler only if step 3 succeeded.
                     old_fh = fh
-                    new_log = new_output / "stream2video.log"
+                    new_log = out_dir / "stream2video.log"
                     try:
                         logger.removeHandler(old_fh)
                         old_fh.close()
@@ -1141,211 +1064,108 @@ def main(
                     else:
                         logger.addHandler(new_fh)
                         fh = new_fh
-                output_dir = new_output
+                output_dir = out_dir
                 console.print(f"Project directory: [cyan]{output_dir}[/cyan]")
 
             # Step 2: Detect silence (with cache support)
             task2 = progress.add_task("[cyan]Detecting silence segments...", total=100)
-
-            # Pre-flight memory-reserve check, same as the GUI controller.
-            # Refuse to start a heavy phase when available RAM is already
-            # below the configured reserve. The message comes from
-            # memory.check_memory_reserve itself (via ``on_log``) so the
-            # console shows the ONE canonical wording — the CLI used to
-            # print its own third formulation ("Not enough free RAM: ..."),
-            # which duplicated the same warning with different words
-            # (audit R4.6).
-            if not check_memory_reserve(
-                resolved_memory_reserve_mb,
-                "silence detection",
-                on_log=lambda msg: console.print(f"[red]{msg}[/red]"),
-            ):
-                raise typer.Exit(1)
-
-            try:
-                silence_segments = None
-                if not force:
-                    silence_segments = load_silence_cache(video_path, output_dir, config)
-
-                if silence_segments is None:
-
-                    def silence_progress(f: float) -> None:
-                        progress.update(task2, completed=min(f * 100, 100))
-
-                    # Resume cache: the CLI and GUI share ONE canonical
-                    # path: ``build_resume_cache_path``
-                    # embeds a hash of the resolved source path so two
-                    # videos that share a stem but live in different
-                    # directories don't share one resume file. Previously
-                    # the CLI hashed and the GUI didn't, so neither
-                    # front-end ever saw the other's checkpoints.
-                    resume_cache_path = build_resume_cache_path(video_path, output_dir)
-                    # Migrate a legacy (stem-only, pre-path-keying) resume
-                    # file written by previous versions so a user resuming
-                    # after an upgrade doesn't lose their checkpoint. The
-                    # legacy file can live in the old stem-only project
-                    # dir (``output_dir.parent`` when the current project
-                    # dir is keyed) or flat in ``output_dir``.
-                    _legacy_resume = next(
-                        (
-                            p
-                            for p in (
-                                output_dir / f"{video_path.stem}_silence_cache.json.resume",
-                                output_dir.parent / f"{video_path.stem}_silence_cache.json.resume",
-                            )
-                            if p.exists()
-                        ),
-                        None,
-                    )
-                    if _legacy_resume is not None and not resume_cache_path.exists():
-                        try:
-                            _legacy_resume.replace(resume_cache_path)
-                        except OSError:
-                            # Fall back to the legacy path so progress
-                            # isn't lost even when the rename can't run.
-                            resume_cache_path = _legacy_resume
-                    # ``--force`` invalidates the resume cache the same
-                    # way it invalidates the final cache, so a forced
-                    # re-detection doesn't pick up segments from a
-                    # prior run with different (threshold/margin) params.
-                    if force and resume_cache_path.exists():
-                        try:
-                            resume_cache_path.unlink()
-                        except OSError as e:
-                            logger.warning(f"Could not remove stale resume cache: {e}")
-
-                    silence_segments = detect_silence(
-                        video_path,
-                        threshold=config["threshold"],
-                        min_silence=config["min_silence"],
-                        margin=config["margin"],
-                        output_dir=output_dir,
-                        progress_callback=silence_progress,
-                        cancel_callback=cancel_cb,
-                        resume_cache_path=resume_cache_path,
-                        timeout=resolved_silence_timeout,
-                    )
-                    save_silence_cache(video_path, silence_segments, output_dir, config)
-                    # Detection succeeded → the final cache is the
-                    # source of truth, the resume file can be removed.
-                    try:
-                        resume_cache_path.unlink(missing_ok=True)
-                    except OSError as e:
-                        logger.warning(f"Could not remove stale resume cache: {e}")
-
-                # By here `silence_segments` is non-None — either loaded
-                # from cache or freshly detected. Narrow the type so the
-                # length read below is unambiguous to the reader / mypy.
-                assert silence_segments is not None
-
-                progress.update(
-                    task2,
-                    completed=100,
-                    description=f"[green]+[/green] Found {len(silence_segments)} silence segments",
-                )
-
-                # --dry-run: stop here. Show the "what would be cut"
-                # summary and exit before the encode phase starts.
-                # This is the tuning loop: a user adjusts threshold /
-                # min_silence / margin in the config, runs --dry-run,
-                # reads the stats, and iterates without spending CPU on
-                # a throwaway encode. See tests/test_cli_dry_run.py.
-                if dry_run:
-                    keep_segments = generate_keep_segments(video_path, silence_segments)
-                    src_duration = get_video_duration(video_path)
-                    src_size = video_path.stat().st_size
-                    console.print()
-                    console.print(
-                        fmt_dry_run_summary(
-                            src_duration=src_duration,
-                            src_size_bytes=src_size,
-                            silence_segments=silence_segments,
-                            keep_segments=keep_segments,
-                        )
-                    )
-                    raise typer.Exit(0)
-
-            except SilenceCancelledError:
-                console.print("[yellow]Silence detection cancelled.[/yellow]")
-                raise typer.Exit(130) from None
-            except SilenceDetectionError as e:
-                console.print(f"[red]Silence detection failed:[/red] {e}")
-                logger.exception("Silence detection error")
-                raise typer.Exit(1) from None
-
-            # Step 3: Cut + 4: Concatenate — atomic phases so the
-            # CLI's bar/label shows which one stalled (e.g. gapless tree
-            # L0 G0 vs segment encodes). The 0.9/0.1 split mirrors the
-            # 0..0.9 cutting / 0.9..1.0 concatenating convention in
-            # pipeline_controller + concat/segment.py.
-            task_cut = progress.add_task("[cyan]Cutting segments...", total=100)
+            task_cut: TaskID | None = None
             task_concat: TaskID | None = None
 
+            def _console_log_line(msg: str) -> None:
+                # The controller's on_log stream (step banners, cache
+                # hits, disk/memory warnings, delete-after notices).
+                # Rendered raw (markup=False) so [WARN]/[ERROR] tags show
+                # literally, matching the GUI's log panel.
+                console.print(msg, markup=False)
+
             def _on_phase_cli(name: str, f: float) -> None:
-                nonlocal task_concat
-                if name == "cutting":
+                # Atomic named-phase dispatch from the controller: drive
+                # the per-phase Rich bars. Phase tasks are created lazily
+                # so the bar list grows in the same order as before
+                # (silence → cutting → concatenating).
+                nonlocal task_cut, task_concat
+                if name == "silence":
+                    progress.update(task2, completed=min(f * 100, 100))
+                    if f >= 1.0:
+                        progress.update(
+                            task2, description="[green]+[/green] Silence detection done"
+                        )
+                elif name == "cutting":
+                    if task_cut is None:
+                        task_cut = progress.add_task("[cyan]Cutting segments...", total=100)
                     progress.update(task_cut, completed=min(f * 100, 100))
-                else:
+                    if f >= 1.0:
+                        progress.update(task_cut, description="[green]+[/green] Cutting done")
+                else:  # concatenating
+                    if task_cut is None:
+                        task_cut = progress.add_task("[cyan]Cutting segments...", total=100)
                     if task_concat is None:
                         progress.update(
                             task_cut, completed=100, description="[green]+[/green] Cutting done"
                         )
                         task_concat = progress.add_task("[cyan]Concatenating...", total=100)
                     progress.update(task_concat, completed=min(f * 100, 100))
-
-            def update_progress(fraction: float) -> None:
-                # Legacy 0..1 path (cut 0..0.9, concat 0.9..1.0)
-                nonlocal task_concat
-                if fraction < 0.9:
-                    progress.update(task_cut, completed=min(fraction / 0.9 * 100, 100))
-                else:
-                    if task_concat is None:
+                    if f >= 1.0:
                         progress.update(
-                            task_cut, completed=100, description="[green]+[/green] Cutting done"
+                            task_concat, description="[green]+[/green] Concatenating done"
                         )
-                        task_concat = progress.add_task("[cyan]Concatenating...", total=100)
-                    progress.update(task_concat, completed=min((fraction - 0.9) / 0.1 * 100, 100))
+
+            # The CLI and GUI now orchestrate through the SAME
+            # PipelineController (audit #11); this block only renders
+            # (Rich bars, console lines) and provides the interactive
+            # libx264 consent. The controller owns download / project-dir
+            # resolution / silence cache+resume / concat / output
+            # validation / delete-after — the old hand-rolled phases
+            # here drifted from the GUI's (e.g. missing-output success),
+            # which is exactly what the audit flagged.
+            controller = PipelineController(
+                cfg=_pcfg,
+                cb=PipelineCallbacks(
+                    on_progress=lambda f: None,
+                    on_status=lambda text, *, force=False: None,
+                    on_log=_console_log_line,
+                    on_info=_console_log_line,
+                    on_overall=lambda elapsed, remaining, silent: None,
+                    on_total=lambda total: None,
+                    on_phase=_on_phase_cli,
+                    on_download_progress=_download_progress_cb,
+                    on_pipeline_complete=lambda summary: None,
+                ),
+                cancel_event=cancel_event,
+                on_output_resolved=_on_output_resolved,
+                on_fallback_consent=_make_fallback_consent(),
+            )
 
             try:
-                if not check_memory_reserve(
-                    resolved_memory_reserve_mb,
-                    "concat phase",
-                    on_log=lambda msg: console.print(f"[red]{msg}[/red]"),
-                ):
-                    raise typer.Exit(1)
-                output_video = output_dir / f"{artifact_stem(video_path)}_{output_suffix}"
+                result = controller.run()
+                if _pcfg.dry_run:
+                    # --dry-run: the controller stopped after silence
+                    # detection. Show the "what would be cut" summary and
+                    # exit before the encode phase starts. This is the
+                    # tuning loop: a user adjusts threshold / min_silence /
+                    # margin in the config, runs --dry-run, reads the
+                    # stats, and iterates without spending CPU on a
+                    # throwaway encode. See tests/test_cli_dry_run.py.
+                    assert result.silence_segments is not None
+                    assert result.keep_segments is not None
+                    console.print()
+                    console.print(
+                        fmt_dry_run_summary(
+                            src_duration=result.src_duration,
+                            src_size_bytes=result.src_size_bytes,
+                            silence_segments=result.silence_segments,
+                            keep_segments=result.keep_segments,
+                        )
+                    )
+                    raise typer.Exit(0)
 
-                cut_and_concat(
-                    video_path,
-                    silence_segments,
-                    output_video,
-                    progress_callback=update_progress,
-                    on_phase=_on_phase_cli,
-                    method=method,
-                    encoder=encoder,
-                    video_quality=video_quality,
-                    audio_quality=audio_quality,
-                    cancel_callback=cancel_cb,
-                    software_fallback=software_fallback,
-                    fallback_consent=_make_fallback_consent(),
-                    x264_preset=x264_preset,
-                    encoder_threads=resolved_encoder_threads,
-                    output_fps=output_fps,
-                    output_format=output_format,
-                    memory_limit_mb=resolved_memory_limit_mb,
-                    memory_reserve_mb=resolved_memory_reserve_mb,
-                    x264_low_memory=resolved_x264_low_memory,
-                    use_crf=resolved_use_crf,
-                    gapless_concat=resolved_gapless_concat,
-                    low_process_priority=resolved_low_process_priority,
-                    rlimit_as_mb=resolved_rlimit_as_mb,
-                    segment_encode_timeout=resolved_segment_encode_timeout,
-                    final_concat_timeout=resolved_final_concat_timeout,
-                    stall_kill_timeout=resolved_stall_kill_timeout,
-                    stall_warning_timeout=config.get("stall_warning_timeout", 120),
-                    batch_chunk_size=batch_chunk_size,
-                    min_part_bytes=resolved_min_part_bytes,
-                )
+                output_video = result.output_path
+                if output_video is None:
+                    # Defensive: success without a resolved output path is
+                    # a controller bug; fail loudly instead of printing a
+                    # summary that dereferences None.
+                    raise typer.Exit(1)
 
                 # Mark whichever task is live as done
                 if task_concat is not None:
@@ -1355,6 +1175,11 @@ def main(
                         description="[green]+[/green] Concatenating done",
                     )
                 else:
+                    if task_cut is None:
+                        # on_phase never fired (e.g. single-segment or a
+                        # stub cut_and_concat in tests) — materialize the
+                        # bars so the summary still shows the full flow.
+                        task_cut = progress.add_task("[cyan]Cutting segments...", total=100)
                     progress.update(
                         task_cut, completed=100, description="[green]+[/green] Cutting done"
                     )
@@ -1364,21 +1189,54 @@ def main(
                         tc, completed=100, description="[green]+[/green] Concatenating done"
                     )
 
-            except CancelledError:
-                # ``CancelledError`` is a subclass of ``ConcatError`` so
-                # it MUST be caught first — otherwise the generic
-                # ``ConcatError`` handler would run, re-check the cancel
-                # event, and emit a misleading "concatenation failed"
-                # log line for what was actually a clean cancel. This
-                # mirrors the silence-detection handler above which
-                # catches ``SilenceCancelledError`` (subclass of
-                # ``SilenceDetectionError``) before the generic handler.
-                console.print("[yellow]Concatenation cancelled.[/yellow]")
+            except PipelineCancelled:
+                console.print("[yellow]Pipeline cancelled.[/yellow]")
                 raise typer.Exit(130) from None
-            except ConcatError as e:
+            except PipelineDownloadError as e:
+                cause = e.__cause__
+                if isinstance(cause, URLValidationError):
+                    # Caught before the generic download handler so the
+                    # user gets a clear "this isn't a URL or local file"
+                    # message.
+                    console.print(f"[red]Invalid input:[/red] {e}")
+                    console.print("  Expected an http(s):// URL or an existing local file path.")
+                    raise typer.Exit(2) from None
+                if isinstance(cause, VideoNotAvailableError):
+                    console.print(f"[red]Video unavailable:[/red] {e}")
+                    console.print("  The video may be private, deleted, or region-restricted.")
+                    raise typer.Exit(1) from None
+                if isinstance(cause, DownloadTimeoutError):
+                    console.print(f"[red]Download timed out:[/red] {e}")
+                    console.print("  Try again later or check your connection.")
+                    raise typer.Exit(1) from None
+                if isinstance(cause, DiskSpaceError):
+                    console.print(f"[red]Disk space error:[/red] {e}")
+                    console.print("  Free up disk space and try again.")
+                    raise typer.Exit(1) from None
+                if isinstance(cause, PermissionDeniedError):
+                    console.print(f"[red]Permission denied:[/red] {e}")
+                    console.print("  Check file permissions and try again.")
+                    raise typer.Exit(1) from None
+                if isinstance(cause, FileBusyError):
+                    console.print(f"[red]File in use:[/red] {e}")
+                    console.print("  Close the program using the file and try again.")
+                    raise typer.Exit(1) from None
+                console.print(f"[red]Download failed:[/red] {e}")
+                logger.exception("Download error")
+                raise typer.Exit(1) from None
+            except PipelineSilenceError as e:
+                console.print(f"[red]Silence detection failed:[/red] {e}")
+                logger.exception("Silence detection error")
+                raise typer.Exit(1) from None
+            except PipelineConcatError as e:
                 console.print(f"[red]Concatenation failed:[/red] {e}")
                 logger.exception("Concatenation error")
                 raise typer.Exit(1) from None
+            except PipelineUnexpectedError as e:
+                # The controller already logged the full traceback;
+                # surface the user-facing message and preserve the cause.
+                console.print(f"[red]Unexpected error:[/red] {e}")
+                raise typer.Exit(1) from e
 
         # Summary — show rich stats: input/output size + duration, percent
         # saved, wall-clock time, and a ``X.Yx realtime`` throughput hint.
@@ -1388,13 +1246,13 @@ def main(
         try:
             from stream2video.concat import get_video_duration as _get_duration
 
-            src_size = video_path.stat().st_size if video_path.exists() else 0
-            dst_size = output_video.stat().st_size if output_video.exists() else 0
-            src_dur_secs = _get_duration(video_path)  # None on ffprobe failure
-            # Wall-clock from the top of main() to the completion banner —
-            # covers download + silence + encode and matches what the user
-            # watched on the clock.
-            elapsed = time.monotonic() - pipeline_start_time
+            src_size = result.src_size_bytes
+            dst_size = result.dst_size_bytes
+            src_dur_secs = result.src_duration  # None on ffprobe failure
+            # Wall-clock from the start of the controller run to the
+            # completion banner — covers download + silence + encode and
+            # matches what the user watched on the clock.
+            elapsed = result.pipeline_seconds
             # Use output_video's duration as "keep_dur" — that's the
             # actual encoded length, which beats an estimate computed
             # from the input. ``None`` on an empty file is tolerated by
@@ -1418,18 +1276,9 @@ def main(
             console.print("\n[bold green]+ Compression complete![/bold green]")
             console.print(f"Output: [cyan]{output_video}[/cyan]")
 
-        if download_result.is_downloaded:
-            if delete_after:
-                try:
-                    video_path.unlink()
-                    console.print(f"Deleted source: [dim]{video_path}[/dim]")
-                    logger.info(f"Deleted source: {video_path}")
-                except OSError as e:
-                    console.print(f"[yellow]Warning:[/yellow] Could not delete source: {e}")
-                    logger.warning(f"Could not delete source: {e}")
-            else:
-                logger.info(f"Temporary download file: {video_path}")
-
+        # Delete-after is handled by the controller inside its ``_finish``
+        # step (audit #11) — it owns the download + delete lifecycle, so
+        # this block must not exist here anymore.
         logger.info(f"Successfully compressed video to {output_video}")
 
     except typer.Exit:

@@ -5,12 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from stream2video import concat as _c
-from stream2video.concat.constants import (
-    _FINAL_CONCAT_TIMEOUT,
-    _STALL_KILL,
-    _STALL_WARNING,
-)
-from stream2video.memory import MemoryMonitor
+from stream2video.concat.options import ConcatOptions, coerce_options
 from stream2video.tools import ffmpeg_path
 
 logger = logging.getLogger(__name__)
@@ -25,14 +20,9 @@ def _run_final_concat(
     progress_callback: Callable[[float], None] | None,
     cancel_callback: Callable[[], bool] | None,
     label: str,
-    timeout: int = _FINAL_CONCAT_TIMEOUT,
-    stall_kill: int = _STALL_KILL,
-    stall_warning: int = _STALL_WARNING,
-    low_process_priority: bool = False,
-    rlimit_as_mb: int = 0,
-    memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
+    options: ConcatOptions | None = None,
     audio_resync: bool = False,
-    audio_quality: str = "medium",
+    **legacy_kwargs,
 ) -> None:
     """Build ``concat.txt`` and run the final concat-demuxer pass.
 
@@ -64,6 +54,7 @@ def _run_final_concat(
     (resume + fresh) and the source has audio; a fresh-only set shares
     one encode session's timebase and needs no correction.
     """
+    options = coerce_options(options, legacy_kwargs)
     list_path = work_dir / "concat.txt"
     with open(list_path, "w", encoding="utf-8") as lf:
         for part in part_paths:
@@ -80,7 +71,7 @@ def _run_final_concat(
             "aresample=async=1:first_pts=0",
             "-c:a",
             "aac",
-            *_c._audio_bitrate_opts(audio_quality),
+            *_c._audio_bitrate_opts(options.audio_quality),
         ]
     else:
         codec_opts = ["-c", "copy"]
@@ -115,14 +106,14 @@ def _run_final_concat(
                 str(output_path),
             ],
             progress_callback=_c._concat_progress_callback(progress_callback, total_duration),
-            timeout=timeout,
+            timeout=options.final_concat_timeout,
             label=label_text,
             cancel_callback=cancel_callback,
-            memory_monitor=_c._new_memory_monitor(memory_monitor_factory, label_text),
-            stall_kill=stall_kill,
-            stall_warning=stall_warning,
-            low_process_priority=low_process_priority,
-            rlimit_as_mb=rlimit_as_mb,
+            memory_monitor=_c._new_memory_monitor(options.memory_monitor_factory, label_text),
+            stall_kill=options.stall_kill,
+            stall_warning=options.stall_warning,
+            low_process_priority=options.low_process_priority,
+            rlimit_as_mb=options.rlimit_as_mb,
         )
     finally:
         # ``concat.txt`` is a pure-derive artifact of this run. Leaving it

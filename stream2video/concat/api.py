@@ -14,6 +14,7 @@ from stream2video.concat.constants import (
     _STALL_KILL,
     _STALL_WARNING,
 )
+from stream2video.concat.options import ConcatOptions
 from stream2video.concat.output_lock import acquire_output_lock, release_output_lock
 from stream2video.config import VALID_OUTPUT_FORMATS
 
@@ -157,6 +158,30 @@ def _run_locked(
     """
     keep_segments = _c.generate_keep_segments(video_path, silence_segments)
     memory_monitor_factory = _c._make_memory_monitor_factory(memory_limit_mb, memory_reserve_mb)
+    options = ConcatOptions(
+        encoder=encoder,
+        video_quality=video_quality,
+        audio_quality=audio_quality,
+        software_fallback=software_fallback,
+        fallback_consent=fallback_consent,
+        x264_preset=x264_preset,
+        encoder_threads=encoder_threads,
+        output_fps=output_fps,
+        x264_low_memory=x264_low_memory,
+        use_crf=use_crf,
+        gapless_concat=gapless_concat,
+        low_process_priority=low_process_priority,
+        rlimit_as_mb=rlimit_as_mb,
+        segment_encode_timeout=segment_encode_timeout,
+        final_concat_timeout=final_concat_timeout,
+        stall_kill=stall_kill_timeout,
+        stall_warning=stall_warning_timeout,
+        batch_chunk_size=batch_chunk_size,
+        min_part_bytes=min_part_bytes,
+        memory_limit_mb=memory_limit_mb,
+        memory_reserve_mb=memory_reserve_mb,
+        memory_monitor_factory=memory_monitor_factory,
+    )
 
     if not keep_segments:
         raise _c.ConcatError("No video segments to keep after removing silence")
@@ -188,15 +213,7 @@ def _run_locked(
             output_format,
             progress_callback=progress_callback,
             cancel_callback=cancel_callback,
-            audio_quality=audio_quality,
-            segment_encode_timeout=segment_encode_timeout,
-            final_concat_timeout=final_concat_timeout,
-            stall_kill=stall_kill_timeout,
-            stall_warning=stall_warning_timeout,
-            min_part_bytes=min_part_bytes,
-            low_process_priority=low_process_priority,
-            rlimit_as_mb=rlimit_as_mb,
-            memory_monitor_factory=memory_monitor_factory,
+            options=options,
         )
         return output_path
 
@@ -279,6 +296,10 @@ def _run_locked(
     source_has_audio = _c.has_audio_stream(video_path)
     if not source_has_audio:
         logger.info(f"Source {video_path.name} has no audio stream -- encoding video-only")
+    options = options.replace(
+        source_bitrate=source_bitrate,
+        source_has_audio=source_has_audio,
+    )
 
     # Wrap progress so inner methods can report atomically via on_phase.
     # When the caller provided on_phase, split 0..0.9 → cutting and 0.9..1.0 →
@@ -310,27 +331,7 @@ def _run_locked(
         method,
         inner_progress,
         cancel_callback,
-        video_quality=video_quality,
-        audio_quality=audio_quality,
-        software_fallback=software_fallback,
-        fallback_consent=fallback_consent,
-        x264_preset=x264_preset,
-        encoder_threads=encoder_threads,
-        source_has_audio=source_has_audio,
-        output_fps=output_fps,
-        x264_low_memory=x264_low_memory,
-        use_crf=use_crf,
-        source_bitrate=source_bitrate,
-        gapless_concat=gapless_concat,
-        low_process_priority=low_process_priority,
-        rlimit_as_mb=rlimit_as_mb,
-        segment_encode_timeout=segment_encode_timeout,
-        final_concat_timeout=final_concat_timeout,
-        stall_kill=stall_kill_timeout,
-        stall_warning=stall_warning_timeout,
-        batch_chunk_size=batch_chunk_size,
-        min_part_bytes=min_part_bytes,
-        memory_monitor_factory=memory_monitor_factory,
+        options=options,
     )
 
     return output_path

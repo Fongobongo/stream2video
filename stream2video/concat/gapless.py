@@ -13,14 +13,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 from stream2video import concat as _c
-from stream2video.concat.constants import (
-    _FINAL_CONCAT_TIMEOUT,
-    _MIN_PART_BYTES,
-    _STALL_KILL,
-    _STALL_WARNING,
-)
+from stream2video.concat.options import ConcatOptions, coerce_options
 from stream2video.concat.probing import _ffprobe_is_valid_media
-from stream2video.memory import MemoryMonitor
 from stream2video.tools import ffmpeg_path
 
 logger = logging.getLogger(__name__)
@@ -39,11 +33,8 @@ def _concat_filter_one_pass(
     cancel_callback: Callable[[], bool] | None = None,
     timeout: int,
     label: str,
-    stall_kill: int,
-    stall_warning: int,
-    low_process_priority: bool = False,
-    rlimit_as_mb: int = 0,
-    memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
+    options: ConcatOptions | None = None,
+    **legacy_kwargs,
 ) -> None:
     """Run one concat-filter pass over ``part_paths`` → ``output_path``.
 
@@ -56,6 +47,7 @@ def _concat_filter_one_pass(
     cannot be used with ``-filter_complex``: copy is rejected, ffv1
     blows up disk 10-30x).
     """
+    options = coerce_options(options, legacy_kwargs)
     n = len(part_paths)
     inputs: list[str] = []
     for p in part_paths:
@@ -106,16 +98,16 @@ def _concat_filter_one_pass(
             *_movflags,
             str(output_path),
         ],
-        progress_callback=_prog,
-        timeout=timeout,
-        label=label,
-        cancel_callback=cancel_callback,
-        memory_monitor=_c._new_memory_monitor(memory_monitor_factory, label),
-        stall_kill=stall_kill,
-        stall_warning=stall_warning,
-        low_process_priority=low_process_priority,
-        rlimit_as_mb=rlimit_as_mb,
-    )
+progress_callback=_prog,
+            timeout=timeout,
+            label=label,
+            cancel_callback=cancel_callback,
+            memory_monitor=_c._new_memory_monitor(options.memory_monitor_factory, label),
+            stall_kill=options.stall_kill,
+            stall_warning=options.stall_warning,
+            low_process_priority=options.low_process_priority,
+            rlimit_as_mb=options.rlimit_as_mb,
+        )
 
 
 def _run_gapless_segment_concat(
@@ -124,17 +116,12 @@ def _run_gapless_segment_concat(
     vcodec: str,
     vcodec_opts: list[str],
     *,
-    audio_quality: str = "medium",
     total_duration: float,
     progress_callback: Callable[[float], None] | None = None,
     cancel_callback: Callable[[], bool] | None = None,
-    timeout: int = _FINAL_CONCAT_TIMEOUT,
-    stall_kill: int = _STALL_KILL,
-    stall_warning: int = _STALL_WARNING,
-    low_process_priority: bool = False,
-    rlimit_as_mb: int = 0,
-    memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
+    options: ConcatOptions | None = None,
     manifest: dict | None = None,
+    **legacy_kwargs,
 ) -> None:
     """Gapless segment join via concat filter (re-encode both streams).
 
@@ -194,6 +181,7 @@ def _run_gapless_segment_concat(
      size) + PCM — ffv1 would be 10-30x larger (disk blowup on 15GB
      sources → -28 ENOSPC).
      """
+    options = coerce_options(options, legacy_kwargs)
     n = len(part_paths)
     if n == 0:
         raise _c.ConcatError("gapless concat: no parts to join")
@@ -225,7 +213,7 @@ def _run_gapless_segment_concat(
             vcodec,
             vcodec_opts,
             audio_codec="aac",
-            audio_opts=[*_c._audio_bitrate_opts(audio_quality), *_c._audio_opts(audio_quality)],
+            audio_opts=[*_c._audio_bitrate_opts(options.audio_quality), *_c._audio_opts(options.audio_quality)],
             total_duration=total_duration,
             progress_callback=(
                 (lambda s: progress_callback(min(s / total_duration * 0.1, 0.1) + 0.9))
@@ -233,13 +221,9 @@ def _run_gapless_segment_concat(
                 else None
             ),
             cancel_callback=cancel_callback,
-            timeout=timeout,
+            timeout=options.final_concat_timeout,
             label="gapless segment concat",
-            stall_kill=stall_kill,
-            stall_warning=stall_warning,
-            low_process_priority=low_process_priority,
-            rlimit_as_mb=rlimit_as_mb,
-            memory_monitor_factory=memory_monitor_factory,
+            options=options,
         )
         return
 
@@ -414,13 +398,9 @@ def _run_gapless_segment_concat(
                 total_duration=_chunk_dur,
                 progress_callback=_group_prog,
                 cancel_callback=cancel_callback,
-                timeout=timeout,
+                timeout=options.final_concat_timeout,
                 label=f"gapless tree L{level} G{g}",
-                stall_kill=stall_kill,
-                stall_warning=stall_warning,
-                low_process_priority=low_process_priority,
-                rlimit_as_mb=rlimit_as_mb,
-                memory_monitor_factory=memory_monitor_factory,
+                options=options,
             )
             completed_groups += 1
             _report_tree_progress()
@@ -457,16 +437,12 @@ def _run_gapless_segment_concat(
         vcodec,
         vcodec_opts,
         audio_codec="aac",
-        audio_opts=[*_c._audio_bitrate_opts(audio_quality), *_c._audio_opts(audio_quality)],
+        audio_opts=[*_c._audio_bitrate_opts(options.audio_quality), *_c._audio_opts(options.audio_quality)],
         total_duration=total_duration,
         progress_callback=_final_prog if progress_callback and total_duration > 0 else None,
         cancel_callback=cancel_callback,
-        timeout=timeout,
+        timeout=options.final_concat_timeout,
         label="gapless segment concat (final)",
-        stall_kill=stall_kill,
-        stall_warning=stall_warning,
-        low_process_priority=low_process_priority,
-        rlimit_as_mb=rlimit_as_mb,
-        memory_monitor_factory=memory_monitor_factory,
+        options=options,
     )
     shutil.rmtree(tree_dir, ignore_errors=True)

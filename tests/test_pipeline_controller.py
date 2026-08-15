@@ -123,6 +123,7 @@ class TestPipelineConfig:
             "batch_chunk_size",
             "min_part_bytes",
             "proxy",
+            "dry_run",
         }
         assert set(cfg.__dataclass_fields__.keys()) == expected
 
@@ -956,3 +957,100 @@ class TestCleanupIncompleteOnClose:
         # never raise out of the teardown path.
         assert controller._download_path is None
         assert any("Could not clean up output" in m for m in calls["log"])
+
+
+class TestFinishOutputValidation:
+    """Audit #4/#8: ``_finish`` must refuse to report success without a
+    real, non-empty output — and must never run delete_after (which
+    would destroy the only source copy) when there is no result."""
+
+    def _controller(self, tmp_path: Path, *, delete_after: bool):
+        import threading
+        import time
+
+        from stream2video.pipeline_controller import _build_progress_plan
+
+        completed: list[dict] = []
+        logs: list[str] = []
+        cb = PipelineCallbacks(
+            on_progress=lambda f: None,
+            on_status=lambda s: None,
+            on_log=logs.append,
+            on_info=lambda s: None,
+            on_overall=lambda e, r, m: None,
+            on_total=lambda t: None,
+            on_download_progress=lambda p: None,
+            on_pipeline_complete=completed.append,
+        )
+        cfg = _valid_config(
+            output_dir=tmp_path,
+            input_raw=str(tmp_path / "src.mp4"),
+            delete_after=delete_after,
+        )
+        controller = PipelineController(cfg=cfg, cb=cb, cancel_event=threading.Event())
+        controller._pipeline_start = time.monotonic() - 30.0
+        controller._progress_plan = _build_progress_plan(
+            is_downloaded=True, src_duration=100.0, silence_cache_hit=False
+        )
+        return controller, completed, logs
+
+    def test_missing_output_raises_and_keeps_source(self, tmp_path: Path):
+        controller, completed, _logs = self._controller(tmp_path, delete_after=True)
+        source = tmp_path / "src.mp4"
+        source.write_bytes(b"source data")
+        output = tmp_path / "out.mp4"  # never created
+        controller._download_path = source
+
+        with pytest.raises(PipelineConcatError, match="missing"):
+            controller._finish(
+                video_path=source,
+                output_path=output,
+                src_size_bytes=len(b"source data"),
+                src_duration=None,
+                keep_dur=10.0,
+            )
+        assert not completed, "no success callback may fire without an output"
+        assert source.exists(), "delete_after must not destroy the source on failure"
+
+    def test_empty_output_raises_and_keeps_source(self, tmp_path: Path):
+        controller, completed, _logs = self._controller(tmp_path, delete_after=True)
+        source = tmp_path / "src.mp4"
+        source.write_bytes(b"source data")
+        output = tmp_path / "out.mp4"
+        output.write_bytes(b"")  # zero bytes
+        controller._download_path = source
+
+        with pytest.raises(PipelineConcatError, match="empty"):
+            controller._finish(
+                video_path=source,
+                output_path=output,
+                src_size_bytes=len(b"source data"),
+                src_duration=None,
+                keep_dur=10.0,
+            )
+        assert not completed, "no success callback may fire for a zero-byte output"
+        assert source.exists(), "delete_after must not destroy the source on failure"
+
+    def test_valid_output_reports_success_and_clears_slots(self, tmp_path: Path):
+        controller, completed, logs = self._controller(tmp_path, delete_after=True)
+        source = tmp_path / "src.mp4"
+        source.write_bytes(b"source data")
+        output = tmp_path / "out.mp4"
+        output.write_bytes(b"0123456789")
+        controller._download_path = source
+        controller._output_path = output
+
+        result = controller._finish(
+            video_path=source,
+            output_path=output,
+            src_size_bytes=len(b"source data"),
+            src_duration=None,
+            keep_dur=10.0,
+        )
+        assert result.dst_size_bytes == 10
+        assert len(completed) == 1
+        assert completed[0]["dst_size_bytes"] == 10
+        # The output is no longer considered an incomplete artifact.
+        assert controller._output_path is None
+        assert not source.exists(), "delete_after unlinks the source on success"
+        assert any("Deleted source" in m for m in logs)

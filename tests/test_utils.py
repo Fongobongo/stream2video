@@ -462,6 +462,51 @@ class TestRegisteredProcess:
             set_active_process(None, owner="preview")
             default_proc.wait(timeout=5)
 
+    def test_same_owner_a_exit_keeps_b_registered(self):
+        """Audit #6: two processes registered under the SAME owner — A
+        exits first, B's registration must survive (and be cancellable)
+        instead of being wiped by A's ``finally``."""
+        proc_a = _spawn_quick_proc()
+        proc_b = _spawn_quick_proc()
+        try:
+            with registered_process(proc_a, owner="preview"):
+                set_active_process(proc_b, owner="preview")
+                # Both reachable; the most recent is the active one.
+                assert get_active_process("preview") is proc_b
+            # A's finally removed exactly A — B is still registered.
+            assert get_active_process("preview") is proc_b
+            killed = cancel_process("preview", timeout=2.0)
+            assert killed is True
+            proc_b.wait(timeout=5)
+        finally:
+            set_active_process(None, owner="preview")
+            if proc_a.poll() is None:
+                proc_a.kill()
+            if proc_b.poll() is None:
+                proc_b.kill()
+            proc_a.wait(timeout=5)
+            proc_b.wait(timeout=5)
+
+    def test_same_owner_cancel_kills_all(self):
+        """Audit #6: cancel_process must reach EVERY process registered
+        under the owner, not just the latest."""
+        procs = [_spawn_quick_proc() for _ in range(3)]
+        try:
+            for p in procs:
+                set_active_process(p, owner="waveform")
+            assert get_active_process("waveform") is procs[-1]
+            killed = cancel_process("waveform", timeout=2.0)
+            assert killed is True
+            for p in procs:
+                p.wait(timeout=5)
+                assert p.poll() is not None
+        finally:
+            set_active_process(None, owner="waveform")
+            for p in procs:
+                if p.poll() is None:
+                    p.kill()
+                p.wait(timeout=5)
+
 
 class TestSubprocessKwargs:
     """subprocess_kwargs — composes no_window_kwargs with optional

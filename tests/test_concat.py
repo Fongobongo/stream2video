@@ -79,7 +79,7 @@ def test_cut_and_concat_builds_memory_monitor_factory(tmp_path: Path):
     ):
         cut_and_concat(video, [], output, memory_limit_mb=1024, memory_reserve_mb=512)
 
-    factory = received["memory_monitor_factory"]
+    factory = received["options"].memory_monitor_factory
     monitor = factory("unit")
     assert monitor is not None
     assert monitor.memory_limit_mb == 1024

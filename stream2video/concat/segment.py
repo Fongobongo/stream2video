@@ -7,14 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from stream2video import concat as _c
-from stream2video.concat.constants import (
-    _FINAL_CONCAT_TIMEOUT,
-    _MIN_PART_BYTES,
-    _SEGMENT_ENCODE_TIMEOUT,
-    _STALL_KILL,
-    _STALL_WARNING,
-)
-from stream2video.memory import MemoryMonitor
+from stream2video.concat.options import ConcatOptions, coerce_options
 from stream2video.tools import ffmpeg_path
 
 logger = logging.getLogger(__name__)
@@ -28,22 +21,8 @@ def _run_segment_concat(
     vcodec_opts: list[str],
     progress_callback: Callable[[float], None] | None = None,
     cancel_callback: Callable[[], bool] | None = None,
-    encoder: str = "libx264",
-    video_quality: str = "medium",
-    audio_quality: str = "medium",
-    x264_preset: str = "medium",
-    encoder_threads: str | int = "auto",
-    source_has_audio: bool = True,
-    output_fps: str = "source",
-    gapless_concat: bool = False,
-    low_process_priority: bool = False,
-    rlimit_as_mb: int = 0,
-    segment_encode_timeout: int = _SEGMENT_ENCODE_TIMEOUT,
-    final_concat_timeout: int = _FINAL_CONCAT_TIMEOUT,
-    stall_kill: int = _STALL_KILL,
-    stall_warning: int = _STALL_WARNING,
-    min_part_bytes: int = _MIN_PART_BYTES,
-    memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
+    options: ConcatOptions | None = None,
+    **legacy_kwargs,
 ) -> None:
     """Encode each segment, join with concat demuxer (or concat filter for gapless).
 
@@ -58,6 +37,7 @@ def _run_segment_concat(
     resumed segment is also ffprobe-validated so a partial moov-atom
     crash artifact is detected and re-encoded.
     """
+    options = coerce_options(options, legacy_kwargs)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     total_duration = sum(e - s for s, e in keep_segments)
@@ -69,16 +49,16 @@ def _run_segment_concat(
         video_path,
         keep_segments,
         "segment",
-        encoder,
+        options.encoder,
         vcodec,
         vcodec_opts,
-        video_quality,
-        audio_quality,
-        x264_preset,
-        encoder_threads,
-        output_fps=output_fps,
-        gapless_concat=gapless_concat,
-        source_has_audio=source_has_audio,
+        options.video_quality,
+        options.audio_quality,
+        options.x264_preset,
+        options.encoder_threads,
+        output_fps=options.output_fps,
+        gapless_concat=options.gapless_concat,
+        source_has_audio=options.source_has_audio,
     )
     _c._ensure_fresh_work_dir(seg_dir, manifest)
 
@@ -123,9 +103,9 @@ def _run_segment_concat(
             # and ``cut_encode.py`` (slack=1.0 after the P2 audit).
             if (
                 seg_path.exists()
-                and seg_path.stat().st_size >= min_part_bytes
+                and seg_path.stat().st_size >= options.min_part_bytes
                 and _c._ffprobe_is_valid_mp4(seg_path)
-                and (not source_has_audio or _c._ffprobe_is_valid_media(seg_path, stream_type="a"))
+                and (not options.source_has_audio or _c._ffprobe_is_valid_media(seg_path, stream_type="a"))
                 and _c._ffprobe_duration_ok(seg_path, dur)
             ):
                 skipped += 1
@@ -208,13 +188,13 @@ def _run_segment_concat(
                     "0:v:0",
                     *(
                         # When the user requests a CFR target
-                        # (output_fps != "source"), apply the ``fps``
+                        # (options.output_fps != "source"), apply the ``fps``
                         # filter on the video stream. Without a filter
                         # graph the ``-r`` output option would work
                         # too, but the filter is the documented way
                         # to do it post-encode PTS normalisation and
                         # matches the batch path's filter chain shape.
-                        ["-vf", f"fps={output_fps}"] if output_fps != "source" else []
+                        ["-vf", f"fps={options.output_fps}"] if options.output_fps != "source" else []
                     ),
                     "-c:v",
                     vcodec,
@@ -225,10 +205,10 @@ def _run_segment_concat(
                             "0:a:0?",
                             "-c:a",
                             "aac",
-                            *_c._audio_bitrate_opts(audio_quality),
-                            *_c._audio_opts(audio_quality),
+                            *_c._audio_bitrate_opts(options.audio_quality),
+                            *_c._audio_opts(options.audio_quality),
                         ]
-                        if source_has_audio
+                        if options.source_has_audio
                         else []
                     ),
                     *(
@@ -238,19 +218,19 @@ def _run_segment_concat(
                         # extends the segment by the duplicated tail and
                         # the final concat plays longer than the keep
                         # window (frozen video over silence at each join).
-                        ["-shortest"] if source_has_audio and output_fps != "source" else []
+                        ["-shortest"] if options.source_has_audio and options.output_fps != "source" else []
                     ),
                     str(seg_path),
                 ],
                 progress_callback=seg_prog,
-                timeout=segment_encode_timeout,
+                timeout=options.segment_encode_timeout,
                 label=label_text,
                 cancel_callback=cancel_callback,
-                memory_monitor=_c._new_memory_monitor(memory_monitor_factory, label_text),
-                stall_kill=stall_kill,
-                stall_warning=stall_warning,
-                low_process_priority=low_process_priority,
-                rlimit_as_mb=rlimit_as_mb,
+                memory_monitor=_c._new_memory_monitor(options.memory_monitor_factory, label_text),
+                stall_kill=options.stall_kill,
+                stall_warning=options.stall_warning,
+                low_process_priority=options.low_process_priority,
+                rlimit_as_mb=options.rlimit_as_mb,
             )
 
             encoded_keep += dur
@@ -294,22 +274,16 @@ def _run_segment_concat(
         # Windows 32K limit no matter how many segments were generated.
         # The demuxer path is used when ``gapless_concat`` is off, or
         # when the source has no audio (nothing to re-encode).
-        if gapless_concat and source_has_audio and n_segs > 1:
+        if options.gapless_concat and options.source_has_audio and n_segs > 1:
             _c._run_gapless_segment_concat(
                 output_path,
                 part_paths,
                 vcodec,
                 vcodec_opts,
-                audio_quality=audio_quality,
                 total_duration=total_duration,
                 progress_callback=progress_callback,
                 cancel_callback=cancel_callback,
-                timeout=final_concat_timeout,
-                stall_kill=stall_kill,
-                stall_warning=stall_warning,
-                low_process_priority=low_process_priority,
-                rlimit_as_mb=rlimit_as_mb,
-                memory_monitor_factory=memory_monitor_factory,
+                options=options,
                 manifest=manifest,
             )
         else:
@@ -321,19 +295,13 @@ def _run_segment_concat(
                 progress_callback=progress_callback,
                 cancel_callback=cancel_callback,
                 label="segment concat",
-                timeout=final_concat_timeout,
-                stall_kill=stall_kill,
-                stall_warning=stall_warning,
-                low_process_priority=low_process_priority,
-                rlimit_as_mb=rlimit_as_mb,
-                memory_monitor_factory=memory_monitor_factory,
+                options=options,
                 # A mixed part set (some resumed, some freshly
                 # encoded) can carry per-segment AAC priming offsets that
                 # accumulate into audible seam clicks under -c copy; the
                 # aresample re-encode re-anchors the audio. A fresh-only
                 # set shares one encode session's timebase — no correction.
-                audio_resync=bool(skipped) and source_has_audio,
-                audio_quality=audio_quality,
+                audio_resync=bool(skipped) and options.source_has_audio,
             )
         logger.info(f"Successfully created output: {output_path}")
 

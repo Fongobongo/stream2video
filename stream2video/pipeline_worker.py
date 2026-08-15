@@ -479,9 +479,7 @@ class PipelineWorker:
             )
 
             # The controller owns the REAL resolved paths
-            # (``_download_path`` / ``_output_path``) — the GUI's own
-            # ``_output_path`` / ``_download_path`` fields are never
-            # populated (dead on-close cleanup). Register the active
+            # (``_download_path`` / ``_output_path``). Register the active
             # controller so ``_on_close`` can ask it to remove any
             # half-written artifacts when the app is closed mid-run.
             try:

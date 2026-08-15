@@ -9,13 +9,19 @@ effects, no I/O.
 from __future__ import annotations
 
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from stream2video.gui_helpers import (
+    CMD_SHELL,
+    POWERSHELL_SHELL,
     STATUS_UPDATE_INTERVAL,
     TOTAL_ETA_MIN_PROGRESS,
     EtaSmoother,
+    _quote_arg,
     build_cli_command,
     build_compact_done_line,
     build_completion_summary,
@@ -27,16 +33,17 @@ from stream2video.gui_helpers import (
     build_silence_info_line,
     build_total_line,
     mask_proxy,
+    proxy_has_credentials,
     redact_proxy_in_cli_command,
     should_update_status,
+    strip_proxy_credentials,
 )
 
 
 # Windows cmdline splitter with CommandLineToArgvW / MSVCRT semantics
 # (backslash-run doubling before quotes, "" escaping, trailing-run
-# doubling) — the inverse of ``_quote_cli_arg``. Used to verify
-# round-trips on win32, where shlex.split would apply POSIX rules to a
-# command the user will paste into cmd.exe / PowerShell.
+# doubling) — the inverse of the cmd.exe quoting. Used to verify
+# round-trips of the "cmd" target.
 def _split_win_cmdline(line: str) -> list[str]:
     args: list[str] = []
     cur: list[str] = []
@@ -79,65 +86,127 @@ def _split_win_cmdline(line: str) -> list[str]:
     return args
 
 
+# PowerShell splitter: single quotes group a token, ``''`` is an
+# escaped literal quote. Everything inside a single-quoted token is
+# verbatim (no interpolation) — the inverse of the PowerShell quoting.
+def _split_powershell_cmdline(line: str) -> list[str]:
+    args: list[str] = []
+    cur: list[str] = []
+    in_single = False
+    i = 0
+    n = len(line)
+    while i < n:
+        c = line[i]
+        if in_single:
+            if c == "'":
+                if i + 1 < n and line[i + 1] == "'":
+                    cur.append("'")
+                    i += 2
+                else:
+                    in_single = False
+                    i += 1
+            else:
+                cur.append(c)
+                i += 1
+        elif c == "'":
+            in_single = True
+            i += 1
+        elif c in " \t":
+            if cur:
+                args.append("".join(cur))
+                cur = []
+            i += 1
+        else:
+            cur.append(c)
+            i += 1
+    if cur:
+        args.append("".join(cur))
+    return args
+
+
 def _split_cmd(cmd: str) -> list[str]:
     """Split a built CLI command with the quoting rules of the current platform."""
-    return _split_win_cmdline(cmd) if sys.platform == "win32" else shlex.split(cmd)
+    return _split_powershell_cmdline(cmd) if sys.platform == "win32" else shlex.split(cmd)
 
 
 class TestQuoteCliArg:
-    """MSVCRT quoting rules for Windows; shlex.quote on POSIX."""
+    """Per-shell quoting: PowerShell single-quote, cmd MSVCRT, POSIX shlex."""
 
-    def test_bare_token_unquoted(self):
-        from stream2video.gui_helpers import _quote_cli_arg
+    def test_powershell_bare_token_unquoted(self):
+        assert (
+            _quote_arg("C:\\Users\\John\\video.mp4", POWERSHELL_SHELL)
+            == "C:\\Users\\John\\video.mp4"
+        )
 
-        assert _quote_cli_arg("C:\\Users\\John\\video.mp4") == "C:\\Users\\John\\video.mp4"
+    def test_powershell_space_token_single_quoted(self):
+        assert _quote_arg("a b", POWERSHELL_SHELL) == "'a b'"
 
-    def test_space_token_double_quoted(self):
-        from stream2video.gui_helpers import _quote_cli_arg
+    def test_powershell_embedded_quote_doubled(self):
+        assert _quote_arg("a'b", POWERSHELL_SHELL) == "'a''b'"
 
-        if sys.platform == "win32":
-            assert _quote_cli_arg("a b") == '"a b"'
-        else:
-            assert _quote_cli_arg("a b") == "'a b'"
+    def test_powershell_interpolation_tokens_quoted_literal(self):
+        # Audit #2: inside double quotes PowerShell would interpolate
+        # $var / $(...) and expand backticks — every dangerous token
+        # must end up in a single-quoted literal.
+        for tok in (
+            "$(calc)",
+            "$env:PATH",
+            "a%VAR%b",
+            'a"b',
+            "a;b",
+            "a`n",
+            "a&b",
+            "a|b",
+            "a>b",
+            "a<b",
+            "a#b",
+        ):
+            quoted = _quote_arg(tok, POWERSHELL_SHELL)
+            assert quoted.startswith("'") and quoted.endswith("'"), tok
 
-    def test_embedded_quote_doubled(self):
-        from stream2video.gui_helpers import _quote_cli_arg
+    def test_powershell_roundtrip_with_splitter(self):
+        for tok in (
+            "plain",
+            "a b",
+            "it's",
+            'a"b',
+            "C:\\dir\\",
+            "trail\\\\",
+            "socks5://user:p;ss&$(touch pwned)@proxy:1080",
+            'mix\\" of\\ everything',
+            "$(Write-Output INJECTED)",
+        ):
+            parsed = _split_powershell_cmdline(_quote_arg(tok, POWERSHELL_SHELL))
+            assert parsed == [tok], f"{tok!r} → {_quote_arg(tok, POWERSHELL_SHELL)!r} → {parsed!r}"
 
-        if sys.platform == "win32":
-            assert _quote_cli_arg('a"b') == '"a\\"b"'
-        else:
-            assert _quote_cli_arg('a"b') == "'a\"b'"
+    def test_cmd_space_token_double_quoted(self):
+        assert _quote_arg("a b", CMD_SHELL) == '"a b"'
 
-    def test_trailing_backslash_run_doubled(self):
-        from stream2video.gui_helpers import _quote_cli_arg
+    def test_cmd_embedded_quote_msvcrt(self):
+        assert _quote_arg('a"b', CMD_SHELL) == '"a\\"b"'
 
-        if sys.platform == "win32":
-            # A bare trailing-backslash token needs no quoting at all
-            # (no metachars); when the token IS quoted (space below),
-            # the trailing run must be doubled so it can't escape the
-            # closing quote (MSVCRT: \ before " = literal quote).
-            assert _quote_cli_arg("C:\\dir\\") == "C:\\dir\\"
-            assert _quote_cli_arg("C:\\dir name\\") == '"C:\\dir name\\\\"'
-        else:
-            assert _quote_cli_arg("C:\\dir\\") == "'C:\\dir\\'"
+    def test_cmd_trailing_backslash_run_doubled(self):
+        # A bare trailing-backslash token needs no quoting at all
+        # (no metachars); when the token IS quoted (space below),
+        # the trailing run must be doubled so it can't escape the
+        # closing quote (MSVCRT: \ before " = literal quote).
+        assert _quote_arg("C:\\dir\\", CMD_SHELL) == "C:\\dir\\"
+        assert _quote_arg("C:\\dir name\\", CMD_SHELL) == '"C:\\dir name\\\\"'
 
-    def test_backslash_before_quote_odd_run(self):
-        from stream2video.gui_helpers import _quote_cli_arg
+    def test_cmd_odd_backslash_run_before_quote(self):
+        # k=1 backslash before a quote → 2k+1 = 3 backslashes + quote
+        # (the odd one escapes the quote on the way back).
+        assert _quote_arg('a\\"b', CMD_SHELL) == '"a\\\\\\"b"'
 
-        if sys.platform == "win32":
-            # k=1 backslash before a quote → 2k+1 = 3 backslashes + quote
-            # (the odd one escapes the quote on the way back).
-            assert _quote_cli_arg('a\\"b') == '"a\\\\\\"b"'
-        else:
-            assert _quote_cli_arg('a\\"b') == "'a\\\"b'"
+    def test_cmd_percent_refused(self):
+        with pytest.raises(ValueError):
+            _quote_arg("a%PATH%b", CMD_SHELL)
 
-    def test_win_roundtrip_with_splitter(self):
-        # Property check: _quote_cli_arg → _split_win_cmdline is the
-        # identity on a set of nasty tokens.
-        if sys.platform != "win32":
-            return
-        from stream2video.gui_helpers import _quote_cli_arg
+    def test_cmd_bang_refused(self):
+        with pytest.raises(ValueError):
+            _quote_arg("a!x!", CMD_SHELL)
 
+    def test_cmd_roundtrip_with_splitter(self):
         for tok in (
             "plain",
             "a b",
@@ -148,8 +217,82 @@ class TestQuoteCliArg:
             "socks5://user:p;ss&$(touch pwned)@proxy:1080",
             'mix\\" of\\ everything',
         ):
-            parsed = _split_win_cmdline(_quote_cli_arg(tok))
-            assert parsed == [tok], f"{tok!r} → {_quote_cli_arg(tok)!r} → {parsed!r}"
+            parsed = _split_win_cmdline(_quote_arg(tok, CMD_SHELL))
+            assert parsed == [tok], f"{tok!r} → {_quote_arg(tok, CMD_SHELL)!r} → {parsed!r}"
+
+    def test_posix_uses_shlex(self):
+        assert _quote_arg("a b", "posix") == "'a b'"
+        assert _quote_arg("a b", "posix") == shlex.quote("a b")
+
+    def test_platform_default_is_powershell_on_windows(self):
+        from stream2video.gui_helpers import _quote_cli_arg
+
+        assert _quote_cli_arg("a b") == "'a b'"
+        if sys.platform != "win32":
+            assert _quote_cli_arg("a b") == "'a b'"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="real Windows shells required")
+class TestRealShellQuoting:
+    """Audit #2: verify quoting against REAL cmd.exe / PowerShell.
+
+    The unit splitter above is our own inverse-rule implementation; a
+    bug mirrored in both would slip through. These tests paste the
+    built command fragments into actual shells and check that (a) a
+    ``$(...)`` payload is passed as literal text, never executed, and
+    (b) cmd.exe round-trips a spaced path.
+    """
+
+    def test_powershell_pastes_interpolation_as_literal(self):
+        payload = "$(Write-Output INJECTED)"
+        quoted = _quote_arg(payload, POWERSHELL_SHELL)
+        out = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                f"Write-Output {quoted}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == payload
+
+    def test_powershell_pastes_embedded_quote_as_literal(self):
+        payload = "it's a $(calc)"
+        quoted = _quote_arg(payload, POWERSHELL_SHELL)
+        out = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                f"Write-Output {quoted}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == payload
+
+    def test_cmd_roundtrips_spaced_path_to_python_argv(self):
+        payload = r"C:\dir name\file.mp4"
+        quoted = _quote_arg(payload, CMD_SHELL)
+        # Single-string invocation (no list2cmdline escaping) + /s with
+        # the whole command wrapped in an extra quote pair: cmd strips
+        # the outer pair and executes the inner command verbatim.
+        runner = (
+            f'cmd.exe /d /s /c ""{sys.executable}" -c '
+            f'"import sys;print(repr(sys.argv[1]))" "{payload}""'
+        )
+        out = subprocess.run(runner, capture_output=True, text=True, timeout=60)
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == repr(payload)
+        assert quoted == f'"{payload}"'
 
 
 class TestBuildCliCommand:
@@ -234,8 +377,8 @@ class TestBuildCliCommand:
         # space) used to be injected as a raw token, so pasting the
         # copied command would split it into multiple shell words and
         # mangle the argument. It must be quoted for the target shell
-        # (double-quoted MSVCRT form on Windows — shlex.quote's POSIX
-        # single quotes are not understood by cmd.exe), and the raw
+        # (PowerShell single quotes on Windows — the only quoting that
+        # is both understood and interpolation-proof), and the raw
         # unquoted token must not appear in the command string.
         proxy = "socks5://user:pa ss@proxy:1080"
         cmd = build_cli_command(
@@ -248,11 +391,60 @@ class TestBuildCliCommand:
             proxy=proxy,
         )
         if sys.platform == "win32":
-            assert '--proxy "socks5://user:pa ss@proxy:1080"' in cmd
+            assert "--proxy 'socks5://user:pa ss@proxy:1080'" in cmd
         else:
             assert f"--proxy {shlex.quote(proxy)}" in cmd
         assert "--proxy socks5://user:pa ss@proxy:1080" not in cmd
         tokens = _split_cmd(cmd)
+        assert tokens[tokens.index("--proxy") + 1] == proxy
+
+    def test_proxy_with_percent_quoted_for_powershell(self):
+        # Audit #2: %VAR% would expand in cmd.exe even inside double
+        # quotes — the default PowerShell target must single-quote it.
+        proxy = "http://user:p%ss@host:8080"
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+            proxy=proxy,
+        )
+        tokens = _split_cmd(cmd)
+        assert tokens[tokens.index("--proxy") + 1] == proxy
+
+    def test_cmd_target_refuses_unsafe_proxy(self):
+        # Audit #2: cmd.exe cannot quote % or ! safely — building a
+        # command for it must fail loudly, not produce an injectable
+        # string.
+        for bad in ("http://user:p%ss@host:8080", "http://user:pa!ss@host:8080"):
+            with pytest.raises(ValueError):
+                build_cli_command(
+                    "x",
+                    Path("./o"),
+                    method="segment",
+                    encoder="libx264",
+                    video_quality="medium",
+                    download_quality="best",
+                    proxy=bad,
+                    target_shell=CMD_SHELL,
+                )
+
+    def test_cmd_target_quotes_spaced_proxy(self):
+        proxy = "socks5://user:pa ss@proxy:1080"
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+            proxy=proxy,
+            target_shell=CMD_SHELL,
+        )
+        assert '--proxy "socks5://user:pa ss@proxy:1080"' in cmd
+        tokens = _split_win_cmdline(cmd)
         assert tokens[tokens.index("--proxy") + 1] == proxy
 
     def test_proxy_with_shell_metacharacters_is_quoted_and_roundtrips(self):
@@ -521,6 +713,27 @@ class TestMaskProxy:
         assert "PWNED" not in masked
 
 
+class TestProxyCredentials:
+    def test_has_credentials_detects_user_pass(self):
+        assert proxy_has_credentials("socks5://user:secret@host:1080")
+        assert proxy_has_credentials("socks5://user:pa@ss@host:1080")
+        assert not proxy_has_credentials("http://127.0.0.1:8080")
+        assert not proxy_has_credentials("socks5://host:1080")
+        assert not proxy_has_credentials("")
+
+    def test_strip_removes_only_credentials(self):
+        assert (
+            strip_proxy_credentials("socks5://user:secret@host:1080")
+            == "socks5://host:1080"
+        )
+        assert (
+            strip_proxy_credentials("socks5://user:pa@ss@host:1080")
+            == "socks5://host:1080"
+        )
+        assert strip_proxy_credentials("http://127.0.0.1:8080") == "http://127.0.0.1:8080"
+        assert strip_proxy_credentials("") == ""
+
+
 class TestRedactProxyInCliCommand:
     def test_password_not_present_in_redacted_command(self):
         proxy = "socks5://user:super-secret@host:1080"
@@ -578,6 +791,23 @@ class TestRedactProxyInCliCommand:
         assert "p;ss" not in redacted
         assert "touch pwned" not in redacted
         assert "socks5://***:***@proxy:1080" in redacted
+
+    def test_cmd_target_redacted_with_matching_quoting(self):
+        proxy = "socks5://user:pa ss@proxy:1080"
+        cmd = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+            proxy=proxy,
+            target_shell=CMD_SHELL,
+        )
+        redacted = redact_proxy_in_cli_command(cmd, proxy, target_shell=CMD_SHELL)
+        assert "pa ss" not in redacted
+        assert "socks5://***:***@proxy:1080" in redacted
+        assert redacted.startswith("stream2video ") and "--method segment" in redacted
 
 
 class TestBuildDownloadStatus:

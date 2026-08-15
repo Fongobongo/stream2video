@@ -427,11 +427,10 @@ class Stream2VideoGUI(
         try:
             worker.run(params)
         finally:
-            # Per-run slots the worker doesn't own — cleared here so a
-            # stale path doesn't leak into the next pipeline run or
-            # the on-close cleanup path.
-            self._output_path = None
-            self._download_path = None
+            # The worker owns the real resolved paths (controller-level
+            # ``_output_path`` / ``_download_path``); nothing to clear
+            # here — a stale GUI copy would just lie about the last run.
+            pass
 
 
 class _EncoderTesterAdapter:
@@ -447,16 +446,11 @@ class _EncoderTesterAdapter:
 
     def schedule_on_main(self, ms: int, func: Callable[..., Any]) -> None:
         # ``_tk_after`` swallows ``TclError`` if the root is destroyed
-        # mid-test — exactly what the legacy code did.
-        self._gui._tk_after(ms, func)
-
-    def schedule_after(self, ms: int, func: Callable[..., Any]) -> None:
-        # ``self.after`` is not used cross-thread here because the
-        # caller (EncoderTester) always invokes this from the worker
-        # thread's ``finally`` block; ``_tk_after`` is the cross-thread
-        # safe variant. Use it instead of ``self.after`` to keep the
-        # pattern consistent (and avoid ``TclError`` races during
-        # window close mid-test).
+        # mid-test — exactly what the legacy code did. Note this is the
+        # ONLY scheduler in the interface: the legacy ``schedule_after``
+        # was byte-identical and the worker (EncoderTester) always
+        # invokes it cross-thread, so ``self.after`` would race window
+        # teardown; both names now resolve to this one method.
         self._gui._tk_after(ms, func)
 
     def set_test_button_state(self, *, running: bool) -> None:

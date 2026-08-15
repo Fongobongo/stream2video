@@ -1,7 +1,10 @@
 """Tests for stream2video.paths — per-video project directory helpers."""
 
+import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
+import pytest
 
 from stream2video.paths import (
     PROJECT_MARKER_FILENAME,
@@ -123,6 +126,71 @@ class TestMoveIntoProject:
             result = move_into_project(src, project)
             assert project.is_dir()
             assert result == project / "video1.mp4"
+
+    def test_old_target_survives_failed_swap(self, monkeypatch):
+        """Audit #5: if the atomic swap fails (locked target, disk
+        error), the previous good copy must remain in place AND the
+        source must be restored for the user's retry."""
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            src = out / "video1.mp4"
+            src.write_text("new")
+            project = out / "video1"
+            project.mkdir()
+            existing = project / "video1.mp4"
+            existing.write_text("old")
+
+            def _boom(_src, _dst):
+                raise OSError("target locked by another process")
+
+            monkeypatch.setattr(shutil, "move", _boom)
+            with pytest.raises(OSError):
+                move_into_project(src, project)
+            monkeypatch.undo()
+            assert existing.read_text() == "old", "old target must survive a failed move"
+            assert src.exists(), "source must be restored for the retry"
+            assert src.read_text() == "new"
+
+    def test_no_tmp_siblings_left_after_success(self):
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            src = out / "video1.mp4"
+            src.write_text("data")
+            project = out / "video1"
+            move_into_project(src, project)
+            leftovers = [p for p in project.iterdir() if p.name != "video1.mp4"]
+            assert leftovers == [], f"temp siblings leaked: {leftovers}"
+
+    def test_swap_failure_after_move_restores_source(self, monkeypatch):
+        """Audit #5: the failure point that killed the old copy used to
+        be the pre-move unlink. Now the old target is only replaced via
+        os.replace AFTER the new file is fully staged — simulate a
+        failure exactly there and verify both files survive."""
+        import stream2video.paths as paths_mod
+
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            src = out / "video1.mp4"
+            src.write_text("new")
+            project = out / "video1"
+            project.mkdir()
+            existing = project / "video1.mp4"
+            existing.write_text("old")
+
+            real_move = paths_mod.shutil.move
+            real_replace = paths_mod.os.replace
+
+            def _fail_replace(_a, _b):
+                raise OSError("swap refused")
+
+            monkeypatch.setattr(paths_mod.shutil, "move", real_move)
+            monkeypatch.setattr(paths_mod.os, "replace", _fail_replace)
+            with pytest.raises(OSError):
+                move_into_project(src, project)
+            monkeypatch.undo()
+            assert existing.read_text() == "old"
+            assert src.exists() and src.read_text() == "new"
+            assert not list(project.glob("*.tmp-*")), "staged temp must be cleaned/restored"
 
 
 class TestAddRecentProject:

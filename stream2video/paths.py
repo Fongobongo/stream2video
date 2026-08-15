@@ -34,6 +34,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import shutil
 from pathlib import Path
 
@@ -271,6 +272,17 @@ def move_into_project(file_path: Path, project_dir: Path) -> Path:
     download dir → project dir move (e.g. temp on C:, project on D:)
     works instead of raising ``OSError``.
 
+    Audit #5: the replacement is atomic. The historical implementation
+    unlinked the destination BEFORE moving, so a cross-volume copy
+    failure, disk-full, permission error or antivirus lock destroyed the
+    previous good copy while the new file sat half-copied in the source
+    directory. Now the incoming file is first moved to a temporary
+    sibling of the target (same volume → the final step is a rename),
+    fsynced, and swapped in with :func:`os.replace` — the old
+    destination is only lost at the instant the new file is fully in
+    place. If the swap fails, the source is restored so a retry still
+    has it.
+
     Raises ``FileNotFoundError`` if ``file_path`` does not exist —
     callers that expect the source to be present (e.g. after a download)
     should see a clear error rather than a silent unlink of nothing.
@@ -283,18 +295,41 @@ def move_into_project(file_path: Path, project_dir: Path) -> Path:
         return file_path
     new_path = project_dir / file_path.name
     project_dir.mkdir(parents=True, exist_ok=True)
-    # os.rename inside shutil.move raises FileExistsError (WinError 183)
-    # on Windows when dst exists — remove the stale target first so the
-    # fresh download always wins.
+    # Same volume as the target, so the final step is a rename, not a
+    # copy. Unique name so a concurrent run's temp file can't collide.
+    tmp_path = new_path.with_name(new_path.name + f".tmp-{secrets.token_hex(4)}")
     try:
-        new_path.unlink(missing_ok=True)
-    except OSError:
-        # Target locked by another reader — let move() surface the error.
-        pass
-    # shutil.move handles both same-volume rename and the cross-drive
-    # copy+unlink fallback the plain Path.rename would have raised on.
-    shutil.move(str(file_path), str(new_path))
+        shutil.move(str(file_path), str(tmp_path))
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    try:
+        _fsync_best_effort(tmp_path)
+        os.replace(tmp_path, new_path)
+    except BaseException:
+        # Swap failed (target locked by AV/indexer, disk error...).
+        # Restore the source so the user's retry still has the file
+        # instead of it being stranded in a .tmp sibling.
+        try:
+            shutil.move(str(tmp_path), str(file_path))
+        except OSError as e:
+            logger.warning(f"Could not restore {file_path} after failed move: {e}")
+        raise
     return new_path
+
+
+def _fsync_best_effort(path: Path) -> None:
+    """Flush a moved file's data to disk before the atomic swap.
+
+    Best-effort: an OSError here (locked handle, exotic filesystem) is
+    not worth failing the move over — os.replace still guarantees the
+    old target survives until the swap.
+    """
+    try:
+        with open(path, "rb") as f:
+            os.fsync(f.fileno())
+    except OSError:
+        pass
 
 
 def add_recent_project(

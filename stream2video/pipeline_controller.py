@@ -171,6 +171,12 @@ class PipelineConfig:
     waveform_timeout: int = 300
     batch_chunk_size: int = 40
     min_part_bytes: int = 1024
+    # Run only download + silence detection, then stop before the encode
+    # phase (CLI ``--dry-run``). The success result carries the detected
+    # segments + keep mapping so the host can render its "what would be
+    # cut" summary without re-running detection. Defaulted + last so the
+    # GUI's positional/ordered construction keeps compiling.
+    dry_run: bool = False
 
 
 @dataclass(frozen=True)
@@ -203,6 +209,11 @@ class PipelineCallbacks:
     # without change; a None-able ``lambda f: None`` would also work but
     # an Optional avoids a stray no-op closure in the default case.
     on_phase_progress: Callable[[float], None] | None = None
+    # Atomic named-phase dispatch: ``(name, fraction)`` with ``name`` one
+    # of "silence" / "cutting" / "concatenating". Hosts WITHOUT an
+    # internal phase state machine (the CLI) drive per-phase bars from
+    # this; the GUI tracks its own phase state and omits the callback.
+    on_phase: Callable[[str, float], None] | None = None
     # The per-run ``ProgressPlan`` boundary fractions — the tuple
     # ``(download_end, silence_end, cut_end, concat_end)`` in overall
     # 0..1 space. Sent on EVERY plan (re)build so the GUI can draw
@@ -222,13 +233,21 @@ class PipelineResult:
     it to drive the completion popup + log block.
     """
 
-    output_path: Path
+    output_path: Path | None
     video_path: Path
     src_size_bytes: int
     src_duration: float | None
     dst_size_bytes: int
     keep_duration: float
     pipeline_seconds: float
+    # Populated on a dry-run success (no encode ran): the detected
+    # silence segments and their keep mapping so the host can render its
+    # "what would be cut" summary. ``None`` on real runs.
+    silence_segments: list[SilenceSegment] | None = None
+    keep_segments: list[tuple[float, float]] | None = None
+    # True when the source was downloaded this run (vs a local-file
+    # passthrough). Hosts use it for delete-after decisions.
+    was_downloaded: bool = False
 
 
 class PipelineError(Exception):
@@ -558,6 +577,34 @@ class PipelineController:
             silence_segments = self._run_silence_phase(video_path)
             if self.cancel_event.is_set():
                 raise PipelineCancelled("cancelled between silence and concat")
+            keep_segments = generate_keep_segments(video_path, silence_segments)
+            keep_dur = sum(e - s for s, e in keep_segments)
+            self.cb.on_info(
+                build_silence_info_line(
+                    num_silence=len(silence_segments),
+                    num_keep=len(keep_segments),
+                    keep_duration=keep_dur,
+                )
+            )
+            if self.cfg.dry_run:
+                # --dry-run stops before the encode phase, so the concat
+                # memory-reserve pre-flight below must NOT run here — the
+                # CLI's historical behaviour (exit before any concat RAM
+                # check) is preserved by returning first.
+                self._set_phase_progress(1.0)
+                self.cb.on_progress(self._progress_plan.silence_end)
+                return PipelineResult(
+                    output_path=None,
+                    video_path=video_path,
+                    src_size_bytes=src_size_bytes,
+                    src_duration=src_duration,
+                    dst_size_bytes=0,
+                    keep_duration=keep_dur,
+                    pipeline_seconds=time.monotonic() - self._pipeline_start,
+                    silence_segments=silence_segments,
+                    keep_segments=keep_segments,
+                    was_downloaded=self._download_was_real,
+                )
             if not check_memory_reserve(
                 self.cfg.memory_reserve_mb,
                 "concat phase",
@@ -568,15 +615,6 @@ class PipelineController:
                     "cannot start concat phase. Close other applications or "
                     "reduce --memory-reserve-mb."
                 )
-            keep_segments = generate_keep_segments(video_path, silence_segments)
-            keep_dur = sum(e - s for s, e in keep_segments)
-            self.cb.on_info(
-                build_silence_info_line(
-                    num_silence=len(silence_segments),
-                    num_keep=len(keep_segments),
-                    keep_duration=keep_dur,
-                )
-            )
             output_path = self._run_concat_phase(video_path, silence_segments, keep_dur)
             return self._finish(video_path, output_path, src_size_bytes, src_duration, keep_dur)
         except PipelineCancelled as e:
@@ -820,6 +858,8 @@ class PipelineController:
             # Point 4: make the cache hit visible — a flash-through
             # otherwise looks like the phase didn't run.
             self._set_phase_progress(1.0)
+            if self.cb.on_phase is not None:
+                self.cb.on_phase("silence", 1.0)
             self._set_status("Step 2/4: Silence (cached)", force=True)
             self.cb.on_progress(self._progress_plan.silence_end)
             return cache
@@ -830,6 +870,8 @@ class PipelineController:
         def silence_prog(f: float) -> None:
             elapsed = time.monotonic() - silence_start
             controller._set_phase_progress(f)
+            if controller.cb.on_phase is not None:
+                controller.cb.on_phase("silence", max(0.0, min(1.0, f)))
             if f > 0.01:
                 remaining = elapsed / f - elapsed
                 controller.cb.on_progress(controller._progress_plan.map_silence(f))
@@ -864,6 +906,8 @@ class PipelineController:
             self.cb.on_log(f"[WARN] Could not clean up resume cache: {e}")
         self.cb.on_progress(self._progress_plan.silence_end)
         self._set_phase_progress(1.0)
+        if self.cb.on_phase is not None:
+            self.cb.on_phase("silence", 1.0)
         self.cb.on_log(f"Detected {len(silence_segments)} silence segments")
         return silence_segments
 
@@ -984,6 +1028,8 @@ class PipelineController:
             # concatenating 0..1 → cut_end..concat_end. Each phase gets
             # its own thin bar + ETA so a stall in gapless tree L0 is
             # distinguishable from segment encodes.
+            if self.cb.on_phase is not None:
+                self.cb.on_phase(name, max(0.0, min(1.0, f)))
             if name == "cutting":
                 if current_phase != "cutting":
                     _set_phase("cutting")
@@ -1082,7 +1128,6 @@ class PipelineController:
             fallback_consent=self.on_fallback_consent,
         )
 
-        self._output_path = None
         self._set_phase_progress(1.0)
         return output_path
 
@@ -1098,15 +1143,26 @@ class PipelineController:
     ) -> PipelineResult:
         """Build the success summary and clean up."""
         self.cb.on_progress(self._progress_plan.concat_end)
+        # Audit #4/#8: a "success" without a real output is a failure —
+        # never report one, and never delete_after the source when the
+        # result is missing. The output was there a moment ago
+        # (cut_and_concat returned on it); if it is gone now (antivirus
+        # quarantine, user deletion) or empty, surface a clear error
+        # and keep the downloaded source so the user can retry.
         try:
             dst_size_bytes = output_path.stat().st_size
-        except OSError:
-            # The output was there a moment ago (cut_and_concat returned
-            # successfully on it) — an antivirus or the user removed it
-            # in the gap between encode-finish and this stat. Report 0
-            # rather than crashing the whole pipeline at the 100% mark;
-            # the summary's other fields still describe a real success.
-            dst_size_bytes = 0
+        except OSError as e:
+            raise PipelineConcatError(
+                f"Output file is missing after concat finished: {output_path} ({e})"
+            ) from None
+        if dst_size_bytes <= 0:
+            raise PipelineConcatError(
+                f"Output file is empty after concat finished: {output_path}"
+            )
+        # The output is validated — from here on the incomplete-output
+        # cleanup must no longer consider it (it is complete, and the
+        # on-close cleanup must not delete a finished video).
+        self._output_path = None
         total_elapsed = time.monotonic() - self._pipeline_start
 
         summary = {
@@ -1137,6 +1193,7 @@ class PipelineController:
             dst_size_bytes=dst_size_bytes,
             keep_duration=keep_dur,
             pipeline_seconds=total_elapsed,
+            was_downloaded=self._download_was_real,
         )
 
 

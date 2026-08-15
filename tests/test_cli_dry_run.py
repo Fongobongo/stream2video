@@ -1,9 +1,10 @@
 """Tests for --dry-run flag (walks pipeline through silence detection,
 prints stats, exits before encode).
 
-The tests mock download / detect_silence / cut_and_concat so no real
-ffmpeg is needed — what we're checking is the control-flow branch that
-short-circuits after step 2 (silence) and never reaches the encode call.
+The tests mock the controller's download / detect_silence / cut_and_concat
+(patched where the controller imports them: ``stream2video.pipeline_controller``)
+so no real ffmpeg is needed — what we're checking is the control-flow branch
+that short-circuits after step 2 (silence) and never reaches the encode call.
 """
 
 from __future__ import annotations
@@ -37,18 +38,24 @@ def _invoke(argv: list[str]) -> tuple[int, str, MagicMock, MagicMock]:
 
     with (
         patch.object(cli_mod, "_check_ffmpeg", lambda: None),
-        patch.object(cli_mod, "download") as mock_dl,
-        patch.object(cli_mod, "detect_silence") as mock_detect,
-        patch.object(cli_mod, "load_silence_cache", return_value=None),
-        patch.object(cli_mod, "save_silence_cache", lambda *a, **kw: None),
-        # generate_keep_segments internally calls get_video_duration —
-        # patch it where concat's helpers re-exported it (concat.helpers
-        # imports the symbol from stream2video.concat at call time).
+        # The CLI now orchestrates through PipelineController, so the
+        # heavy I/O lives behind the controller's module-level imports
+        # (audit #11): patch there, NOT on the cli module.
+        patch("stream2video.pipeline_controller.download") as mock_dl,
+        patch("stream2video.pipeline_controller.detect_silence") as mock_detect,
+        patch("stream2video.pipeline_controller.load_silence_cache", return_value=None),
+        patch("stream2video.pipeline_controller.save_silence_cache", lambda *a, **kw: None),
+        # src_duration is probed by the controller via its module-level
+        # binding of ``stream2video.utils.get_video_duration``; the real
+        # generate_keep_segments probes internally via
+        # ``stream2video.concat.get_video_duration``.
+        patch("stream2video.pipeline_controller.get_video_duration", return_value=10.0),
         patch("stream2video.concat.get_video_duration", return_value=10.0),
-        patch.object(cli_mod, "cut_and_concat") as mock_cut,
-        patch.object(cli_mod, "check_memory_reserve", return_value=True),
-        patch.object(
-            cli_mod, "apply_per_video_dir", side_effect=lambda o, v, d, per_video_dir=False: (o, v)
+        patch("stream2video.pipeline_controller.cut_and_concat") as mock_cut,
+        patch("stream2video.pipeline_controller.check_memory_reserve", return_value=True),
+        patch(
+            "stream2video.pipeline_controller.apply_per_video_dir",
+            side_effect=lambda o, v, d, per_video_dir=False: (o, v),
         ),
     ):
         # download() passthrough: return the input path as-is.
@@ -57,6 +64,13 @@ def _invoke(argv: list[str]) -> tuple[int, str, MagicMock, MagicMock]:
             is_downloaded=False,
         )
         mock_detect.return_value = _make_silence_segments()
+
+        # The controller validates the output file exists and is non-empty
+        # (audit #4/#8), so the stubbed concat must materialize it.
+        def _fake_cut(source, silence_segments, output_video, **kwargs):
+            Path(output_video).write_bytes(b"\x00" * 1024)
+
+        mock_cut.side_effect = _fake_cut
         result = runner.invoke(cli_mod.app, argv, catch_exceptions=False)
         return result.exit_code, result.stdout, mock_dl, mock_cut
 
@@ -129,25 +143,26 @@ class TestDryRun:
 
         calls: list[str] = []
 
-        def _counted(reserve_mb: int, phase: str, **kwargs) -> bool:
+        def _counted(reserve_mb: int, phase: str, on_log=None, **kwargs) -> bool:
             calls.append(phase)
             return True
 
         runner = CliRunner()
         with (
             patch.object(cli_mod, "_check_ffmpeg", lambda: None),
-            patch.object(cli_mod, "download") as mock_dl,
-            patch.object(cli_mod, "detect_silence") as mock_detect,
-            patch.object(cli_mod, "load_silence_cache", return_value=None),
-            patch.object(cli_mod, "save_silence_cache", lambda *a, **kw: None),
-            # generate_keep_segments reads duration via ``stream2video.concat.get_video_duration``
-            # (the indirection layer keeps the historical patch-point alive).
+            patch("stream2video.pipeline_controller.download") as mock_dl,
+            patch("stream2video.pipeline_controller.detect_silence") as mock_detect,
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=None),
+            patch("stream2video.pipeline_controller.save_silence_cache", lambda *a, **kw: None),
+            # generate_keep_segments reads duration via ``stream2video.concat.get_video_duration``;
+            # the controller probes src duration via its own binding
+            # (``stream2video.pipeline_controller.get_video_duration``).
+            patch("stream2video.pipeline_controller.get_video_duration", return_value=10.0),
             patch("stream2video.concat.get_video_duration", return_value=10.0),
-            patch.object(cli_mod, "cut_and_concat"),
-            patch.object(cli_mod, "check_memory_reserve", side_effect=_counted),
-            patch.object(
-                cli_mod,
-                "apply_per_video_dir",
+            patch("stream2video.pipeline_controller.cut_and_concat"),
+            patch("stream2video.pipeline_controller.check_memory_reserve", side_effect=_counted),
+            patch(
+                "stream2video.pipeline_controller.apply_per_video_dir",
                 side_effect=lambda o, v, d, per_video_dir=False: (o, v),
             ),
         ):

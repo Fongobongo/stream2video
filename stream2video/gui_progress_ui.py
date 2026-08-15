@@ -5,9 +5,9 @@ thread → main-thread dispatchers for every progress widget), the
 running/cancel state, and the button-state toggle.
 
 State owned: ``running``, ``_cancel_event``, ``_last_status_update``,
-``_pipeline_start``, ``_output_path``, ``_download_path``. The cross-
-thread dispatcher (``self._tk_after``) and ``self._log`` stay on the
-host GUI class because they're shared with every other mixin.
+``_pipeline_start``. The cross-thread dispatcher (``self._tk_after``)
+and ``self._log`` stay on the host GUI class because they're shared
+with every other mixin.
 """
 
 from __future__ import annotations
@@ -69,8 +69,6 @@ class ProgressUiMixin:
         # the phase.
         self._last_step_status_update: float = 0.0
         self._pipeline_start: float | None = None
-        self._output_path: Path | None = None
-        self._download_path: Path | None = None
         # ETA smoother + overall-progress snapshot used by ``_ui_overall``
         # to render the whole-pipeline ETA (``Total: X / ~Y``). Smoothed
         # so the readout doesn't jitter second-to-second.

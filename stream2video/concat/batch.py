@@ -16,16 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from stream2video import concat as _c
-from stream2video.concat.constants import (
-    _BATCH_CHUNK_MIN,
-    _BATCH_CHUNK_SIZE,
-    _FINAL_CONCAT_TIMEOUT,
-    _MIN_PART_BYTES,
-    _SEGMENT_ENCODE_TIMEOUT,
-    _STALL_KILL,
-    _STALL_WARNING,
-)
-from stream2video.memory import MemoryMonitor
+from stream2video.concat.constants import _BATCH_CHUNK_MIN
+from stream2video.concat.options import ConcatOptions, coerce_options
 from stream2video.tools import ffmpeg_path
 from stream2video.utils import get_video_start_time
 
@@ -40,22 +32,8 @@ def _run_batch_concat(
     vcodec_opts: list[str],
     progress_callback: Callable[[float], None] | None = None,
     cancel_callback: Callable[[], bool] | None = None,
-    encoder: str = "libx264",
-    video_quality: str = "medium",
-    audio_quality: str = "medium",
-    x264_preset: str = "medium",
-    encoder_threads: str | int = "auto",
-    source_has_audio: bool = True,
-    output_fps: str = "source",
-    segment_encode_timeout: int = _SEGMENT_ENCODE_TIMEOUT,
-    final_concat_timeout: int = _FINAL_CONCAT_TIMEOUT,
-    stall_kill: int = _STALL_KILL,
-    stall_warning: int = _STALL_WARNING,
-    batch_chunk_size: int = _BATCH_CHUNK_SIZE,
-    min_part_bytes: int = _MIN_PART_BYTES,
-    low_process_priority: bool = False,
-    rlimit_as_mb: int = 0,
-    memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
+    options: ConcatOptions | None = None,
+    **legacy_kwargs,
 ) -> None:
     """Process chunks sequentially: each chunk → temp file, then concat.
 
@@ -70,6 +48,7 @@ def _run_batch_concat(
     ffprobe-validated so a partial moov-atom crash artifact is detected
     and re-encoded.
     """
+    options = coerce_options(options, legacy_kwargs)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     total_duration = sum(e - s for s, e in keep_segments)
@@ -77,12 +56,12 @@ def _run_batch_concat(
     # RAM, scale up for small files to keep chunks productive.
     n_segs = len(keep_segments)
     if n_segs > 200:
-        chunk_size = max(_BATCH_CHUNK_MIN, batch_chunk_size * 200 // n_segs)
+        chunk_size = max(_BATCH_CHUNK_MIN, options.batch_chunk_size * 200 // n_segs)
     elif n_segs > 100 and total_duration > 3600:
-        chunk_size = max(_BATCH_CHUNK_MIN, batch_chunk_size * 100 // n_segs)
+        chunk_size = max(_BATCH_CHUNK_MIN, options.batch_chunk_size * 100 // n_segs)
     else:
-        chunk_size = batch_chunk_size
-    chunk_size = max(_BATCH_CHUNK_MIN, min(chunk_size, batch_chunk_size))
+        chunk_size = options.batch_chunk_size
+    chunk_size = max(_BATCH_CHUNK_MIN, min(chunk_size, options.batch_chunk_size))
     chunks = [keep_segments[i : i + chunk_size] for i in range(0, n_segs, chunk_size)]
     n_chunks = len(chunks)
     logger.info(
@@ -95,15 +74,16 @@ def _run_batch_concat(
         video_path,
         keep_segments,
         "batch",
-        encoder,
+        options.encoder,
         vcodec,
         vcodec_opts,
-        video_quality,
-        audio_quality,
-        x264_preset,
-        encoder_threads,
-        output_fps=output_fps,
-        source_has_audio=source_has_audio,
+        options.video_quality,
+        options.audio_quality,
+        options.x264_preset,
+        options.encoder_threads,
+        output_fps=options.output_fps,
+        gapless_concat=options.gapless_concat,
+        source_has_audio=options.source_has_audio,
     )
     _c._ensure_fresh_work_dir(batch_dir, manifest)
 
@@ -165,10 +145,10 @@ def _run_batch_concat(
             # the final concat (mirrors the cut_encode.py audio check).
             if (
                 chunk_path.exists()
-                and chunk_path.stat().st_size >= min_part_bytes
+                and chunk_path.stat().st_size >= options.min_part_bytes
                 and _c._ffprobe_is_valid_mp4(chunk_path)
                 and (
-                    not source_has_audio or _c._ffprobe_is_valid_media(chunk_path, stream_type="a")
+                    not options.source_has_audio or _c._ffprobe_is_valid_media(chunk_path, stream_type="a")
                 )
                 and _c._ffprobe_duration_ok(chunk_path, sum(e - s for s, e in chunk))
             ):
@@ -247,7 +227,7 @@ def _run_batch_concat(
             # ``setpts`` is needed after the final concat.
             v_chains = []
             a_chains = []
-            fps_suffix = _c._fps_filter_chain(output_fps)
+            fps_suffix = _c._fps_filter_chain(options.output_fps)
             for idx, (s, e) in enumerate(chunk):
                 # ``s``/``e`` are absolute source timestamps (user-visible
                 # 0..N). The seek above made ffmpeg start at ``seek_to``
@@ -260,7 +240,7 @@ def _run_batch_concat(
                 # shifted PTS timeline. For start_time=0 this is
                 # identical to the historical absolute-source-time path.
                 #
-                # When ``output_fps != "source"``, splice an
+                # When ``options.output_fps != "source"``, splice an
                 # ``fps=<target>`` filter AFTER ``setpts=PTS-STARTPTS``
                 # so the new PTS cadence is the source's, not the
                 # synthetic ``N/FRAME_RATE`` one. ``fps`` duplicates or
@@ -282,13 +262,13 @@ def _run_batch_concat(
                 # bleeding silence into the next segment's timeslot
                 # (audio-outlives-video inside the final concat demuxer
                 # join). The padding is silence, so no audible artifact.
-                if source_has_audio:
+                if options.source_has_audio:
                     a_chains.append(
                         f"[0:a]atrim={s + start_time}:{e + start_time},asetpts=PTS-STARTPTS,"
                         f"apad,atrim=0:{e - s}[a{idx}]"
                     )
             n = len(chunk)
-            if source_has_audio:
+            if options.source_has_audio:
                 concat_inputs = "".join(f"[v{i}][a{i}]" for i in range(n))
                 graph = (
                     ";".join(v_chains + a_chains)
@@ -370,10 +350,10 @@ def _run_batch_concat(
                                 "[outa]",
                                 "-c:a",
                                 "aac",
-                                *_c._audio_bitrate_opts(audio_quality),
-                                *_c._audio_opts(audio_quality),
+                                *_c._audio_bitrate_opts(options.audio_quality),
+                                *_c._audio_opts(options.audio_quality),
                             ]
-                            if source_has_audio
+                            if options.source_has_audio
                             else []
                         ),
                         *(
@@ -384,19 +364,19 @@ def _run_batch_concat(
                             # the muxer writes the longer video tail and
                             # the chunk runs long (frozen tail frames at
                             # every concat join).
-                            ["-shortest"] if source_has_audio and output_fps != "source" else []
+                            ["-shortest"] if options.source_has_audio and options.output_fps != "source" else []
                         ),
                         str(chunk_path),
                     ],
                     progress_callback=_chunk_prog,
-                    timeout=segment_encode_timeout,
+                    timeout=options.segment_encode_timeout,
                     label=label_text,
                     cancel_callback=cancel_callback,
-                    memory_monitor=_c._new_memory_monitor(memory_monitor_factory, label_text),
-                    stall_kill=stall_kill,
-                    stall_warning=stall_warning,
-                    low_process_priority=low_process_priority,
-                    rlimit_as_mb=rlimit_as_mb,
+                    memory_monitor=_c._new_memory_monitor(options.memory_monitor_factory, label_text),
+                    stall_kill=options.stall_kill,
+                    stall_warning=options.stall_warning,
+                    low_process_priority=options.low_process_priority,
+                    rlimit_as_mb=options.rlimit_as_mb,
                 )
             finally:
                 Path(script_path).unlink(missing_ok=True)
@@ -421,15 +401,9 @@ def _run_batch_concat(
             progress_callback=progress_callback,
             cancel_callback=cancel_callback,
             label="batch concat",
-            timeout=final_concat_timeout,
-            stall_kill=stall_kill,
-            stall_warning=stall_warning,
-            low_process_priority=low_process_priority,
-            rlimit_as_mb=rlimit_as_mb,
-            memory_monitor_factory=memory_monitor_factory,
+            options=options,
             # Same mixed-set seam correction as _run_segment_concat.
-            audio_resync=bool(skipped) and source_has_audio,
-            audio_quality=audio_quality,
+            audio_resync=bool(skipped) and options.source_has_audio,
         )
         logger.info(f"batch: successfully created {output_path}")
 

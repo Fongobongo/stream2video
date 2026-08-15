@@ -76,23 +76,57 @@ class EtaSmoother:
         return self._smoothed
 
 
-# cmd.exe / PowerShell metacharacters that force quoting. `%` is
-# included because cmd.exe expands %VAR% even inside most contexts and
-# PowerShell treats it as the modulo operator; `!` enables delayed
+# Shell targets supported by ``build_cli_command``. Each has its own
+# quoting rules — there is NO universal quoting that is safe in both
+# cmd.exe and PowerShell (audit #2: MSVCRT double quotes still let
+# PowerShell interpolate ``$(...)``/``$var`` and cmd.exe expand
+# ``%VAR%``/``!VAR!``).
+POWERSHELL_SHELL = "powershell"
+CMD_SHELL = "cmd"
+POSIX_SHELL = "posix"
+# Characters that force quoting for the target shell. The sets differ:
+# cmd.exe expands %VAR% and (with delayed expansion) !VAR! even inside
+# double quotes; PowerShell interpolates $var/$(...) inside double
+# quotes and treats ` as an escape.
+_SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_./:+@=\\-]+$")
+
+
+def _default_target_shell() -> str:
+    """The shell a pasted command will land in on this platform."""
+    return POWERSHELL_SHELL if sys.platform == "win32" else POSIX_SHELL
+
+
+def _quote_powershell_arg(arg: str) -> str:
+    """Quote a single argument for PowerShell (audit #2).
+
+    PowerShell single-quoted strings are fully literal: ``$var``,
+    ``$(...)``, backticks and ``%VAR%`` are all passed through verbatim.
+    The only escape needed is doubling an embedded single quote
+    (``'`` → ``''``). Tokens with no metacharacters are passed through
+    unquoted.
+    """
+    if _SAFE_TOKEN_RE.match(arg):
+        return arg
+    return "'" + arg.replace("'", "''") + "'"
+
+
+# cmd.exe metacharacters that force quoting. `%` is included because
+# cmd.exe expands %VAR% even inside most contexts; `!` enables delayed
 # expansion in cmd.exe. Bare tokens without any of these round-trip
-# unquoted on both shells.
+# unquoted in cmd.
 _WIN_CMD_METACHARS = re.compile(r'[\s&|<>^"%!]')
 
 
-def _quote_cli_arg(arg: str) -> str:
-    """Quote a single CLI argument for the shell the command will be pasted into.
+def _quote_cmd_arg(arg: str) -> str:
+    """Quote a single argument for cmd.exe (audit #2).
 
-    Windows (cmd.exe / PowerShell): ``shlex.quote``'s POSIX quoting
-    (single quotes, backslash escapes) is NOT understood by cmd.exe,
-    and PowerShell mangles backslashes inside single quotes — a path
-    like ``C:\\Users\\John`` would paste back with a literal ``\\U``
-    escape. Use the MSVCRT double-quote rules (the same algorithm as
-    CPython's ``subprocess.list2cmdline``):
+    cmd.exe has no fully safe quoting: ``%VAR%`` expands even inside
+    double quotes (cannot be escaped interactively) and ``!VAR!``
+    expands when delayed expansion is enabled. Tokens containing ``%``
+    or ``!`` are therefore REFUSED (ValueError) — better a clear error
+    than a command that injects or corrupts. Everything else uses the
+    MSVCRT double-quote rules (the same algorithm as CPython's
+    ``subprocess.list2cmdline``):
 
       * a backslash run immediately before a quote: ``2k+1``
         backslashes + the quote (the odd one escapes the quote);
@@ -100,30 +134,56 @@ def _quote_cli_arg(arg: str) -> str:
         doubled to ``2k`` so it can't escape the quote.
 
     Tokens with no whitespace or cmd metacharacters are passed through
-    unquoted (both shells keep them intact).
-
-    POSIX: delegates to :func:`shlex.quote`.
+    unquoted.
     """
-    if sys.platform == "win32":
-        if not _WIN_CMD_METACHARS.search(arg):
-            return arg
-        out: list[str] = ['"']
-        backslashes = 0
-        for ch in arg:
-            if ch == "\\":
-                backslashes += 1
-            elif ch == '"':
-                out.append("\\" * (2 * backslashes + 1))
-                out.append('"')
-                backslashes = 0
-            else:
-                out.append("\\" * backslashes)
-                out.append(ch)
-                backslashes = 0
-        out.append("\\" * (2 * backslashes))
-        out.append('"')
-        return "".join(out)
+    if not _WIN_CMD_METACHARS.search(arg):
+        return arg
+    if "%" in arg or "!" in arg:
+        raise ValueError(
+            "cmd.exe cannot quote an argument containing '%' or '!' safely "
+            "(%VAR% expands inside double quotes, !VAR! under delayed "
+            "expansion); paste into PowerShell instead"
+        )
+    out: list[str] = ['"']
+    backslashes = 0
+    for ch in arg:
+        if ch == "\\":
+            backslashes += 1
+        elif ch == '"':
+            out.append("\\" * (2 * backslashes + 1))
+            out.append('"')
+            backslashes = 0
+        else:
+            out.append("\\" * backslashes)
+            out.append(ch)
+            backslashes = 0
+    out.append("\\" * (2 * backslashes))
+    out.append('"')
+    return "".join(out)
+
+
+def _quote_arg(arg: str, target_shell: str | None = None) -> str:
+    """Quote a single CLI argument for the shell the command is pasted into.
+
+    * ``powershell`` (Windows default): single quotes with ``''``
+      doubling — the only quoting PowerShell cannot interpolate through.
+    * ``cmd``: MSVCRT double quotes, ``!`` escaped; ``%`` is refused
+      (unsafe, see :func:`_quote_cmd_arg`).
+    * ``posix``: delegates to :func:`shlex.quote`.
+    """
+    shell = _default_target_shell() if target_shell is None else target_shell
+    if shell == POWERSHELL_SHELL:
+        return _quote_powershell_arg(arg)
+    if shell == CMD_SHELL:
+        return _quote_cmd_arg(arg)
     return shlex.quote(arg)
+
+
+# Back-compat alias: the historical single-quoter selection for the
+# platform's default shell (used by redact_proxy_in_cli_command and
+# legacy call sites).
+def _quote_cli_arg(arg: str) -> str:
+    return _quote_arg(arg, _default_target_shell())
 
 
 def build_cli_command(
@@ -159,6 +219,7 @@ def build_cli_command(
     config_path: Path | None = None,
     proxy: str = "",
     per_video_dir: bool = CONFIG_DEFAULTS["per_video_dir"],
+    target_shell: str | None = None,
 ) -> str:
     """Build the equivalent CLI invocation for the current GUI settings.
 
@@ -166,6 +227,13 @@ def build_cli_command(
     the GUI can paste the same operation into a shell, a script, or
     documentation. Pure: returns the string, doesn't touch the
     clipboard.
+
+    ``target_shell`` selects the quoting rules (audit #2: there is no
+    quoting that is safe in both cmd.exe and PowerShell). Defaults to
+    PowerShell on Windows — the only Windows shell whose args can be
+    quoted losslessly — and POSIX sh elsewhere. ``cmd`` is best-effort
+    and raises :class:`ValueError` when an argument cannot be quoted
+    safely for it (contains ``%``).
 
     The shape mirrors what the CLI actually accepts (see
     ``stream2video.cli.main``). Defaults are taken from
@@ -186,15 +254,15 @@ def build_cli_command(
     """
     parts = ["stream2video"]
     if input_raw:
-        parts.append(_quote_cli_arg(input_raw))
-    parts.extend(["-o", _quote_cli_arg(str(output_dir))])
+        parts.append(_quote_arg(input_raw, target_shell))
+    parts.extend(["-o", _quote_arg(str(output_dir), target_shell)])
     if config_path is not None:
-        parts.extend(["-c", _quote_cli_arg(str(config_path))])
+        parts.extend(["-c", _quote_arg(str(config_path), target_shell)])
     parts.extend(["--method", method, "--encoder", encoder])
     parts.extend(["--video-quality", video_quality])
     parts.extend(["--download-quality", download_quality])
     if proxy:
-        parts.extend(["--proxy", _quote_cli_arg(proxy)])
+        parts.extend(["--proxy", _quote_arg(proxy, target_shell)])
     # Newer flags — only append when they're not the default so the
     # copied command stays compact. The defaults match CONFIG_DEFAULTS
     # so a user who hasn't touched the advanced panel gets a clean
@@ -275,23 +343,55 @@ def mask_proxy(proxy: str) -> str:
     return f"{scheme}://***:***@{host}" if scheme else f"***:***@{host}"
 
 
-def redact_proxy_in_cli_command(cmd: str, proxy: str) -> str:
+def proxy_has_credentials(proxy: str) -> bool:
+    """True when ``proxy`` embeds ``user:pass@`` credentials.
+
+    Mirrors :func:`mask_proxy`'s notion of "secret present": a proxy
+    URL with an ``@`` after the scheme carries credentials (the cut is
+    made at the LAST ``@`` so a password containing ``@`` still counts).
+    """
+    if not proxy:
+        return False
+    if "://" in proxy:
+        _, _, rest = proxy.partition("://")
+    else:
+        rest = proxy
+    return "@" in rest
+
+
+def strip_proxy_credentials(proxy: str) -> str:
+    """Return *proxy* without its ``user:pass@`` credential part.
+
+    ``socks5://user:pass@host:1080`` → ``socks5://host:1080``. A proxy
+    without credentials is returned unchanged. Used to build a copyable
+    command that never carries the secret.
+    """
+    if not proxy_has_credentials(proxy):
+        return proxy
+    if "://" in proxy:
+        scheme, _, rest = proxy.partition("://")
+        _, _, host = rest.rpartition("@")
+        return f"{scheme}://{host}"
+    _, _, host = proxy.rpartition("@")
+    return host
+
+
+def redact_proxy_in_cli_command(cmd: str, proxy: str, target_shell: str | None = None) -> str:
     """Return *cmd* with the ``--proxy`` value replaced by its masked form.
 
-    The copied command keeps the real proxy (the user pastes and runs
-    it), but a GUI log line must never print the credentials: the proxy
-    token is swapped for the masked form instead. The replacement is
-    exact (the quoted token is unique within the command), so only the
-    proxy token is affected. Quoting must match
-    :func:`build_cli_command` exactly — on Windows that is the
-    double-quoted MSVCRT form, not ``shlex.quote``'s POSIX quoting.
+    The GUI log line must never print the credentials: the proxy token
+    is swapped for the masked form instead. The replacement is exact
+    (the quoted token is unique within the command), so only the proxy
+    token is affected. Quoting must match
+    :func:`build_cli_command` exactly — i.e. the same ``target_shell``
+    must be passed here.
     """
     if not cmd or not proxy:
         return cmd
-    quoted = _quote_cli_arg(proxy)
+    quoted = _quote_arg(proxy, target_shell)
     if quoted not in cmd:
         return cmd
-    return cmd.replace(quoted, _quote_cli_arg(mask_proxy(proxy)))
+    return cmd.replace(quoted, _quote_arg(mask_proxy(proxy), target_shell))
 
 
 def _wrap_status_lines(

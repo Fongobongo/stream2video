@@ -33,14 +33,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from stream2video import concat as _c
-from stream2video.concat.constants import (
-    _FINAL_CONCAT_TIMEOUT,
-    _MIN_PART_BYTES,
-    _SEGMENT_ENCODE_TIMEOUT,
-    _STALL_KILL,
-    _STALL_WARNING,
-)
-from stream2video.memory import MemoryMonitor
+from stream2video.concat.options import ConcatOptions, coerce_options
 from stream2video.tools import ffmpeg_path
 
 logger = logging.getLogger(__name__)
@@ -54,32 +47,19 @@ def _run_cut_then_encode(
     vcodec_opts: list[str],
     progress_callback: Callable[[float], None] | None = None,
     cancel_callback: Callable[[], bool] | None = None,
-    encoder: str = "libx264",
-    video_quality: str = "medium",
-    audio_quality: str = "medium",
-    x264_preset: str = "medium",
-    encoder_threads: str | int = "auto",
-    source_has_audio: bool = True,
-    output_fps: str = "source",
-    segment_encode_timeout: int = _SEGMENT_ENCODE_TIMEOUT,
-    final_concat_timeout: int = _FINAL_CONCAT_TIMEOUT,
-    stall_kill: int = _STALL_KILL,
-    stall_warning: int = _STALL_WARNING,
-    min_part_bytes: int = _MIN_PART_BYTES,
-    low_process_priority: bool = False,
-    rlimit_as_mb: int = 0,
-    memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
-    x264_low_memory: bool = False,
+    options: ConcatOptions | None = None,
+    **legacy_kwargs,
 ) -> None:
     """Encode each keep segment frame-accurately, concat losslessly,
     then stream-copy the result to the final output.
 
-    ``x264_low_memory`` is accepted for symmetry with segment/batch (those
-    pipelines use it to size the per-segment bitrate/CRF table). Here the
-    flag is currently a no-op — the single final encode uses the caller's
-    ``vcodec_opts`` directly — but the parameter must exist so a future
-    fix in ``encoder_opts`` keyed on ``x264_low_memory`` silently applies
-    to this method too instead of passing a never-forwarded kwarg.
+    ``options.x264_low_memory`` is accepted for symmetry with
+    segment/batch (those pipelines use it to size the per-segment
+    bitrate/CRF table). Here the flag is currently a no-op — the single
+    final encode uses the caller's ``vcodec_opts`` directly — but the
+    field must exist so a future fix in ``encoder_opts`` keyed on
+    ``x264_low_memory`` silently applies to this method too instead of
+    passing a never-forwarded kwarg.
 
     Unlike ``_run_segment_concat`` (which writes ``seg_*.mp4`` into a
     ``_<stem>_segments`` work dir) and ``_run_batch_concat`` (which writes
@@ -104,6 +84,7 @@ def _run_cut_then_encode(
     Work dir: ``_<stem>_cut`` (distinct from ``_segments`` / ``_batch``
     so manifests don't collide).
     """
+    options = coerce_options(options, legacy_kwargs)
     n_segs = len(keep_segments)
     total_duration = sum(e - s for s, e in keep_segments)
     if total_duration <= 0:
@@ -119,15 +100,15 @@ def _run_cut_then_encode(
         video_path,
         keep_segments,
         "cut_then_encode",
-        encoder,
+        options.encoder,
         vcodec,
         vcodec_opts,
-        video_quality,
-        audio_quality,
-        x264_preset,
-        encoder_threads,
-        output_fps=output_fps,
-        source_has_audio=source_has_audio,
+        options.video_quality,
+        options.audio_quality,
+        options.x264_preset,
+        options.encoder_threads,
+        output_fps=options.output_fps,
+        source_has_audio=options.source_has_audio,
     )
     _c._ensure_fresh_work_dir(cut_dir, manifest)
     cut_dir.mkdir(parents=True, exist_ok=True)
@@ -188,9 +169,9 @@ def _run_cut_then_encode(
             # that's no longer the case here.
             if (
                 cut_path.exists()
-                and cut_path.stat().st_size >= min_part_bytes
+                and cut_path.stat().st_size >= options.min_part_bytes
                 and _c._ffprobe_is_valid_mp4(cut_path)
-                and (not source_has_audio or _c._ffprobe_is_valid_media(cut_path, stream_type="a"))
+                and (not options.source_has_audio or _c._ffprobe_is_valid_media(cut_path, stream_type="a"))
                 and _c._ffprobe_duration_ok(cut_path, dur)
             ):
                 logger.debug(f"cut_then_encode: reusing cut_{i:06d}.mp4")
@@ -228,7 +209,7 @@ def _run_cut_then_encode(
                 "-map",
                 "0:v:0",
             ]
-            if source_has_audio:
+            if options.source_has_audio:
                 cmd.extend(["-map", "0:a:0?"])
             cmd.extend(
                 [
@@ -237,26 +218,26 @@ def _run_cut_then_encode(
                     *vcodec_opts,
                 ]
             )
-            if source_has_audio:
+            if options.source_has_audio:
                 cmd.extend(
                     [
                         "-c:a",
                         "aac",
-                        *_c._audio_bitrate_opts(audio_quality),
-                        *_c._audio_opts(audio_quality),
+                        *_c._audio_bitrate_opts(options.audio_quality),
+                        *_c._audio_opts(options.audio_quality),
                     ]
                 )
-            # FPS conversion: when ``output_fps != 'source'`` the
+            # FPS conversion: when ``options.output_fps != 'source'`` the
             # ``fps=`` filter duplicates/drops frames to the target CFR.
             # Apply on the encode side so each segment is independently
             # CFR; the lossless phase-2 concat then joins CFR parts with
             # no PTS jumps. Same logic as segment.py.
-            if output_fps != "source":
-                cmd.extend(["-vf", f"fps={output_fps}"])
+            if options.output_fps != "source":
+                cmd.extend(["-vf", f"fps={options.output_fps}"])
             # Thread count: forward so libx264 (or whatever encoder is
             # chosen) respects the user's low-CPU intent. Mirrors
             # segment.py's thread forwarding.
-            cmd.extend(_c._threads_opt(encoder_threads))
+            cmd.extend(_c._threads_opt(options.encoder_threads))
             cmd.extend(
                 [
                     "-movflags",
@@ -283,16 +264,16 @@ def _run_cut_then_encode(
             _c._run_ffmpeg(
                 cmd,
                 progress_callback=_seg_prog if progress_callback else None,
-                timeout=segment_encode_timeout,
+                timeout=options.segment_encode_timeout,
                 label=f"cut_then_encode cut phase segment {i}",
                 cancel_callback=cancel_callback,
                 memory_monitor=_c._new_memory_monitor(
-                    memory_monitor_factory, f"cut_then_encode seg {i}"
+                    options.memory_monitor_factory, f"cut_then_encode seg {i}"
                 ),
-                stall_kill=stall_kill,
-                stall_warning=stall_warning,
-                low_process_priority=low_process_priority,
-                rlimit_as_mb=rlimit_as_mb,
+                stall_kill=options.stall_kill,
+                stall_warning=options.stall_warning,
+                low_process_priority=options.low_process_priority,
+                rlimit_as_mb=options.rlimit_as_mb,
             )
             encoded_keep += dur
             if progress_callback and total_duration > 0:
@@ -326,10 +307,10 @@ def _run_cut_then_encode(
         # pipelines.
         if not (
             raw_concat_path.exists()
-            and raw_concat_path.stat().st_size >= min_part_bytes
+            and raw_concat_path.stat().st_size >= options.min_part_bytes
             and _c._ffprobe_is_valid_mp4(raw_concat_path)
             and (
-                not source_has_audio or _c._ffprobe_is_valid_media(raw_concat_path, stream_type="a")
+                not options.source_has_audio or _c._ffprobe_is_valid_media(raw_concat_path, stream_type="a")
             )
             and _c._ffprobe_duration_ok(raw_concat_path, total_duration)
         ):
@@ -349,12 +330,7 @@ def _run_cut_then_encode(
                 ),
                 cancel_callback=cancel_callback,
                 label="cut_then_encode concat",
-                timeout=final_concat_timeout,
-                stall_kill=stall_kill,
-                stall_warning=stall_warning,
-                low_process_priority=low_process_priority,
-                rlimit_as_mb=rlimit_as_mb,
-                memory_monitor_factory=memory_monitor_factory,
+                options=options,
             )
 
         # ── Phase 3: Stream-copy intermediate → final output ──
@@ -401,14 +377,14 @@ def _run_cut_then_encode(
                 str(output_path),
             ],
             progress_callback=_encode_prog,
-            timeout=final_concat_timeout,
+            timeout=options.final_concat_timeout,
             label=label_text,
             cancel_callback=cancel_callback,
-            memory_monitor=_c._new_memory_monitor(memory_monitor_factory, "cut_then_encode mux"),
-            stall_kill=stall_kill,
-            stall_warning=stall_warning,
-            low_process_priority=low_process_priority,
-            rlimit_as_mb=rlimit_as_mb,
+            memory_monitor=_c._new_memory_monitor(options.memory_monitor_factory, "cut_then_encode mux"),
+            stall_kill=options.stall_kill,
+            stall_warning=options.stall_warning,
+            low_process_priority=options.low_process_priority,
+            rlimit_as_mb=options.rlimit_as_mb,
         )
         if progress_callback:
             progress_callback(1.0)

@@ -64,7 +64,7 @@ class TestCliMemoryReservePreflight:
 
         with (
             patch(
-                "stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)
+                "stream2video.pipeline_controller.download", return_value=DownloadResult(src, is_downloaded=False)
             ),
             patch("stream2video.memory._available_ram_mb", return_value=8000.0),
         ):
@@ -94,11 +94,14 @@ class TestCliMemoryReservePreflight:
 
         with (
             patch(
-                "stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)
+                "stream2video.pipeline_controller.download", return_value=DownloadResult(src, is_downloaded=False)
             ),
-            patch("stream2video.cli.load_silence_cache", return_value=[]),
-            patch("stream2video.cli.cut_and_concat", side_effect=fake_cut_and_concat),
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=[]),
+            patch("stream2video.pipeline_controller.cut_and_concat", side_effect=fake_cut_and_concat),
             patch("stream2video.memory._available_ram_mb", return_value=64 * 1024.0),
+            # The controller calls the REAL generate_keep_segments before
+            # concat; its internal duration probe needs a fake ffprobe.
+            patch("stream2video.concat.get_video_duration", return_value=10.0),
         ):
             result = CliRunner().invoke(
                 app,
@@ -202,10 +205,13 @@ class TestCliUseCrf:
 
         with (
             patch(
-                "stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)
+                "stream2video.pipeline_controller.download", return_value=DownloadResult(src, is_downloaded=False)
             ),
-            patch("stream2video.cli.load_silence_cache", return_value=[]),
-            patch("stream2video.cli.cut_and_concat", side_effect=fake_cut_and_concat),
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=[]),
+            patch("stream2video.pipeline_controller.cut_and_concat", side_effect=fake_cut_and_concat),
+            # generate_keep_segments (called by the controller before the
+            # encode) probes duration via stream2video.concat — fake it.
+            patch("stream2video.concat.get_video_duration", return_value=10.0),
         ):
             result = CliRunner().invoke(
                 app,
@@ -242,10 +248,13 @@ class TestCliUseCrf:
 
         with (
             patch(
-                "stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)
+                "stream2video.pipeline_controller.download", return_value=DownloadResult(src, is_downloaded=False)
             ),
-            patch("stream2video.cli.load_silence_cache", return_value=[]),
-            patch("stream2video.cli.cut_and_concat", side_effect=fake_cut_and_concat),
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=[]),
+            patch("stream2video.pipeline_controller.cut_and_concat", side_effect=fake_cut_and_concat),
+            # generate_keep_segments (called by the controller before the
+            # encode) probes duration via stream2video.concat — fake it.
+            patch("stream2video.concat.get_video_duration", return_value=10.0),
         ):
             result = CliRunner().invoke(
                 app,
@@ -307,10 +316,13 @@ class TestCliOutputFps:
 
         with (
             patch(
-                "stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)
+                "stream2video.pipeline_controller.download", return_value=DownloadResult(src, is_downloaded=False)
             ),
-            patch("stream2video.cli.load_silence_cache", return_value=[]),
-            patch("stream2video.cli.cut_and_concat", side_effect=fake_cut_and_concat),
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=[]),
+            patch("stream2video.pipeline_controller.cut_and_concat", side_effect=fake_cut_and_concat),
+            # generate_keep_segments (called by the controller before the
+            # encode) probes duration via stream2video.concat — fake it.
+            patch("stream2video.concat.get_video_duration", return_value=10.0),
         ):
             result = CliRunner().invoke(
                 app,
@@ -348,10 +360,13 @@ class TestCliOutputFps:
 
         with (
             patch(
-                "stream2video.cli.download", return_value=DownloadResult(src, is_downloaded=False)
+                "stream2video.pipeline_controller.download", return_value=DownloadResult(src, is_downloaded=False)
             ),
-            patch("stream2video.cli.load_silence_cache", return_value=[]),
-            patch("stream2video.cli.cut_and_concat", side_effect=fake_cut_and_concat),
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=[]),
+            patch("stream2video.pipeline_controller.cut_and_concat", side_effect=fake_cut_and_concat),
+            # generate_keep_segments (called by the controller before the
+            # encode) probes duration via stream2video.concat — fake it.
+            patch("stream2video.concat.get_video_duration", return_value=10.0),
         ):
             result = CliRunner().invoke(
                 app,

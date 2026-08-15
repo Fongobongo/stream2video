@@ -506,18 +506,25 @@ def read_lines_queue(pipe: IO[bytes]) -> tuple[queue.Queue[bytes | None], thread
 # "download") so multiple subprocesses can coexist and cancellation can
 # target the right one.
 #
+# Each owner maps to a LIST so two processes registered under the SAME
+# owner (two parallel previews, a preview + a pipeline) both stay
+# reachable, and a context-manager exit only ever removes its OWN
+# process (audit #6: the historical ``finally: set_active_process(None)``
+# unconditionally wiped the slot, erasing a process B that had
+# registered under the same owner before A exited).
+#
 # ``set_active_process`` / ``get_active_process`` are retained as thin
 # wrappers around the registry so existing call sites (concat.py,
 # silence.py, download.py) keep working — they implicitly use the
 # "default" owner. New call sites should prefer the scoped API.
-_proc_registry: dict[str, subprocess.Popen] = {}
+_proc_registry: dict[str, list[subprocess.Popen]] = {}
 _proc_registry_lock = threading.Lock()
 
 
 def get_active_process(owner: str = "default") -> subprocess.Popen | None:
-    """Return the currently registered subprocess for ``owner`` (default slot).
+    """Return the most recently registered subprocess for ``owner``.
 
-    Returns ``None`` when ``owner`` is not registered — there is no
+    Returns ``None`` when ``owner`` has no registration — there is no
     fallback to the "default" slot. Previously ``get_active_process("preview")``
     would silently return the pipeline's ffmpeg if no preview was running,
     which caused a parallel preview's ``finally`` to clear the pipeline's
@@ -525,13 +532,16 @@ def get_active_process(owner: str = "default") -> subprocess.Popen | None:
     pass ``owner="default"`` (the default).
     """
     with _proc_registry_lock:
-        return _proc_registry.get(owner)
+        procs = _proc_registry.get(owner)
+        return procs[-1] if procs else None
 
 
 def set_active_process(proc: subprocess.Popen | None, owner: str = "default") -> None:
     """Register or clear the active subprocess for ``owner``. Thread-safe.
 
-    Passing ``proc=None`` removes the registration. Multiple owners can
+    Passing ``proc=None`` clears ALL registrations for ``owner``
+    (legacy semantic — use :func:`unregister_process` from a context
+    manager so only YOUR process is removed). Multiple owners can
     coexist (e.g. "pipeline" + "preview") so parallel subprocesses don't
     clobber each other's registration.
     """
@@ -539,31 +549,47 @@ def set_active_process(proc: subprocess.Popen | None, owner: str = "default") ->
         if proc is None:
             _proc_registry.pop(owner, None)
         else:
-            _proc_registry[owner] = proc
+            _proc_registry.setdefault(owner, []).append(proc)
+
+
+def unregister_process(proc: subprocess.Popen, owner: str = "default") -> None:
+    """Remove exactly *proc* from ``owner``'s registrations (identity).
+
+    Unlike ``set_active_process(None, owner)`` this never touches other
+    processes registered under the same owner — audit #6: A's exit must
+    not erase B's registration.
+    """
+    with _proc_registry_lock:
+        procs = _proc_registry.get(owner)
+        if not procs:
+            return
+        for i, p in enumerate(procs):
+            if p is proc:
+                del procs[i]
+                break
+        if not procs:
+            _proc_registry.pop(owner, None)
 
 
 @contextmanager
 def registered_process(proc: subprocess.Popen, owner: str = "default") -> Iterator[None]:
     """Context manager that registers ``proc`` under ``owner`` on entry and
-    clears the same slot on exit (success or exception).
+    removes exactly that process on exit (success or exception).
 
-    Guarantees the registry slot is always cleared by the time the block
-    exits, even on cancel/timeout/error, and that the ``owner`` used for
-    clear matches the one used for register — the historical bare
-    ``set_active_process(None)`` in ``finally`` cleared ``"default"``
-    even when the registration was under ``"preview"``, which erased a
-    concurrently-running pipeline's ffmpeg from the registry (P0 audit:
-    preview clobbered default registration).
+    Guarantees the registry slot is always cleaned by the time the block
+    exits, even on cancel/timeout/error, and that the removal is scoped
+    to THIS process: a concurrent run registered under the same owner
+    (a second preview) survives A's exit untouched (audit #6).
     """
     set_active_process(proc, owner=owner)
     try:
         yield
     finally:
-        set_active_process(None, owner=owner)
+        unregister_process(proc, owner=owner)
 
 
 def cancel_process(owner: str, timeout: float = 2.0) -> bool:
-    """Kill the subprocess registered under ``owner`` if any. Returns True if killed.
+    """Kill ALL subprocesses registered under ``owner``. Returns True if any was killed.
 
     Uses ``process.kill()`` (SIGKILL on Unix, TerminateProcess on Windows)
     because we don't know which subprocess type it is and graceful
@@ -577,43 +603,50 @@ def cancel_process(owner: str, timeout: float = 2.0) -> bool:
     and exit cleanly.
     """
     with _proc_registry_lock:
-        proc = _proc_registry.get(owner)
-    if proc is None or proc.poll() is not None:
+        procs = list(_proc_registry.get(owner) or [])
+    if not procs:
         return False
-    try:
-        proc.kill()
-    except Exception:
-        logger.exception(f"cancel_process({owner!r}): kill() failed")
-        return False
-    # Wait for the child to actually reap BEFORE closing
-    # our pipe handles. On Windows, closing a pipe handle while a drain
-    # thread is blocked in a synchronous ReadFile on it does NOT wake
-    # the reader (no EBADF is delivered to the in-flight read); the
-    # reader only exits when the child dies and breaks the pipe. The old
-    # order closed the pipes first, so a failing ``kill()`` (or a slow
-    # one) left the drain threads permanently wedged and the caller's
-    # wait loop running with no data flow. ``wait(timeout)`` first, then
-    # close.
-    try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        logger.warning("cancel_process(%r): process did not exit within %.1fs", owner, timeout)
-        # Fall through to closing the pipes anyway — if the
-        # child survives (killed but wedged), the drain threads blocked in
-        # ReadFile need our handle-close to see EOF and unwind. Returning
-        # False here without closing would leak them until process exit.
-    # Only now, after kill+wait, close OUR pipe handles. Any drain thread
-    # sees EOF (the child's ends are gone) and exits.
-    for pipe_name in ("stdin", "stdout", "stderr"):
-        pipe = getattr(proc, pipe_name, None)
-        if pipe is not None:
-            try:
-                pipe.close()
-            except Exception:
-                logger.debug(
-                    "cancel_process(%r): closing %s failed", owner, pipe_name, exc_info=True
-                )
-    return proc.poll() is not None
+    killed_any = False
+    for proc in procs:
+        if proc.poll() is not None:
+            continue
+        try:
+            proc.kill()
+            killed_any = True
+        except Exception:
+            logger.exception(f"cancel_process({owner!r}): kill() failed")
+            continue
+        # Wait for the child to actually reap BEFORE closing
+        # our pipe handles. On Windows, closing a pipe handle while a drain
+        # thread is blocked in a synchronous ReadFile on it does NOT wake
+        # the reader (no EBADF is delivered to the in-flight read); the
+        # reader only exits when the child dies and breaks the pipe. The old
+        # order closed the pipes first, so a failing ``kill()`` (or a slow
+        # one) left the drain threads permanently wedged and the caller's
+        # wait loop running with no data flow. ``wait(timeout)`` first, then
+        # close.
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "cancel_process(%r): process did not exit within %.1fs", owner, timeout
+            )
+            # Fall through to closing the pipes anyway — if the
+            # child survives (killed but wedged), the drain threads blocked in
+            # ReadFile need our handle-close to see EOF and unwind. Returning
+            # False here without closing would leak them until process exit.
+        # Only now, after kill+wait, close OUR pipe handles. Any drain thread
+        # sees EOF (the child's ends are gone) and exits.
+        for pipe_name in ("stdin", "stdout", "stderr"):
+            pipe = getattr(proc, pipe_name, None)
+            if pipe is not None:
+                try:
+                    pipe.close()
+                except Exception:
+                    logger.debug(
+                        "cancel_process(%r): closing %s failed", owner, pipe_name, exc_info=True
+                    )
+    return killed_any
 
 
 def list_active_owners() -> list[str]:
@@ -626,7 +659,11 @@ def list_active_owners() -> list[str]:
     scoped-registry API surface the shutdown path is expected to build on.
     """
     with _proc_registry_lock:
-        return [owner for owner, proc in _proc_registry.items() if proc.poll() is None]
+        return [
+            owner
+            for owner, procs in _proc_registry.items()
+            if any(p.poll() is None for p in procs)
+        ]
 
 
 def kill_and_reap(process: subprocess.Popen, timeout: float = 30.0) -> None:

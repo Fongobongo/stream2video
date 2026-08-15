@@ -33,7 +33,6 @@ class _FakeCallbacks:
     def __init__(self) -> None:
         self.logs: list[str] = []
         self.scheduled_on_main: list[tuple[int, Callable[..., Any]]] = []
-        self.scheduled_after: list[tuple[int, Callable[..., Any]]] = []
         self.button_states: list[bool] = []  # True = running, False = idle
         self._lock = threading.Lock()
 
@@ -44,10 +43,6 @@ class _FakeCallbacks:
         self.scheduled_on_main.append((ms, func))
         # Drive the queued callback immediately so the test sees the
         # resulting log line without needing a Tk main loop.
-        func()
-
-    def schedule_after(self, ms: int, func: Callable[..., Any]) -> None:
-        self.scheduled_after.append((ms, func))
         func()
 
     def set_test_button_state(self, *, running: bool) -> None:

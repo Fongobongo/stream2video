@@ -1654,7 +1654,7 @@ class TestAudioQualityParametric:
         seen: list[str] = []
 
         def fake_run_with_fallback(*args, **kwargs):
-            seen.append(kwargs["audio_quality"])
+            seen.append(kwargs["options"].audio_quality)
 
         with (
             patch("stream2video.concat.get_video_duration", return_value=2.0),

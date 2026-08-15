@@ -11,16 +11,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 from stream2video import concat as _c
-from stream2video.concat.constants import (
-    _BATCH_CHUNK_SIZE,
-    _FINAL_CONCAT_TIMEOUT,
-    _MIN_PART_BYTES,
-    _SEGMENT_ENCODE_TIMEOUT,
-    _STALL_KILL,
-    _STALL_WARNING,
-)
+from stream2video.concat.options import ConcatOptions, coerce_options
 from stream2video.config import VALID_METHODS
-from stream2video.memory import MemoryMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -34,27 +26,8 @@ def _run_with_fallback(
     method: str,
     progress_callback: Callable[[float], None] | None = None,
     cancel_callback: Callable[[], bool] | None = None,
-    video_quality: str = "medium",
-    audio_quality: str = "medium",
-    software_fallback: str = "ask",
-    fallback_consent: Callable[[], bool] | None = None,
-    x264_preset: str = "medium",
-    encoder_threads: str | int = "auto",
-    source_has_audio: bool = True,
-    output_fps: str = "source",
-    x264_low_memory: bool = False,
-    use_crf: bool = False,
-    source_bitrate: int | None = None,
-    gapless_concat: bool = False,
-    low_process_priority: bool = False,
-    rlimit_as_mb: int = 0,
-    segment_encode_timeout: int = _SEGMENT_ENCODE_TIMEOUT,
-    final_concat_timeout: int = _FINAL_CONCAT_TIMEOUT,
-    stall_kill: int = _STALL_KILL,
-    stall_warning: int = _STALL_WARNING,
-    batch_chunk_size: int = _BATCH_CHUNK_SIZE,
-    min_part_bytes: int = _MIN_PART_BYTES,
-    memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
+    options: ConcatOptions | None = None,
+    **legacy_kwargs,
 ) -> None:
     """Run the picked concat method with the primary encoder; fall back to libx264 on failure.
 
@@ -68,13 +41,15 @@ def _run_with_fallback(
 
     ``method`` is one of ``VALID_METHODS`` ("segment", "batch",
     "cut_then_encode"); anything else raises ConcatError.
-    ``video_quality`` / ``audio_quality`` are forwarded to the libx264
-    fallback so the retry uses the same bitrate/CRF/AAC preset the user
-    requested. ``software_fallback`` / ``fallback_consent`` gate the
-    retry per the policy in :func:`_with_libx264_fallback`.
-    ``x264_preset`` / ``encoder_threads`` likewise forward so the fallback
+    ``options.video_quality`` / ``options.audio_quality`` are forwarded
+    to the libx264 fallback so the retry uses the same bitrate/CRF/AAC
+    preset the user requested. ``options.software_fallback`` /
+    ``options.fallback_consent`` gate the retry per the policy in
+    :func:`_with_libx264_fallback`. ``options.x264_preset`` /
+    ``options.encoder_threads`` likewise forward so the fallback
     respects a low-CPU intent.
     """
+    options = coerce_options(options, legacy_kwargs)
     if method == "segment":
         work_suffix = "_segments"
     elif method == "batch":
@@ -104,12 +79,12 @@ def _run_with_fallback(
         )
         libx264_opts = _c.encoder_opts(
             "libx264",
-            video_quality,
-            x264_preset=x264_preset,
-            encoder_threads=encoder_threads,
-            x264_low_memory=x264_low_memory,
-            use_crf=use_crf,
-            source_bitrate=source_bitrate,
+            options.video_quality,
+            x264_preset=options.x264_preset,
+            encoder_threads=options.encoder_threads,
+            x264_low_memory=options.x264_low_memory,
+            use_crf=options.use_crf,
+            source_bitrate=options.source_bitrate,
         )
         manifest = _c._build_manifest(
             video_path,
@@ -118,13 +93,13 @@ def _run_with_fallback(
             "libx264",
             "libx264",
             libx264_opts,
-            video_quality,
-            audio_quality,
-            x264_preset,
-            encoder_threads,
-            output_fps=output_fps,
-            gapless_concat=gapless_concat,
-            source_has_audio=source_has_audio,
+            options.video_quality,
+            options.audio_quality,
+            options.x264_preset,
+            options.encoder_threads,
+            output_fps=options.output_fps,
+            gapless_concat=options.gapless_concat,
+            source_has_audio=options.source_has_audio,
         )
         try:
             work_dir.mkdir(parents=True, exist_ok=True)
@@ -133,6 +108,7 @@ def _run_with_fallback(
             logger.warning(f"Could not retag work dir for libx264 retry: {e}")
 
     def _try(enc: str, enc_opts: list[str]) -> None:
+        retry_options = options.replace(encoder=enc)
         if method == "segment":
             _c._run_segment_concat(
                 video_path,
@@ -142,22 +118,7 @@ def _run_with_fallback(
                 enc_opts,
                 progress_callback,
                 cancel_callback,
-                encoder=enc,
-                video_quality=video_quality,
-                audio_quality=audio_quality,
-                x264_preset=x264_preset,
-                encoder_threads=encoder_threads,
-                source_has_audio=source_has_audio,
-                output_fps=output_fps,
-                gapless_concat=gapless_concat,
-                low_process_priority=low_process_priority,
-                rlimit_as_mb=rlimit_as_mb,
-                segment_encode_timeout=segment_encode_timeout,
-                final_concat_timeout=final_concat_timeout,
-                stall_kill=stall_kill,
-                stall_warning=stall_warning,
-                min_part_bytes=min_part_bytes,
-                memory_monitor_factory=memory_monitor_factory,
+                options=retry_options,
             )
         elif method == "cut_then_encode":
             _c._run_cut_then_encode(
@@ -168,22 +129,7 @@ def _run_with_fallback(
                 enc_opts,
                 progress_callback,
                 cancel_callback,
-                encoder=enc,
-                video_quality=video_quality,
-                audio_quality=audio_quality,
-                x264_preset=x264_preset,
-                encoder_threads=encoder_threads,
-                source_has_audio=source_has_audio,
-                output_fps=output_fps,
-                segment_encode_timeout=segment_encode_timeout,
-                final_concat_timeout=final_concat_timeout,
-                stall_kill=stall_kill,
-                stall_warning=stall_warning,
-                min_part_bytes=min_part_bytes,
-                low_process_priority=low_process_priority,
-                rlimit_as_mb=rlimit_as_mb,
-                memory_monitor_factory=memory_monitor_factory,
-                x264_low_memory=x264_low_memory,
+                options=retry_options,
             )
         else:
             _c._run_batch_concat(
@@ -194,22 +140,7 @@ def _run_with_fallback(
                 enc_opts,
                 progress_callback,
                 cancel_callback,
-                encoder=enc,
-                video_quality=video_quality,
-                audio_quality=audio_quality,
-                x264_preset=x264_preset,
-                encoder_threads=encoder_threads,
-                source_has_audio=source_has_audio,
-                output_fps=output_fps,
-                segment_encode_timeout=segment_encode_timeout,
-                final_concat_timeout=final_concat_timeout,
-                stall_kill=stall_kill,
-                stall_warning=stall_warning,
-                batch_chunk_size=batch_chunk_size,
-                min_part_bytes=min_part_bytes,
-                low_process_priority=low_process_priority,
-                rlimit_as_mb=rlimit_as_mb,
-                memory_monitor_factory=memory_monitor_factory,
+                options=retry_options,
             )
 
     _c._with_libx264_fallback(
@@ -218,15 +149,7 @@ def _run_with_fallback(
         _try,
         (_c.ConcatError, OSError),
         _cleanup,
-        video_quality=video_quality,
-        audio_quality=audio_quality,
-        software_fallback=software_fallback,
-        fallback_consent=fallback_consent,
-        x264_preset=x264_preset,
-        encoder_threads=encoder_threads,
-        x264_low_memory=x264_low_memory,
-        use_crf=use_crf,
-        source_bitrate=source_bitrate,
+        options=options,
     )
 
 
@@ -236,40 +159,33 @@ def _with_libx264_fallback(
     try_fn: Callable[[str, list[str]], None],
     exc_types: tuple[type[BaseException], ...],
     on_fallback: Callable[[str], None] | None = None,
-    video_quality: str = "medium",
-    audio_quality: str = "medium",
-    software_fallback: str = "ask",
-    fallback_consent: Callable[[], bool] | None = None,
-    x264_preset: str = "medium",
-    encoder_threads: str | int = "auto",
-    x264_low_memory: bool = False,
-    use_crf: bool = False,
-    source_bitrate: int | None = None,
+    options: ConcatOptions | None = None,
+    **legacy_kwargs,
 ) -> None:
     """Run ``try_fn(primary_codec, primary_opts)``; on failure, retry once with libx264.
 
-    Behaviour on ``primary_codec`` failure depends on ``software_fallback``:
+    Behaviour on ``primary_codec`` failure depends on ``options.software_fallback``:
 
       * ``enabled`` -- retry with libx264 (legacy silent-fallback behaviour).
       * ``disabled`` -- re-raise the original exception immediately so the
         user gets the real encoder's error.
-      * ``ask`` (default) -- call ``fallback_consent``; if it returns True
-        retry with libx264, otherwise re-raise. When ``fallback_consent``
-        is None the policy re-raises so an unattended run cannot silently
-        switch to a CPU-heavy encoder.
+      * ``ask`` (default) -- call ``options.fallback_consent``; if it returns
+        True retry with libx264, otherwise re-raise. When
+        ``options.fallback_consent`` is None the policy re-raises so an
+        unattended run cannot silently switch to a CPU-heavy encoder.
 
     ``on_fallback`` (optional): called with the failing encoder name
     BEFORE retrying with libx264. Use this to clean up partial / corrupt
     output (e.g. delete a segment directory of MP4s that have a missing
     moov atom).
 
-    ``video_quality`` and ``audio_quality`` are forwarded to the libx264
-    retry so its CRF/AAC bitrate matches the user-requested preset.
-    ``x264_preset`` / ``encoder_threads`` likewise follow the user's
-    settings so the fallback respects the low-CPU intent for users who
-    chose ``ultrafast`` + a thread cap to protect an unstable CPU.
-    ``x264_low_memory`` reduces the encoder's frame-buffer footprint
-    (see ``encoder_opts`` for details).
+    ``options.video_quality`` and ``options.audio_quality`` are forwarded
+    to the libx264 retry so its CRF/AAC bitrate matches the user-requested
+    preset. ``options.x264_preset`` / ``options.encoder_threads`` likewise
+    follow the user's settings so the fallback respects the low-CPU intent
+    for users who chose ``ultrafast`` + a thread cap to protect an unstable
+    CPU. ``options.x264_low_memory`` reduces the encoder's frame-buffer
+    footprint (see ``encoder_opts`` for details).
 
     Two exception classes bypass the retry entirely:
 
@@ -281,6 +197,7 @@ def _with_libx264_fallback(
         tried (a config problem, not a video-data problem), so a libx264
         retry adds no information.
     """
+    options = coerce_options(options, legacy_kwargs)
     enc, enc_opts = primary_codec, primary_opts
     while True:
         try:
@@ -295,9 +212,11 @@ def _with_libx264_fallback(
             if enc == "libx264":
                 raise
             # Non-libx264 encoder failed -- apply fallback policy.
-            if software_fallback == "disabled":
+            if options.software_fallback == "disabled":
                 raise
-            if software_fallback == "ask" and (fallback_consent is None or not fallback_consent()):
+            if options.software_fallback == "ask" and (
+                options.fallback_consent is None or not options.fallback_consent()
+            ):
                 raise
             # software_fallback == "enabled" OR ask-consented.
             logger.warning(f"{enc} failed: {str(e)[:200]}; falling back to libx264")
@@ -310,11 +229,11 @@ def _with_libx264_fallback(
                 "libx264",
                 _c.encoder_opts(
                     "libx264",
-                    video_quality,
-                    x264_preset=x264_preset,
-                    encoder_threads=encoder_threads,
-                    x264_low_memory=x264_low_memory,
-                    use_crf=use_crf,
-                    source_bitrate=source_bitrate,
+                    options.video_quality,
+                    x264_preset=options.x264_preset,
+                    encoder_threads=options.encoder_threads,
+                    x264_low_memory=options.x264_low_memory,
+                    use_crf=options.use_crf,
+                    source_bitrate=options.source_bitrate,
                 ),
             )

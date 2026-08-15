@@ -22,6 +22,7 @@ from stream2video.gui_widgets import Tooltip as _Tooltip
 from stream2video.paths import (
     RECENT_NAME_MAX,
     add_recent_project,
+    is_marked_project_dir,
     prune_recent_projects,
     truncate_recent_name,
     validate_project_delete,
@@ -37,8 +38,17 @@ class RecentProjectsMixin:
         """Rebuild the Recent Projects sub-section from self.config.
 
         Prunes entries whose directory no longer exists. Rows have a
-        label (project name + tooltip with full path) and a trash button
-        that asks for confirmation before deleting the whole subdirectory.
+        label (project name + tooltip with full path) and a trailing
+        button:
+
+          * marked project dirs (per-video dirs created by this app):
+            a trash "X" that confirms before recursively deleting the
+            whole subdirectory;
+          * anything else (flat-mode output dirs, foreign dirs): a
+            remove-from-recents button only — audit #7: in flat mode the
+            entry is the shared output dir, which this app never marks
+            as a project dir, so a destructive delete is logically
+            impossible and the UI must not promise it.
         """
         for child in self.recent_frame.winfo_children():
             # Each row owns a Tooltip with pending Tk ``after`` timers —
@@ -78,17 +88,42 @@ class RecentProjectsMixin:
             # Keep a reachable reference so the row-teardown above can
             # cancel the tooltip's timers before the widget goes away.
             lbl._tooltip_ref = _Tooltip(lbl, path_str)
-            del_btn = ctk.CTkButton(
-                row,
-                text="X",
-                width=22,
-                height=22,
-                fg_color=("gray70", "gray30"),
-                hover_color=("#c0392b", "#922B21"),
-                text_color=("gray10", "gray90"),
-                command=lambda p=path_str: self._delete_recent_project(p),
-            )
-            del_btn.pack(side="right", padx=(0, 3))
+            try:
+                deletable = is_marked_project_dir(Path(path_str))
+            except OSError:
+                deletable = False
+            if deletable:
+                del_btn = ctk.CTkButton(
+                    row,
+                    text="X",
+                    width=22,
+                    height=22,
+                    fg_color=("gray70", "gray30"),
+                    hover_color=("#c0392b", "#922B21"),
+                    text_color=("gray10", "gray90"),
+                    command=lambda p=path_str: self._delete_recent_project(p),
+                )
+                del_btn.pack(side="right", padx=(0, 3))
+                del_btn._tooltip_ref = _Tooltip(
+                    del_btn, "Delete this project and all its files"
+                )
+            else:
+                # Flat mode (or a hand-edited entry): deletion of the
+                # directory is not possible — only remove the list entry.
+                rem_btn = ctk.CTkButton(
+                    row,
+                    text="–",
+                    width=22,
+                    height=22,
+                    fg_color=("gray70", "gray30"),
+                    hover_color=("#c0392b", "#922B21"),
+                    text_color=("gray10", "gray90"),
+                    command=lambda p=path_str: self._remove_recent_entry(p),
+                )
+                rem_btn.pack(side="right", padx=(0, 3))
+                rem_btn._tooltip_ref = _Tooltip(
+                    rem_btn, "Remove from Recent Projects (no files are deleted)"
+                )
 
     def _add_to_recent_projects(self, project_path: Path | str) -> None:
         """Add or move ``project_path`` to the top of the recent list (max 5).
@@ -146,6 +181,23 @@ class RecentProjectsMixin:
         path = Path(path_str)
         if not path.is_dir():
             self._log(f"Project no longer exists, dropping from list: {path_str}")
+            self._remove_recent_entry(path_str)
+            return
+        # Audit #7: in flat mode the recents entry is the shared output
+        # directory, which this app never marks as a project dir — a
+        # recursive delete of it is impossible by design. Drop the entry
+        # silently instead of showing a warning for a state the UI no
+        # longer exposes (the render hides the trash button for
+        # unmarked entries; a hand-edited settings.json can still land
+        # here).
+        try:
+            marked = is_marked_project_dir(path)
+        except OSError:
+            marked = False
+        if not marked:
+            self._log(
+                f"Not an app-created project directory — removed from list: {path_str}"
+            )
             self._remove_recent_entry(path_str)
             return
         ok, reason = validate_project_delete(path)

@@ -7,15 +7,9 @@ from collections.abc import Callable
 from pathlib import Path
 
 from stream2video import concat as _c
-from stream2video.concat.constants import (
-    _FINAL_CONCAT_TIMEOUT,
-    _MIN_PART_BYTES,
-    _SEGMENT_ENCODE_TIMEOUT,
-    _STALL_KILL,
-    _STALL_WARNING,
-)
+from stream2video.concat.constants import _FINAL_CONCAT_TIMEOUT
+from stream2video.concat.options import ConcatOptions, coerce_options
 from stream2video.config import OUTPUT_FORMAT_SPECS
-from stream2video.memory import MemoryMonitor
 from stream2video.tools import ffmpeg_path
 
 logger = logging.getLogger(__name__)
@@ -26,17 +20,13 @@ def _run_audio_concat_filter(
     part_paths: list[Path],
     *,
     codec: str,
-    audio_quality: str,
     extra_opts: list[str],
     total_duration: float,
     progress_callback: Callable[[float], None] | None = None,
     cancel_callback: Callable[[], bool] | None = None,
     timeout: int = _FINAL_CONCAT_TIMEOUT,
-    stall_kill: int = _STALL_KILL,
-    stall_warning: int = _STALL_WARNING,
-    low_process_priority: bool = False,
-    rlimit_as_mb: int = 0,
-    memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
+    options: ConcatOptions | None = None,
+    **legacy_kwargs,
 ) -> None:
     """Join audio parts via the ``concat`` filter (re-encode path).
 
@@ -53,6 +43,7 @@ def _run_audio_concat_filter(
     demuxer instead), but if they did, the re-encode would add one
     generation of loss — acceptable as a fallback, not as policy.
     """
+    options = coerce_options(options, legacy_kwargs)
     n = len(part_paths)
     if n == 0:
         raise _c.ConcatError("audio concat filter: no parts to join")
@@ -83,8 +74,8 @@ def _run_audio_concat_filter(
             # Bitrate first so ``extra_opts`` (already carrying e.g.
             # explicit sample-rate / channel pins) can override on a
             # later flag — ffmpeg takes the LAST occurrence of each option.
-            *_c._audio_bitrate_opts(audio_quality),
-            *_c._audio_opts(audio_quality),
+            *_c._audio_bitrate_opts(options.audio_quality),
+            *_c._audio_opts(options.audio_quality),
             *extra_opts,
             str(output_path),
         ],
@@ -92,11 +83,11 @@ def _run_audio_concat_filter(
         timeout=timeout,
         label=label_text,
         cancel_callback=cancel_callback,
-        memory_monitor=_c._new_memory_monitor(memory_monitor_factory, label_text),
-        stall_kill=stall_kill,
-        stall_warning=stall_warning,
-        low_process_priority=low_process_priority,
-        rlimit_as_mb=rlimit_as_mb,
+        memory_monitor=_c._new_memory_monitor(options.memory_monitor_factory, label_text),
+        stall_kill=options.stall_kill,
+        stall_warning=options.stall_warning,
+        low_process_priority=options.low_process_priority,
+        rlimit_as_mb=options.rlimit_as_mb,
     )
 
 
@@ -107,15 +98,8 @@ def _run_audio_extract(
     output_format: str,
     progress_callback: Callable[[float], None] | None = None,
     cancel_callback: Callable[[], bool] | None = None,
-    audio_quality: str = "medium",
-    segment_encode_timeout: int = _SEGMENT_ENCODE_TIMEOUT,
-    final_concat_timeout: int = _FINAL_CONCAT_TIMEOUT,
-    stall_kill: int = _STALL_KILL,
-    stall_warning: int = _STALL_WARNING,
-    min_part_bytes: int = _MIN_PART_BYTES,
-    low_process_priority: bool = False,
-    rlimit_as_mb: int = 0,
-    memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None,
+    options: ConcatOptions | None = None,
+    **legacy_kwargs,
 ) -> None:
     """Extract audio-only output (mp3/opus/aac/wav/flac) from keep segments.
 
@@ -140,6 +124,7 @@ def _run_audio_extract(
     ``_audio_bitrate_opts()`` (high=256k, medium=192k, low=128k);
     ``source`` and wav/flac omit the bitrate knob.
     """
+    options = coerce_options(options, legacy_kwargs)
     spec = OUTPUT_FORMAT_SPECS.get(output_format)
     if spec is None:
         # Should be unreachable: cut_and_concat validates output_format
@@ -168,7 +153,7 @@ def _run_audio_extract(
         codec,  # vcodec slot — the actual ffmpeg codec used
         [],  # vcodec_opts slot — audio has no encoder opts beyond -c:a
         "n/a",  # video_quality slot — not applicable to audio-only
-        audio_quality,
+        options.audio_quality,
         "n/a",  # x264_preset slot
         "auto",  # encoder_threads slot
     )
@@ -179,7 +164,7 @@ def _run_audio_extract(
     # command line readable in the log.
     bitrate_opts: list[str] = []
     if not lossless:
-        bitrate_opts = _c._audio_bitrate_opts(audio_quality)
+        bitrate_opts = _c._audio_bitrate_opts(options.audio_quality)
 
     try:
         encoded_keep = 0.0
@@ -209,7 +194,7 @@ def _run_audio_extract(
             # it has no video stream, defeating resume (P0 audit v0.3).
             if (
                 seg_path.exists()
-                and seg_path.stat().st_size >= min_part_bytes
+                and seg_path.stat().st_size >= options.min_part_bytes
                 and _c._ffprobe_is_valid_media(seg_path, stream_type="a")
                 and _c._ffprobe_duration_ok(seg_path, dur)
             ):
@@ -244,19 +229,19 @@ def _run_audio_extract(
                     "-c:a",
                     codec,
                     *bitrate_opts,
-                    *_c._audio_opts(audio_quality),
+                    *_c._audio_opts(options.audio_quality),
                     *extra_opts,
                     str(seg_path),
                 ],
                 progress_callback=seg_prog,
-                timeout=segment_encode_timeout,
+                timeout=options.segment_encode_timeout,
                 label=label_text,
                 cancel_callback=cancel_callback,
-                memory_monitor=_c._new_memory_monitor(memory_monitor_factory, label_text),
-                stall_kill=stall_kill,
-                stall_warning=stall_warning,
-                low_process_priority=low_process_priority,
-                rlimit_as_mb=rlimit_as_mb,
+                memory_monitor=_c._new_memory_monitor(options.memory_monitor_factory, label_text),
+                stall_kill=options.stall_kill,
+                stall_warning=options.stall_warning,
+                low_process_priority=options.low_process_priority,
+                rlimit_as_mb=options.rlimit_as_mb,
             )
 
             encoded_keep += dur
@@ -294,17 +279,12 @@ def _run_audio_extract(
                 output_path,
                 part_paths,
                 codec=codec,
-                audio_quality=audio_quality,
                 extra_opts=extra_opts,
                 total_duration=total_duration,
                 progress_callback=progress_callback,
                 cancel_callback=cancel_callback,
-                timeout=final_concat_timeout,
-                stall_kill=stall_kill,
-                stall_warning=stall_warning,
-                low_process_priority=low_process_priority,
-                rlimit_as_mb=rlimit_as_mb,
-                memory_monitor_factory=memory_monitor_factory,
+                timeout=options.final_concat_timeout,
+                options=options,
             )
         else:
             _c._run_final_concat(
@@ -315,12 +295,7 @@ def _run_audio_extract(
                 progress_callback=progress_callback,
                 cancel_callback=cancel_callback,
                 label="audio extract concat",
-                timeout=final_concat_timeout,
-                stall_kill=stall_kill,
-                stall_warning=stall_warning,
-                low_process_priority=low_process_priority,
-                rlimit_as_mb=rlimit_as_mb,
-                memory_monitor_factory=memory_monitor_factory,
+                options=options,
             )
         logger.info(f"Successfully created audio output: {output_path}")
 

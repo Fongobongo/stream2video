@@ -24,7 +24,9 @@ from stream2video.config import (
 from stream2video.gui_helpers import (
     build_cli_command,
     mask_proxy,
+    proxy_has_credentials,
     redact_proxy_in_cli_command,
+    strip_proxy_credentials,
 )
 from stream2video.gui_platform import fit_to_screen
 from stream2video.gui_settings import load_settings as _load_settings_from_disk
@@ -61,9 +63,6 @@ class _ProxyInputDialog(ctk.CTkInputDialog):
 
 class LifecycleMixin:
     """Settings persistence + window lifecycle (close / restore / save)."""
-
-    _output_path: Path | None
-    _download_path: Path | None
 
     def _save_settings(self) -> None:
         # Read widgets in the main thread (Tk reads are unsafe from
@@ -110,8 +109,6 @@ class LifecycleMixin:
         self.combo_theme.set(self.config["theme"])
         self.entry_input.delete(0, "end")
         self.entry_output.delete(0, "end")
-        self._output_path = None
-        self._download_path = None
         # Don't null the controller while a run is active: the worker
         # thread still targets it (progress callbacks, on-close cleanup
         # in ``_on_close`` reads it). Only a *finished* run's dangling
@@ -280,6 +277,28 @@ class LifecycleMixin:
             self._log("[WARN] Could not write CLI config (out_dir not writable)")
 
         proxy_value = self.config.get("proxy", "") if self.config.get("proxy_active", False) else ""
+        # Audit #3: the copied command lands in the clipboard, the shell
+        # history and the process list — a proxy password must NOT go
+        # there silently. Copy without credentials by default (explicit
+        # user confirmation re-includes them).
+        proxy_copied = proxy_value
+        if proxy_has_credentials(proxy_value):
+            include_secret = messagebox.askyesno(
+                "Proxy credentials",
+                "Your proxy address contains a password.\n\n"
+                "Include it in the copied CLI command? It will remain in "
+                "the clipboard, the shell history and the process list.\n\n"
+                "Choose No to copy the command without the password "
+                "(the proxy URL is kept, the credential part is removed).",
+                icon="warning",
+                parent=cast(ctk.CTk, self),
+            )
+            if not include_secret:
+                proxy_copied = strip_proxy_credentials(proxy_value)
+                self._log(
+                    "[WARN] Proxy password NOT copied to the clipboard — "
+                    "the command keeps the proxy URL without credentials"
+                )
         cmd = build_cli_command(
             inp,
             out_path,
@@ -306,10 +325,10 @@ class LifecycleMixin:
             batch_chunk_size=self.config.get("batch_chunk_size", 40),
             min_part_bytes=self.config.get("min_part_bytes", 1024),
             config_path=config_path,
-            proxy=proxy_value,
+            proxy=proxy_copied,
             per_video_dir=self.config.get("per_video_dir", True),
         )
-        cmd_log = redact_proxy_in_cli_command(cmd, proxy_value)
+        cmd_log = redact_proxy_in_cli_command(cmd, proxy_copied)
         self.clipboard_clear()
         self.clipboard_append(cmd)
         if config_path is not None:
@@ -347,12 +366,11 @@ class LifecycleMixin:
                 _logger.debug("cancel_process(%r) on close failed", owner, exc_info=True)
         # Clean up incomplete artifacts — the REAL paths live in the
         # active PipelineController (``_download_path`` / ``_output_path``
-        # there are stamped by the download/concat phases). The GUI's own
-        # ``_output_path`` / ``_download_path`` fields are never populated
-        # (dead on-close cleanup), so ask the controller directly (B9
-        # audit). The controller is registered by the worker at Start and
-        # cleared in its finally; on-close racing that clear is harmless
-        # (both paths are idempotent / exception-guarded).
+        # there are stamped by the download/concat phases). Ask the
+        # controller directly (B9 audit); the controller is registered by
+        # the worker at Start and cleared in its finally; on-close racing
+        # that clear is harmless (both paths are idempotent /
+        # exception-guarded).
         active = getattr(self, "_active_controller", None)
         if active is not None:
             try:

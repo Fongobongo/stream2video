@@ -67,8 +67,6 @@ class EncoderTestCallbacks(Protocol):
 
     def schedule_on_main(self, ms: int, func: Callable[..., Any]) -> None: ...
 
-    def schedule_after(self, ms: int, func: Callable[..., Any]) -> None: ...
-
     def set_test_button_state(self, *, running: bool) -> None: ...
 
 
@@ -151,10 +149,10 @@ class EncoderTester:
                 # raises), don't crash the daemon thread on top of that —
                 # the button state is moot when its window is gone.
                 try:
-                    self._cb.schedule_after(
+                    self._cb.schedule_on_main(
                         0, lambda: self._cb.set_test_button_state(running=False)
                     )
                 except Exception:
-                    logger.debug("schedule_after raised during shutdown", exc_info=True)
+                    logger.debug("schedule_on_main raised during shutdown", exc_info=True)
 
         threading.Thread(target=_run, daemon=True).start()
