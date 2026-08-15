@@ -116,8 +116,14 @@ class _Resolver:
             # *string* ("" / "false") would otherwise be coerced by Python's
             # truthiness to True/"False" silently — a config authored as
             # ``force: "false"`` (quoted) used to resolve to True.
+            # When neither surface supplied a value, fall back to the
+            # CONFIG_DEFAULTS entry — NOT a hard-coded False: bool flags
+            # whose default is True (gapless_concat / per_video_dir /
+            # completion_sound) used to silently flip off whenever a host
+            # or test fed the resolver a dict missing that key.
             if value is None:
-                return False
+                default = CONFIG_DEFAULTS.get(name, False)
+                return bool(default)
             if isinstance(value, bool):
                 return value
             if isinstance(value, str):

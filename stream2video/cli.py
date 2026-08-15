@@ -418,20 +418,26 @@ def main(
         "Lowering this reduces peak CPU at the cost of slower encode. If not "
         "passed, the config file's `encoder_threads` key is used.",
     ),
-    x264_low_memory: bool = typer.Option(
-        False,
+    x264_low_memory: bool | None = typer.Option(
+        None,
         "--x264-low-memory/--no-x264-low-memory",
         help="Reduce x264's frame-buffer footprint via rc-lookahead=10, ref=1, "
         "bframes=0. Produces slightly larger files but uses significantly less "
-        "RAM during encode. Useful on memory-constrained machines (4-8 GB).",
+        "RAM during encode. Useful on memory-constrained machines (4-8 GB). If "
+        "not passed, falls back to the config file's `x264_low_memory` key "
+        "(default False); --no-x264-low-memory pins it off so a config file "
+        "with `x264_low_memory: true` can be overridden.",
     ),
-    use_crf: bool = typer.Option(
-        False,
+    use_crf: bool | None = typer.Option(
+        None,
         "--use-crf/--no-use-crf",
         help="Use quality-fixed encoding instead of bitrate-fixed "
         "(-b:v source/10000k/7000k/3500k). libx264 uses CRF, NVENC/AMF use "
         "CQ/QP-style modes, and MF uses quality mode. File size varies by "
-        "content and encoder. Default off (bitrate parity between encoders).",
+        "content and encoder. Default off (bitrate parity between encoders). "
+        "If not passed, falls back to the config file's `use_crf` key "
+        "(default False); --no-use-crf pins it off so a config file with "
+        "`use_crf: true` can be overridden.",
     ),
     gapless_concat: bool | None = typer.Option(
         None,
@@ -445,14 +451,17 @@ def main(
         "on very long multi-segment outputs. For lossless video + gapless "
         "audio in a single pass use --method cut_then_encode instead.",
     ),
-    low_process_priority: bool = typer.Option(
-        False,
+    low_process_priority: bool | None = typer.Option(
+        None,
         "--low-process-priority/--no-low-process-priority",
         help="Spawn ffmpeg at a lower scheduling priority so a long-running "
         "encode doesn't starve interactive applications. On Windows: "
         "BELOW_NORMAL_PRIORITY_CLASS; on Linux/macOS: nice +10. Useful for "
         "unattended batch processing on shared/desktop machines. Default "
-        "off (normal priority, faster encoding).",
+        "off (normal priority, faster encoding). If not passed, falls back "
+        "to the config file's `low_process_priority` key (default False); "
+        "--no-low-process-priority pins it off so a config file with "
+        "`low_process_priority: true` can be overridden.",
     ),
     rlimit_as_mb: int = typer.Option(
         0,

@@ -20,8 +20,6 @@ interaction.
 
 from __future__ import annotations
 
-from tkinter import TclError
-
 import pytest
 
 pytest.importorskip("PIL", reason="gui.py requires Pillow ([gui] extra)")
@@ -31,28 +29,11 @@ from stream2video.config import CONFIG_DEFAULTS, VALID_ENCODERS, VALID_METHODS, 
 
 
 @pytest.fixture(scope="module")
-def gui():
-    """Instantiate Stream2VideoGUI once per module; skip on headless envs.
-
-    Module-scoped because Tk init is slow (hundreds of ms on Windows);
-    tests just query widget state, they don't mutate it.
-    """
-    from stream2video.gui import Stream2VideoGUI
-
-    try:
-        app = Stream2VideoGUI()
-    except TclError as e:
-        pytest.skip(f"headless environment — TclError on init: {e}")
-    # Flush pending idle tasks so widgets are queryable.
-    try:
-        app.update_idletasks()
-    except TclError as e:
-        pytest.skip(f"Tk idle tasks failed (no display?): {e}")
-    yield app
-    try:
-        app.destroy()
-    except TclError:
-        pass
+def gui(gui_module):
+    """Alias for the shared module-scoped ``gui_module`` fixture from
+    conftest — smoke tests only query widget state, they don't mutate
+    it, so the slow Tk init is amortised across the whole module."""
+    return gui_module
 
 
 class TestGuiInstantiation:

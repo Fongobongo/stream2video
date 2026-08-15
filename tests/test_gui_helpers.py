@@ -497,19 +497,6 @@ class TestBuildCliCommand:
         assert "--encoder-threads 4" in cmd
         assert "--output-fps 60" in cmd
 
-    def test_config_path_appended_as_c_flag(self):
-        cmd = build_cli_command(
-            "x",
-            Path("./o"),
-            method="segment",
-            encoder="libx264",
-            video_quality="medium",
-            download_quality="best",
-            config_path=Path("/tmp/cfg.yaml"),
-        )
-        assert "-c " in cmd
-        assert "cfg.yaml" in cmd
-
     def test_empty_input_omits_argument(self):
         cmd = build_cli_command(
             "",

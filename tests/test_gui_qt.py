@@ -38,35 +38,6 @@ from stream2video.config import CONFIG_DEFAULTS, PRESETS
 from stream2video.pipeline_worker import PipelineWorkerParams
 
 
-@pytest.fixture
-def gui():
-    """Instantiate Stream2VideoGUI; skip on headless envs.
-
-    Note: pytest-qt's ``qtbot.addWidget`` can't track Tkinter widgets
-    (it expects ``QWidget`` subclasses), so we use plain Tk
-    ``update()`` / ``update_idletasks()`` to flush the event loop
-    instead. The ``qtbot`` fixture is not used — these tests drive
-    the Tk event loop directly, not the Qt one. pytest-qt is installed
-    only so the test environment has a Qt binding available (some
-    CI setups need it for headless display auto-detection).
-    """
-    from stream2video.gui import Stream2VideoGUI
-
-    try:
-        app = Stream2VideoGUI()
-    except TclError as e:
-        pytest.skip(f"headless environment — TclError on init: {e}")
-    try:
-        app.update_idletasks()
-    except TclError as e:
-        pytest.skip(f"Tk idle tasks failed (no display?): {e}")
-    yield app
-    try:
-        app.destroy()
-    except TclError:
-        pass
-
-
 def _flush_events(app, timeout_ms: int = 500):
     """Process pending Tk events for up to ``timeout_ms`` milliseconds.
 

@@ -512,28 +512,8 @@ def read_lines_queue(pipe: IO[bytes]) -> tuple[queue.Queue[bytes | None], thread
 # process (audit #6: the historical ``finally: set_active_process(None)``
 # unconditionally wiped the slot, erasing a process B that had
 # registered under the same owner before A exited).
-#
-# ``set_active_process`` / ``get_active_process`` are retained as thin
-# wrappers around the registry so existing call sites (concat.py,
-# silence.py, download.py) keep working — they implicitly use the
-# "default" owner. New call sites should prefer the scoped API.
 _proc_registry: dict[str, list[subprocess.Popen]] = {}
 _proc_registry_lock = threading.Lock()
-
-
-def get_active_process(owner: str = "default") -> subprocess.Popen | None:
-    """Return the most recently registered subprocess for ``owner``.
-
-    Returns ``None`` when ``owner`` has no registration — there is no
-    fallback to the "default" slot. Previously ``get_active_process("preview")``
-    would silently return the pipeline's ffmpeg if no preview was running,
-    which caused a parallel preview's ``finally`` to clear the pipeline's
-    registration. Callers that want the historical single-slot behaviour
-    pass ``owner="default"`` (the default).
-    """
-    with _proc_registry_lock:
-        procs = _proc_registry.get(owner)
-        return procs[-1] if procs else None
 
 
 def set_active_process(proc: subprocess.Popen | None, owner: str = "default") -> None:

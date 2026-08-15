@@ -591,27 +591,6 @@ class TestUnlinkRetry:
         assert not _unlink_with_retry(f, attempts=2, delay_s=0.01)
 
 
-# ── #23 ── settings_io path traversal ──────────────────────────────────
-class TestSettingsIoTraversal:
-    def test_dotdot_rejected(self, tmp_path: Path):
-        from stream2video.settings_io import write_cli_config_yaml
-
-        with pytest.raises(ValueError, match="plain file name"):
-            write_cli_config_yaml(tmp_path, -30.0, 2.0, 0.5, filename="../evil.yaml")
-
-    def test_plain_name_still_works(self, tmp_path: Path):
-        from stream2video.settings_io import write_cli_config_yaml
-
-        p = write_cli_config_yaml(tmp_path, -30.0, 2.0, 0.5)
-        assert p is not None and p.parent == tmp_path.resolve()
-
-    def test_subdirectory_rejected(self, tmp_path: Path):
-        from stream2video.settings_io import write_cli_config_yaml
-
-        with pytest.raises(ValueError):
-            write_cli_config_yaml(tmp_path, -30.0, 2.0, 0.5, filename="nested/cfg.yaml")
-
-
 # ── #24 ── manifest identity ────────────────────────────────────────────
 class TestManifestHash:
     def test_same_size_mtime_different_content_invalidates(self, tmp_path: Path):

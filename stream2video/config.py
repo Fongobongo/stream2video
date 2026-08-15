@@ -471,14 +471,18 @@ def coerce_typed_value(key: str, value: Any) -> Any:
         return None
     default = CONFIG_DEFAULTS[key]
     # Special case: ``encoder_threads`` accepts ``"auto"`` (str default)
-    # OR a positive int from the user. The two types are both legitimate
+    # OR a positive int from the user. The two types are both legitimately
     # expressions of the same setting, so accept either explicitly. A
     # non-positive int is dropped (it would be a no-op or harmful hint
     # to ffmpeg's thread pool — negative values raise on the CLI side).
+    # ``"auto"`` is matched case-insensitively and normalised to the
+    # canonical lowercase form — the same rule the CLI flag
+    # (cli_resolver) and the GUI's Advanced entry (settings_io) apply,
+    # so one value has one spelling rule across all surfaces.
     if key == "encoder_threads":
         lo, hi = CONFIG_RANGES["encoder_threads"]
-        if isinstance(value, str) and value == "auto":
-            return value
+        if isinstance(value, str) and value.strip().lower() == "auto":
+            return "auto"
         if isinstance(value, bool):
             return None
         if isinstance(value, int) and lo <= value <= hi:
@@ -491,8 +495,8 @@ def coerce_typed_value(key: str, value: Any) -> Any:
     # silently flooring a limit to 1 MB is a dangerous quiet change.
     if key == "memory_limit_mb":
         lo, hi = CONFIG_RANGES["memory_limit_mb"]
-        if isinstance(value, str) and value == "auto":
-            return value
+        if isinstance(value, str) and value.strip().lower() == "auto":
+            return "auto"
         if isinstance(value, bool):
             return None
         if isinstance(value, int) and lo <= value <= hi:

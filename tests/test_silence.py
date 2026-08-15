@@ -131,12 +131,16 @@ class TestApplyMargin:
     def test_negative_margin_merges_when_raw_segments_touch(self):
         """When raw silences share an endpoint (no loud gap between them)
         a negative margin can still close the implicit 0-width gap and
-        merge the two — this is the legacy behaviour tested by
-        ``test_overlapping_segments_merge_after_expand``."""
-        # 1..2.5 and 2.0..3.5 overlap in raw → no gap → clamp skipped.
-        seg1 = SilenceSegment(1.0, 2.5)
+        merge the two — the neighbour clamp only fires on a REAL loud gap
+        (``seg.end < next.start``). Distinct from
+        ``test_overlapping_segments_merge_after_expand`` (raw overlap);
+        here the raw segments merely TOUCH at one point."""
+        # 1..2 and 2..3.5 share exactly the endpoint 2.0 → no gap →
+        # clamp skipped → expansion overlaps → merge.
+        seg1 = SilenceSegment(1.0, 2.0)
         seg2 = SilenceSegment(2.0, 3.5)
         result = apply_margin([seg1, seg2], -0.3)
+        # seg1: 0.7-2.3, seg2: 1.7-3.8 → overlap → merge to 0.7-3.8
         assert len(result) == 1
         assert result[0].start == 0.7
         assert result[0].end == 3.8

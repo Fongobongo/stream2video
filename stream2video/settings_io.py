@@ -1,7 +1,7 @@
 """Pure snapshot + I/O helpers for the GUI's settings / defaults
 persistence — extracted from ``gui.py`` (incremental refactor).
 
-Three categories of pure logic live here:
+Two categories of pure logic live here:
 
   1. ``build_save_settings_snapshot`` — turns a widget-value dict into
      the dict written to ``settings.json`` on close / save. The GUI
@@ -14,20 +14,13 @@ Three categories of pure logic live here:
      ``user_defaults.json`` (the per-user "factory defaults" file that
      overrides ``CONFIG_DEFAULTS`` on next startup). Same shape, one
      fewer field (``window_geometry`` is session-only and not saved).
-  3. ``write_cli_config_yaml`` — writes the tiny ``threshold /
-     min_silence / margin`` YAML so a "Copy CLI command" paste can be
-     run with ``-c stream2video_cli_config.yaml`` and match the GUI's
-     slider values. Pure file I/O — taking ``out_dir`` + the three
-     values means the GUI side just resolves the path and forwards.
 
 Everything that touches the clipboard, the messagebox, or a Tk widget
-stays in ``gui.py`` — only pure transformations and file writes live
-here.
+stays in ``gui.py`` — only pure transformations live here.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from stream2video.config import CONFIG_DEFAULTS as _CONFIG_DEFAULTS
@@ -465,57 +458,3 @@ def build_user_defaults_snapshot(
         else:
             snapshot[key] = _CONFIG_DEFAULTS.get(key)
     return snapshot
-
-
-def write_cli_config_yaml(
-    out_dir: Path,
-    threshold: float,
-    min_silence: float,
-    margin: float,
-    *,
-    filename: str = "stream2video_cli_config.yaml",
-) -> Path | None:
-    """Write a tiny YAML config holding the three slider values so a
-    "Copy CLI command" paste picks them up via ``-c``.
-
-    The CLI's ``-c`` / ``--config`` flag accepts a YAML file whose
-    keys mirror the GUI's sliders; without it, the copied command's
-    ``threshold`` / ``min_silence`` / ``margin`` would silently fall
-    back to the CLI defaults (see ``CONFIG_DEFAULTS``) and the user's
-    slider values would be lost. This function writes *just* those
-    three keys — adding more would clutter the (visible) command line
-    and isn't necessary (the rest is already passed as explicit flags).
-
-    Pure: returns the path written or ``None`` on any filesystem error
-    (the GUI logs the warning; the caller decides whether to keep
-    ``--config`` in the command).
-
-    Security: ``filename`` must be a plain file name (no path
-    components). ``(out_dir / "../evil.yaml").resolve()`` would
-    otherwise escape the output directory — the parameter is part of
-    the public surface, so enforce the invariant here.
-    Atomicity: not strictly required for a tiny CLI config — a partial
-    write is acceptable because the caller tolerates ``None``.
-    """
-    if Path(filename).name != filename:
-        raise ValueError(
-            f"filename must be a plain file name, got {filename!r} "
-            f"(path traversal would escape the output directory)"
-        )
-    config_path = (out_dir / filename).resolve()
-    # ``resolve()`` collapses ``..`` but a caller using a nested name
-    # (``subdir/cfg.yaml``) is caught above; this check is the last
-    # line of defence against platform quirks (e.g. 8.3 short names).
-    if config_path.parent != out_dir.resolve():
-        raise ValueError(f"filename resolves outside the output directory: {filename!r}")
-    try:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        config_yaml = f"threshold: {threshold}\nmin_silence: {min_silence}\nmargin: {margin}\n"
-        with open(config_path, "w", encoding="utf-8") as f:
-            f.write(config_yaml)
-        return config_path
-    except OSError:
-        # The caller logs and continues without the ``--config`` flag
-        # (the command still runs, just with CLI defaults for the
-        # slider-only values).
-        return None

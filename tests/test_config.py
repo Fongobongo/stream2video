@@ -140,6 +140,16 @@ class TestCoerceTypedValue:
     def test_list_key_rejects_str(self):
         assert coerce_typed_value("recent_projects", "a,b") is None
 
+    def test_auto_or_int_accepts_auto_case_insensitive(self):
+        # Parity with the CLI flag (cli_resolver lowercases before
+        # matching) and the GUI's Advanced entries — "auto" has one
+        # spelling rule across all surfaces; the returned value is the
+        # canonical lowercase form the rest of the pipeline compares
+        # against (``== "auto"``).
+        assert coerce_typed_value("encoder_threads", "AUTO") == "auto"
+        assert coerce_typed_value("encoder_threads", " Auto ") == "auto"
+        assert coerce_typed_value("memory_limit_mb", "AUTO") == "auto"
+
     def test_user_default_keys_are_a_subset_of_defaults(self):
         for key in USER_DEFAULT_KEYS:
             assert key in CONFIG_DEFAULTS, f"USER_DEFAULT_KEYS references unknown key {key}"

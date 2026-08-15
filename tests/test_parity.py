@@ -1,4 +1,4 @@
-﻿"""GUI <-> CLI parity contract tests (audit round 10).
+"""GUI <-> CLI parity contract tests (audit round 10).
 
 The copied CLI command must reproduce the GUI's run exactly: the audit
 found two silent divergences that these tests pin down --

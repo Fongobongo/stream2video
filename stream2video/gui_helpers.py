@@ -202,14 +202,14 @@ def build_cli_command(
     x264_preset: str = CONFIG_DEFAULTS["x264_preset"],
     encoder_threads: str | int = CONFIG_DEFAULTS["encoder_threads"],
     output_fps: str = CONFIG_DEFAULTS["output_fps"],
-    output_format: str = "video",
+    output_format: str = CONFIG_DEFAULTS["output_format"],
     threshold: float = CONFIG_DEFAULTS["threshold"],
     min_silence: float = CONFIG_DEFAULTS["min_silence"],
     margin: float = CONFIG_DEFAULTS["margin"],
-    x264_low_memory: bool = False,
-    use_crf: bool = False,
+    x264_low_memory: bool = CONFIG_DEFAULTS["x264_low_memory"],
+    use_crf: bool = CONFIG_DEFAULTS["use_crf"],
     gapless_concat: bool = CONFIG_DEFAULTS["gapless_concat"],
-    low_process_priority: bool = False,
+    low_process_priority: bool = CONFIG_DEFAULTS["low_process_priority"],
     preset: str = CONFIG_DEFAULTS["preset"],
     memory_limit_mb: str | int = CONFIG_DEFAULTS["memory_limit_mb"],
     memory_reserve_mb: int = CONFIG_DEFAULTS["memory_reserve_mb"],
@@ -225,11 +225,10 @@ def build_cli_command(
     batch_chunk_size: int = CONFIG_DEFAULTS["batch_chunk_size"],
     min_part_bytes: int = CONFIG_DEFAULTS["min_part_bytes"],
     rlimit_as_mb: int = CONFIG_DEFAULTS["rlimit_as_mb"],
-    force: bool = False,
-    delete_after: bool = False,
+    force: bool = CONFIG_DEFAULTS["force"],
+    delete_after: bool = CONFIG_DEFAULTS["delete_after"],
     completion_sound: bool = CONFIG_DEFAULTS["completion_sound"],
-    config_path: Path | None = None,
-    proxy: str = "",
+    proxy: str = CONFIG_DEFAULTS["proxy"],
     proxy_active: bool = CONFIG_DEFAULTS["proxy_active"],
     per_video_dir: bool = CONFIG_DEFAULTS["per_video_dir"],
     target_shell: str | None = None,
@@ -271,18 +270,15 @@ def build_cli_command(
     diverges from the effective default, so the paste can't silently
     re-enable a proxy from user_defaults.json.
 
-    ``config_path``: legacy — when set, appends ``-c <path>`` so a
-    pasted command loads an extra YAML. The GUI no longer needs it (the
-    slider values travel as explicit ``--threshold`` /
-    ``--min-silence`` / ``--margin`` flags), but the parameter stays for
-    back-compat with external callers.
+    ``config_path`` support was removed: a pasted command carries every
+    tunable as explicit flags (including the slider values via
+    ``--threshold`` / ``--min-silence`` / ``--margin``), so no side-car
+    YAML is needed and no caller passed it anymore.
     """
     parts = ["stream2video"]
     if input_raw:
         parts.append(_quote_arg(input_raw, target_shell))
     parts.extend(["-o", _quote_arg(str(output_dir), target_shell)])
-    if config_path is not None:
-        parts.extend(["-c", _quote_arg(str(config_path), target_shell)])
     parts.extend(["--method", method, "--encoder", encoder])
     parts.extend(["--video-quality", video_quality])
     parts.extend(["--download-quality", download_quality])

@@ -11,15 +11,9 @@ and the YAML write. The pure helpers here let the test pin:
   * ``build_save_settings_snapshot`` / ``build_user_defaults_snapshot``
     — turn a widget-shaped dict into the persisted dict; identity-ish
     (key order preserved; bool casts left to the caller).
-  * ``write_cli_config_yaml`` — three-line YAML in
-    ``stream2video_cli_config.yaml`` so a "Copy CLI command" paste
-    picks up the slider values. Returns ``None`` on filesystem errors.
 """
 
 from __future__ import annotations
-
-from pathlib import Path
-from unittest.mock import patch
 
 from stream2video.settings_io import (
     SAVE_SETTINGS_KEYS,
@@ -28,7 +22,6 @@ from stream2video.settings_io import (
     build_settings_payload,
     build_user_defaults_snapshot,
     parse_advanced_widgets,
-    write_cli_config_yaml,
 )
 
 
@@ -210,54 +203,6 @@ class TestBuildUserDefaultsSnapshot:
         assert snapshot["x264_low_memory"] is True
         assert snapshot["use_crf"] is True
         assert snapshot["preset"] == "maximum_performance"
-
-
-class TestWriteCliConfigYaml:
-    def test_writes_three_keys(self, tmp_path: Path):
-        config_path = write_cli_config_yaml(tmp_path, threshold=-30.0, min_silence=2.0, margin=0.5)
-        assert config_path is not None
-        assert config_path.exists()
-        text = config_path.read_text(encoding="utf-8")
-        assert "threshold: -30.0" in text
-        assert "min_silence: 2.0" in text
-        assert "margin: 0.5" in text
-
-    def test_uses_default_filename(self, tmp_path: Path):
-        # The default filename is the one the GUI's ``build_cli_command``
-        # references — keep the two in sync.
-        config_path = write_cli_config_yaml(tmp_path, 0, 0, 0)
-        assert config_path is not None
-        assert config_path.name == "stream2video_cli_config.yaml"
-
-    def test_custom_filename(self, tmp_path: Path):
-        config_path = write_cli_config_yaml(tmp_path, 0, 0, 0, filename="custom.yaml")
-        assert config_path is not None
-        assert config_path.name == "custom.yaml"
-
-    def test_creates_parent_dir_if_missing(self, tmp_path: Path):
-        # The GUI's "Copy CLI command" may run before the user has
-        # opened the output dir — the helper creates it.
-        new_dir = tmp_path / "fresh" / "out"
-        config_path = write_cli_config_yaml(new_dir, 0, 0, 0)
-        assert config_path is not None
-        assert config_path.exists()
-
-    def test_returns_none_on_os_error(self, tmp_path: Path):
-        # If the directory can't be written (permission denied),
-        # return ``None`` so the caller logs and continues without the
-        # ``--config`` flag. Patch ``open`` to raise OSError — easier
-        # than constructing a permission-denied directory cross-platform.
-        with patch("builtins.open", side_effect=OSError("denied")):
-            config_path = write_cli_config_yaml(tmp_path, 0, 0, 0)
-        assert config_path is None
-
-    def test_returns_resolved_path(self, tmp_path: Path):
-        # The path returned is ``resolve()``-ed so the "Copied command"
-        # pastes an absolute path even when the GUI's ``out_raw`` was
-        # relative.
-        config_path = write_cli_config_yaml(tmp_path, 0, 0, 0)
-        assert config_path is not None
-        assert config_path.is_absolute()
 
 
 class TestParseAdvancedWidgets:

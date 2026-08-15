@@ -84,7 +84,11 @@ def load_config(config_file: Path | None, console: Any) -> dict:
     # The auto_or_int keys (``encoder_threads`` / ``memory_limit_mb``)
     # default to the literal string ``"auto"`` in CONFIG_DEFAULTS —
     # that's a legitimate value, not a number, so it's skipped here
-    # (the resolver's ``auto_or_int`` path handles it). See
+    # (the resolver's ``auto_or_int`` path handles it). ``"auto"`` is
+    # matched case-insensitively and normalised to lowercase — the SAME
+    # rule the CLI flag (cli_resolver) and the GUI's Advanced entries
+    # (settings_io / coerce_typed_value) apply, so YAML is no longer the
+    # only surface where ``AUTO`` is rejected. See
     # ``config.AUTO_OR_INT_KEYS`` for the single source of truth.
     for key, (min_val, max_val) in CONFIG_RANGES.items():
         if key in config:
@@ -97,7 +101,16 @@ def load_config(config_file: Path | None, console: Any) -> dict:
             if isinstance(original, bool):
                 console.print(f"[red]Invalid {key}:[/red] {original} is a bool, expected a number")
                 raise typer.Exit(1)
-            if key in AUTO_OR_INT_KEYS and original == "auto":
+            if (
+                key in AUTO_OR_INT_KEYS
+                and isinstance(original, str)
+                and original.strip().lower() == "auto"
+            ):
+                # Canonical lowercase spelling for downstream ``== "auto"``
+                # comparisons (concat/encoders, memory budget,
+                # validate_pipeline_config). Non-"auto" strings fall
+                # through to float() below, same as before.
+                config[key] = "auto"
                 continue
             try:
                 value = float(original)

@@ -10,9 +10,10 @@ import pytest
 
 from stream2video.utils import (
     CANCEL_POLL_INTERVAL,
+    _proc_registry,
+    _proc_registry_lock,
     cancel_monitor,
     cancel_process,
-    get_active_process,
     get_video_duration,
     get_video_start_time,
     looks_like_oom,
@@ -27,6 +28,17 @@ def _spawn_quick_proc():
     return subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(0.1)"],
     )
+
+
+def _active_procs(owner: str) -> list:
+    """Snapshot of the subprocess registry for ``owner``.
+
+    ``get_active_process`` (the legacy public getter) was removed with
+    the dead code it served; the registry itself is the source of truth
+    the tests assert against.
+    """
+    with _proc_registry_lock:
+        return list(_proc_registry.get(owner, []))
 
 
 class TestCancelMonitor:
@@ -343,22 +355,24 @@ class TestGetVideoStartTime:
 
 
 class TestActiveProcess:
-    """set/get_active_process — registry used by the GUI's WM_DELETE
-    handler to kill the in-flight ffmpeg on close."""
+    """set_active_process — registry used by the GUI's WM_DELETE
+    handler to kill the in-flight ffmpeg on close. The legacy
+    ``get_active_process`` getter was removed with the dead code it
+    served; these tests observe ``_proc_registry`` directly."""
 
     def test_default_is_none(self):
         set_active_process(None)
-        assert get_active_process() is None
+        assert _active_procs("default") == []
 
     def test_unknown_owner_returns_none_no_fallback(self):
-        """get_active_process("nonexistent") must return None, not fall
-        back to the "default" slot — otherwise a preview's finally
-        could clobber the pipeline's registration (P0 audit 1.1)."""
+        """Registering under "default" must not leak into a "preview"
+        lookup — otherwise a preview's finally could clobber the
+        pipeline's registration (P0 audit 1.1)."""
         proc = _spawn_quick_proc()
         try:
             set_active_process(proc)
-            assert get_active_process("preview") is None
-            assert get_active_process("nonexistent") is None
+            assert _active_procs("preview") == []
+            assert _active_procs("nonexistent") == []
         finally:
             set_active_process(None)
             proc.wait(timeout=5)
@@ -381,15 +395,15 @@ class TestRegisteredProcess:
     def test_clears_default_slot_on_normal_exit(self):
         proc = _spawn_quick_proc()
         with registered_process(proc):
-            assert get_active_process("default") is proc
-        assert get_active_process("default") is None
+            assert _active_procs("default") == [proc]
+        assert _active_procs("default") == []
         proc.wait(timeout=5)
 
     def test_clears_preview_slot_on_normal_exit(self):
         proc = _spawn_quick_proc()
         with registered_process(proc, owner="preview"):
-            assert get_active_process("preview") is proc
-        assert get_active_process("preview") is None
+            assert _active_procs("preview") == [proc]
+        assert _active_procs("preview") == []
         proc.wait(timeout=5)
 
     def test_clears_slot_on_exception(self):
@@ -399,7 +413,7 @@ class TestRegisteredProcess:
                 raise RuntimeError("boom")
         except RuntimeError:
             pass
-        assert get_active_process("preview") is None
+        assert _active_procs("preview") == []
         proc.wait(timeout=5)
 
     def test_clears_slot_on_early_return(self):
@@ -410,7 +424,7 @@ class TestRegisteredProcess:
                 return "done"
 
         f()
-        assert get_active_process("preview") is None
+        assert _active_procs("preview") == []
         proc.wait(timeout=5)
 
     def test_preview_does_not_clobber_default(self):
@@ -423,20 +437,12 @@ class TestRegisteredProcess:
             set_active_process(default_proc, owner="default")
             with registered_process(preview_proc, owner="preview"):
                 # Both registrations coexist.
-                assert get_active_process("default") is default_proc
-                assert get_active_process("preview") is preview_proc
+                assert _active_procs("default") == [default_proc]
+                assert _active_procs("preview") == [preview_proc]
             # Preview's finally cleared its own slot.
-            assert (
-                "preview"
-                not in {
-                    owner
-                    for owner in ["preview", "default"]
-                    if get_active_process(owner) is not None
-                }
-                or get_active_process("preview") is None
-            )
+            assert _active_procs("preview") == []
             # Default slot untouched by preview's exit.
-            assert get_active_process("default") is default_proc
+            assert _active_procs("default") == [default_proc]
         finally:
             set_active_process(None, owner="default")
             set_active_process(None, owner="preview")
@@ -445,8 +451,8 @@ class TestRegisteredProcess:
 
     def test_cancel_preview_kills_preview_not_default(self):
         """cancel_process("preview") targets only the preview slot
-        (regression: a fallback in get_active_process used to make
-        cancel process cross-owner)."""
+        (regression: a cross-owner fallback used to make cancel_process
+        reach the wrong owner's processes)."""
         default_proc = _spawn_quick_proc()
         preview_proc = _spawn_quick_proc()
         try:
@@ -471,10 +477,10 @@ class TestRegisteredProcess:
         try:
             with registered_process(proc_a, owner="preview"):
                 set_active_process(proc_b, owner="preview")
-                # Both reachable; the most recent is the active one.
-                assert get_active_process("preview") is proc_b
+                # Both reachable in registration order.
+                assert _active_procs("preview") == [proc_a, proc_b]
             # A's finally removed exactly A — B is still registered.
-            assert get_active_process("preview") is proc_b
+            assert _active_procs("preview") == [proc_b]
             killed = cancel_process("preview", timeout=2.0)
             assert killed is True
             proc_b.wait(timeout=5)
@@ -494,7 +500,7 @@ class TestRegisteredProcess:
         try:
             for p in procs:
                 set_active_process(p, owner="waveform")
-            assert get_active_process("waveform") is procs[-1]
+            assert _active_procs("waveform") == procs
             killed = cancel_process("waveform", timeout=2.0)
             assert killed is True
             for p in procs:

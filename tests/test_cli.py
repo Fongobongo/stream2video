@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -13,6 +14,24 @@ import typer
 
 from stream2video.cli import load_config
 from stream2video.cli_resolver import make_resolver
+
+
+def _make_fake_cut_and_concat(received: dict[str, Any] | None = None):
+    """Build the fake ``cut_and_concat`` used across the CLI tests.
+
+    Writes a dummy output file (so the pipeline's output-exists check
+    passes) and, when ``received`` is supplied, records the keyword
+    arguments the controller forwarded to ``cut_and_concat``.
+    """
+
+    def fake_cut_and_concat(video_path, silence_segments, output_path, **kwargs):
+        if received is not None:
+            received.update(kwargs)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"out")
+        return output_path
+
+    return fake_cut_and_concat
 
 
 class _FakeConsole:
@@ -40,6 +59,22 @@ class TestResolverBoolStringCoercion:
     def test_none_falls_through_to_false(self):
         # No config key AND no CLI flag -> default False for force.
         assert self._resolve({}, "force", None) is False
+
+    def test_none_falls_back_to_config_default(self):
+        """A missing key OR an explicit None must resolve to the
+        CONFIG_DEFAULTS entry, not a hard-coded False — a host/test
+        feeding the resolver a partial dict used to silently flip
+        True-defaulted flags (gapless_concat / per_video_dir /
+        completion_sound) off."""
+        from stream2video.config import CONFIG_DEFAULTS
+
+        for name in ("gapless_concat", "per_video_dir", "completion_sound"):
+            assert CONFIG_DEFAULTS[name] is True
+            assert self._resolve({}, name, None) is True
+            assert self._resolve({name: None}, name, None) is True
+        # And the False-defaulted ones keep resolving to False.
+        assert self._resolve({}, "delete_after", None) is False
+        assert self._resolve({"delete_after": None}, "delete_after", None) is False
 
     def test_garbage_string_rejected(self):
         with pytest.raises(typer.Exit):
@@ -87,17 +122,15 @@ class TestCliMemoryReservePreflight:
         src.write_bytes(b"source")
         out_dir = tmp_path / "out"
 
-        def fake_cut_and_concat(video_path, silence_segments, output_path, **kwargs):
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(b"out")
-            return output_path
-
         with (
             patch(
                 "stream2video.pipeline_controller.download", return_value=DownloadResult(src, is_downloaded=False)
             ),
             patch("stream2video.pipeline_controller.load_silence_cache", return_value=[]),
-            patch("stream2video.pipeline_controller.cut_and_concat", side_effect=fake_cut_and_concat),
+            patch(
+                "stream2video.pipeline_controller.cut_and_concat",
+                side_effect=_make_fake_cut_and_concat(),
+            ),
             patch("stream2video.memory._available_ram_mb", return_value=64 * 1024.0),
             # The controller calls the REAL generate_keep_segments before
             # concat; its internal duration probe needs a fake ffprobe.
@@ -185,6 +218,82 @@ class TestLoadConfigBoolValidation:
         assert any("socks5://***:***@host:1080" in r.getMessage() for r in caplog.records)
 
 
+class TestLoadConfigAutoCaseInsensitive:
+    """YAML ``auto`` must accept any casing, matching the CLI flag and
+    the GUI's Advanced entries — three surfaces, one rule. Regression:
+    ``encoder_threads: AUTO`` crashed load_config with "is not a
+    number" (float("AUTO")) while --encoder-threads AUTO and the GUI
+    field both accepted it."""
+
+    def test_uppercase_auto_yaml_loads(self, tmp_path: Path):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("encoder_threads: AUTO\nmemory_limit_mb: Auto\n")
+        loaded = load_config(cfg)
+        # Canonical lowercase form for downstream ``== "auto"`` checks.
+        assert loaded["encoder_threads"] == "auto"
+        assert loaded["memory_limit_mb"] == "auto"
+
+    def test_padded_auto_yaml_loads(self, tmp_path: Path):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text('encoder_threads: " auto "\n')
+        loaded = load_config(cfg)
+        assert loaded["encoder_threads"] == "auto"
+
+    def test_garbage_string_still_rejected(self, tmp_path: Path):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("encoder_threads: automatic\n")
+        with pytest.raises(typer.Exit):
+            load_config(cfg)
+
+
+class TestCliAutoCaseInsensitive:
+    """--encoder-threads AUTO / --memory-limit-mb Auto must reach the
+    pipeline as the canonical lowercase "auto" (the CLI half of the same
+    three-surface rule as TestLoadConfigAutoCaseInsensitive)."""
+
+    def test_uppercase_auto_flag_reaches_cut_and_concat(self, tmp_path: Path):
+        from typer.testing import CliRunner
+
+        from stream2video.cli import app
+        from stream2video.download import DownloadResult
+
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"source")
+        out_dir = tmp_path / "out"
+        received: dict = {}
+
+        with (
+            patch(
+                "stream2video.pipeline_controller.download",
+                return_value=DownloadResult(src, is_downloaded=False),
+            ),
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=[]),
+            patch(
+                "stream2video.pipeline_controller.cut_and_concat",
+                side_effect=_make_fake_cut_and_concat(received),
+            ),
+            patch("stream2video.concat.get_video_duration", return_value=10.0),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    str(src),
+                    "-o",
+                    str(out_dir),
+                    "--no-per-video-dir",
+                    "--encoder-threads",
+                    "AUTO",
+                    "--memory-limit-mb",
+                    "Auto",
+                ],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert received["encoder_threads"] == "auto"
+        assert received["memory_limit_mb"] == "auto"
+
+
 class TestCliUseCrf:
     def test_use_crf_flag_reaches_cut_and_concat(self, tmp_path: Path):
         from typer.testing import CliRunner
@@ -197,18 +306,15 @@ class TestCliUseCrf:
         out_dir = tmp_path / "out"
         received: dict = {}
 
-        def fake_cut_and_concat(video_path, silence_segments, output_path, **kwargs):
-            received.update(kwargs)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(b"out")
-            return output_path
-
         with (
             patch(
                 "stream2video.pipeline_controller.download", return_value=DownloadResult(src, is_downloaded=False)
             ),
             patch("stream2video.pipeline_controller.load_silence_cache", return_value=[]),
-            patch("stream2video.pipeline_controller.cut_and_concat", side_effect=fake_cut_and_concat),
+            patch(
+                "stream2video.pipeline_controller.cut_and_concat",
+                side_effect=_make_fake_cut_and_concat(received),
+            ),
             # generate_keep_segments (called by the controller before the
             # encode) probes duration via stream2video.concat — fake it.
             patch("stream2video.concat.get_video_duration", return_value=10.0),
@@ -240,18 +346,15 @@ class TestCliUseCrf:
         cfg.write_text("use_crf: true\nper_video_dir: false\n", encoding="utf-8")
         received: dict = {}
 
-        def fake_cut_and_concat(video_path, silence_segments, output_path, **kwargs):
-            received.update(kwargs)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(b"out")
-            return output_path
-
         with (
             patch(
                 "stream2video.pipeline_controller.download", return_value=DownloadResult(src, is_downloaded=False)
             ),
             patch("stream2video.pipeline_controller.load_silence_cache", return_value=[]),
-            patch("stream2video.pipeline_controller.cut_and_concat", side_effect=fake_cut_and_concat),
+            patch(
+                "stream2video.pipeline_controller.cut_and_concat",
+                side_effect=_make_fake_cut_and_concat(received),
+            ),
             # generate_keep_segments (called by the controller before the
             # encode) probes duration via stream2video.concat — fake it.
             patch("stream2video.concat.get_video_duration", return_value=10.0),
@@ -308,18 +411,15 @@ class TestCliOutputFps:
         out_dir = tmp_path / "out"
         received: dict = {}
 
-        def fake_cut_and_concat(video_path, silence_segments, output_path, **kwargs):
-            received.update(kwargs)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(b"out")
-            return output_path
-
         with (
             patch(
                 "stream2video.pipeline_controller.download", return_value=DownloadResult(src, is_downloaded=False)
             ),
             patch("stream2video.pipeline_controller.load_silence_cache", return_value=[]),
-            patch("stream2video.pipeline_controller.cut_and_concat", side_effect=fake_cut_and_concat),
+            patch(
+                "stream2video.pipeline_controller.cut_and_concat",
+                side_effect=_make_fake_cut_and_concat(received),
+            ),
             # generate_keep_segments (called by the controller before the
             # encode) probes duration via stream2video.concat — fake it.
             patch("stream2video.concat.get_video_duration", return_value=10.0),
@@ -352,18 +452,15 @@ class TestCliOutputFps:
         cfg.write_text("output_fps: '60'\nper_video_dir: false\n", encoding="utf-8")
         received: dict = {}
 
-        def fake_cut_and_concat(video_path, silence_segments, output_path, **kwargs):
-            received.update(kwargs)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(b"out")
-            return output_path
-
         with (
             patch(
                 "stream2video.pipeline_controller.download", return_value=DownloadResult(src, is_downloaded=False)
             ),
             patch("stream2video.pipeline_controller.load_silence_cache", return_value=[]),
-            patch("stream2video.pipeline_controller.cut_and_concat", side_effect=fake_cut_and_concat),
+            patch(
+                "stream2video.pipeline_controller.cut_and_concat",
+                side_effect=_make_fake_cut_and_concat(received),
+            ),
             # generate_keep_segments (called by the controller before the
             # encode) probes duration via stream2video.concat — fake it.
             patch("stream2video.concat.get_video_duration", return_value=10.0),
@@ -497,12 +594,6 @@ class TestCliPresetResolution:
         out_dir = tmp_path / "out"
         received: dict = {}
 
-        def fake_cut_and_concat(video_path, silence_segments, output_path, **kwargs):
-            received.update(kwargs)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            output_path.write_bytes(b"out")
-            return output_path
-
         with (
             patch(
                 "stream2video.pipeline_controller.download",
@@ -511,7 +602,7 @@ class TestCliPresetResolution:
             patch("stream2video.pipeline_controller.load_silence_cache", return_value=[]),
             patch(
                 "stream2video.pipeline_controller.cut_and_concat",
-                side_effect=fake_cut_and_concat,
+                side_effect=_make_fake_cut_and_concat(received),
             ),
             patch("stream2video.concat.get_video_duration", return_value=10.0),
         ):
