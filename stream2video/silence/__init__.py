@@ -63,12 +63,6 @@ from stream2video.silence.parser import (
     apply_margin,
 )
 from stream2video.silence.pipeline import detect_silence
-from stream2video.utils import (  # noqa: F401
-    drain_stderr_lines,
-    no_window_kwargs,
-    read_lines_queue,
-    registered_process,
-)
 
 
 def _probe_duration(video_path: Path) -> float | None:

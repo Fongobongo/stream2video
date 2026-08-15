@@ -312,12 +312,17 @@ def add_recent_project(
     Accepts either a str or a Path; always stores as str.
     """
     path_str = str(project_path)
+    max_keep = max(1, max_keep)
     out = [path_str]
     for p in recent:
-        if str(p) != path_str:
-            out.append(str(p))
+        if str(p) == path_str:
+            continue
+        # Cap BEFORE appending: the historical check sat after the
+        # append, so ``max_keep=1`` returned a 2-element list (the new
+        # path plus one dedup pass) — the cap only bit at >= 2.
         if len(out) >= max_keep:
             break
+        out.append(str(p))
     return out
 
 
@@ -366,8 +371,6 @@ def apply_per_video_dir(
     if not per_video_dir:
         return output_dir, video_path
     project_dir = ensure_project_dir(output_dir, artifact_stem(video_path), True)
-    if project_dir != output_dir:
-        if is_downloaded:
-            video_path = move_into_project(video_path, project_dir)
-        return project_dir, video_path
-    return output_dir, video_path
+    if is_downloaded:
+        video_path = move_into_project(video_path, project_dir)
+    return project_dir, video_path

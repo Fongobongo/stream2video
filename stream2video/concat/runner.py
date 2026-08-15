@@ -35,6 +35,7 @@ from stream2video.utils import (
     CANCEL_POLL_INTERVAL,
     cancel_monitor,
     drain_stderr_lines,
+    kill_and_reap,
     read_lines_queue,
     registered_process,
     subprocess_kwargs,
@@ -235,13 +236,11 @@ def _run_ffmpeg(
         # before propagating: on Windows ``kill()`` is asynchronous, and letting
         # the exception escape without a ``wait()`` keeps the process handles
         # (and the segment file ffmpeg had open) alive long enough for the next
-        # ``shutil.rmtree(seg_dir)`` to trip WinError 32 (file busy).
+        # ``shutil.rmtree(seg_dir)`` to trip WinError 32 (file busy). Delegates
+        # to the shared ``kill_and_reap`` (utils.py) so the kill+reap policy
+        # lives in exactly one place.
         def _kill_and_raise(exc: BaseException) -> None:
-            process.kill()
-            try:
-                process.wait(timeout=30)
-            except subprocess.TimeoutExpired:
-                pass  # already dead or un-killable; nothing more to reap
+            kill_and_reap(process)
             raise exc from None
 
         try:

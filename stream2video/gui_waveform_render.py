@@ -241,6 +241,13 @@ class WaveformRenderMixin:
                             # timeout bounds the preview exactly like the
                             # peak-read paths above.
                             timeout=self.config.get("waveform_timeout", 300),
+                            # Stale-render cancels (new render started /
+                            # window closed) kill the ffmpeg child via
+                            # cancel_process("preview"); without this the
+                            # kill surfaces as rc=-9 and the user sees
+                            # "ffmpeg silencedetect OOM" instead of a
+                            # clean cancel.
+                            cancel_callback=(lambda: token != self._waveform_render_token),
                         )
                     except SilenceDetectionError as e:
                         _logger.warning(f"Dry-run detect failed: {e}")

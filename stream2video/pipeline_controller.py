@@ -69,8 +69,6 @@ from stream2video.utils import get_video_duration
 
 logger = logging.getLogger(__name__)
 
-_MEMORY_POLL_INTERVAL = 2.0
-
 
 def _unlink_with_retry(path: Path, attempts: int = 5, delay_s: float = 0.2) -> bool:
     """Best-effort unlink with short retries for Windows AV/indexer locks.

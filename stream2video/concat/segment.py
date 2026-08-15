@@ -170,19 +170,9 @@ def _run_segment_concat(
             # already normalised to start at 0, so a `setpts=PTS-STARTPTS`
             # is a no-op here and is omitted for clarity.
 
-            def _seg_prog(
-                seconds: float, _dur: float = dur, _encoded_keep: float = encoded_keep
-            ) -> None:
-                # ffmpeg -progress reports `out_time_us` -- the position within
-                # this segment's output, NOT the original video. Map it to
-                # absolute progress across the whole video so the GUI/CLI
-                # bar moves smoothly even when a single segment takes an
-                # hour (e.g. 0 silence segments → 1 keep segment = the
-                # whole video).
-                if progress_callback and total_duration > 0 and _dur > 0:
-                    seg_frac = min(seconds / _dur, 1.0)
-                    abs_time = _encoded_keep + seg_frac * _dur
-                    progress_callback(min(abs_time / total_duration * 0.9, 0.9))
+            seg_prog = _c._seg_progress_callback(
+                progress_callback, total_duration, encoded_keep, dur
+            )
 
             label_text = f"segment {i} encode"
             _c._run_ffmpeg(
@@ -252,7 +242,7 @@ def _run_segment_concat(
                     ),
                     str(seg_path),
                 ],
-                progress_callback=_seg_prog,
+                progress_callback=seg_prog,
                 timeout=segment_encode_timeout,
                 label=label_text,
                 cancel_callback=cancel_callback,

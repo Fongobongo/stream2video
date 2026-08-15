@@ -42,6 +42,51 @@ def _quote_concat_path(p: str) -> str:
     )
 
 
+def _seg_progress_callback(
+    progress_callback: Callable[[float], None] | None,
+    total_duration: float,
+    encoded_keep: float,
+    dur: float,
+) -> Callable[[float], None]:
+    """Map ffmpeg's per-segment ``out_time_us`` to absolute pipeline progress.
+
+    ffmpeg -progress reports ``out_time_us`` — the position within THIS
+    segment's output, not the original video. Map it to absolute progress
+    across the whole video so the GUI/CLI bar moves smoothly even when a
+    single segment takes an hour (e.g. 0 silence segments → 1 keep segment
+    = the whole video). The 0.9 ceiling leaves room for the final concat
+    pass, which owns the 0.9..1.0 band. Parameters are captured by value
+    at factory time (per-loop-iteration ``dur`` / ``encoded_keep``), the
+    same semantics the historical nested closures got from default args.
+    """
+
+    def _prog(seconds: float) -> None:
+        if progress_callback is not None and total_duration > 0 and dur > 0:
+            seg_frac = min(seconds / dur, 1.0)
+            abs_time = encoded_keep + seg_frac * dur
+            progress_callback(min(abs_time / total_duration * 0.9, 0.9))
+
+    return _prog
+
+
+def _concat_progress_callback(
+    progress_callback: Callable[[float], None] | None,
+    total_duration: float,
+) -> Callable[[float], None]:
+    """Map the final concat pass's ``out_time_us`` to the 0.9..1.0 band.
+
+    The final concat's out_time_us reflects output time across the whole
+    concat; the segment path reserves 0..0.9 for the per-segment encodes
+    and 0.9..1.0 for this pass.
+    """
+
+    def _prog(seconds: float) -> None:
+        if progress_callback is not None and total_duration > 0:
+            progress_callback(min(seconds / total_duration * 0.1, 0.1) + 0.9)
+
+    return _prog
+
+
 def _audio_bitrate(audio_quality: str = "") -> str:
     """Bitrate string for the AAC encoder based on ``audio_quality``.
 

@@ -13,7 +13,9 @@ clipboard stays in ``gui.py`` — only pure transformations live here.
 
 from __future__ import annotations
 
+import re
 import shlex
+import sys
 from pathlib import Path
 
 from stream2video.config import CONFIG_DEFAULTS
@@ -72,6 +74,56 @@ class EtaSmoother:
         else:
             self._smoothed = self._smoothed + self._alpha * (raw - self._smoothed)
         return self._smoothed
+
+
+# cmd.exe / PowerShell metacharacters that force quoting. `%` is
+# included because cmd.exe expands %VAR% even inside most contexts and
+# PowerShell treats it as the modulo operator; `!` enables delayed
+# expansion in cmd.exe. Bare tokens without any of these round-trip
+# unquoted on both shells.
+_WIN_CMD_METACHARS = re.compile(r'[\s&|<>^"%!]')
+
+
+def _quote_cli_arg(arg: str) -> str:
+    """Quote a single CLI argument for the shell the command will be pasted into.
+
+    Windows (cmd.exe / PowerShell): ``shlex.quote``'s POSIX quoting
+    (single quotes, backslash escapes) is NOT understood by cmd.exe,
+    and PowerShell mangles backslashes inside single quotes — a path
+    like ``C:\\Users\\John`` would paste back with a literal ``\\U``
+    escape. Use the MSVCRT double-quote rules (the same algorithm as
+    CPython's ``subprocess.list2cmdline``):
+
+      * a backslash run immediately before a quote: ``2k+1``
+        backslashes + the quote (the odd one escapes the quote);
+      * a trailing backslash run (before the closing quote we add):
+        doubled to ``2k`` so it can't escape the quote.
+
+    Tokens with no whitespace or cmd metacharacters are passed through
+    unquoted (both shells keep them intact).
+
+    POSIX: delegates to :func:`shlex.quote`.
+    """
+    if sys.platform == "win32":
+        if not _WIN_CMD_METACHARS.search(arg):
+            return arg
+        out: list[str] = ['"']
+        backslashes = 0
+        for ch in arg:
+            if ch == "\\":
+                backslashes += 1
+            elif ch == '"':
+                out.append("\\" * (2 * backslashes + 1))
+                out.append('"')
+                backslashes = 0
+            else:
+                out.append("\\" * backslashes)
+                out.append(ch)
+                backslashes = 0
+        out.append("\\" * (2 * backslashes))
+        out.append('"')
+        return "".join(out)
+    return shlex.quote(arg)
 
 
 def build_cli_command(
@@ -134,15 +186,15 @@ def build_cli_command(
     """
     parts = ["stream2video"]
     if input_raw:
-        parts.append(shlex.quote(input_raw))
-    parts.extend(["-o", shlex.quote(str(output_dir))])
+        parts.append(_quote_cli_arg(input_raw))
+    parts.extend(["-o", _quote_cli_arg(str(output_dir))])
     if config_path is not None:
-        parts.extend(["-c", shlex.quote(str(config_path))])
+        parts.extend(["-c", _quote_cli_arg(str(config_path))])
     parts.extend(["--method", method, "--encoder", encoder])
     parts.extend(["--video-quality", video_quality])
     parts.extend(["--download-quality", download_quality])
     if proxy:
-        parts.extend(["--proxy", shlex.quote(proxy)])
+        parts.extend(["--proxy", _quote_cli_arg(proxy)])
     # Newer flags — only append when they're not the default so the
     # copied command stays compact. The defaults match CONFIG_DEFAULTS
     # so a user who hasn't touched the advanced panel gets a clean
@@ -229,15 +281,17 @@ def redact_proxy_in_cli_command(cmd: str, proxy: str) -> str:
     The copied command keeps the real proxy (the user pastes and runs
     it), but a GUI log line must never print the credentials: the proxy
     token is swapped for the masked form instead. The replacement is
-    exact (``shlex.quote`` output is unique within the command), so only
-    the proxy token is affected.
+    exact (the quoted token is unique within the command), so only the
+    proxy token is affected. Quoting must match
+    :func:`build_cli_command` exactly — on Windows that is the
+    double-quoted MSVCRT form, not ``shlex.quote``'s POSIX quoting.
     """
     if not cmd or not proxy:
         return cmd
-    quoted = shlex.quote(proxy)
+    quoted = _quote_cli_arg(proxy)
     if quoted not in cmd:
         return cmd
-    return cmd.replace(quoted, shlex.quote(mask_proxy(proxy)))
+    return cmd.replace(quoted, _quote_cli_arg(mask_proxy(proxy)))
 
 
 def _wrap_status_lines(

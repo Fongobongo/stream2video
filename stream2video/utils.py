@@ -8,13 +8,23 @@ import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import IO
+from typing import IO, Protocol
 
 from stream2video.tools import ffprobe_path
 
 logger = logging.getLogger(__name__)
 
 CANCEL_POLL_INTERVAL = 0.5
+
+
+class WaitForDrain(Protocol):
+    """Signature of the callable returned by ``drain_stderr_lines``.
+
+    ``timeout`` bounds how long to block for the drain thread to finish;
+    omitting it uses the implementation's default.
+    """
+
+    def __call__(self, timeout: float | None = 30.0) -> None: ...
 
 
 @contextmanager
@@ -329,11 +339,11 @@ _STDERR_TAIL_LINES = 800
 
 
 def drain_stderr_lines(
-    pipe: IO[bytes],
+    pipe: IO[str] | IO[bytes],
     sink: list[str],
     on_line: Callable[[str], None] | None = None,
-) -> Callable[[], None]:
-    """Spawn a daemon thread that reads bytes from `pipe` and appends decoded lines to `sink`.
+) -> WaitForDrain:
+    """Spawn a daemon thread that reads lines from `pipe` (bytes or text mode) and appends decoded lines to `sink`.
 
     The thread terminates when the pipe is closed (typically when the subprocess
     exits and the OS reaps its fds); it cannot be stopped from outside the
@@ -346,9 +356,10 @@ def drain_stderr_lines(
     raised by the callback are logged and swallowed — they do not stop the
     drain thread.
 
-    Returns a `wait_for_drain` callable that blocks (up to `timeout` seconds) for
-    the thread to finish. Call it in a `finally` block to ensure `sink` is fully
-    populated before reading it.
+    Returns a `wait_for_drain` callable that blocks for the thread to finish,
+    optionally bounded by a `timeout` in seconds (`wait_for_drain()` defaults to
+    30s; callers in tight watchdog loops pass a small explicit timeout). Call it
+    in a `finally` block to ensure `sink` is fully populated before reading it.
 
     Typical usage:
         stop_drain = drain_stderr_lines(process.stderr, stderr_lines)
@@ -403,7 +414,7 @@ def drain_stderr_lines(
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
 
-    def _wait_for_drain(timeout: float = 30.0) -> None:
+    def _wait_for_drain(timeout: float | None = 30.0) -> None:
         # 5s used to be the bound. On a stderr-spammy source (corrupt
         # input, "error while decoding MB" floods) the drain thread can
         # still be chewing through the pipe when the wait expires, so
@@ -433,6 +444,13 @@ def read_lines_queue(pipe: IO[bytes]) -> tuple[queue.Queue[bytes | None], thread
     but on its own thread). When the pipe closes (subprocess exits),
     the producer puts ``None`` as a sentinel and terminates.
 
+    Text-mode safety: the EOF test is ``not raw``, NOT ``iter(readline,
+    b"")`` — the bytes sentinel never matches in text mode, where
+    ``readline()`` returns ``""`` at EOF. The historical
+    ``iter(pipe.readline, b"")`` loop spun forever on a text-mode pipe
+    (only the daemon flag kept it from hanging the process), exactly
+    the bug ``drain_stderr_lines`` guards against.
+
     Returns ``(q, thread)``. The consumer reads from ``q`` with
     ``q.get(timeout=...)``; ``None`` means EOF.
 
@@ -460,7 +478,14 @@ def read_lines_queue(pipe: IO[bytes]) -> tuple[queue.Queue[bytes | None], thread
 
     def _reader() -> None:
         try:
-            for raw in iter(pipe.readline, b""):
+            # Explicit EOF loop instead of iter(pipe.readline, b""): the
+            # bytes sentinel never matches in text mode (readline returns
+            # "" at EOF), where the historical loop spun forever and only
+            # the daemon flag kept it from hanging process exit.
+            while True:
+                raw = pipe.readline()
+                if not raw:
+                    break
                 q.put(raw)
         except (OSError, ValueError):
             pass
@@ -602,6 +627,28 @@ def list_active_owners() -> list[str]:
     """
     with _proc_registry_lock:
         return [owner for owner, proc in _proc_registry.items() if proc.poll() is None]
+
+
+def kill_and_reap(process: subprocess.Popen, timeout: float = 30.0) -> None:
+    """Kill ``process`` and reap it with a bounded wait.
+
+    The canonical kill-first helper for every pipeline path. On Windows
+    ``kill()`` (TerminateProcess) is asynchronous; letting an exception
+    escape without a ``wait()`` keeps the process handles — and any file
+    the child had open (a segment ffmpeg wrote, a partial WAV) — alive
+    long enough for the caller's cleanup (unlink, ``rmtree`` of a work
+    dir) to trip WinError 32 (file busy). The 30s bound matches the
+    historical ``_kill_and_raise`` implementations in the concat runner
+    and the silence detector; a child that ignores the kill is
+    un-reapable anyway. Best-effort: the kill itself may also fail
+    (AccessDenied, transient handle ownership) — the caller's own error
+    path must still surface.
+    """
+    process.kill()
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        pass  # already dead or un-killable; nothing more to reap
 
 
 def no_window_kwargs() -> dict:

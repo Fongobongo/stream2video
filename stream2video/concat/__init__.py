@@ -71,10 +71,12 @@ from stream2video.concat.helpers import (
     _audio_bitrate,
     _audio_bitrate_opts,
     _audio_opts,
+    _concat_progress_callback,
     _make_memory_monitor_factory,
     _memory_budget_mb,
     _new_memory_monitor,
     _quote_concat_path,
+    _seg_progress_callback,
     generate_keep_segments,
 )
 from stream2video.concat.manifest import (
@@ -189,6 +191,7 @@ __all__ = [
     "_audio_opts",
     "_build_manifest",
     "_concat_filter_one_pass",
+    "_concat_progress_callback",
     "_ensure_fresh_work_dir",
     "_ffprobe_duration_ok",
     "_ffprobe_is_valid_media",
@@ -210,6 +213,7 @@ __all__ = [
     "_run_segment_concat",
     "_run_subprocess_cmd",
     "_run_with_fallback",
+    "_seg_progress_callback",
     "_source_identity",
     "_threads_opt",
     "_validate_manifest",

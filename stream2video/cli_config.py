@@ -24,6 +24,7 @@ from stream2video.config import (
     VALID_QUALITIES,
     VALID_SOFTWARE_FALLBACKS,
     VALID_X264_PRESETS,
+    effective_defaults,
 )
 from stream2video.gui_helpers import mask_proxy
 
@@ -41,7 +42,12 @@ def load_config(config_file: Path | None, console: Any) -> dict:
     YAML value is rejected here regardless of whether the matching
     CLI flag was passed.
     """
-    config = CONFIG_DEFAULTS.copy()
+    # Start from the EFFECTIVE defaults (CONFIG_DEFAULTS + any
+    # user_defaults.json overrides), not a bare CONFIG_DEFAULTS.copy():
+    # the GUI and CLI must agree on the starting point, and .copy() is
+    # shallow — a YAML config would share the ``recent_projects`` list
+    # object with every other config dict in the process.
+    config = effective_defaults()
     # Raw YAML dict (before merging into ``config``). Kept so bool-key
     # validation below can distinguish "user wrote 1 in YAML" (int,
     # rejected) from "default value absent" (skip). ``file_config`` is

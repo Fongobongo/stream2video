@@ -9,6 +9,7 @@ effects, no I/O.
 from __future__ import annotations
 
 import shlex
+import sys
 from pathlib import Path
 
 from stream2video.gui_helpers import (
@@ -29,6 +30,126 @@ from stream2video.gui_helpers import (
     redact_proxy_in_cli_command,
     should_update_status,
 )
+
+
+# Windows cmdline splitter with CommandLineToArgvW / MSVCRT semantics
+# (backslash-run doubling before quotes, "" escaping, trailing-run
+# doubling) — the inverse of ``_quote_cli_arg``. Used to verify
+# round-trips on win32, where shlex.split would apply POSIX rules to a
+# command the user will paste into cmd.exe / PowerShell.
+def _split_win_cmdline(line: str) -> list[str]:
+    args: list[str] = []
+    cur: list[str] = []
+    in_quotes = False
+    i = 0
+    n = len(line)
+    while i < n:
+        c = line[i]
+        if c == "\\":
+            run = 0
+            while i < n and line[i] == "\\":
+                run += 1
+                i += 1
+            if i < n and line[i] == '"':
+                cur.append("\\" * (run // 2))
+                if run % 2 == 1:
+                    cur.append('"')  # escaped quote — literal
+                else:
+                    in_quotes = not in_quotes
+                i += 1
+            else:
+                cur.append("\\" * run)
+        elif c == '"':
+            if in_quotes and i + 1 < n and line[i + 1] == '"':
+                cur.append('"')  # "" inside quotes — literal quote
+                i += 2
+            else:
+                in_quotes = not in_quotes
+                i += 1
+        elif c in " \t" and not in_quotes:
+            if cur:
+                args.append("".join(cur))
+                cur = []
+            i += 1
+        else:
+            cur.append(c)
+            i += 1
+    if cur:
+        args.append("".join(cur))
+    return args
+
+
+def _split_cmd(cmd: str) -> list[str]:
+    """Split a built CLI command with the quoting rules of the current platform."""
+    return _split_win_cmdline(cmd) if sys.platform == "win32" else shlex.split(cmd)
+
+
+class TestQuoteCliArg:
+    """MSVCRT quoting rules for Windows; shlex.quote on POSIX."""
+
+    def test_bare_token_unquoted(self):
+        from stream2video.gui_helpers import _quote_cli_arg
+
+        assert _quote_cli_arg("C:\\Users\\John\\video.mp4") == "C:\\Users\\John\\video.mp4"
+
+    def test_space_token_double_quoted(self):
+        from stream2video.gui_helpers import _quote_cli_arg
+
+        if sys.platform == "win32":
+            assert _quote_cli_arg("a b") == '"a b"'
+        else:
+            assert _quote_cli_arg("a b") == "'a b'"
+
+    def test_embedded_quote_doubled(self):
+        from stream2video.gui_helpers import _quote_cli_arg
+
+        if sys.platform == "win32":
+            assert _quote_cli_arg('a"b') == '"a\\"b"'
+        else:
+            assert _quote_cli_arg('a"b') == "'a\"b'"
+
+    def test_trailing_backslash_run_doubled(self):
+        from stream2video.gui_helpers import _quote_cli_arg
+
+        if sys.platform == "win32":
+            # A bare trailing-backslash token needs no quoting at all
+            # (no metachars); when the token IS quoted (space below),
+            # the trailing run must be doubled so it can't escape the
+            # closing quote (MSVCRT: \ before " = literal quote).
+            assert _quote_cli_arg("C:\\dir\\") == "C:\\dir\\"
+            assert _quote_cli_arg("C:\\dir name\\") == '"C:\\dir name\\\\"'
+        else:
+            assert _quote_cli_arg("C:\\dir\\") == "'C:\\dir\\'"
+
+    def test_backslash_before_quote_odd_run(self):
+        from stream2video.gui_helpers import _quote_cli_arg
+
+        if sys.platform == "win32":
+            # k=1 backslash before a quote → 2k+1 = 3 backslashes + quote
+            # (the odd one escapes the quote on the way back).
+            assert _quote_cli_arg('a\\"b') == '"a\\\\\\"b"'
+        else:
+            assert _quote_cli_arg('a\\"b') == "'a\\\"b'"
+
+    def test_win_roundtrip_with_splitter(self):
+        # Property check: _quote_cli_arg → _split_win_cmdline is the
+        # identity on a set of nasty tokens.
+        if sys.platform != "win32":
+            return
+        from stream2video.gui_helpers import _quote_cli_arg
+
+        for tok in (
+            "plain",
+            "a b",
+            'a"b',
+            "C:\\dir\\",
+            "trail\\\\",
+            'quote at end"',
+            "socks5://user:p;ss&$(touch pwned)@proxy:1080",
+            'mix\\" of\\ everything',
+        ):
+            parsed = _split_win_cmdline(_quote_cli_arg(tok))
+            assert parsed == [tok], f"{tok!r} → {_quote_cli_arg(tok)!r} → {parsed!r}"
 
 
 class TestBuildCliCommand:
@@ -112,9 +233,10 @@ class TestBuildCliCommand:
         # Regression: a proxy containing a space (e.g. a password with a
         # space) used to be injected as a raw token, so pasting the
         # copied command would split it into multiple shell words and
-        # mangle the argument. It must be shlex-quoted like the other
-        # values, and the raw unquoted token must not appear in the
-        # command string.
+        # mangle the argument. It must be quoted for the target shell
+        # (double-quoted MSVCRT form on Windows — shlex.quote's POSIX
+        # single quotes are not understood by cmd.exe), and the raw
+        # unquoted token must not appear in the command string.
         proxy = "socks5://user:pa ss@proxy:1080"
         cmd = build_cli_command(
             "x",
@@ -125,9 +247,13 @@ class TestBuildCliCommand:
             download_quality="best",
             proxy=proxy,
         )
-        assert f"--proxy {shlex.quote(proxy)}" in cmd
+        if sys.platform == "win32":
+            assert '--proxy "socks5://user:pa ss@proxy:1080"' in cmd
+        else:
+            assert f"--proxy {shlex.quote(proxy)}" in cmd
         assert "--proxy socks5://user:pa ss@proxy:1080" not in cmd
-        assert shlex.split(cmd)[shlex.split(cmd).index("--proxy") + 1] == proxy
+        tokens = _split_cmd(cmd)
+        assert tokens[tokens.index("--proxy") + 1] == proxy
 
     def test_proxy_with_shell_metacharacters_is_quoted_and_roundtrips(self):
         # Regression: ``;``, ``&``, ``$(...)`` etc. inside the proxy
@@ -145,7 +271,7 @@ class TestBuildCliCommand:
         )
         # Round-trip: re-splitting the command must yield the proxy
         # exactly as one argument (no injection, no mangling).
-        tokens = shlex.split(cmd)
+        tokens = _split_cmd(cmd)
         assert tokens[tokens.index("--proxy") + 1] == proxy
         # The command must contain no unquoted metacharacters adjacent
         # to the --proxy flag.
@@ -163,7 +289,7 @@ class TestBuildCliCommand:
             proxy=proxy,
         )
         assert "--proxy socks5://user:secret@host:1080" in cmd
-        tokens = shlex.split(cmd)
+        tokens = _split_cmd(cmd)
         assert tokens[tokens.index("--proxy") + 1] == proxy
 
     def test_non_default_advanced_flags_appended(self):

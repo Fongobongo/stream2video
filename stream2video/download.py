@@ -13,9 +13,8 @@ from typing import NamedTuple
 from stream2video.config import CONFIG_DEFAULTS
 from stream2video.tools import popen_with_retry
 from stream2video.utils import (
-    _STDERR_HEAD_LINES,
-    _STDERR_TAIL_LINES,
     CANCEL_POLL_INTERVAL,
+    drain_stderr_lines,
     registered_process,
     subprocess_kwargs,
 )
@@ -333,7 +332,11 @@ def _timeout_error(message: str, stderr_chunks: list[str]) -> DownloadTimeoutErr
     return DownloadTimeoutError(message)
 
 
-def _sweep_partial_fragments(out_dir: Path, since_monotonic: float) -> None:
+def _sweep_partial_fragments(
+    out_dir: Path,
+    since_monotonic: float,
+    existing_before: set[str] | None = None,
+) -> None:
     """Remove orphaned yt-dlp partial fragments created since ``since_monotonic``.
 
     yt-dlp's outtmpl leaves ``*.part`` / ``*.ytdl`` / ``*.temp`` behind when a
@@ -347,6 +350,14 @@ def _sweep_partial_fragments(out_dir: Path, since_monotonic: float) -> None:
     directory AND the windows of the run. We only delete files whose mtime
     falls after the monotonic start time of THIS attempt — older fragments
     belonging to unrelated (still-running or abandoned) attempts are kept.
+
+    ``existing_before``: names of entries that already existed in
+    ``out_dir`` when THIS attempt started (caller snapshots them right
+    before spawning yt-dlp). Any such name is skipped unconditionally:
+    with parallel downloads into the same directory, a fragment can be
+    RE-CREATED or re-touched by a sibling attempt after our snapshot, and
+    the mtime window alone would then mark it as "ours" (the sibling
+    started later and its writes are younger than our start time).
     """
     import time
 
@@ -372,6 +383,10 @@ def _sweep_partial_fragments(out_dir: Path, since_monotonic: float) -> None:
         except OSError:
             continue
         if not name.endswith((".part", ".ytdl", ".temp")):
+            continue
+        if existing_before is not None and name in existing_before:
+            # Pre-existed this attempt — belongs to another (possibly
+            # still-running) attempt; never touch it.
             continue
         try:
             st = p.stat()
@@ -465,6 +480,17 @@ def download(
         raise URLValidationError(f"Invalid URL: {url}")
 
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Snapshot the directory BEFORE spawning yt-dlp so the failure-path
+    # fragment sweep can never delete a file that pre-existed this
+    # attempt — with parallel downloads into the same out_dir, a sibling
+    # attempt's fragment may be younger than our start time (its writes
+    # happen after our snapshot) and the mtime window alone would
+    # misclassify it as ours.
+    try:
+        existing_before = {p.name for p in out_dir.iterdir()}
+    except OSError:
+        existing_before = None
 
     format_str = _format_selector_for_quality(quality)
     logger.info(f"Download quality: {quality} ({format_str})")
@@ -600,29 +626,17 @@ def download(
                     continue
                 stdout_lines.append(text)
 
-        def _drain_stderr() -> None:
-            stderr = process.stderr
-            if stderr is None:
-                return
-            for line in stderr:
-                stderr_chunks.append(line)
-                # Bound the hoard: mirror the ring in drain_stderr_lines
-                # (a corrupt source can spam stderr for the whole stall
-                # window, eating the same RAM the download is supposed
-                # to guard). Head (error classification) + tail are kept.
-                max_lines = _STDERR_HEAD_LINES + 1 + _STDERR_TAIL_LINES
-                if len(stderr_chunks) > max_lines:
-                    stderr_chunks[:] = [
-                        *stderr_chunks[:_STDERR_HEAD_LINES],
-                        "... (middle stderr dropped)\n",
-                        *stderr_chunks[-_STDERR_TAIL_LINES:],
-                    ]
+        # Stderr drain via the shared drain_stderr_lines: the historical
+        # local ``_drain_stderr`` thread re-implemented the same ring
+        # trim (head + marker + tail) and thread lifecycle — now owned by
+        # utils so download.py can't drift from the other pipelines.
+        assert process.stderr is not None  # Popen is always created with stderr=PIPE
+        wait_for_drain = drain_stderr_lines(process.stderr, stderr_chunks)
 
         stdout_thread = threading.Thread(target=_drain_stdout, daemon=True)
-        stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
         stdout_thread.start()
-        stderr_thread.start()
 
+        success = False
         try:
             deadline = time.monotonic() + download_timeout
             while True:
@@ -654,7 +668,7 @@ def download(
                     except subprocess.TimeoutExpired:
                         pass
                     stdout_thread.join(timeout=2)
-                    stderr_thread.join(timeout=2)
+                    wait_for_drain(2.0)
                     raise _timeout_error(
                         f"Download timeout after {download_timeout}s",
                         stderr_chunks,
@@ -679,7 +693,7 @@ def download(
                         except subprocess.TimeoutExpired:
                             pass
                         stdout_thread.join(timeout=2)
-                        stderr_thread.join(timeout=2)
+                        wait_for_drain(2.0)
                         raise _timeout_error(
                             f"Download stalled before first byte: no progress "
                             f"within {connect_timeout}s of start "
@@ -695,7 +709,7 @@ def download(
                         except subprocess.TimeoutExpired:
                             pass
                         stdout_thread.join(timeout=2)
-                        stderr_thread.join(timeout=2)
+                        wait_for_drain(2.0)
                         raise _timeout_error(
                             f"Download stalled: no progress for {int(silent_for)}s",
                             stderr_chunks,
@@ -706,7 +720,7 @@ def download(
                     pass
 
             stdout_thread.join(timeout=2)
-            stderr_thread.join(timeout=2)
+            wait_for_drain(2.0)
 
             if process.returncode != 0:
                 stderr_text = "".join(stderr_chunks)
@@ -733,6 +747,7 @@ def download(
                 raise DownloadError(f"Download completed but file is empty: {resolved}")
 
             logger.info(f"Successfully downloaded: {resolved} ({size // 1024 // 1024} MB)")
+            success = True
             return DownloadResult(resolved, is_downloaded=True)
 
         finally:
@@ -756,7 +771,7 @@ def download(
                 except Exception:
                     logger.debug("final yt-dlp reap failed", exc_info=True)
             stdout_thread.join(timeout=2)
-            stderr_thread.join(timeout=2)
+            wait_for_drain(2.0)
             for pipe in (process.stdout, process.stderr):
                 if pipe:
                     try:
@@ -781,7 +796,13 @@ def download(
             # are unlinked here. Any OSError is logged at debug because
             # an AV sweep locking the partial mid-unlink surfaces here,
             # and elevating it would mask the original cancel exception.
-            try:
-                _sweep_partial_fragments(out_dir, start_time)
-            except Exception:
-                logger.debug("partial-fragment sweep failed", exc_info=True)
+            #
+            # Failure paths only: on success the download's own fragment
+            # was renamed by yt-dlp, so a sweep has nothing to reclaim —
+            # and running it would race parallel downloads in the same
+            # out_dir whose fragments are younger than OUR start time.
+            if not success:
+                try:
+                    _sweep_partial_fragments(out_dir, start_time, existing_before)
+                except Exception:
+                    logger.debug("partial-fragment sweep failed", exc_info=True)

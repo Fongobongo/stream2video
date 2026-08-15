@@ -26,6 +26,44 @@ def _stat_mtime(p: Path) -> float:
         return 0.0
 
 
+def _phase_prog(
+    progress_callback: Callable[[float], None] | None,
+    base: float = 0.15,
+    span: float = 0.70,
+) -> Callable[[float], None]:
+    """Map a 0..1 phase fraction onto the ``base..base+span`` slice of the
+    Silence-phase bar.
+
+    Shared by the WAV silencedetect and the direct-video fallback, whose
+    progress closures were byte-identical: both report inside the
+    15..85% slice (extraction owns 0..15%, sample-verify is hidden, the
+    controller finishes 85..100%).
+    """
+
+    def _prog(f: float) -> None:
+        if progress_callback is not None:
+            progress_callback(base + max(0.0, min(1.0, f)) * span)
+
+    return _prog
+
+
+def _invalidate_wav_and_resume(wav_path: Path, resume_cache_path: Path | None) -> None:
+    """Drop the WAV cache and its resume checkpoints after a verify failure.
+
+    The throttled resume checkpoints were written against the broken
+    WAV's timeline; feeding them into the direct-video fallback would
+    produce a cut plan that is half broken-PTS, half correct. Remove the
+    canonical and in-flight (``.inuse``) checkpoint files; the caller
+    resets ``initial_segments``/``resume_from`` so the fallback restarts
+    from t=0.
+    """
+    wav_path.unlink(missing_ok=True)
+    _c.clear_wav_verified(wav_path)
+    if resume_cache_path is not None:
+        resume_cache_path.unlink(missing_ok=True)
+        _c.resume_inuse_path(resume_cache_path).unlink(missing_ok=True)
+
+
 def detect_silence(
     video_path: Path,
     threshold: float = CONFIG_DEFAULTS["threshold"],
@@ -251,17 +289,12 @@ def detect_silence(
                     f"{_SAMPLE_VERIFY_DURATION:.0f}s). Source may have broken "
                     f"timestamps — re-extracting and falling back if needed."
                 )
-                wav_path.unlink(missing_ok=True)
-                _c.clear_wav_verified(wav_path)
-                if resume_cache_path is not None:
-                    # The resume checkpoints were written against the
-                    # broken WAV timeline — continuing from them would
-                    # poison the direct result. Remove both the canonical
-                    # and the in-flight (.inuse) checkpoint.
-                    resume_cache_path.unlink(missing_ok=True)
-                    _c.resume_inuse_path(resume_cache_path).unlink(missing_ok=True)
-                    initial_segments = []
-                    resume_from = None
+                _invalidate_wav_and_resume(wav_path, resume_cache_path)
+                # The resume checkpoints were written against the
+                # broken WAV timeline — continuing from them would
+                # poison the direct result.
+                initial_segments = []
+                resume_from = None
                 segments = _c._run_silencedetect(
                     video_path,
                     threshold,
@@ -307,16 +340,14 @@ def detect_silence(
             # Map WAV silencedetect 0..1 to 15..85% of the Silence phase
             # (extraction is 0..15 illustration above, sample-verify is
             # hidden). When resuming, offset already handled by progress_divisor.
-            def _wav_silence_prog(f: float) -> None:
-                if progress_callback is not None:
-                    progress_callback(0.15 + max(0.0, min(1.0, f)) * 0.70)
+            wav_silence_prog = _phase_prog(progress_callback)
 
             segments_D = _c._run_silencedetect(
                 wav_path,
                 threshold,
                 min_silence,
                 duration,
-                _wav_silence_prog if progress_callback is not None else None,
+                wav_silence_prog if progress_callback is not None else None,
                 cancel_callback,
                 "WAV",
                 on_segment=on_segment,
@@ -381,34 +412,24 @@ def detect_silence(
                     f"Source may have broken timestamps — falling back to full direct "
                     f"detection. WAV cache invalidated."
                 )
-                wav_path.unlink(missing_ok=True)
-                _c.clear_wav_verified(wav_path)
+                _invalidate_wav_and_resume(wav_path, resume_cache_path)
                 # The throttled resume checkpoints above were written
                 # against the broken WAV's timeline during the D pass —
                 # before this verify pass ran. Feeding them into the
                 # direct-video fallback would produce a cut plan that is
                 # half broken-PTS, half correct. Drop them and restart
                 # the direct detection from t=0.
-                if resume_cache_path is not None:
-                    resume_cache_path.unlink(missing_ok=True)
-                    _c.resume_inuse_path(resume_cache_path).unlink(missing_ok=True)
                 initial_segments = []
                 resume_from = None
 
-                def _direct_prog(f: float) -> None:
-                    # The WAV silencedetect above already consumed
-                    # 0.15..0.85 of the phase bar; report the direct
-                    # fallback's 0..1 fraction inside the same slice so
-                    # the overall bar never regresses.
-                    if progress_callback is not None:
-                        progress_callback(0.15 + max(0.0, min(1.0, f)) * 0.70)
+                direct_prog = _phase_prog(progress_callback)
 
                 segments = _c._run_silencedetect(
                     video_path,
                     threshold,
                     min_silence,
                     duration,
-                    _direct_prog if progress_callback is not None else None,
+                    direct_prog if progress_callback is not None else None,
                     cancel_callback,
                     "video",
                     on_segment=on_segment,

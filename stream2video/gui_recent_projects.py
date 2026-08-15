@@ -9,6 +9,7 @@ the platform's file manager.
 from __future__ import annotations
 
 import logging
+import os
 import shutil
 import threading
 from pathlib import Path
@@ -190,21 +191,45 @@ class RecentProjectsMixin:
 
         def _rmtree_worker() -> None:
             err: OSError | None = None
+            # TOCTOU guard: ``path`` was validated (and confirmed by the
+            # user) BEFORE the dialog, but the directory could have been
+            # swapped or re-pointed in between (renamed + replaced by a
+            # symlink, user moved a folder over it, an AV restore raced
+            # us). Re-validate the RESOLVED path right before the
+            # rmtree — the validation, not the stale pre-dialog check,
+            # is the boundary for destructive actions. An invalid path
+            # at this point is dropped from the list without deleting.
             try:
-                shutil.rmtree(path)
+                resolved = path.resolve()
+            except OSError:
+                resolved = Path(os.path.abspath(str(path)))
+            ok, reason = validate_project_delete(resolved)
+            if not ok:
+                self._log(f"[WARN] Refusing to delete {resolved} at delete time: {reason}")
+
+                def _skip() -> None:
+                    self._remove_recent_entry(path_str)
+
+                try:
+                    self.winfo_toplevel().after(0, _skip)
+                except Exception:
+                    pass
+                return
+            try:
+                shutil.rmtree(resolved)
             except OSError as e:
                 err = e
 
             def _finish() -> None:
                 if err is not None:
-                    self._log(f"[ERROR] Failed to delete {path}: {err}")
+                    self._log(f"[ERROR] Failed to delete {resolved}: {err}")
                     messagebox.showerror(
                         "Delete failed",
-                        f"Could not delete {path}:\n{err}",
+                        f"Could not delete {resolved}:\n{err}",
                         parent=self.winfo_toplevel(),
                     )
                     return
-                self._log(f"Deleted project: {path}")
+                self._log(f"Deleted project: {resolved}")
                 self._remove_recent_entry(path_str)
 
             try:

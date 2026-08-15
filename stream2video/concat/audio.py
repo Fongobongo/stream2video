@@ -64,10 +64,6 @@ def _run_audio_concat_filter(
     chain = "".join(f"[{i}:a]" for i in range(n))
     graph = f"{chain}concat=n={n}:v=0:a=1[outa]"
 
-    def _concat_prog(seconds: float) -> None:
-        if progress_callback and total_duration > 0:
-            progress_callback(min(seconds / total_duration * 0.1, 0.1) + 0.9)
-
     label_text = "audio concat filter"
     _c._run_ffmpeg(
         [
@@ -92,7 +88,7 @@ def _run_audio_concat_filter(
             *extra_opts,
             str(output_path),
         ],
-        progress_callback=_concat_prog,
+        progress_callback=_c._concat_progress_callback(progress_callback, total_duration),
         timeout=timeout,
         label=label_text,
         cancel_callback=cancel_callback,
@@ -223,19 +219,9 @@ def _run_audio_extract(
                     progress_callback(min(encoded_keep / total_duration * 0.9, 0.9))
                 continue
 
-            def _seg_prog(
-                seconds: float,
-                _dur: float = dur,
-                _encoded_keep: float = encoded_keep,
-            ) -> None:
-                # Map ffmpeg's per-segment out_time_us to absolute
-                # progress across the whole output, same trick as the
-                # segment path's _seg_prog. The 0.9 ceiling leaves room
-                # for the final concat pass.
-                if progress_callback and total_duration > 0 and _dur > 0:
-                    seg_frac = min(seconds / _dur, 1.0)
-                    abs_time = _encoded_keep + seg_frac * _dur
-                    progress_callback(min(abs_time / total_duration * 0.9, 0.9))
+            seg_prog = _c._seg_progress_callback(
+                progress_callback, total_duration, encoded_keep, dur
+            )
 
             label_text = f"audio segment {i} encode"
             _c._run_ffmpeg(
@@ -262,7 +248,7 @@ def _run_audio_extract(
                     *extra_opts,
                     str(seg_path),
                 ],
-                progress_callback=_seg_prog,
+                progress_callback=seg_prog,
                 timeout=segment_encode_timeout,
                 label=label_text,
                 cancel_callback=cancel_callback,

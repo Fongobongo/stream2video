@@ -217,56 +217,61 @@ class MemoryMonitor:
             consecutive_none = 0
             if rss > self.peak_rss_mb:
                 self.peak_rss_mb = rss
-                if self.memory_limit_mb is not None and self.memory_limit_mb > 0:
-                    soft_mb = self.memory_limit_mb * self.soft_threshold_frac
-                    hard_mb = self.memory_limit_mb * self.hard_threshold_frac
-                    if rss >= hard_mb and not self.hard_exceeded:
-                        msg = (
-                            f"{self.label} RSS={rss:.0f}MB >= hard limit "
-                            f"{hard_mb:.0f}MB ({self.hard_threshold_frac * 100:.0f}% of "
-                            f"{self.memory_limit_mb:.0f}MB budget) — cancelling"
-                        )
-                        logger.error(msg)
-                        # Set the flag BEFORE the callbacks so the pipeline's
-                        # wait loop can distinguish an OOM-triggered cancel
-                        # from a user cancel as early as possible. The old
-                        # order set it only after ``cancel_callback`` ran, so
-                        # a cancel taking effect quickly (process killed,
-                        # runner sees rc) could be observed by the pipeline
-                        # while ``hard_exceeded`` was still False — the kill
-                        # was then misreported as a user CancelledError
-                        # instead of FFmpegOutOfMemoryError, losing the
-                        # "lower the memory budget" hint.
-                        self.hard_exceeded = True
-                        if self.on_warning is not None:
-                            try:
-                                self.on_warning(msg)
-                            except Exception:
-                                logger.debug("on_warning raised", exc_info=True)
-                        if self.cancel_callback is not None:
-                            try:
-                                # cancel_callback is best-effort: the
-                                # pipeline's own wait loop will reap the
-                                # process and inspect ``hard_exceeded`` to
-                                # pick the OOM error path.
-                                self.cancel_callback()
-                            except Exception:
-                                logger.debug("cancel_callback raised", exc_info=True)
-                        return
-                    if rss >= soft_mb and not warned_soft:
-                        warned_soft = True
-                        self.soft_exceeded = True
-                        msg = (
-                            f"{self.label} RSS={rss:.0f}MB >= soft limit "
-                            f"{soft_mb:.0f}MB ({self.soft_threshold_frac * 100:.0f}% of "
-                            f"{self.memory_limit_mb:.0f}MB budget)"
-                        )
-                        logger.warning(msg)
-                        if self.on_warning is not None:
-                            try:
-                                self.on_warning(msg)
-                            except Exception:
-                                logger.debug("on_warning raised", exc_info=True)
+            # Budget check runs on EVERY poll, not only when a new peak
+            # is observed: an encode that plateaus right at the limit
+            # (RSS stays flat above the soft/hard threshold) would
+            # otherwise never be flagged, because the old nesting inside
+            # ``if rss > peak`` stopped checking once the peak was set.
+            if self.memory_limit_mb is not None and self.memory_limit_mb > 0:
+                soft_mb = self.memory_limit_mb * self.soft_threshold_frac
+                hard_mb = self.memory_limit_mb * self.hard_threshold_frac
+                if rss >= hard_mb and not self.hard_exceeded:
+                    msg = (
+                        f"{self.label} RSS={rss:.0f}MB >= hard limit "
+                        f"{hard_mb:.0f}MB ({self.hard_threshold_frac * 100:.0f}% of "
+                        f"{self.memory_limit_mb:.0f}MB budget) — cancelling"
+                    )
+                    logger.error(msg)
+                    # Set the flag BEFORE the callbacks so the pipeline's
+                    # wait loop can distinguish an OOM-triggered cancel
+                    # from a user cancel as early as possible. The old
+                    # order set it only after ``cancel_callback`` ran, so
+                    # a cancel taking effect quickly (process killed,
+                    # runner sees rc) could be observed by the pipeline
+                    # while ``hard_exceeded`` was still False — the kill
+                    # was then misreported as a user CancelledError
+                    # instead of FFmpegOutOfMemoryError, losing the
+                    # "lower the memory budget" hint.
+                    self.hard_exceeded = True
+                    if self.on_warning is not None:
+                        try:
+                            self.on_warning(msg)
+                        except Exception:
+                            logger.debug("on_warning raised", exc_info=True)
+                    if self.cancel_callback is not None:
+                        try:
+                            # cancel_callback is best-effort: the
+                            # pipeline's own wait loop will reap the
+                            # process and inspect ``hard_exceeded`` to
+                            # pick the OOM error path.
+                            self.cancel_callback()
+                        except Exception:
+                            logger.debug("cancel_callback raised", exc_info=True)
+                    return
+                if rss >= soft_mb and not warned_soft:
+                    warned_soft = True
+                    self.soft_exceeded = True
+                    msg = (
+                        f"{self.label} RSS={rss:.0f}MB >= soft limit "
+                        f"{soft_mb:.0f}MB ({self.soft_threshold_frac * 100:.0f}% of "
+                        f"{self.memory_limit_mb:.0f}MB budget)"
+                    )
+                    logger.warning(msg)
+                    if self.on_warning is not None:
+                        try:
+                            self.on_warning(msg)
+                        except Exception:
+                            logger.debug("on_warning raised", exc_info=True)
 
             # OS reserve check — warning only, never cancels. The
             # available-RAM reading reflects pressure from ALL processes

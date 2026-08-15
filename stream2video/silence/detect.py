@@ -29,6 +29,7 @@ from stream2video.utils import (
     CANCEL_POLL_INTERVAL,
     cancel_monitor,
     drain_stderr_lines,
+    kill_and_reap,
     looks_like_oom,
     no_window_kwargs,
     read_lines_queue,
@@ -41,7 +42,8 @@ logger = logging.getLogger(__name__)
 def _kill_and_raise(proc: subprocess.Popen, exc: BaseException) -> NoReturn:
     """Kill the ffmpeg child and reap it before propagating ``exc``.
 
-    Mirrors the concat runner's ``_kill_and_raise``: on Windows
+    Thin wrapper around :func:`stream2video.utils.kill_and_reap` kept so
+    the raise-from-None semantics stay at the call sites. On Windows
     ``kill()`` (TerminateProcess) is asynchronous, and letting the
     exception escape without a bounded ``wait()`` keeps the process
     handles — and any file the child had open — alive long enough for
@@ -49,11 +51,7 @@ def _kill_and_raise(proc: subprocess.Popen, exc: BaseException) -> NoReturn:
     dir) to trip WinError 32 (file busy). The 30s bound matches
     runner.py; a child that ignores the kill is un-reapable anyway.
     """
-    proc.kill()
-    try:
-        proc.wait(timeout=30)
-    except subprocess.TimeoutExpired:
-        pass  # already dead or un-killable; nothing more to reap
+    kill_and_reap(proc)
     raise exc from None
 
 
@@ -64,6 +62,7 @@ def detect_silence_stream(
     *,
     on_segment: Callable[[list[SilenceSegment]], None] | None = None,
     timeout: int = _SILENCE_TIMEOUT,
+    cancel_callback: Callable[[], bool] | None = None,
 ) -> list[SilenceSegment]:
     """Run ffmpeg silencedetect on ``input_path`` directly — no WAV file.
 
@@ -78,6 +77,13 @@ def detect_silence_stream(
     called this function (typically a background thread); callers that
     need to touch a UI must wrap the call with their framework's
     main-thread dispatch (e.g. ``self.after(0, ...)`` in Tkinter).
+
+    ``cancel_callback`` is polled during the run (and checked after the
+    process exits). When it returns True the ffmpeg child is killed and
+    :class:`SilenceCancelledError` is raised instead of a misleading
+    :class:`SilenceOutOfMemoryError` — a preview cancelled via
+    ``cancel_process("preview")`` exits with rc=-9 (SIGKILL), which
+    ``looks_like_oom`` would otherwise claim.
 
     Returns the final list of segments. Hard ffmpeg failures raise
     :class:`SilenceDetectionError`; the callback is not invoked on
@@ -95,7 +101,7 @@ def detect_silence_stream(
             min_silence=min_silence,
             duration=None,
             progress_callback=None,
-            cancel_callback=None,
+            cancel_callback=cancel_callback,
             label="video (preview)",
             duration_limit=None,
             timeout=timeout,
@@ -139,7 +145,10 @@ def detect_silence_stream(
     parser = SilenceParser(on_segment=on_segment)
 
     try:
-        with registered_process(proc, owner="preview"):
+        with (
+            registered_process(proc, owner="preview"),
+            cancel_monitor(proc, cancel_callback) as cancelled,
+        ):
             # P1 audit v0.3 §5.2: replace the blocking
             # ``iter(pipe.readline, b"")`` with read_lines_queue +
             # ``get(timeout=...)``. A hung ffmpeg that stops writing to
@@ -169,10 +178,16 @@ def detect_silence_stream(
                 try:
                     raw = line_queue.get(timeout=CANCEL_POLL_INTERVAL)
                 except queue.Empty:
-                    # No new line in the poll window — loop back and
-                    # re-check the wall-clock deadline above. (The reader
-                    # thread is the sole sender of None; a merely-exited
-                    # process still has a trailing EOF sentinel to drain.)
+                    # No new line in the poll window — check cancel
+                    # inline (mirrors ``_run_silencedetect``), then loop
+                    # back and re-check the wall-clock deadline above.
+                    # (The reader thread is the sole sender of None; a
+                    # merely-exited process still has a trailing EOF
+                    # sentinel to drain.)
+                    if cancel_callback is not None and cancel_callback():
+                        _kill_and_raise(proc, SilenceCancelledError("silence detection cancelled"))
+                    if cancelled.is_set():
+                        _kill_and_raise(proc, SilenceCancelledError("silence detection cancelled"))
                     continue
                 if raw is None:
                     break  # EOF — reader saw the pipe close.
@@ -195,6 +210,13 @@ def detect_silence_stream(
                     ),
                 )
             if proc.returncode != 0:
+                # A kill from ``cancel_process("preview")`` (or the
+                # cancel_monitor thread) lands here as rc=-9 on POSIX —
+                # check the cancel flag BEFORE ``looks_like_oom`` claims
+                # the kill as an OOM and the user sees "ffmpeg
+                # silencedetect OOM" instead of a cancel.
+                if (cancel_callback is not None and cancel_callback()) or cancelled.is_set():
+                    raise SilenceCancelledError("silence detection cancelled")
                 if looks_like_oom(proc.returncode, ""):
                     raise SilenceOutOfMemoryError(
                         f"ffmpeg silencedetect OOM (rc={proc.returncode}); {_OOM_HINT}"
@@ -285,15 +307,21 @@ def _run_silencedetect(
     # Build the ffmpeg command in dependency order: global options →
     # input → filter → output. `extend` keeps the list monotonic so
     # inserting `-ss` or `-t` does not require magic indices.
-    # `-copyts` is required when seeking (resume path): without it,
+    # `-copyts` is added ONLY when seeking (resume path): without it,
     # input `-ss` before `-i` resets the output PTS to zero, so
     # silencedetect would report timestamps *relative to the seek
     # point* instead of absolute source time — silently corrupting
     # the `initial + new` merge on real videos. With `-copyts`, ffmpeg
     # preserves the source PTS and the segments are directly
-    # concatenable. The option is harmless (no-op) when not seeking.
-    cmd = [_c.ffmpeg_path(), "-copyts", "-progress", "pipe:1"]
+    # concatenable. It must NOT be added otherwise: on non-resume runs
+    # it would turn ffmpeg's `-progress` out_time_us into an ABSOLUTE
+    # source timestamp, making the progress jump to 100% (the
+    # out_time_us already includes any source start offset while the
+    # divisor stays the full duration), and it changes the meaning of
+    # the `-t` limit used for sample-verification.
+    cmd = [_c.ffmpeg_path(), "-progress", "pipe:1"]
     if resume_from is not None and resume_from > 0:
+        cmd.append("-copyts")
         # `-ss` before `-i` = fast seek (keyframe-aligned). Accurate
         # seek (output PTS aligned) is not needed — silencedetect
         # outputs timestamps from the source PTS, which `-copyts`
@@ -399,9 +427,7 @@ def _run_silencedetect(
             # segments but still scans forward — that progress must be
             # checkpointed, or a multi-hour silent scan is lost on
             # cancel).
-            moved = last_progress_pos[0] - (
-                float(resume_from) if resume_from is not None else 0.0
-            )
+            moved = last_progress_pos[0] - (float(resume_from) if resume_from is not None else 0.0)
             if new_count <= 0 and not (moved > 0 and now - last_save_time[0] >= _RESUME_THROTTLE_S):
                 return
             if (
@@ -483,9 +509,13 @@ def _run_silencedetect(
                 except queue.Empty:
                     # No new line — check cancel inline.
                     if cancel_callback is not None and cancel_callback():
-                        _kill_and_raise(process, SilenceCancelledError("silence detection cancelled"))
+                        _kill_and_raise(
+                            process, SilenceCancelledError("silence detection cancelled")
+                        )
                     if cancelled.is_set():
-                        _kill_and_raise(process, SilenceCancelledError("silence detection cancelled"))
+                        _kill_and_raise(
+                            process, SilenceCancelledError("silence detection cancelled")
+                        )
                     if deadline is not None and time.monotonic() > deadline:
                         _kill_and_raise(
                             process,
@@ -684,7 +714,8 @@ def _extract_audio_wav(
                 while True:
                     if deadline is not None and time.monotonic() > deadline:
                         _kill_and_raise(
-                            process, SilenceDetectionError(f"ffmpeg extract timeout after {timeout}s")
+                            process,
+                            SilenceDetectionError(f"ffmpeg extract timeout after {timeout}s"),
                         )
                     try:
                         raw = q.get(timeout=0.2)
@@ -752,7 +783,9 @@ def _extract_audio_wav(
             completed = True
     except subprocess.TimeoutExpired as e:
         wav_path.unlink(missing_ok=True)
-        _kill_and_raise(process, SilenceDetectionError(f"ffmpeg extract timeout after {e.timeout}s"))
+        _kill_and_raise(
+            process, SilenceDetectionError(f"ffmpeg extract timeout after {e.timeout}s")
+        )
     finally:
         if not drain_done:
             wait_for_drain()

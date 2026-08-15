@@ -69,10 +69,6 @@ def _run_final_concat(
         for part in part_paths:
             lf.write(f"file {_c._quote_concat_path(part.name)}\n")
 
-    def _concat_prog(seconds: float) -> None:
-        if progress_callback and total_duration > 0:
-            progress_callback(min(seconds / total_duration * 0.1, 0.1) + 0.9)
-
     if audio_resync:
         codec_opts = [
             "-c:v",
@@ -118,7 +114,7 @@ def _run_final_concat(
                 *codec_opts,
                 str(output_path),
             ],
-            progress_callback=_concat_prog,
+            progress_callback=_c._concat_progress_callback(progress_callback, total_duration),
             timeout=timeout,
             label=label_text,
             cancel_callback=cancel_callback,

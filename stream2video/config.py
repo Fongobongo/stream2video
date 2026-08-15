@@ -445,10 +445,13 @@ def coerce_typed_value(key: str, value: Any) -> Any:
     crashing the GUI later.
 
     For list-typed defaults (currently only ``recent_projects``), the
-    element type is also validated against the default list's first
-    element's type — a list containing non-str entries (e.g. ``[42, null,
-    Path('/x')]``) is dropped entirely so a later ``json.dump`` in the GUI
-    can't crash on a non-serialisable element. An empty list is accepted.
+    element type is also validated — a list containing non-str entries
+    (e.g. ``[42, null, Path('/x')]``) is dropped entirely so a later
+    ``json.dump`` in the GUI can't crash on a non-serialisable element.
+    An empty list is accepted. The expected element type comes from
+    ``_LIST_ELEMENT_TYPES`` (sampling ``default[0]`` doesn't work: the
+    only list default is empty, so the sample-based check was dead
+    code).
     """
     if key not in CONFIG_DEFAULTS:
         return None
@@ -499,14 +502,26 @@ def coerce_typed_value(key: str, value: Any) -> Any:
     if isinstance(default, list):
         if not isinstance(value, list):
             return None
-        # Validate element types against the default list's element type
-        # (defaults are homogeneous lists, so we sample [0] when non-empty).
-        if default:
+        # Validate element types against the expected element type.
+        # Sampling ``type(default[0])`` only works for NON-empty
+        # defaults — the sole list default (``recent_projects``) is
+        # empty, so ``if default:`` was always False and element types
+        # were never actually validated. Use the registry first; the
+        # sample remains as a fallback for any future non-empty list
+        # default that forgets to register.
+        elem_type = _LIST_ELEMENT_TYPES.get(key)
+        if elem_type is None and default:
             elem_type = type(default[0])
-            if not all(isinstance(e, elem_type) for e in value):
-                return None
+        if elem_type is not None and not all(isinstance(e, elem_type) for e in value):
+            return None
         return value
     return None
+
+
+# Expected element type for list-typed defaults whose CONFIG_DEFAULTS
+# entry is EMPTY (so the entry itself can't reveal the element type).
+# Keep in sync with CONFIG_DEFAULTS; used by coerce_typed_value.
+_LIST_ELEMENT_TYPES: dict[str, type] = {"recent_projects": str}
 
 
 def load_user_defaults() -> dict[str, Any]:

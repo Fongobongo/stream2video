@@ -232,10 +232,19 @@ def _validate_manifest(
             f"Resume: keep_segments length differs ({len(stored_segs)} vs {len(current_segs)})"
         )
         return False
-    for (s1, e1), (s2, e2) in zip(stored_segs, current_segs, strict=True):
-        if abs(float(s1) - float(s2)) > 1e-9 or abs(float(e1) - float(e2)) > 1e-9:
-            logger.info(f"Resume: keep_segments differ: {stored_segs} vs {current_segs}")
-            return False
+    try:
+        for (s1, e1), (s2, e2) in zip(stored_segs, current_segs, strict=False):
+            if abs(float(s1) - float(s2)) > 1e-9 or abs(float(e1) - float(e2)) > 1e-9:
+                logger.info(f"Resume: keep_segments differ: {stored_segs} vs {current_segs}")
+                return False
+    except (ValueError, TypeError):
+        # A corrupt manifest can carry malformed segment rows (e.g.
+        # ``["1.0"]`` — 1-tuple unpacking, or ``["x", "y"]`` — float()
+        # failure). Crash in a resume-skip decision would be a
+        # ValueError traceback out of the blue; treat it as a manifest
+        # mismatch so the caller wipes the work dir and re-encodes.
+        logger.info(f"Resume: keep_segments malformed in {work_dir}, treating as stale")
+        return False
     return True
 
 

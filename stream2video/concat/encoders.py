@@ -197,55 +197,12 @@ def encoder_opts(
             *threads_opt,
         ]
 
-    if quality == "source":
-        # Honest source: HW → probed -b:v, libx264 → constrained bitrate too
-        # (not CRF) so quality doesn't depend on encoder. libx264 -b:v is
-        # less efficient than CRF but gives encoder-independent size/quality
-        # at source preset; users wanting quality-per-size should use high/medium.
-        if encoder == "libx264":
-            bitrate = _bitrate_for_quality("source", source_bitrate)
-            low_mem = _x264_low_memory_opts() if x264_low_memory else []
-            # Constant bitrate for source parity: use -b:v + -maxrate like HW.
-            # Keep preset for speed trade-off, but cap bitrate to source.
-            return [
-                "-b:v",
-                bitrate,
-                "-maxrate",
-                bitrate,
-                "-bufsize",
-                bitrate,
-                "-preset",
-                x264_preset,
-                *threads_opt,
-                *low_mem,
-            ]
-        # HW encoders
-        bitrate = _bitrate_for_quality("source", source_bitrate)
-        if encoder == "h264_mf":
-            return ["-b:v", bitrate, "-quality", "100", *threads_opt]
-        if encoder == "h264_amf":
-            return ["-usage", "transcoding", "-quality", "speed", "-b:v", bitrate, *threads_opt]
-        if encoder == "h264_nvenc":
-            # Constrained VBR (NVIDIA's recommended offline model):
-            # ``-b:v`` is the target, ``-maxrate`` the worst-case cap.
-            # No ``-cq`` here — a hard-coded quality floor would fight
-            # the user's quality preset (CRF 18 floor on a 3500k "low"
-            # encode defeats the point of the ladder); use_crf=True is
-            # the dedicated constant-quality path.
-            return [
-                "-preset",
-                "p7",
-                "-rc",
-                "vbr",
-                "-b:v",
-                bitrate,
-                "-maxrate",
-                bitrate,
-                *threads_opt,
-            ]
-        return [*threads_opt]
-
-    bitrate = _VIDEO_BITRATES[quality]
+    # Non-CRF paths. ``quality == "source"`` (probed source bitrate) and
+    # the preset ladder produce the SAME per-encoder option sets — only
+    # the bitrate SOURCE differs, resolved once here. ``_bitrate_for_quality``
+    # handles the fallbacks: probed source (clamped 500k..20000k), or
+    # ``high`` when the probe failed, or the ladder for non-source.
+    bitrate = _bitrate_for_quality(quality, source_bitrate)
     if encoder == "h264_mf":
         # Media Foundation: no preset/threads control via -preset; pass
         # -threads only when the user pinned a count (auto = omit).
@@ -255,7 +212,7 @@ def encoder_opts(
     if encoder == "h264_nvenc":
         # NVENC rate-control model: constrained VBR via
         # ``-rc vbr`` with ``-b:v`` (target) and ``-maxrate`` (cap)
-        # both set to the preset bitrate. VBR lets the encoder spend
+        # both set to the target bitrate. VBR lets the encoder spend
         # bits where they're needed (motion, detail) while ``-maxrate``
         # guarantees a worst-case size. ``-preset p7`` is the slowest /
         # highest-quality NVENC preset (lookahead enabled). On a 6h
@@ -274,14 +231,15 @@ def encoder_opts(
             bitrate,
             *threads_opt,
         ]
-    # libx264 -- encoder-independent quality: use the same bitrate
+    # libx264 — encoder-independent quality: use the same bitrate
     # targets as HW encoders so high/medium/low give the same size
     # regardless of encoder. Previously libx264 used CRF 18/23/28 which
     # is more efficient (better quality per bit) than HW CBR, so the same
     # preset gave different sizes. For parity we use constrained bitrate
-    # (CBR) with preset still controlling speed/CPU. CRF option now lives
-    # behind use_crf=True (see below).
-    bitrate = _bitrate_for_quality(quality, source_bitrate)
+    # (CBR) with preset still controlling speed/CPU. With
+    # ``quality="source"`` the bitrate above is the probed source
+    # bitrate, capped the same way for source parity. CRF option now
+    # lives behind use_crf=True (see below).
     low_mem = _x264_low_memory_opts() if x264_low_memory else []
     return [
         "-b:v",
