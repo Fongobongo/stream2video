@@ -36,9 +36,7 @@ class AdvancedSettingsMixin:
 
     def _build_advanced_section(self, parent: Any) -> None:
         """Build the Advanced section inside the Controls scroll frame."""
-        ctk.CTkFrame(parent, height=2, fg_color=("gray70", "gray30")).pack(
-            fill="x", padx=5, pady=4
-        )
+        ctk.CTkFrame(parent, height=2, fg_color=("gray70", "gray30")).pack(fill="x", padx=5, pady=4)
         ctk.CTkLabel(parent, text="Advanced", anchor="w", font=("", 13, "bold")).pack(
             fill="x", padx=5, pady=(3, 1)
         )
@@ -85,7 +83,9 @@ class AdvancedSettingsMixin:
         read the exact same strings the user sees — the gate must not
         disagree with the parse about what "invalid" means.
         """
-        return {key: getattr(self, ADVANCED_WIDGET_NAMES[key]).get() for key in ADVANCED_WIDGET_SPECS}
+        return {
+            key: getattr(self, ADVANCED_WIDGET_NAMES[key]).get() for key in ADVANCED_WIDGET_SPECS
+        }
 
     def _advanced_widget_errors(self) -> dict[str, str]:
         """Per-key error strings for invalid Advanced widget content.

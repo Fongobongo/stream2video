@@ -196,9 +196,7 @@ def acquire_output_lock(output_path: Path) -> LockHandle:
     try:
         os.write(
             fd,
-            f"token={token} pid={os.getpid()} output={output_path}\n".encode(
-                "utf-8", "replace"
-            ),
+            f"token={token} pid={os.getpid()} output={output_path}\n".encode("utf-8", "replace"),
         )
     finally:
         os.close(fd)

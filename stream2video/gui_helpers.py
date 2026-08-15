@@ -362,8 +362,8 @@ def build_cli_command(
     for _name in CLI_BOOL_FLAG_ORDER:
         _spec = PARAM_SPECS[_name]
         _value = _bools[_name]
-        _baseline = bool(_preset_applied.get(_name)) if _name in _preset_managed else bool(
-            _defaults[_name]
+        _baseline = (
+            bool(_preset_applied.get(_name)) if _name in _preset_managed else bool(_defaults[_name])
         )
         if _value != _baseline:
             parts.append(_spec["flag"] if _value else _spec["flag_off"])

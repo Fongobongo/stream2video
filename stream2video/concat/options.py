@@ -94,9 +94,7 @@ def coerce_options(
     """
     if options is not None:
         if legacy_kwargs:
-            raise TypeError(
-                "Pass either options= or the legacy flat kwargs, not both"
-            )
+            raise TypeError("Pass either options= or the legacy flat kwargs, not both")
         return options
     if not legacy_kwargs:
         return ConcatOptions()

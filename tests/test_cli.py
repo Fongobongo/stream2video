@@ -99,7 +99,8 @@ class TestCliMemoryReservePreflight:
 
         with (
             patch(
-                "stream2video.pipeline_controller.download", return_value=DownloadResult(src, is_downloaded=False)
+                "stream2video.pipeline_controller.download",
+                return_value=DownloadResult(src, is_downloaded=False),
             ),
             patch("stream2video.memory._available_ram_mb", return_value=8000.0),
         ):
@@ -124,7 +125,8 @@ class TestCliMemoryReservePreflight:
 
         with (
             patch(
-                "stream2video.pipeline_controller.download", return_value=DownloadResult(src, is_downloaded=False)
+                "stream2video.pipeline_controller.download",
+                return_value=DownloadResult(src, is_downloaded=False),
             ),
             patch("stream2video.pipeline_controller.load_silence_cache", return_value=[]),
             patch(
@@ -375,7 +377,8 @@ class TestCliUseCrf:
 
         with (
             patch(
-                "stream2video.pipeline_controller.download", return_value=DownloadResult(src, is_downloaded=False)
+                "stream2video.pipeline_controller.download",
+                return_value=DownloadResult(src, is_downloaded=False),
             ),
             patch("stream2video.pipeline_controller.load_silence_cache", return_value=[]),
             patch(
@@ -415,7 +418,8 @@ class TestCliUseCrf:
 
         with (
             patch(
-                "stream2video.pipeline_controller.download", return_value=DownloadResult(src, is_downloaded=False)
+                "stream2video.pipeline_controller.download",
+                return_value=DownloadResult(src, is_downloaded=False),
             ),
             patch("stream2video.pipeline_controller.load_silence_cache", return_value=[]),
             patch(
@@ -480,7 +484,8 @@ class TestCliOutputFps:
 
         with (
             patch(
-                "stream2video.pipeline_controller.download", return_value=DownloadResult(src, is_downloaded=False)
+                "stream2video.pipeline_controller.download",
+                return_value=DownloadResult(src, is_downloaded=False),
             ),
             patch("stream2video.pipeline_controller.load_silence_cache", return_value=[]),
             patch(
@@ -521,7 +526,8 @@ class TestCliOutputFps:
 
         with (
             patch(
-                "stream2video.pipeline_controller.download", return_value=DownloadResult(src, is_downloaded=False)
+                "stream2video.pipeline_controller.download",
+                return_value=DownloadResult(src, is_downloaded=False),
             ),
             patch("stream2video.pipeline_controller.load_silence_cache", return_value=[]),
             patch(
@@ -755,6 +761,7 @@ class TestCliSilenceFlags:
                 side_effect=lambda o, v, d, per_video_dir=False: (o, v),
             ),
         ):
+
             def _fake_cut(source, silence_segments, output_video, **kwargs):
                 Path(output_video).write_bytes(b"\x00" * 1024)
 
@@ -819,6 +826,7 @@ class TestCliSilenceFlags:
                 side_effect=lambda o, v, d, per_video_dir=False: (o, v),
             ),
         ):
+
             def _fake_cut(source, silence_segments, output_video, **kwargs):
                 Path(output_video).write_bytes(b"\x00" * 1024)
 
@@ -879,15 +887,15 @@ class TestProxyActiveValidation:
         # The resolver itself must not treat a truthy string as active
         # (hosts/tests may feed raw dicts bypassing load_config).
         assert (
-            make_resolver(None, {"proxy_active": "false", "proxy": "http://x:1"}, _FakeConsole()).resolve(
-                "proxy", None
-            )
+            make_resolver(
+                None, {"proxy_active": "false", "proxy": "http://x:1"}, _FakeConsole()
+            ).resolve("proxy", None)
             == ""
         )
         assert (
-            make_resolver(None, {"proxy_active": True, "proxy": "http://x:1"}, _FakeConsole()).resolve(
-                "proxy", None
-            )
+            make_resolver(
+                None, {"proxy_active": True, "proxy": "http://x:1"}, _FakeConsole()
+            ).resolve("proxy", None)
             == "http://x:1"
         )
 

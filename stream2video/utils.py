@@ -608,9 +608,7 @@ def cancel_process(owner: str, timeout: float = 2.0) -> bool:
         try:
             proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            logger.warning(
-                "cancel_process(%r): process did not exit within %.1fs", owner, timeout
-            )
+            logger.warning("cancel_process(%r): process did not exit within %.1fs", owner, timeout)
             # Fall through to closing the pipes anyway — if the
             # child survives (killed but wedged), the drain threads blocked in
             # ReadFile need our handle-close to see EOF and unwind. Returning
@@ -640,9 +638,7 @@ def list_active_owners() -> list[str]:
     """
     with _proc_registry_lock:
         return [
-            owner
-            for owner, procs in _proc_registry.items()
-            if any(p.poll() is None for p in procs)
+            owner for owner, procs in _proc_registry.items() if any(p.poll() is None for p in procs)
         ]
 
 

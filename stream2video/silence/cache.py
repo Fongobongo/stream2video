@@ -340,9 +340,7 @@ def load_resume_probe_position(cache_path: Path, video_path: Path, config: dict)
     invalid — the caller then falls back to the last segment's end,
     or to a fresh scan.
     """
-    data = _read_cache_meta(
-        cache_path, video_path, config, log_misses=False
-    )
+    data = _read_cache_meta(cache_path, video_path, config, log_misses=False)
     if data is None:
         return None
     pos = data.get("probe_position")

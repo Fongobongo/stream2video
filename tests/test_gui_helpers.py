@@ -806,14 +806,8 @@ class TestProxyCredentials:
         assert not proxy_has_credentials("")
 
     def test_strip_removes_only_credentials(self):
-        assert (
-            strip_proxy_credentials("socks5://user:secret@host:1080")
-            == "socks5://host:1080"
-        )
-        assert (
-            strip_proxy_credentials("socks5://user:pa@ss@host:1080")
-            == "socks5://host:1080"
-        )
+        assert strip_proxy_credentials("socks5://user:secret@host:1080") == "socks5://host:1080"
+        assert strip_proxy_credentials("socks5://user:pa@ss@host:1080") == "socks5://host:1080"
         assert strip_proxy_credentials("http://127.0.0.1:8080") == "http://127.0.0.1:8080"
         assert strip_proxy_credentials("") == ""
 

@@ -189,8 +189,7 @@ ADVANCED_WIDGET_SPECS: dict[str, dict[str, Any]] = {
         "kind": "entry",
         "label": "No-progress timeout:",
         "value_type": "int",
-        "tooltip": "Mid-download stall watchdog (no progress for this long "
-        "aborts).",
+        "tooltip": "Mid-download stall watchdog (no progress for this long aborts).",
     },
     "segment_encode_timeout": {
         "kind": "entry",
@@ -220,8 +219,7 @@ ADVANCED_WIDGET_SPECS: dict[str, dict[str, Any]] = {
         "kind": "entry",
         "label": "Stall warn (s):",
         "value_type": "int",
-        "tooltip": "No-progress for this long during an ffmpeg phase logs a "
-        "warning.",
+        "tooltip": "No-progress for this long during an ffmpeg phase logs a warning.",
     },
     "waveform_timeout": {
         "kind": "entry",
@@ -236,9 +234,7 @@ ADVANCED_WIDGET_SPECS: dict[str, dict[str, Any]] = {
 # an explicit flag beats the preset — in the GUI the widgets are the
 # explicit surface). Derived from the PRESETS table so a new preset
 # key is picked up automatically.
-PRESET_TUNABLE_KEYS: tuple[str, ...] = tuple(
-    {k for preset in _PRESETS.values() for k in preset}
-)
+PRESET_TUNABLE_KEYS: tuple[str, ...] = tuple({k for preset in _PRESETS.values() for k in preset})
 
 # Widget attribute name for a key: ``combo_<key>`` / ``entry_<key>``.
 ADVANCED_WIDGET_NAMES: dict[str, str] = {
@@ -329,7 +325,9 @@ def validate_advanced_widgets(raw: dict[str, str]) -> dict[str, str]:
             continue
         lo, hi = CONFIG_RANGES[key]
         if not lo <= parsed <= hi:
-            allowed = f"'auto' or {lo}..{hi}" if spec["value_type"] == "auto_or_int" else f"{lo}..{hi}"
+            allowed = (
+                f"'auto' or {lo}..{hi}" if spec["value_type"] == "auto_or_int" else f"{lo}..{hi}"
+            )
             errors[key] = f"{key} {parsed} out of range [{allowed}]"
     return errors
 
@@ -365,9 +363,7 @@ def build_settings_payload(
 
 # Keys always persisted to settings.json regardless of the delta rule
 # (per-machine session state, not tunables).
-_SESSION_SAVE_KEYS: frozenset[str] = frozenset(
-    {"input_path", "output_dir", "window_geometry"}
-)
+_SESSION_SAVE_KEYS: frozenset[str] = frozenset({"input_path", "output_dir", "window_geometry"})
 
 
 def build_save_settings_snapshot(widgets: dict[str, Any]) -> dict[str, Any]:

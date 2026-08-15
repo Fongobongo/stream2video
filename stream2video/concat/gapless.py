@@ -98,16 +98,16 @@ def _concat_filter_one_pass(
             *_movflags,
             str(output_path),
         ],
-progress_callback=_prog,
-            timeout=timeout,
-            label=label,
-            cancel_callback=cancel_callback,
-            memory_monitor=_c._new_memory_monitor(options.memory_monitor_factory, label),
-            stall_kill=options.stall_kill,
-            stall_warning=options.stall_warning,
-            low_process_priority=options.low_process_priority,
-            rlimit_as_mb=options.rlimit_as_mb,
-        )
+        progress_callback=_prog,
+        timeout=timeout,
+        label=label,
+        cancel_callback=cancel_callback,
+        memory_monitor=_c._new_memory_monitor(options.memory_monitor_factory, label),
+        stall_kill=options.stall_kill,
+        stall_warning=options.stall_warning,
+        low_process_priority=options.low_process_priority,
+        rlimit_as_mb=options.rlimit_as_mb,
+    )
 
 
 def _run_gapless_segment_concat(
@@ -213,7 +213,10 @@ def _run_gapless_segment_concat(
             vcodec,
             vcodec_opts,
             audio_codec="aac",
-            audio_opts=[*_c._audio_bitrate_opts(options.audio_quality), *_c._audio_opts(options.audio_quality)],
+            audio_opts=[
+                *_c._audio_bitrate_opts(options.audio_quality),
+                *_c._audio_opts(options.audio_quality),
+            ],
             total_duration=total_duration,
             progress_callback=(
                 (lambda s: progress_callback(min(s / total_duration * 0.1, 0.1) + 0.9))
@@ -437,7 +440,10 @@ def _run_gapless_segment_concat(
         vcodec,
         vcodec_opts,
         audio_codec="aac",
-        audio_opts=[*_c._audio_bitrate_opts(options.audio_quality), *_c._audio_opts(options.audio_quality)],
+        audio_opts=[
+            *_c._audio_bitrate_opts(options.audio_quality),
+            *_c._audio_opts(options.audio_quality),
+        ],
         total_duration=total_duration,
         progress_callback=_final_prog if progress_callback and total_duration > 0 else None,
         cancel_callback=cancel_callback,

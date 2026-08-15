@@ -387,9 +387,10 @@ class TestPresetSync:
         for key, value in PRESETS["low_memory"].items():
             assert gui.settings[key] == value, key
         assert bool(gui.chk_x264_low_memory.get()) == PRESETS["low_memory"]["x264_low_memory"]
-        assert bool(gui.chk_low_process_priority.get()) == PRESETS["low_memory"][
-            "low_process_priority"
-        ]
+        assert (
+            bool(gui.chk_low_process_priority.get())
+            == PRESETS["low_memory"]["low_process_priority"]
+        )
         assert gui.combo_preset.get() == "low_memory"
         gui._restore_defaults()
         _flush_events(gui, 200)

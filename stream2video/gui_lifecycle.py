@@ -293,9 +293,7 @@ class LifecycleMixin:
             messagebox.showerror(
                 "Invalid settings",
                 "Cannot copy the CLI command — some Advanced settings "
-                "are invalid:\n\n"
-                + "\n".join(adv_errors.values())
-                + "\n\nFix them and try again.",
+                "are invalid:\n\n" + "\n".join(adv_errors.values()) + "\n\nFix them and try again.",
                 parent=cast(ctk.CTk, self),
             )
             return

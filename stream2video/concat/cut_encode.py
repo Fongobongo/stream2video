@@ -171,7 +171,10 @@ def _run_cut_then_encode(
                 cut_path.exists()
                 and cut_path.stat().st_size >= options.min_part_bytes
                 and _c._ffprobe_is_valid_mp4(cut_path)
-                and (not options.source_has_audio or _c._ffprobe_is_valid_media(cut_path, stream_type="a"))
+                and (
+                    not options.source_has_audio
+                    or _c._ffprobe_is_valid_media(cut_path, stream_type="a")
+                )
                 and _c._ffprobe_duration_ok(cut_path, dur)
             ):
                 logger.debug(f"cut_then_encode: reusing cut_{i:06d}.mp4")
@@ -312,7 +315,8 @@ def _run_cut_then_encode(
             and raw_concat_path.stat().st_size >= options.min_part_bytes
             and _c._ffprobe_is_valid_mp4(raw_concat_path)
             and (
-                not options.source_has_audio or _c._ffprobe_is_valid_media(raw_concat_path, stream_type="a")
+                not options.source_has_audio
+                or _c._ffprobe_is_valid_media(raw_concat_path, stream_type="a")
             )
             and _c._ffprobe_duration_ok(raw_concat_path, total_duration)
         ):
@@ -382,7 +386,9 @@ def _run_cut_then_encode(
             timeout=options.final_concat_timeout,
             label=label_text,
             cancel_callback=cancel_callback,
-            memory_monitor=_c._new_memory_monitor(options.memory_monitor_factory, "cut_then_encode mux"),
+            memory_monitor=_c._new_memory_monitor(
+                options.memory_monitor_factory, "cut_then_encode mux"
+            ),
             stall_kill=options.stall_kill,
             stall_warning=options.stall_warning,
             low_process_priority=options.low_process_priority,

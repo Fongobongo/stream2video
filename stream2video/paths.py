@@ -296,9 +296,7 @@ def ensure_project_dir(output_dir: Path, video_stem: str, per_video_dir: bool) -
     return p
 
 
-def move_into_project(
-    file_path: Path, project_dir: Path, dest_name: str | None = None
-) -> Path:
+def move_into_project(file_path: Path, project_dir: Path, dest_name: str | None = None) -> Path:
     """Move ``file_path`` into ``project_dir`` (same filename by default).
 
     ``dest_name`` overrides the destination filename — used to strip

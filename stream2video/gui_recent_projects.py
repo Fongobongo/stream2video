@@ -104,9 +104,7 @@ class RecentProjectsMixin:
                     command=lambda p=path_str: self._delete_recent_project(p),
                 )
                 del_btn.pack(side="right", padx=(0, 3))
-                del_btn._tooltip_ref = _Tooltip(
-                    del_btn, "Delete this project and all its files"
-                )
+                del_btn._tooltip_ref = _Tooltip(del_btn, "Delete this project and all its files")
             else:
                 # Flat mode (or a hand-edited entry): deletion of the
                 # directory is not possible — only remove the list entry.
@@ -204,9 +202,7 @@ class RecentProjectsMixin:
         except OSError:
             marked = False
         if not marked:
-            self._log(
-                f"Not an app-created project directory — removed from list: {path_str}"
-            )
+            self._log(f"Not an app-created project directory — removed from list: {path_str}")
             self._remove_recent_entry(path_str)
             return
         ok, reason = validate_project_delete(path)

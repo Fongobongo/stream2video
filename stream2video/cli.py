@@ -850,9 +850,7 @@ def main(
         try:
             output_dir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            console.print(
-                f"[red]Cannot create output directory:[/red] {output_dir} ({e})"
-            )
+            console.print(f"[red]Cannot create output directory:[/red] {output_dir} ({e})")
             raise typer.Exit(1) from None
         log_file = output_dir / "stream2video.log"
 

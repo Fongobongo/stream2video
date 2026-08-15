@@ -229,9 +229,7 @@ class _Resolver:
             # ``"false"`` and would otherwise enable the proxy against
             # the user's intent. ``load_config`` rejects such values for
             # YAML, but hosts/tests may feed raw dicts to the resolver.
-            if isinstance(self._config.get("proxy_active"), bool) and self._config[
-                "proxy_active"
-            ]:
+            if isinstance(self._config.get("proxy_active"), bool) and self._config["proxy_active"]:
                 value = self._config.get("proxy", "")
                 return str(value) if value else ""
             return ""

@@ -1164,9 +1164,7 @@ class PipelineController:
                 f"Output file is missing after concat finished: {output_path} ({e})"
             ) from None
         if dst_size_bytes <= 0:
-            raise PipelineConcatError(
-                f"Output file is empty after concat finished: {output_path}"
-            )
+            raise PipelineConcatError(f"Output file is empty after concat finished: {output_path}")
         # The output is validated — from here on the incomplete-output
         # cleanup must no longer consider it (it is complete, and the
         # on-close cleanup must not delete a finished video).

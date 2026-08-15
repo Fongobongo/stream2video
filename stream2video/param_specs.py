@@ -81,7 +81,11 @@ PARAM_SPECS: dict[str, dict[str, Any]] = {
     "encoder": {"kind": "enum", "valid": VALID_ENCODERS, "flag": "--encoder"},
     "video_quality": {"kind": "enum", "valid": VALID_QUALITIES, "flag": "--video-quality"},
     "audio_quality": {"kind": "enum", "valid": VALID_QUALITIES, "flag": "--audio-quality"},
-    "download_quality": {"kind": "enum", "valid": VALID_DOWNLOAD_QUALITIES, "flag": "--download-quality"},
+    "download_quality": {
+        "kind": "enum",
+        "valid": VALID_DOWNLOAD_QUALITIES,
+        "flag": "--download-quality",
+    },
     "software_fallback": {
         "kind": "enum",
         "valid": VALID_SOFTWARE_FALLBACKS,
@@ -103,7 +107,11 @@ PARAM_SPECS: dict[str, dict[str, Any]] = {
         "flag_off": "--no-x264-low-memory",
     },
     "use_crf": {"kind": "bool", "flag": "--use-crf", "flag_off": "--no-use-crf"},
-    "gapless_concat": {"kind": "bool", "flag": "--gapless-concat", "flag_off": "--no-gapless-concat"},
+    "gapless_concat": {
+        "kind": "bool",
+        "flag": "--gapless-concat",
+        "flag_off": "--no-gapless-concat",
+    },
     "low_process_priority": {
         "kind": "bool",
         "flag": "--low-process-priority",

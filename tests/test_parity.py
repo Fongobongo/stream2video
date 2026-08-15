@@ -266,7 +266,9 @@ class TestParityScenarios:
         proxy_active=true; the GUI switched the proxy off for this
         session. The copied command must carry --no-proxy-active and
         the CLI must run WITHOUT the proxy."""
-        _write_user_defaults(isolated_defaults, {"proxy": "http://127.0.0.1:8080", "proxy_active": True})
+        _write_user_defaults(
+            isolated_defaults, {"proxy": "http://127.0.0.1:8080", "proxy_active": True}
+        )
         values = _widget_values(proxy="http://127.0.0.1:8080", proxy_active=False)
 
         argv = _copied_argv(values)
@@ -415,7 +417,9 @@ class TestJsonLogStateIsolation:
             patch.object(cli_mod, "_check_ffmpeg", lambda: None),
             patch("stream2video.pipeline_controller.download", side_effect=OSError("stop")),
         ):
-            runner.invoke(cli_mod.app, [str(src), "-o", str(tmp_path / "o"), "--log-format", "json"])
+            runner.invoke(
+                cli_mod.app, [str(src), "-o", str(tmp_path / "o"), "--log-format", "json"]
+            )
             assert cli_mod._JSON_LOG_MODE is False, "JSON mode leaked past main()'s exit"
             assert console.stderr is False, "console.stderr leaked past main()'s exit"
             assert not _leaked_json_handlers(), f"JSON handler leaked: {_leaked_json_handlers()}"
@@ -443,9 +447,7 @@ class TestJsonLogStateIsolation:
             patch("stream2video.cli._run_doctor", side_effect=RuntimeError("doctor boom")),
             pytest.raises(RuntimeError, match="doctor boom"),
         ):
-            runner.invoke(
-                cli_mod.app, ["--doctor", "--log-format", "json"], catch_exceptions=False
-            )
+            runner.invoke(cli_mod.app, ["--doctor", "--log-format", "json"], catch_exceptions=False)
         assert cli_mod._JSON_LOG_MODE is False
 
 

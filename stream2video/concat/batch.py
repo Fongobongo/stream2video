@@ -148,7 +148,8 @@ def _run_batch_concat(
                 and chunk_path.stat().st_size >= options.min_part_bytes
                 and _c._ffprobe_is_valid_mp4(chunk_path)
                 and (
-                    not options.source_has_audio or _c._ffprobe_is_valid_media(chunk_path, stream_type="a")
+                    not options.source_has_audio
+                    or _c._ffprobe_is_valid_media(chunk_path, stream_type="a")
                 )
                 and _c._ffprobe_duration_ok(chunk_path, sum(e - s for s, e in chunk))
             ):
@@ -364,7 +365,9 @@ def _run_batch_concat(
                             # the muxer writes the longer video tail and
                             # the chunk runs long (frozen tail frames at
                             # every concat join).
-                            ["-shortest"] if options.source_has_audio and options.output_fps != "source" else []
+                            ["-shortest"]
+                            if options.source_has_audio and options.output_fps != "source"
+                            else []
                         ),
                         str(chunk_path),
                     ],
@@ -372,7 +375,9 @@ def _run_batch_concat(
                     timeout=options.segment_encode_timeout,
                     label=label_text,
                     cancel_callback=cancel_callback,
-                    memory_monitor=_c._new_memory_monitor(options.memory_monitor_factory, label_text),
+                    memory_monitor=_c._new_memory_monitor(
+                        options.memory_monitor_factory, label_text
+                    ),
                     stall_kill=options.stall_kill,
                     stall_warning=options.stall_warning,
                     low_process_priority=options.low_process_priority,

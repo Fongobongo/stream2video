@@ -1286,13 +1286,11 @@ def test_keep_content_matches_source_timeline(method: str, tmp_path: Path):
 
     y_first = _probe_pixel(out, 0.0)
     assert y_first[0] > 200 and y_first[1] < 80 and y_first[2] < 80, (
-        f"{method}: first frame {y_first} != red — keeps "
-        f"mis-located in shifted time?; info={info}"
+        f"{method}: first frame {y_first} != red — keeps mis-located in shifted time?; info={info}"
     )
     y_late = _probe_pixel(out, 3.0)
     assert y_late[0] < 80 and 60 < y_late[1] < 200 and y_late[2] < 80, (
-        f"{method}: t=3.0 frame {y_late} != green — keeps "
-        f"mis-located in shifted time?; info={info}"
+        f"{method}: t=3.0 frame {y_late} != green — keeps mis-located in shifted time?; info={info}"
     )
 
 

@@ -92,8 +92,7 @@ def _bitrate_for_quality(quality: str, source_bitrate: int | None) -> str:
         # preset would otherwise look like a bug when the probed stream's
         # bit_rate is missing.
         logger.warning(
-            "quality='source' without a probed source bitrate — "
-            "falling back to the 'high' preset"
+            "quality='source' without a probed source bitrate — falling back to the 'high' preset"
         )
         return _VIDEO_BITRATES["high"]
     return _VIDEO_BITRATES[quality]
