@@ -7,6 +7,7 @@ functions are also easier to reason about and unit-test.
 """
 
 import math
+import re
 
 
 def fmt_size(bytez: int | float) -> str:
@@ -131,10 +132,12 @@ def fmt_dry_run_summary(
     src_size_bytes: int,
     silence_segments: list,
     keep_segments: list,
+    *,
+    markup: bool = True,
 ) -> str:
     """Format the --dry-run output block.
 
-    Returns a multi-line Rich-markup string:
+    Returns a multi-line Rich-markup string (``markup=True``):
 
         [bold cyan]═══ Dry-run: silence detection only ═══[/bold cyan]
         Source: 6h 23m 12s (2.4 GB)
@@ -142,6 +145,11 @@ def fmt_dry_run_summary(
         Keep segments: 15 (total 5h 0m 0s, 78.1%)
         Estimated output: ~2h 5m 30s (assuming 40% bitrate reduction)
         [dim]Use --force to re-run with encode (or remove --dry-run).[/dim]
+
+    ``markup=False`` strips the Rich tags for consumers that render raw
+    text (the GUI log panel shows Rich markup literally). The dim
+    caveats degrade to plain words: "[dim]? ...[/dim]" →
+    "? (duration unknown — ffprobe unavailable)".
 
     ``src_duration`` None is handled gracefully (shows ``?`` for times).
     ``silence_segments`` / ``keep_segments`` are lists of
@@ -205,7 +213,17 @@ def fmt_dry_run_summary(
         )
 
     lines.append("[dim]Use --force to re-run detection; remove --dry-run to encode.[/dim]")
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    if not markup:
+        return _strip_rich_markup(text)
+    return text
+
+
+def _strip_rich_markup(text: str) -> str:
+    """Strip Rich console tags ([bold], [/dim], [cyan]...) for consumers
+    that render raw text. The dry-run summary's only markup is
+    ``[bold cyan]…[/bold cyan]`` and ``[dim]…[/dim]``."""
+    return re.sub(r"\[/?[a-z][a-z ]*\]", "", text)
 
 
 def fmt_zoom_text(zoom_level: float) -> str:

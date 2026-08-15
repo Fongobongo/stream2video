@@ -14,16 +14,10 @@ import typer
 import yaml
 
 from stream2video.config import (
+    AUTO_OR_INT_KEYS,
     CONFIG_DEFAULTS,
     CONFIG_RANGES,
-    VALID_DOWNLOAD_QUALITIES,
-    VALID_ENCODERS,
-    VALID_METHODS,
-    VALID_OUTPUT_FORMATS,
-    VALID_OUTPUT_FPS,
-    VALID_QUALITIES,
-    VALID_SOFTWARE_FALLBACKS,
-    VALID_X264_PRESETS,
+    ENUM_VALIDATORS,
     effective_defaults,
 )
 from stream2video.gui_helpers import mask_proxy
@@ -87,6 +81,11 @@ def load_config(config_file: Path | None, console: Any) -> dict:
     # tunable (``batch_chunk_size`` etc.) to float, and a resolver that
     # later hands ``PipelineConfig(batch_chunk_size=40.0)`` an int
     # slot gets a subtle type mismatch.
+    # The auto_or_int keys (``encoder_threads`` / ``memory_limit_mb``)
+    # default to the literal string ``"auto"`` in CONFIG_DEFAULTS —
+    # that's a legitimate value, not a number, so it's skipped here
+    # (the resolver's ``auto_or_int`` path handles it). See
+    # ``config.AUTO_OR_INT_KEYS`` for the single source of truth.
     for key, (min_val, max_val) in CONFIG_RANGES.items():
         if key in config:
             original = config[key]
@@ -98,6 +97,8 @@ def load_config(config_file: Path | None, console: Any) -> dict:
             if isinstance(original, bool):
                 console.print(f"[red]Invalid {key}:[/red] {original} is a bool, expected a number")
                 raise typer.Exit(1)
+            if key in AUTO_OR_INT_KEYS and original == "auto":
+                continue
             try:
                 value = float(original)
 
@@ -155,21 +156,12 @@ def load_config(config_file: Path | None, console: Any) -> dict:
 
     # Validate enum keys against their VALID_* lists. A bad value in
     # either the YAML or CONFIG_DEFAULTS is rejected here so downstream
-    # code can assume the value is one of the allowed tokens. ``theme`` is
-    # GUI-only — the CLI never reads or applies it — so it's intentionally
-    # excluded from the enum validation here (a bad theme in a YAML config
-    # that the CLI loads shouldn't abort the run).
-    enum_specs = [
-        ("method", VALID_METHODS),
-        ("encoder", VALID_ENCODERS),
-        ("video_quality", VALID_QUALITIES),
-        ("audio_quality", VALID_QUALITIES),
-        ("download_quality", VALID_DOWNLOAD_QUALITIES),
-        ("software_fallback", VALID_SOFTWARE_FALLBACKS),
-        ("x264_preset", VALID_X264_PRESETS),
-        ("output_fps", VALID_OUTPUT_FPS),
-        ("output_format", VALID_OUTPUT_FORMATS),
-    ]
+    # code can assume the value is one of the allowed tokens. The list is
+    # derived from config.ENUM_VALIDATORS — the single source of truth —
+    # minus ``theme``, which is GUI-only: the CLI never reads or applies
+    # it, so a bad theme in a YAML config that the CLI loads shouldn't
+    # abort the run.
+    enum_specs = [(k, list(v)) for k, v in ENUM_VALIDATORS.items() if k != "theme"]
     for key, valid in enum_specs:
         enum_val: Any = config.get(key)
         if enum_val is None:

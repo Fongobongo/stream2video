@@ -88,6 +88,13 @@ def _bitrate_for_quality(quality: str, source_bitrate: int | None) -> str:
     if quality == "source":
         # Probe failed — caller logs and chooses fallback before calling us;
         # but for direct encoder_opts(source) without probe, fall back to high.
+        # Say it out loud: "source parity" silently degrading to the high
+        # preset would otherwise look like a bug when the probed stream's
+        # bit_rate is missing.
+        logger.warning(
+            "quality='source' without a probed source bitrate — "
+            "falling back to the 'high' preset"
+        )
         return _VIDEO_BITRATES["high"]
     return _VIDEO_BITRATES[quality]
 

@@ -33,7 +33,7 @@ def _run_batch_concat(
     progress_callback: Callable[[float], None] | None = None,
     cancel_callback: Callable[[], bool] | None = None,
     options: ConcatOptions | None = None,
-    **legacy_kwargs,
+    **legacy_kwargs: object,
 ) -> None:
     """Process chunks sequentially: each chunk → temp file, then concat.
 

@@ -27,7 +27,7 @@ def _run_audio_concat_filter(
     cancel_callback: Callable[[], bool] | None = None,
     timeout: int = _FINAL_CONCAT_TIMEOUT,
     options: ConcatOptions | None = None,
-    **legacy_kwargs,
+    **legacy_kwargs: object,
 ) -> None:
     """Join audio parts via the ``concat`` filter (re-encode path).
 
@@ -107,7 +107,7 @@ def _run_audio_extract(
     progress_callback: Callable[[float], None] | None = None,
     cancel_callback: Callable[[], bool] | None = None,
     options: ConcatOptions | None = None,
-    **legacy_kwargs,
+    **legacy_kwargs: object,
 ) -> None:
     """Extract audio-only output (mp3/opus/aac/wav/flac) from keep segments.
 

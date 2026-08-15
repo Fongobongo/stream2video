@@ -22,7 +22,7 @@ def _run_final_concat(
     label: str,
     options: ConcatOptions | None = None,
     audio_resync: bool = False,
-    **legacy_kwargs,
+    **legacy_kwargs: object,
 ) -> None:
     """Build ``concat.txt`` and run the final concat-demuxer pass.
 

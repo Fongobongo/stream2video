@@ -262,7 +262,22 @@ CONFIG_RANGES = {
     # overflow guard, far beyond any real machine.
     "memory_reserve_mb": (0, 1048576),
     "rlimit_as_mb": (0, 1048576),
+    # Encoder thread budget. ``auto`` (ffmpeg decides) or 1..1024
+    # threads; the ceiling is a typo guard — a stray digit (e.g.
+    # ``-threads 10000``) would spawn a thread storm on any real box.
+    "encoder_threads": (1, 1024),
+    # RAM budget in MiB. 0 disables the in-process check; ``auto``
+    # (60% of total RAM) and the ceiling mirror the other memory caps.
+    "memory_limit_mb": (0, 1048576),
 }
+
+# Keys whose value may be the literal ``"auto"`` instead of a number —
+# the numeric ``CONFIG_RANGES`` bound only applies to the int form.
+# Single source of truth for every place that must skip ``"auto"`` before
+# a numeric comparison: ``cli_config.load_config`` (would otherwise crash
+# on the default config value at every startup), ``pipeline_controller
+# .validate_pipeline_config`` (the loop over CONFIG_RANGES), and the GUI.
+AUTO_OR_INT_KEYS: frozenset[str] = frozenset({"encoder_threads", "memory_limit_mb"})
 
 VALID_METHODS: list[str] = ["segment", "batch", "cut_then_encode"]
 
@@ -461,11 +476,12 @@ def coerce_typed_value(key: str, value: Any) -> Any:
     # non-positive int is dropped (it would be a no-op or harmful hint
     # to ffmpeg's thread pool — negative values raise on the CLI side).
     if key == "encoder_threads":
+        lo, hi = CONFIG_RANGES["encoder_threads"]
         if isinstance(value, str) and value == "auto":
             return value
         if isinstance(value, bool):
             return None
-        if isinstance(value, int) and value > 0:
+        if isinstance(value, int) and lo <= value <= hi:
             return value
         return None
     # ``memory_limit_mb`` accepts ``"auto"`` or a non-negative int
@@ -474,13 +490,14 @@ def coerce_typed_value(key: str, value: Any) -> Any:
     # coarse-grained) while a fractional float (``1.9``) is rejected —
     # silently flooring a limit to 1 MB is a dangerous quiet change.
     if key == "memory_limit_mb":
+        lo, hi = CONFIG_RANGES["memory_limit_mb"]
         if isinstance(value, str) and value == "auto":
             return value
         if isinstance(value, bool):
             return None
-        if isinstance(value, int) and value >= 0:
+        if isinstance(value, int) and lo <= value <= hi:
             return value
-        if isinstance(value, float) and value >= 0 and value.is_integer():
+        if isinstance(value, float) and value.is_integer() and lo <= value <= hi:
             return int(value)
         return None
     if key == "preset":
@@ -512,7 +529,7 @@ def coerce_typed_value(key: str, value: Any) -> Any:
         # hand-edited settings.json / user_defaults.json can't smuggle
         # a bogus value past the GUI's comboboxes and crash the run
         # mid-pipeline with an obscure ffmpeg/validator error.
-        valid = _ENUM_VALIDATORS.get(key)
+        valid = ENUM_VALIDATORS.get(key)
         if valid is not None and value not in valid:
             return None
         return value
@@ -542,9 +559,10 @@ _LIST_ELEMENT_TYPES: dict[str, type] = {"recent_projects": str}
 
 # Enum-valued string keys validated by coerce_typed_value against their
 # VALID_* whitelists. Keys WITHOUT an entry keep the historical
-# type-only check. Keep in sync with the enum_specs list in
-# cli_config.load_config (CLI-side validation).
-_ENUM_VALIDATORS: dict[str, tuple[str, ...]] = {
+# type-only check. This is the single source of truth; the CLI derives
+# its config-file enum checks from it (see cli_config.load_config,
+# which drops the GUI-only ``theme`` key).
+ENUM_VALIDATORS: dict[str, tuple[str, ...]] = {
     "method": tuple(VALID_METHODS),
     "encoder": tuple(VALID_ENCODERS),
     "video_quality": tuple(VALID_QUALITIES),

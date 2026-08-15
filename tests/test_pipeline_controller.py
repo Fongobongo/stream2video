@@ -232,6 +232,62 @@ class TestValidatePipelineConfig:
         cfg = _valid_config(threshold=-5.0, min_silence=60.0, margin=5.0)
         assert validate_pipeline_config(cfg) == []
 
+    def test_encoder_threads_boundaries_accepted(self):
+        # ``auto`` and the 1..1024 edges are the valid forms.
+        assert validate_pipeline_config(_valid_config(encoder_threads="auto")) == []
+        assert validate_pipeline_config(_valid_config(encoder_threads=1)) == []
+        assert validate_pipeline_config(_valid_config(encoder_threads=1024)) == []
+
+    @pytest.mark.parametrize("bad", [0, 1025, -4, True, "4"])
+    def test_encoder_threads_rejected(self, bad):
+        errors = validate_pipeline_config(_valid_config(encoder_threads=bad))
+        assert any("encoder_threads" in e for e in errors)
+
+    def test_memory_limit_mb_boundaries_accepted(self):
+        assert validate_pipeline_config(_valid_config(memory_limit_mb="auto")) == []
+        assert validate_pipeline_config(_valid_config(memory_limit_mb=0)) == []
+        assert validate_pipeline_config(_valid_config(memory_limit_mb=1048576)) == []
+
+    @pytest.mark.parametrize("bad", [-1, 1048577, True, "8192"])
+    def test_memory_limit_mb_rejected(self, bad):
+        errors = validate_pipeline_config(_valid_config(memory_limit_mb=bad))
+        assert any("memory_limit_mb" in e for e in errors)
+
+    def test_pipeline_timeouts_out_of_range(self):
+        # The audit found only threshold/min_silence/margin were range-
+        # checked pre-flight; a stale settings.json timeout used to
+        # survive until the phase's watchdog fired mid-run.
+        cfg = _valid_config(segment_encode_timeout=-5, batch_chunk_size=0)
+        errors = validate_pipeline_config(cfg)
+        assert any("segment_encode_timeout" in e and "out of range" in e for e in errors)
+        assert any("batch_chunk_size" in e and "out of range" in e for e in errors)
+
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "download_timeout",
+            "connect_timeout",
+            "no_progress_timeout",
+            "segment_encode_timeout",
+            "final_concat_timeout",
+            "silence_timeout",
+            "stall_kill_timeout",
+            "stall_warning_timeout",
+            "waveform_timeout",
+            "batch_chunk_size",
+            "min_part_bytes",
+            "memory_reserve_mb",
+            "rlimit_as_mb",
+        ],
+    )
+    def test_all_number_keys_covered_by_config_ranges(self, key: str):
+        # Every numeric PipelineConfig slot must be range-validated —
+        # pin the loop invariant so a new tunable doesn't silently slip
+        # past the pre-flight check.
+        from stream2video.config import CONFIG_RANGES
+
+        assert key in CONFIG_RANGES, f"{key} has no range entry"
+
 
 class TestPipelineControllerRun:
     """Orchestration tests for PipelineController.run().

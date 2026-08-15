@@ -132,6 +132,7 @@ exclude = [
 # (gui.py) is fully checked — it inherits from every mixin and CTk.
 [[tool.mypy.overrides]]
 module = [
+    "stream2video.gui_advanced",
     "stream2video.gui_dialogs",
     "stream2video.gui_encoder_panel",
     "stream2video.gui_file_info",

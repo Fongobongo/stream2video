@@ -5,6 +5,7 @@ import json
 import pytest
 
 from stream2video.config import (
+    AUTO_OR_INT_KEYS,
     CONFIG_DEFAULTS,
     CONFIG_RANGES,
     DEFAULT_PRESET,
@@ -20,6 +21,11 @@ from stream2video.config import (
     load_user_defaults,
     save_user_defaults,
 )
+
+# Keys that accept "auto" OR an int; their CONFIG_DEFAULTS is the
+# literal "auto" (a string) so the numeric range doesn't bound it.
+# Single source of truth is config.AUTO_OR_INT_KEYS — import it, don't
+# re-list the keys here.
 
 
 class TestConfigDefaults:
@@ -48,8 +54,14 @@ class TestConfigDefaults:
 
     def test_ranges_cover_defaults(self):
         for key, (lo, hi) in CONFIG_RANGES.items():
-            assert lo <= CONFIG_DEFAULTS[key] <= hi, (
-                f"default for {key} ({CONFIG_DEFAULTS[key]}) is outside range ({lo}, {hi})"
+            default = CONFIG_DEFAULTS[key]
+            if key in AUTO_OR_INT_KEYS:
+                # These keys default to the literal "auto" — range
+                # checks don't apply to the auto-or-int fallback.
+                assert default == "auto"
+                continue
+            assert lo <= default <= hi, (
+                f"default for {key} ({default}) is outside range ({lo}, {hi})"
             )
 
 

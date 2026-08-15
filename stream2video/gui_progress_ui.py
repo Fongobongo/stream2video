@@ -105,6 +105,7 @@ class ProgressUiMixin:
         self.running = state
         if state:
             self.btn_start.configure(state="disabled", text="Running...")
+            self.btn_dry_run.configure(state="disabled")
             self.btn_cancel.configure(state="normal")
             self._phase_eta_smoother.reset()
             self._current_step = None
@@ -120,6 +121,7 @@ class ProgressUiMixin:
             self._set_phase_progress(0.0)
         else:
             self.btn_start.configure(state="normal", text="Start")
+            self.btn_dry_run.configure(state="normal")
             self.btn_cancel.configure(state="disabled")
             # Clear the time labels so a stale state is not shown on the
             # next pipeline's idle state.

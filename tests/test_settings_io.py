@@ -25,7 +25,9 @@ from stream2video.settings_io import (
     SAVE_SETTINGS_KEYS,
     USER_DEFAULTS_KEYS,
     build_save_settings_snapshot,
+    build_settings_payload,
     build_user_defaults_snapshot,
+    parse_advanced_widgets,
     write_cli_config_yaml,
 )
 
@@ -98,6 +100,26 @@ class TestBuildSaveSettingsSnapshot:
             "theme",
             "proxy",
             "proxy_active",
+            # The 18 advanced tunables (previously CLI-only; the audit's
+            # GUI-widget gap).
+            "software_fallback",
+            "x264_preset",
+            "encoder_threads",
+            "output_fps",
+            "memory_limit_mb",
+            "memory_reserve_mb",
+            "rlimit_as_mb",
+            "download_timeout",
+            "connect_timeout",
+            "no_progress_timeout",
+            "segment_encode_timeout",
+            "final_concat_timeout",
+            "silence_timeout",
+            "stall_kill_timeout",
+            "stall_warning_timeout",
+            "waveform_timeout",
+            "batch_chunk_size",
+            "min_part_bytes",
             "window_geometry",
         )
         # Use a sentinel dict so the test catches a missing / extra key
@@ -236,3 +258,114 @@ class TestWriteCliConfigYaml:
         config_path = write_cli_config_yaml(tmp_path, 0, 0, 0)
         assert config_path is not None
         assert config_path.is_absolute()
+
+
+class TestParseAdvancedWidgets:
+    """Pure parser for the Advanced section's widget strings. Covers
+    the audit's "no GUI surface for 18 CLI tunables" gap: the GUI
+    forwards ``widget.get()`` strings; parsing must never crash on a
+    half-typed field."""
+
+    def test_combo_values_pass_through(self):
+        out = parse_advanced_widgets({"x264_preset": "ultrafast", "software_fallback": "ask"})
+        assert out["x264_preset"] == "ultrafast"
+        assert out["software_fallback"] == "ask"
+
+    def test_auto_or_int_accepts_auto_case_insensitive(self):
+        out = parse_advanced_widgets({"encoder_threads": "AUTO", "memory_limit_mb": " auto "})
+        assert out["encoder_threads"] == "auto"
+        assert out["memory_limit_mb"] == "auto"
+
+    def test_int_strings_become_ints(self):
+        out = parse_advanced_widgets(
+            {"encoder_threads": "4", "download_timeout": "3600", "min_part_bytes": "1048576"}
+        )
+        assert out["encoder_threads"] == 4
+        assert out["download_timeout"] == 3600
+        assert out["min_part_bytes"] == 1048576
+
+    def test_unparseable_entry_falls_back_to_current(self):
+        # The fallback keeps a half-typed field from crashing the run —
+        # the widget shows the bad text, the run keeps the last
+        # known-good value.
+        current = {"encoder_threads": 2, "download_timeout": 900}
+        out = parse_advanced_widgets(
+            {"encoder_threads": "abc", "download_timeout": ""}, current=current
+        )
+        assert out["encoder_threads"] == 2
+        assert out["download_timeout"] == 900
+
+    def test_unparseable_entry_without_current_uses_factory_default(self):
+        from stream2video.config import CONFIG_DEFAULTS
+
+        out = parse_advanced_widgets({"encoder_threads": "???"})
+        assert out["encoder_threads"] == CONFIG_DEFAULTS["encoder_threads"]
+
+    def test_missing_keys_are_omitted(self):
+        # Only keys present in ``raw`` appear in the result — the GUI
+        # merges the parse result over the live settings, so omitted
+        # keys keep their previous value.
+        out = parse_advanced_widgets({"x264_preset": "medium"})
+        assert list(out) == ["x264_preset"]
+
+    def test_negative_and_zero_parsable(self):
+        # Value-level bounds are ``validate_pipeline_config``'s job; the
+        # parser just converts text → number.
+        out = parse_advanced_widgets({"rlimit_as_mb": "-1", "memory_reserve_mb": "0"})
+        assert out["rlimit_as_mb"] == -1
+        assert out["memory_reserve_mb"] == 0
+
+
+class TestBuildSettingsPayload:
+    """Delta rule for settings.json: a key is persisted when it differs
+    from the effective defaults (so settings.json can't permanently
+    shadow user_defaults.json) or when it is session state."""
+
+    def test_values_equal_to_baseline_are_dropped(self):
+        from stream2video.config import effective_defaults
+
+        baseline = effective_defaults()
+        snapshot = dict(baseline)
+        payload = build_settings_payload(snapshot)
+        # Every non-session tunable at its default value is dropped so
+        # settings.json can't shadow user_defaults.json. ``output_dir``
+        # is the session key that ALSO lives in the defaults snapshot
+        # — it always persists regardless of value.
+        assert payload == {"output_dir": ""}
+
+    def test_changed_tunable_is_written(self):
+        from stream2video.config import effective_defaults
+
+        snapshot = {**effective_defaults(), "threshold": -99.0}
+        payload = build_settings_payload(snapshot)
+        assert payload["threshold"] == -99.0
+        # …and the session key rides along; nothing else at its default
+        # value is re-writtten.
+        assert set(payload) == {"output_dir", "threshold"}
+
+    def test_session_keys_always_written(self):
+        # input_path / output_dir / window_geometry are per-machine
+        # state with no baseline — persist even when "unchanged".
+        payload = build_settings_payload(
+            {"input_path": "vid.mp4", "output_dir": "./out", "window_geometry": "1000x600"},
+            baseline={},
+        )
+        assert payload == {
+            "input_path": "vid.mp4",
+            "output_dir": "./out",
+            "window_geometry": "1000x600",
+        }
+
+    def test_recent_projects_rides_along(self):
+        # recent_projects isn't a widget value — the GUI merges the
+        # whole ``self.settings`` dict in; it must persist when it
+        # differs from the (empty) baseline.
+        payload = build_settings_payload({"recent_projects": ["a", "b"]}, baseline={})
+        assert payload == {"recent_projects": ["a", "b"]}
+        # …and is dropped when it equals the baseline (untouched list).
+        payload = build_settings_payload({"recent_projects": []}, baseline={"recent_projects": []})
+        assert payload == {}
+
+    def test_explicit_baseline_wins(self):
+        payload = build_settings_payload({"threshold": -30.0}, baseline={"threshold": -30.0})
+        assert payload == {}

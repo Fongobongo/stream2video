@@ -27,7 +27,7 @@ def _run_with_fallback(
     progress_callback: Callable[[float], None] | None = None,
     cancel_callback: Callable[[], bool] | None = None,
     options: ConcatOptions | None = None,
-    **legacy_kwargs,
+    **legacy_kwargs: object,
 ) -> None:
     """Run the picked concat method with the primary encoder; fall back to libx264 on failure.
 
@@ -160,7 +160,7 @@ def _with_libx264_fallback(
     exc_types: tuple[type[BaseException], ...],
     on_fallback: Callable[[str], None] | None = None,
     options: ConcatOptions | None = None,
-    **legacy_kwargs,
+    **legacy_kwargs: object,
 ) -> None:
     """Run ``try_fn(primary_codec, primary_opts)``; on failure, retry once with libx264.
 

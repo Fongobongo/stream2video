@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Callable
+from typing import Any
 
 from stream2video.concat.constants import (
     _BATCH_CHUNK_SIZE,
@@ -72,9 +73,12 @@ class ConcatOptions:
     memory_reserve_mb: int = 2048
     memory_monitor_factory: Callable[[str], MemoryMonitor | None] | None = None
 
-    def replace(self, **kwargs) -> "ConcatOptions":
+    def replace(self, **kwargs: Any) -> ConcatOptions:
         """Shorthand for ``dataclasses.replace`` (used by the fallback
-        path to re-run a method under a different encoder)."""
+        path to re-run a method under a different encoder). ``Any`` —
+        the values are arbitrary field values, validated by
+        ``dataclasses.replace`` / the dataclass constructor at runtime
+        (unknown names raise TypeError)."""
         return dataclasses.replace(self, **kwargs)
 
 

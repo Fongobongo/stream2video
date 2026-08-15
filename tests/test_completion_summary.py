@@ -114,3 +114,33 @@ class TestCompletionSummary:
         assert "Source:" in out
         assert "Silence:" in out
         assert "Keep:" in out
+
+    def test_fmt_dry_run_summary_markup_default_has_rich_tags(self) -> None:
+        """Default output keeps the Rich markup the CLI console renders."""
+        from stream2video.formatters import fmt_dry_run_summary
+
+        out = fmt_dry_run_summary(
+            src_duration=100.0,
+            src_size_bytes=1_000_000,
+            silence_segments=[],
+            keep_segments=[(0.0, 100.0)],
+        )
+        assert "[bold cyan]" in out
+        assert "[dim]" in out
+
+    def test_fmt_dry_run_summary_plain_strips_rich_tags(self) -> None:
+        """``markup=False`` (the GUI log path) renders raw text — the
+        GUI log shows Rich markup literally, so tags must be stripped
+        without losing any of the message content."""
+        from stream2video.formatters import fmt_dry_run_summary
+
+        plain = fmt_dry_run_summary(
+            src_duration=100.0,
+            src_size_bytes=1_000_000,
+            silence_segments=[],
+            keep_segments=[(0.0, 100.0)],
+            markup=False,
+        )
+        assert "[" not in plain and "]" not in plain
+        assert "none detected" in plain
+        assert "Keep: 1 segment" in plain

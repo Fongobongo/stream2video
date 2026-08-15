@@ -65,7 +65,8 @@ BoolEmitRule = Literal["positive", "negative"]
 #   min        — for ``auto_or_int`` / ``int`` / ``float``: minimum
 #                accepted value (``0`` for "non-negative", ``1`` for
 #                "positive")
-#   max        — for ``int`` / ``float``: maximum accepted value
+#   max        — for ``int`` / ``float`` / ``auto_or_int``: maximum
+#                accepted value
 #   flag       — the CLI flag emitted for this parameter in a copied
 #                command (for negative-emit bools: the ``--no-*`` form)
 #   bool_emit  — for ``bool``: ``positive`` or ``negative`` (see above)
@@ -206,9 +207,24 @@ PARAM_SPECS: dict[str, dict[str, Any]] = {
     },
     # Auto-or-int: the CLI flag arrives as a string; when COMMANDLINE
     # the resolver tries ``int(value)``, falling back to ``"auto"``
-    # (case-insensitive). Config values are already coerced.
-    "encoder_threads": {"kind": "auto_or_int", "min": 1, "flag": "--encoder-threads"},
-    "memory_limit_mb": {"kind": "auto_or_int", "min": 0, "flag": "--memory-limit-mb"},
+    # (case-insensitive). Config values are already coerced. The
+    # ``min``/``max`` bounds come from CONFIG_RANGES — the same limits
+    # coerce_typed_value / cli_config apply, so ``--encoder-threads
+    # 99999`` is rejected exactly like its YAML twin (previously the
+    # upper bound was only enforced for ints from the flag path, and
+    # not at all on the config path).
+    "encoder_threads": {
+        "kind": "auto_or_int",
+        "min": CONFIG_RANGES["encoder_threads"][0],
+        "max": CONFIG_RANGES["encoder_threads"][1],
+        "flag": "--encoder-threads",
+    },
+    "memory_limit_mb": {
+        "kind": "auto_or_int",
+        "min": CONFIG_RANGES["memory_limit_mb"][0],
+        "max": CONFIG_RANGES["memory_limit_mb"][1],
+        "flag": "--memory-limit-mb",
+    },
     # Proxy: CLI --proxy implies proxy_active=True. A YAML proxy without
     # proxy_active is inert (matches the GUI's checkbox contract).
     "proxy": {"kind": "proxy", "flag": "--proxy"},
@@ -262,8 +278,3 @@ CLI_BOOL_FLAG_ORDER: tuple[str, ...] = (
     "force",
     "delete_after",
 )
-
-
-def cli_flag_for(name: str) -> str:
-    """Return the CLI flag for parameter ``name`` (spec-table lookup)."""
-    return PARAM_SPECS[name]["flag"]

@@ -178,7 +178,6 @@ class TestMoveIntoProject:
             existing.write_text("old")
 
             real_move = paths_mod.shutil.move
-            real_replace = paths_mod.os.replace
 
             def _fail_replace(_a, _b):
                 raise OSError("swap refused")

@@ -34,7 +34,7 @@ def _concat_filter_one_pass(
     timeout: int,
     label: str,
     options: ConcatOptions | None = None,
-    **legacy_kwargs,
+    **legacy_kwargs: object,
 ) -> None:
     """Run one concat-filter pass over ``part_paths`` → ``output_path``.
 
@@ -121,7 +121,7 @@ def _run_gapless_segment_concat(
     cancel_callback: Callable[[], bool] | None = None,
     options: ConcatOptions | None = None,
     manifest: dict | None = None,
-    **legacy_kwargs,
+    **legacy_kwargs: object,
 ) -> None:
     """Gapless segment join via concat filter (re-encode both streams).
 
@@ -311,7 +311,7 @@ def _run_gapless_segment_concat(
             inter = tree_dir / f"L{level}_{g:05d}.mkv"
             if cancel_callback and cancel_callback():
                 raise _c.CancelledError(f"gapless tree L{level} cancelled")
-            reuse = inter.exists() and inter.stat().st_size >= _MIN_PART_BYTES
+            reuse = inter.exists() and inter.stat().st_size >= options.min_part_bytes
             if reuse:
                 # Video-stream-only validation accepts an
                 # intermediate whose AUDIO track was truncated by a

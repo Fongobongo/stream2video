@@ -20,6 +20,7 @@ The ``Stream2VideoGUI`` class is composed from nine focused mixins
 """
 
 import logging
+import os
 import queue
 import shutil
 import threading
@@ -32,6 +33,7 @@ from typing import Any
 import customtkinter as ctk
 
 from stream2video.config import apply_preset, effective_defaults
+from stream2video.gui_advanced import AdvancedSettingsMixin
 from stream2video.gui_dialogs import DialogsMixin
 from stream2video.gui_encoder_panel import EncoderPanelMixin
 from stream2video.gui_file_info import FileInfoMixin
@@ -61,6 +63,7 @@ class Stream2VideoGUI(
     FileInfoMixin,
     ProgressUiMixin,
     SlidersMixin,
+    AdvancedSettingsMixin,
     LifecycleMixin,
     ctk.CTk,
 ):
@@ -206,7 +209,14 @@ class Stream2VideoGUI(
     # worker owns the PipelineController invocation, the callback
     # wiring, and the ``Pipeline*Error`` → status mapping.
 
-    def _start_pipeline(self) -> None:
+    def _start_pipeline(self, dry_run: bool = False) -> None:
+        """Start the pipeline on a background thread.
+
+        ``dry_run=True`` (the "Dry run" button) stops the worker right
+        after the silence pass: the controller reports which segments
+        would be kept/cut without encoding anything (mirrors the CLI's
+        ``--dry-run``).
+        """
         if self.running:
             return
 
@@ -238,27 +248,30 @@ class Stream2VideoGUI(
         # worker threads; the worker receives the values as args, see
         # _pipeline_worker's signature).
         input_raw = self.entry_input.get().strip()
+        if "~" in input_raw:
+            input_raw = os.path.expanduser(input_raw)
         output_dir = Path(self.entry_output.get().strip() or "./processed_videos")
-        output_dir = output_dir.resolve()
-        method = self.combo_method.get()
-        encoder = self.combo_encoder.get()
-        video_quality = self.combo_video_quality.get()
-        audio_quality = self.combo_audio_quality.get()
-        download_quality = self.combo_download_quality.get()
-        # Sync combo selections into self.settings so build_pipeline_config
-        # (which reads from the config dict, not from PipelineWorkerParams)
-        # picks up the current value. output_format drives the output file
-        # extension and the audio-extract short-circuit in cut_and_concat,
-        # so a stale self.settings value would produce the wrong output.
-        self.settings["output_format"] = self.combo_output_format.get()
-        self.settings["gapless_concat"] = bool(self.chk_gapless_concat.get())
-        self.settings["low_process_priority"] = bool(self.chk_low_process_priority.get())
-        self.settings["x264_low_memory"] = bool(self.chk_x264_low_memory.get())
-        self.settings["use_crf"] = bool(self.chk_use_crf.get())
-        self.settings["completion_sound"] = bool(self.chk_completion_sound.get())
-        force = bool(self.chk_force.get())
-        per_video_dir = bool(self.chk_per_video_dir.get())
-        delete_after = bool(self.chk_delete.get())
+        # ``~`` expansion: Path.resolve() does NOT expand the tilde (it is
+        # lexically relative to the CWD), so a ``~/Videos`` output path
+        # used to silently create a ``~`` directory. Match
+        # _copy_cli_command's expanduser() first.
+        output_dir = Path(os.path.expanduser(str(output_dir))).resolve()
+        # Read EVERY tunable through the shared helper — the same source
+        # _copy_cli_command and _save_settings use, so the run, the
+        # saved settings and the copied command can't disagree (the
+        # audit found the copied command reading settings.json values
+        # the run ignored). Previously only 6 keys were synced here and
+        # the 18 advanced values silently fell back to stale
+        # self.settings entries.
+        widget_values = self._read_widget_values()
+        method = widget_values["method"]
+        encoder = widget_values["encoder"]
+        video_quality = widget_values["video_quality"]
+        audio_quality = widget_values["audio_quality"]
+        download_quality = widget_values["download_quality"]
+        force = widget_values["force"]
+        per_video_dir = widget_values["per_video_dir"]
+        delete_after = widget_values["delete_after"]
 
         # Build the run's config in a *copy*: ``apply_preset`` returns a
         # dict with the preset's tunables overlaid — merging that back
@@ -269,10 +282,16 @@ class Stream2VideoGUI(
         # ``self.settings`` keeps the widget state; the run gets its own
         # preset-applied snapshot. ``balanced`` is the identity preset,
         # so with it the snapshot keeps every checkbox value verbatim.
-        preset_name = self.combo_preset.get()
+        # The EXPLICIT widget choices are then re-applied on top of the
+        # preset (CLI semantics: an explicit --flag beats the preset —
+        # in the GUI the widgets ARE the explicit surface), so a preset
+        # can no longer force e.g. x264_low_memory=True against an
+        # unchecked checkbox.
+        preset_name = widget_values["preset"]
         run_config = dict(self.settings)
         if preset_name:
             run_config = apply_preset(run_config, preset_name)
+        run_config.update(widget_values)
         # Show the preset's effective values in the run log, not the
         # stale widget-state ones.
         run_config["preset"] = preset_name
@@ -289,7 +308,15 @@ class Stream2VideoGUI(
             from stream2video.utils import resolve_disk_probe as _rdp
 
             disk_input = Path(input_raw) if input_raw else None
-            is_local = disk_input is not None and disk_input.exists() and disk_input.is_file()
+            is_local = (
+                disk_input is not None
+                and disk_input.exists()
+                and disk_input.is_file()
+                # A dry run never writes anything — skip the space
+                # warning (it would claim "the run may fail" about a run
+                # that cannot fail on disk space).
+                and not dry_run
+            )
             if is_local and disk_input is not None:
                 src_size = disk_input.stat().st_size
                 src_dur = _gvd(disk_input)
@@ -355,6 +382,7 @@ class Stream2VideoGUI(
             f"preset={config_snapshot.get('preset')}, "
             f"delete_after={delete_after}, "
             f"per_video_dir={per_video_dir}"
+            f"{', DRY RUN — no encode' if dry_run else ''}"
         )
 
         threading.Thread(
@@ -371,6 +399,7 @@ class Stream2VideoGUI(
                 per_video_dir,
                 delete_after,
                 config_snapshot,
+                dry_run,
             ),
             daemon=True,
         ).start()
@@ -388,6 +417,7 @@ class Stream2VideoGUI(
         per_video_dir: bool = False,
         delete_after: bool = False,
         config_snapshot: dict | None = None,
+        dry_run: bool = False,
     ) -> None:
         """Worker thread: delegates to
         :class:`stream2video.pipeline_worker.PipelineWorker` which owns
@@ -418,6 +448,7 @@ class Stream2VideoGUI(
             force=force,
             per_video_dir=per_video_dir,
             delete_after=delete_after,
+            dry_run=dry_run,
         )
         worker = PipelineWorker(
             _PipelineGuiCallbacksAdapter(self),

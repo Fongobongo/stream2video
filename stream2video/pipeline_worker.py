@@ -80,6 +80,10 @@ class PipelineWorkerParams:
     force: bool
     per_video_dir: bool = False
     delete_after: bool = False
+    # GUI "Dry run" (mirrors the CLI's --dry-run): the controller stops
+    # after the silence pass and the worker logs what would be kept/cut
+    # without encoding anything.
+    dry_run: bool = False
 
 
 class PipelineGuiCallbacks(Protocol):
@@ -236,6 +240,7 @@ def build_pipeline_config_from_snapshot(
         waveform_timeout=config.get("waveform_timeout", CONFIG_DEFAULTS["waveform_timeout"]),
         batch_chunk_size=config.get("batch_chunk_size", CONFIG_DEFAULTS["batch_chunk_size"]),
         min_part_bytes=config.get("min_part_bytes", CONFIG_DEFAULTS["min_part_bytes"]),
+        dry_run=params.dry_run,
     )
 
 
@@ -487,7 +492,28 @@ class PipelineWorker:
             except Exception:
                 logger.debug("set_active_controller failed", exc_info=True)
 
-            controller.run()
+            result = controller.run()
+            if cfg.dry_run and result.silence_segments is not None:
+                # GUI dry-run: the controller stopped after the silence
+                # pass and returned the detected segments (a real run
+                # leaves them None). Log the "what would be kept/cut"
+                # summary in PLAIN text — the GUI log doesn't render Rich
+                # markup — and finish without the completion chime (the
+                # CLI's --dry-run also exits before its completion
+                # sound).
+                from stream2video.formatters import fmt_dry_run_summary
+
+                summary = fmt_dry_run_summary(
+                    src_duration=result.src_duration,
+                    src_size_bytes=result.src_size_bytes,
+                    silence_segments=result.silence_segments,
+                    keep_segments=result.keep_segments or [],
+                    markup=False,
+                )
+                for line in summary.splitlines():
+                    self._gui.log(line)
+                self._gui.ui_status("Dry-run complete — no encode performed", force=True)
+                self._gui.ui_set_success_style()  # green bar, like a normal completion
             # NOTE: source-file deletion on ``delete_after=True`` is owned
             # by ``PipelineController._finish`` — it unlinks the path AND
             # clears ``_download_path`` to None, so re-checking it here

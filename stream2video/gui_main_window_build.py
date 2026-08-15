@@ -14,6 +14,7 @@ from tkinter import StringVar
 import customtkinter as ctk
 
 from stream2video.config import (
+    CONFIG_RANGES,
     DEFAULT_PRESET,
     PRESET_NAMES,
     VALID_DOWNLOAD_QUALITIES,
@@ -195,8 +196,8 @@ class MainWindowBuildMixin:
             ctrl_frame,
             "Threshold (dB):",
             "threshold",
-            -60,
-            -5,
+            CONFIG_RANGES["threshold"][0],
+            CONFIG_RANGES["threshold"][1],
             self.settings["threshold"],
             tooltip="Audio below this level is considered silence. Lower (-30) removes more noise, higher (-5) only cuts loud pauses.",
         )
@@ -204,8 +205,8 @@ class MainWindowBuildMixin:
             ctrl_frame,
             "Min Silence (s):",
             "min_silence",
-            0.1,
-            60,
+            CONFIG_RANGES["min_silence"][0],
+            CONFIG_RANGES["min_silence"][1],
             self.settings["min_silence"],
             tooltip="Minimum silence duration to cut (seconds). Longer values prevent choppy edits.",
         )
@@ -213,8 +214,8 @@ class MainWindowBuildMixin:
             ctrl_frame,
             "Margin (s):",
             "margin",
-            -3,
-            5,
+            CONFIG_RANGES["margin"][0],
+            CONFIG_RANGES["margin"][1],
             self.settings["margin"],
             tooltip="How much to shrink silence zones. Positive = shrink silence (keep more audio around phrases). Negative = expand silence (cut more aggressively). 0 = no adjustment.",
         )
@@ -390,17 +391,22 @@ class MainWindowBuildMixin:
         _Tooltip(
             self.combo_preset,
             "Resource preset — a bundle of tunables (x264_low_memory, "
-            "memory_limit_mb, batch_chunk_size, low_process_priority) "
-            "applied on top of the current settings at Start.\n"
+            "memory_limit_mb, batch_chunk_size, low_process_priority, "
+            "x264_preset, encoder_threads) applied on top of the "
+            "current settings at Start.\n"
             "  - low_memory: 4-8 GB machines (x264_low_memory=True, "
             "batch_chunk_size=20, low_process_priority=True).\n"
+            "  - low_cpu: minimize CPU usage for background encoding "
+            "(x264_preset=ultrafast, encoder_threads=2, "
+            "x264_low_memory=True, low_process_priority=True).\n"
             "  - balanced: no changes (identity).\n"
             "  - maximum_performance: trade RAM for throughput "
             "(x264_low_memory=False, memory_limit_mb=0, "
             "batch_chunk_size=80).\n"
-            "The preset's own keys win over the matching checkboxes "
-            "below for the run; pick 'balanced' to have the checkboxes "
-            "applied verbatim.",
+            "Explicit checkbox / field choices below win over the "
+            "preset's keys for the run (like an explicit CLI flag "
+            "beats --preset); pick 'balanced' to have them applied "
+            "verbatim.",
         )
 
         advanced_toggle_frame = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
@@ -472,6 +478,9 @@ class MainWindowBuildMixin:
             "(normal priority, faster encoding).",
         )
 
+        # ── Advanced: the 18 CLI-only tunables (AdvancedSettingsMixin).
+        self._build_advanced_section(ctrl_frame)
+
         ctk.CTkFrame(ctrl_frame, height=2, fg_color=("gray70", "gray30")).pack(
             fill="x", padx=5, pady=4
         )
@@ -480,9 +489,11 @@ class MainWindowBuildMixin:
         action_frame = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
         action_frame.pack(fill="x", padx=5, pady=(0, 6))
 
-        # Action row: [Start] [Cancel] only. The Step/Complete status and
-        # the progress block moved to the bottom of this column (fixed
-        # strip at grid row 1, built below).
+        # Action row: [Start] [Dry run] [Cancel]. Only. The
+        # Step/Complete status and the progress block moved to the
+        # bottom of this column (fixed strip at grid row 1, built below).
+        # Dry run mirrors the CLI's --dry-run: detect silence + report
+        # what would be kept/cut, without encoding anything.
         left_cluster = ctk.CTkFrame(action_frame, fg_color="transparent")
         left_cluster.pack(side="left", fill="x", expand=True)
 
@@ -495,6 +506,15 @@ class MainWindowBuildMixin:
             width=70,
         )
         self.btn_start.pack(side="left", padx=(0, 8))
+
+        self.btn_dry_run = ctk.CTkButton(
+            left_cluster,
+            text="Dry run",
+            command=lambda: self._start_pipeline(dry_run=True),
+            height=36,
+            width=70,
+        )
+        self.btn_dry_run.pack(side="left", padx=(0, 8))
 
         self.btn_cancel = ctk.CTkButton(
             left_cluster,

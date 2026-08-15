@@ -33,10 +33,10 @@ from stream2video.cli_helpers import (
     logger,
 )
 from stream2video.cli_resolver import is_from_cli, make_resolver
+from stream2video.completion_sound import play_completion_sound
 from stream2video.config import (
     CONFIG_DEFAULTS,
     DEFAULT_PRESET,
-    PRESET_NAMES,
     apply_preset,
 )
 from stream2video.download import (
@@ -49,7 +49,6 @@ from stream2video.download import (
     VideoNotAvailableError,
 )
 from stream2video.formatters import fmt_completion_summary, fmt_dry_run_summary
-from stream2video.completion_sound import play_completion_sound
 from stream2video.gui_helpers import build_download_status
 from stream2video.pipeline_controller import (
     PipelineCallbacks,
@@ -62,9 +61,6 @@ from stream2video.pipeline_controller import (
 )
 from stream2video.pipeline_controller import (
     PipelineConfig as _PipelineConfig,
-)
-from stream2video.pipeline_controller import (
-    validate_pipeline_config as _validate_pipeline_config,
 )
 
 # Module-level flag toggled by --log-format json. When True the human-
@@ -468,9 +464,12 @@ def main(
         "--preset",
         help=(
             "Resource preset — bundle of tunables (x264_low_memory, "
-            "memory_limit_mb, batch_chunk_size, low_process_priority). "
-            "'low_memory' trades speed for stability on 4-8 GB machines "
-            "(x264_low_memory=True, batch_chunk_size=20, "
+            "memory_limit_mb, batch_chunk_size, low_process_priority, "
+            "x264_preset, encoder_threads). 'low_memory' trades speed for "
+            "stability on 4-8 GB machines (x264_low_memory=True, "
+            "batch_chunk_size=20, low_process_priority=True). 'low_cpu' "
+            "minimizes CPU usage for background encoding "
+            "(x264_preset=ultrafast, encoder_threads=2, x264_low_memory=True, "
             "low_process_priority=True). 'balanced' (default) reproduces "
             "the historical defaults. 'maximum_performance' trades RAM "
             "for maximum throughput (x264_low_memory=False, memory_limit_mb=0, "
@@ -810,7 +809,7 @@ def main(
             console.print(
                 f"[red]Cannot create output directory:[/red] {output_dir} ({e})"
             )
-            raise typer.Exit(1)
+            raise typer.Exit(1) from None
         log_file = output_dir / "stream2video.log"
 
         if not _JSON_LOG_MODE:
@@ -834,12 +833,9 @@ def main(
         # ``--preset low_memory`` would silently fail to enable
         # x264_low_memory / batch_chunk_size=20 / low_process_priority.
         resolved_preset = make_resolver(ctx, config, console).resolve("preset", preset)
-        if resolved_preset not in PRESET_NAMES:
-            console.print(
-                f"[red]Invalid preset:[/red] {resolved_preset!r} "
-                f"(use {' or '.join(repr(p) for p in PRESET_NAMES)})"
-            )
-            raise typer.Exit(1)
+        # ``apply_preset`` raises ValueError for an unknown preset, and
+        # the resolver already rejected any value outside PRESET_NAMES —
+        # no separate validity check needed here.
         config = apply_preset(config, resolved_preset)
         resolver = make_resolver(ctx, config, console)
 
@@ -933,13 +929,13 @@ def main(
         resolved_min_silence: float = resolver.resolve("min_silence", min_silence)
         resolved_margin: float = resolver.resolve("margin", margin)
 
-        # Defensive re-validation through the shared pipeline validator.
-        # ``resolver.resolve`` + ``load_config`` already rejected every
-        # CLI-visible bad key; this second pass runs the final resolved
-        # values through the same ``validate_pipeline_config`` the GUI's
-        # worker uses, so a value that bypasses the per-key checks here
-        # (future config key, regression in the resolver) still fails
-        # early with a clear message instead of mid-pipeline.
+        # Assemble the immutable config snapshot the controller runs on.
+        # Every value above was already validated: the resolver rejects
+        # bad CLI flags (enum whitelists + CONFIG_RANGES bounds via
+        # PARAM_SPECS) and ``load_config`` rejected bad YAML, so no
+        # second validation pass is needed here (the GUI worker runs the
+        # same validator because its config arrives from hand-editable
+        # JSON, not from these two chokepoints).
         _pcfg = _PipelineConfig(
             input_raw=input_video,
             output_dir=output_dir,
@@ -980,11 +976,6 @@ def main(
             batch_chunk_size=batch_chunk_size,
             dry_run=dry_run,
         )
-        _cfg_errors = _validate_pipeline_config(_pcfg)
-        if _cfg_errors:
-            for _err in _cfg_errors:
-                console.print(f"[red]Invalid configuration:[/red] {_err}")
-            raise typer.Exit(1)
 
         # P1: reify ``software_fallback="ask"``. The callback typer
         # confirms with (``--force``-style defaults can't short-circuit
@@ -1206,6 +1197,20 @@ def main(
                 on_fallback_consent=_make_fallback_consent(),
             )
 
+            # CLI ↔ GUI parity: the GUI's worker plays an "attention"
+            # chime on cancel/failure and "success" on completion. Best-
+            # effort — playback failure returns a warning string instead
+            # of raising.
+            def _play_attention_sound() -> None:
+                if not resolved_completion_sound:
+                    return
+                try:
+                    _sound_warning = play_completion_sound(enabled=True, kind="attention")
+                    if _sound_warning:
+                        console.print(f"[yellow]{_sound_warning}[/yellow]")
+                except Exception:
+                    logger.debug("play_completion_sound raised", exc_info=True)
+
             try:
                 result = controller.run()
                 if _pcfg.dry_run:
@@ -1260,6 +1265,7 @@ def main(
 
             except PipelineCancelled:
                 console.print("[yellow]Pipeline cancelled.[/yellow]")
+                _play_attention_sound()
                 raise typer.Exit(130) from None
             except PipelineDownloadError as e:
                 cause = e.__cause__
@@ -1292,19 +1298,23 @@ def main(
                     raise typer.Exit(1) from None
                 console.print(f"[red]Download failed:[/red] {e}")
                 logger.exception("Download error")
+                _play_attention_sound()
                 raise typer.Exit(1) from None
             except PipelineSilenceError as e:
                 console.print(f"[red]Silence detection failed:[/red] {e}")
                 logger.exception("Silence detection error")
+                _play_attention_sound()
                 raise typer.Exit(1) from None
             except PipelineConcatError as e:
                 console.print(f"[red]Concatenation failed:[/red] {e}")
                 logger.exception("Concatenation error")
+                _play_attention_sound()
                 raise typer.Exit(1) from None
             except PipelineUnexpectedError as e:
                 # The controller already logged the full traceback;
                 # surface the user-facing message and preserve the cause.
                 console.print(f"[red]Unexpected error:[/red] {e}")
+                _play_attention_sound()
                 raise typer.Exit(1) from e
 
         # Summary — show rich stats: input/output size + duration, percent

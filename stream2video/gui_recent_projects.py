@@ -112,7 +112,7 @@ class RecentProjectsMixin:
                 # directory is not possible — only remove the list entry.
                 rem_btn = ctk.CTkButton(
                     row,
-                    text="–",
+                    text="-",
                     width=22,
                     height=22,
                     fg_color=("gray70", "gray30"),

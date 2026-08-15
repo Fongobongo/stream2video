@@ -525,6 +525,106 @@ class TestPipelineWorkerRun:
         # A run must have been begun before any controller callback fires.
         assert gui.live_segments_runs == 1
 
+    def test_dry_run_flag_reaches_pipeline_config(self):
+        from dataclasses import replace
+
+        params = replace(self._params(), dry_run=True)
+        cfg = build_pipeline_config_from_snapshot(
+            params, {"threshold": -30, "min_silence": 2, "margin": 0}
+        )
+        assert cfg.dry_run is True
+
+    def test_dry_run_defaults_to_false(self):
+        assert self._params().dry_run is False
+
+    def test_dry_run_logs_summary_and_status(self):
+        # GUI dry-run (mirrors the CLI's --dry-run): the controller
+        # stops after the silence pass and returns the detected
+        # segments; the worker logs the plain-text summary (the GUI log
+        # shows Rich markup literally), sets a dry-run status, and
+        # marks the bar green like a normal completion.
+        from dataclasses import replace
+
+        from stream2video.pipeline_controller import PipelineResult
+        from stream2video.silence import SilenceSegment
+
+        gui = _FakeGuiCallbacks()
+        worker = PipelineWorker(gui, {"threshold": -30, "min_silence": 2, "margin": 0})
+
+        class _DryRunController(_FakePipelineController):
+            def run(self):
+                return PipelineResult(
+                    output_path=None,
+                    video_path=Path("vid.mp4"),
+                    src_size_bytes=1_000_000,
+                    src_duration=100.0,
+                    dst_size_bytes=0,
+                    keep_duration=80.0,
+                    pipeline_seconds=3.0,
+                    silence_segments=[SilenceSegment(2.0, 4.0), SilenceSegment(50.0, 68.0)],
+                    keep_segments=[(0.0, 2.0), (4.0, 50.0), (68.0, 100.0)],
+                )
+
+        with (
+            patch(
+                "stream2video.pipeline_controller.PipelineCallbacks",
+                new=_FakePipelineCallbacks,
+            ),
+            patch(
+                "stream2video.pipeline_controller.PipelineController",
+                new=_DryRunController,
+            ),
+        ):
+            worker.run(replace(self._params(), dry_run=True))
+
+        # Plain summary, one log line per rendered line.
+        assert any("Dry-run" in line for line in gui.logs)
+        assert any("Silence: 2 segments" in line for line in gui.logs)
+        assert any("Keep: 3 segments" in line for line in gui.logs)
+        # No Rich tags survive into the GUI log.
+        assert not any("[" in line or "]" in line for line in gui.logs)
+        # The dedicated dry-run status, not a generic completion.
+        assert any("Dry-run complete" in text for text, _ in gui.status_calls)
+        # Button state restored in finally.
+        assert gui.running_state_changes[-1] is False
+
+    def test_real_run_keeps_no_dry_run_summary(self):
+        # A real run returns silence_segments=None — the dry-run branch
+        # must not fire (it would otherwise spam the log with an empty
+        # summary after every successful encode).
+        from dataclasses import replace
+
+        from stream2video.pipeline_controller import PipelineResult
+
+        gui = _FakeGuiCallbacks()
+        worker = PipelineWorker(gui, {"threshold": -30, "min_silence": 2, "margin": 0})
+
+        class _RealController(_FakePipelineController):
+            def run(self):
+                return PipelineResult(
+                    output_path=Path("out.mp4"),
+                    video_path=Path("vid.mp4"),
+                    src_size_bytes=1_000_000,
+                    src_duration=100.0,
+                    dst_size_bytes=500_000,
+                    keep_duration=80.0,
+                    pipeline_seconds=30.0,
+                )
+
+        with (
+            patch(
+                "stream2video.pipeline_controller.PipelineCallbacks",
+                new=_FakePipelineCallbacks,
+            ),
+            patch(
+                "stream2video.pipeline_controller.PipelineController",
+                new=_RealController,
+            ),
+        ):
+            worker.run(replace(self._params(), dry_run=True))
+
+        assert not any("Dry-run" in line for line in gui.logs)
+
     def test_pipeline_cancelled_sets_status_and_logs(self):
         # Cancellation: the user hit Cancel; the controller raised
         # ``PipelineCancelled`` (a subclass of ``PipelineError`` but

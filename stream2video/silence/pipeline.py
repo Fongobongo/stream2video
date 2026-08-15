@@ -6,7 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from stream2video import silence as _c
-from stream2video.config import CONFIG_DEFAULTS
+from stream2video.config import CONFIG_DEFAULTS, CONFIG_RANGES
 from stream2video.silence.parser import (
     _SAMPLE_VERIFY_DURATION,
     _SEGMENT_MATCH_TOLERANCE,
@@ -139,14 +139,20 @@ def detect_silence(
     if not video_path.exists():
         raise SilenceDetectionError(f"Video file not found: {video_path}")
 
-    if not -60 <= threshold <= -5:
-        raise ValueError(f"Threshold must be in range [-60, -5], got {threshold}")
+    # Range checks against the SHARED CONFIG_RANGES table (the same
+    # bounds the GUI sliders, the YAML loader and the CLI enforce) so a
+    # direct caller can't pass a value the GUI/CLI would reject.
+    lo, hi = CONFIG_RANGES["threshold"]
+    if not lo <= threshold <= hi:
+        raise ValueError(f"Threshold must be in range [{lo}, {hi}], got {threshold}")
 
-    if not 0.1 <= min_silence <= 60:
-        raise ValueError(f"Min silence must be in range [0.1, 60], got {min_silence}")
+    lo, hi = CONFIG_RANGES["min_silence"]
+    if not lo <= min_silence <= hi:
+        raise ValueError(f"Min silence must be in range [{lo}, {hi}], got {min_silence}")
 
-    if not -3 <= margin <= 5:
-        raise ValueError(f"Margin must be in range [-3, 5], got {margin}")
+    lo, hi = CONFIG_RANGES["margin"]
+    if not lo <= margin <= hi:
+        raise ValueError(f"Margin must be in range [{lo}, {hi}], got {margin}")
 
     # Timeout override from config. None = use module-level fallback.
     effective_timeout = timeout if timeout is not None else _SILENCE_TIMEOUT

@@ -38,7 +38,12 @@ from stream2video.concat import (
     generate_keep_segments,
 )
 from stream2video.config import (
+    AUTO_OR_INT_KEYS,
+    CONFIG_RANGES,
     VALID_DOWNLOAD_QUALITIES,
+    VALID_ENCODERS,
+    VALID_METHODS,
+    VALID_OUTPUT_FORMATS,
     VALID_OUTPUT_FPS,
     VALID_QUALITIES,
     VALID_SOFTWARE_FALLBACKS,
@@ -1212,11 +1217,11 @@ def validate_pipeline_config(cfg: PipelineConfig) -> list[str]:
     errors: list[str] = []
     if not cfg.input_raw.strip():
         errors.append("Input is empty — provide a URL or local file path.")
-    if cfg.method not in ("segment", "batch", "cut_then_encode"):
+    if cfg.method not in VALID_METHODS:
         errors.append(
-            f"Unknown method {cfg.method!r} (use 'segment', 'batch', or 'cut_then_encode')."
+            f"Unknown method {cfg.method!r} (use {', '.join(repr(v) for v in VALID_METHODS)})."
         )
-    if cfg.encoder not in ("h264_nvenc", "h264_amf", "h264_mf", "libx264"):
+    if cfg.encoder not in VALID_ENCODERS:
         errors.append(f"Unknown encoder {cfg.encoder!r}.")
     if cfg.video_quality not in VALID_QUALITIES:
         errors.append(f"Unknown video_quality {cfg.video_quality!r}.")
@@ -1235,21 +1240,52 @@ def validate_pipeline_config(cfg: PipelineConfig) -> list[str]:
         or (
             isinstance(cfg.encoder_threads, int)
             and not isinstance(cfg.encoder_threads, bool)
-            and cfg.encoder_threads > 0
+            and CONFIG_RANGES["encoder_threads"][0]
+            <= cfg.encoder_threads
+            <= CONFIG_RANGES["encoder_threads"][1]
         )
     ):
         errors.append(
-            f"encoder_threads {cfg.encoder_threads!r} must be 'auto' or a positive integer."
+            f"encoder_threads {cfg.encoder_threads!r} must be 'auto' or an "
+            f"integer in "
+            f"[{CONFIG_RANGES['encoder_threads'][0]}, {CONFIG_RANGES['encoder_threads'][1]}]."
         )
-    if cfg.output_format not in ("video", "mp3", "opus", "aac", "wav", "flac"):
+    if not (
+        cfg.memory_limit_mb == "auto"
+        or (
+            isinstance(cfg.memory_limit_mb, int)
+            and not isinstance(cfg.memory_limit_mb, bool)
+            and CONFIG_RANGES["memory_limit_mb"][0]
+            <= cfg.memory_limit_mb
+            <= CONFIG_RANGES["memory_limit_mb"][1]
+        )
+    ):
+        errors.append(
+            f"memory_limit_mb {cfg.memory_limit_mb!r} must be 'auto' or an "
+            f"integer in "
+            f"[{CONFIG_RANGES['memory_limit_mb'][0]}, {CONFIG_RANGES['memory_limit_mb'][1]}]."
+        )
+    if cfg.output_format not in VALID_OUTPUT_FORMATS:
         errors.append(
             f"Unknown output_format {cfg.output_format!r} "
-            "(use 'video', 'mp3', 'opus', 'aac', 'wav', or 'flac')."
+            f"(use {', '.join(repr(v) for v in VALID_OUTPUT_FORMATS)})."
         )
-    if not -60 <= cfg.threshold <= -5:
-        errors.append(f"threshold {cfg.threshold} out of range [-60, -5].")
-    if not 0.1 <= cfg.min_silence <= 60:
-        errors.append(f"min_silence {cfg.min_silence} out of range [0.1, 60].")
-    if not -3 <= cfg.margin <= 5:
-        errors.append(f"margin {cfg.margin} out of range [-3, 5].")
+    # Numeric ranges — the SAME CONFIG_RANGES the YAML loader and the
+    # CLI resolver enforce, so the GUI worker rejects a stale
+    # settings.json value (``stall_kill_timeout: 9``, ``threshold: -70``)
+    # with the same message family as the CLI. Previously only
+    # threshold / min_silence / margin were checked here; the timeouts
+    # and memory keys flowed through unchecked and surfaced as a
+    # mid-pipeline watchdog error instead of a clear pre-flight message.
+    # The auto_or_int keys are handled by the dedicated checks above
+    # (their ``"auto"`` string is not a number; see
+    # ``config.AUTO_OR_INT_KEYS``).
+    for key, (lo, hi) in CONFIG_RANGES.items():
+        if key in AUTO_OR_INT_KEYS:
+            continue
+        value = getattr(cfg, key)
+        if not isinstance(value, int | float) or isinstance(value, bool):
+            continue
+        if not lo <= value <= hi:
+            errors.append(f"{key} {value} out of range [{lo}, {hi}].")
     return errors

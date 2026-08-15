@@ -48,7 +48,7 @@ def _run_cut_then_encode(
     progress_callback: Callable[[float], None] | None = None,
     cancel_callback: Callable[[], bool] | None = None,
     options: ConcatOptions | None = None,
-    **legacy_kwargs,
+    **legacy_kwargs: object,
 ) -> None:
     """Encode each keep segment frame-accurately, concat losslessly,
     then stream-copy the result to the final output.
@@ -231,9 +231,11 @@ def _run_cut_then_encode(
             # ``fps=`` filter duplicates/drops frames to the target CFR.
             # Apply on the encode side so each segment is independently
             # CFR; the lossless phase-2 concat then joins CFR parts with
-            # no PTS jumps. Same logic as segment.py.
-            if options.output_fps != "source":
-                cmd.extend(["-vf", f"fps={options.output_fps}"])
+            # no PTS jumps. Same logic as segment.py — reuse the shared
+            # ``_fps_vf_option`` so the two paths can't drift (the
+            # segment path also gates the value against VALID_OUTPUT_FPS
+            # and logs a warning for invalid ones).
+            cmd.extend(_c._fps_vf_option(options.output_fps))
             # Thread count: forward so libx264 (or whatever encoder is
             # chosen) respects the user's low-CPU intent. Mirrors
             # segment.py's thread forwarding.

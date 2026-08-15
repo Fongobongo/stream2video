@@ -22,7 +22,7 @@ def _run_segment_concat(
     progress_callback: Callable[[float], None] | None = None,
     cancel_callback: Callable[[], bool] | None = None,
     options: ConcatOptions | None = None,
-    **legacy_kwargs,
+    **legacy_kwargs: object,
 ) -> None:
     """Encode each segment, join with concat demuxer (or concat filter for gapless).
 

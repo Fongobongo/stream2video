@@ -17,7 +17,6 @@ from typing import Any, cast
 import customtkinter as ctk
 
 from stream2video.config import (
-    CONFIG_DEFAULTS,
     effective_defaults,
     save_user_defaults,
     user_defaults_path,
@@ -34,6 +33,7 @@ from stream2video.gui_settings import load_settings as _load_settings_from_disk
 from stream2video.gui_settings import save_settings as _save_settings_to_disk
 from stream2video.settings_io import (
     build_save_settings_snapshot,
+    build_settings_payload,
     build_user_defaults_snapshot,
 )
 from stream2video.slider_widgets import format_slider_entry_value
@@ -64,14 +64,21 @@ class _ProxyInputDialog(ctk.CTkInputDialog):
 class LifecycleMixin:
     """Settings persistence + window lifecycle (close / restore / save)."""
 
-    def _save_settings(self) -> None:
-        # Read widgets in the main thread (Tk reads are unsafe from
-        # worker threads); forward the snapshot through the pure
-        # :func:`stream2video.settings_io.build_save_settings_snapshot`
-        # so the field list / key order is unit-tested in isolation.
-        widgets = {
-            "input_path": self.entry_input.get().strip(),
-            "output_dir": self.entry_output.get().strip(),
+    def _read_widget_values(self) -> dict[str, Any]:
+        """Read every tunable widget in the Tk main thread (Tk reads are
+        unsafe from worker threads).
+
+        Shared by ``_save_settings`` / ``_save_user_defaults`` /
+        ``_copy_cli_command`` / ``_start_pipeline`` so the widget-reading
+        blocks can't drift apart again — the audit found three copies
+        that had already diverged (``_copy_cli_command`` pulled
+        ``software_fallback`` from ``self.settings`` while
+        ``_save_settings`` never saved it at all).
+        """
+        values: dict[str, Any] = {
+            "threshold": float(self.settings["threshold"]),
+            "min_silence": float(self.settings["min_silence"]),
+            "margin": float(self.settings["margin"]),
             "method": self.combo_method.get(),
             "encoder": self.combo_encoder.get(),
             "video_quality": self.combo_video_quality.get(),
@@ -90,11 +97,33 @@ class LifecycleMixin:
             "theme": self.combo_theme.get(),
             "proxy": str(self.settings.get("proxy", "")),
             "proxy_active": bool(self.settings.get("proxy_active", False)),
+        }
+        values.update(self._read_advanced_widget_values())
+        return values
+
+    def _save_settings(self) -> None:
+        # Read widgets in the main thread (Tk reads are unsafe from
+        # worker threads); forward the snapshot through the pure
+        # :func:`stream2video.settings_io.build_save_settings_snapshot`
+        # so the field list / key order is unit-tested in isolation.
+        widgets = {
+            "input_path": self.entry_input.get().strip(),
+            "output_dir": self.entry_output.get().strip(),
             "window_geometry": self.geometry(),
         }
-        self.settings.update(build_save_settings_snapshot(widgets))
+        widgets.update(self._read_widget_values())
+        snapshot = build_save_settings_snapshot(widgets)
+        self.settings.update(snapshot)
+        # Persist only the DELTA vs the effective defaults (plus the
+        # session keys): a tunable the user never touched keeps its
+        # user_defaults.json value even after this write, so
+        # settings.json can't shadow user_defaults.json. Previously the
+        # whole ``self.settings`` dict was dumped, and any key ever
+        # written to settings.json permanently overrode the user
+        # defaults file.
+        payload = build_settings_payload({**self.settings, **snapshot})
         try:
-            _save_settings_to_disk(self.settings)
+            _save_settings_to_disk(payload)
         except Exception as e:
             self._log(f"[WARN] Could not save settings: {e}")
 
@@ -147,6 +176,7 @@ class LifecycleMixin:
                 if ev:
                     ev.delete(0, "end")
                     ev.insert(0, format_slider_entry_value(val))
+        self._set_advanced_widget_values(self.settings)
         self.lbl_output.configure(text="Output: —")
         self.lbl_file.configure(text="File: —")
         self.lbl_size.configure(text="Size: —")
@@ -216,29 +246,7 @@ class LifecycleMixin:
             self._sync_slider_entries()
         except Exception:
             pass
-        widgets = {
-            "threshold": float(self.settings["threshold"]),
-            "min_silence": float(self.settings["min_silence"]),
-            "margin": float(self.settings["margin"]),
-            "method": self.combo_method.get(),
-            "encoder": self.combo_encoder.get(),
-            "video_quality": self.combo_video_quality.get(),
-            "audio_quality": self.combo_audio_quality.get(),
-            "download_quality": self.combo_download_quality.get(),
-            "output_format": self.combo_output_format.get(),
-            "force": bool(self.chk_force.get()),
-            "delete_after": bool(self.chk_delete.get()),
-            "per_video_dir": bool(self.chk_per_video_dir.get()),
-            "completion_sound": bool(self.chk_completion_sound.get()),
-            "x264_low_memory": bool(self.chk_x264_low_memory.get()),
-            "use_crf": bool(self.chk_use_crf.get()),
-            "gapless_concat": bool(self.chk_gapless_concat.get()),
-            "low_process_priority": bool(self.chk_low_process_priority.get()),
-            "preset": self.combo_preset.get(),
-            "theme": self.combo_theme.get(),
-            "proxy": str(self.settings.get("proxy", "")),
-            "proxy_active": bool(self.settings.get("proxy_active", False)),
-        }
+        widgets = self._read_widget_values()
         snapshot = build_user_defaults_snapshot(widgets, current=self.settings)
         try:
             save_user_defaults(snapshot)
@@ -249,35 +257,18 @@ class LifecycleMixin:
 
     def _copy_cli_command(self) -> None:
         self._sync_slider_entries()
+        # The SAME widget values the Start button's run_config reads
+        # (shared ``_read_widget_values``), so the copied command
+        # reproduces the GUI run exactly. Previously the 18 advanced
+        # values came from ``self.settings`` (which ``_save_settings``
+        # never even wrote for several of them) and the copied command
+        # could silently disagree with the run.
+        values = self._read_widget_values()
         inp = self.entry_input.get().strip()
         out_raw = self.entry_output.get().strip() or "./processed_videos"
-        method = self.combo_method.get()
-        encoder = self.combo_encoder.get()
-        video_quality = self.combo_video_quality.get()
-        audio_quality = self.combo_audio_quality.get()
-        download_quality = self.combo_download_quality.get()
-        force = bool(self.chk_force.get())
-        delete_after = bool(self.chk_delete.get())
-        x264_low_memory = bool(self.chk_x264_low_memory.get())
-        use_crf = bool(self.chk_use_crf.get())
-        gapless_concat = bool(self.chk_gapless_concat.get())
-        low_process_priority = bool(self.chk_low_process_priority.get())
-        per_video_dir = bool(self.chk_per_video_dir.get())
-        completion_sound = bool(self.chk_completion_sound.get())
-        preset = self.combo_preset.get()
 
-        # Values that have no dedicated widget come from the settings /
-        # defaults snapshot — the SAME source the Start button's
-        # run_config reads — so the copied command reproduces the GUI
-        # run exactly. Previously 10 of these (software_fallback,
-        # x264_preset, encoder_threads, output_fps, completion_sound,
-        # download_timeout, connect_timeout, no_progress_timeout,
-        # rlimit_as_mb, stall_warning_timeout) were silently dropped and
-        # the pasted command ran with different values.
         out_path = Path(out_raw).expanduser()
-        proxy_value = (
-            self.settings.get("proxy", "") if self.settings.get("proxy_active", False) else ""
-        )
+        proxy_value = values["proxy"] if values["proxy_active"] else ""
         # Audit #3: the copied command lands in the clipboard, the shell
         # history and the process list — a proxy password must NOT go
         # there silently. Copy without credentials by default (explicit
@@ -303,76 +294,46 @@ class LifecycleMixin:
         cmd = build_cli_command(
             inp,
             out_path,
-            method=method,
-            encoder=encoder,
-            video_quality=video_quality,
-            audio_quality=audio_quality,
-            download_quality=download_quality,
-            software_fallback=self.settings.get(
-                "software_fallback", CONFIG_DEFAULTS["software_fallback"]
-            ),
-            x264_preset=self.settings.get("x264_preset", CONFIG_DEFAULTS["x264_preset"]),
-            encoder_threads=self.settings.get(
-                "encoder_threads", CONFIG_DEFAULTS["encoder_threads"]
-            ),
-            output_fps=self.settings.get("output_fps", CONFIG_DEFAULTS["output_fps"]),
-            output_format=self.combo_output_format.get(),
+            method=values["method"],
+            encoder=values["encoder"],
+            video_quality=values["video_quality"],
+            audio_quality=values["audio_quality"],
+            download_quality=values["download_quality"],
+            software_fallback=values["software_fallback"],
+            x264_preset=values["x264_preset"],
+            encoder_threads=values["encoder_threads"],
+            output_fps=values["output_fps"],
+            output_format=values["output_format"],
             # Slider values are passed as explicit CLI flags — no side-car
             # YAML file needed (a failed YAML write used to leave the
             # copied command silently running with different values).
-            threshold=float(self.settings["threshold"]),
-            min_silence=float(self.settings["min_silence"]),
-            margin=float(self.settings["margin"]),
-            force=force,
-            delete_after=delete_after,
-            x264_low_memory=x264_low_memory,
-            use_crf=use_crf,
-            gapless_concat=gapless_concat,
-            low_process_priority=low_process_priority,
-            completion_sound=completion_sound,
-            preset=preset,
-            memory_limit_mb=self.settings.get(
-                "memory_limit_mb", CONFIG_DEFAULTS["memory_limit_mb"]
-            ),
-            memory_reserve_mb=self.settings.get(
-                "memory_reserve_mb", CONFIG_DEFAULTS["memory_reserve_mb"]
-            ),
-            rlimit_as_mb=self.settings.get("rlimit_as_mb", CONFIG_DEFAULTS["rlimit_as_mb"]),
-            download_timeout=self.settings.get(
-                "download_timeout", CONFIG_DEFAULTS["download_timeout"]
-            ),
-            connect_timeout=self.settings.get(
-                "connect_timeout", CONFIG_DEFAULTS["connect_timeout"]
-            ),
-            no_progress_timeout=self.settings.get(
-                "no_progress_timeout", CONFIG_DEFAULTS["no_progress_timeout"]
-            ),
-            segment_encode_timeout=self.settings.get(
-                "segment_encode_timeout", CONFIG_DEFAULTS["segment_encode_timeout"]
-            ),
-            final_concat_timeout=self.settings.get(
-                "final_concat_timeout", CONFIG_DEFAULTS["final_concat_timeout"]
-            ),
-            silence_timeout=self.settings.get(
-                "silence_timeout", CONFIG_DEFAULTS["silence_timeout"]
-            ),
-            stall_kill_timeout=self.settings.get(
-                "stall_kill_timeout", CONFIG_DEFAULTS["stall_kill_timeout"]
-            ),
-            stall_warning_timeout=self.settings.get(
-                "stall_warning_timeout", CONFIG_DEFAULTS["stall_warning_timeout"]
-            ),
-            waveform_timeout=self.settings.get(
-                "waveform_timeout", CONFIG_DEFAULTS["waveform_timeout"]
-            ),
-            batch_chunk_size=self.settings.get(
-                "batch_chunk_size", CONFIG_DEFAULTS["batch_chunk_size"]
-            ),
-            min_part_bytes=self.settings.get(
-                "min_part_bytes", CONFIG_DEFAULTS["min_part_bytes"]
-            ),
+            threshold=values["threshold"],
+            min_silence=values["min_silence"],
+            margin=values["margin"],
+            force=values["force"],
+            delete_after=values["delete_after"],
+            x264_low_memory=values["x264_low_memory"],
+            use_crf=values["use_crf"],
+            gapless_concat=values["gapless_concat"],
+            low_process_priority=values["low_process_priority"],
+            completion_sound=values["completion_sound"],
+            preset=values["preset"],
+            memory_limit_mb=values["memory_limit_mb"],
+            memory_reserve_mb=values["memory_reserve_mb"],
+            rlimit_as_mb=values["rlimit_as_mb"],
+            download_timeout=values["download_timeout"],
+            connect_timeout=values["connect_timeout"],
+            no_progress_timeout=values["no_progress_timeout"],
+            segment_encode_timeout=values["segment_encode_timeout"],
+            final_concat_timeout=values["final_concat_timeout"],
+            silence_timeout=values["silence_timeout"],
+            stall_kill_timeout=values["stall_kill_timeout"],
+            stall_warning_timeout=values["stall_warning_timeout"],
+            waveform_timeout=values["waveform_timeout"],
+            batch_chunk_size=values["batch_chunk_size"],
+            min_part_bytes=values["min_part_bytes"],
             proxy=proxy_copied,
-            per_video_dir=per_video_dir,
+            per_video_dir=values["per_video_dir"],
         )
         cmd_log = redact_proxy_in_cli_command(cmd, proxy_copied)
         self.clipboard_clear()
