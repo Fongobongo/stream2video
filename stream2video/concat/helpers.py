@@ -186,6 +186,14 @@ def _new_memory_monitor(
     return memory_monitor_factory(label) if memory_monitor_factory is not None else None
 
 
+# Minimum duration of a keep segment. Shorter keeps (a sub-100ms "blip"
+# of audio between two back-to-back silences) would produce a truncated
+# output segment the encoder can barely represent; they are dropped.
+# Keeps of EXACTLY this length survive (>=), preserving the historical
+# 0.1s floor pinned by the integration tests.
+MIN_KEEP_DURATION = 0.1
+
+
 def generate_keep_segments(
     video_path: Path,
     silence_segments: "list[SilenceSegment]",
@@ -230,4 +238,19 @@ def generate_keep_segments(
     if current_time < duration:
         keep_segments.append((current_time, duration))
 
-    return keep_segments
+    # Post-processing (audit): drop sub-floor keeps and merge adjacent
+    # keeps separated by a silence gap smaller than the floor. A
+    # 0.05s keep between two silences is a detector artifact, not an
+    # output segment — encoding it produces a truncated MP4 that's
+    # useless on its own and adds per-segment overhead to every phase.
+    filtered = [k for k in keep_segments if k[1] - k[0] >= MIN_KEEP_DURATION]
+    merged: list[tuple[float, float]] = []
+    for start, end in filtered:
+        if merged and start - merged[-1][1] < MIN_KEEP_DURATION:
+            # The silence between these two keeps is smaller than the
+            # floor — collapse into one continuous keep.
+            merged[-1] = (merged[-1][0], end)
+        else:
+            merged.append((start, end))
+
+    return merged

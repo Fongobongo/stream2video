@@ -14,8 +14,15 @@ project dir and overwrite each other's output and caches.
 
 Layout comparison (per_video_dir=True):
     output_dir/
-        <stem>_<path-hash>/
-            <stem>_<path-hash>.mp4    # downloaded source (or local file untouched)
+        <id>/                       # downloaded source: project dir = epochless yt-dlp id
+            <id>.mp4                # downloaded source (renamed, epoch stripped)
+            <id>_<path-hash>_audio.wav
+            <id>_<path-hash>_silence_cache.json
+            <id>_<path-hash>_compressed.mp4
+            stream2video.log
+            _<id>_<path-hash>_segments/   # temp, cleaned on success
+            _<id>_<path-hash>_batch/      # temp, cleaned on success
+        <stem>_<path-hash>/         # local file: project dir = stem + source-path hash
             <stem>_<path-hash>_audio.wav
             <stem>_<path-hash>_silence_cache.json
             <stem>_<path-hash>_compressed.mp4
@@ -25,7 +32,9 @@ Layout comparison (per_video_dir=True):
 
 Local input files are NEVER moved or copied — the source stays where the
 user put it, but WAV / JSON / compressed / log / temp dirs all go into
-the per-video subdir.
+the per-video subdir. Downloaded sources ARE moved (and epoch-stripped,
+see ``_epochless``) so a re-run of the same URL reuses the project dir
+and caches instead of forking per download.
 """
 
 from __future__ import annotations
@@ -218,6 +227,28 @@ def source_path_key(video_path: Path) -> str:
     return digest
 
 
+def _epochless(stem: str) -> str:
+    """Strip yt-dlp's ``-<epoch>`` suffix from a filename stem.
+
+    yt-dlp's outtmpl is ``%(id)s-%(epoch)s.%(ext)s``, so a downloaded
+    file is ``<id>-<10-digit-epoch>.mp4`` — a DIFFERENT name every run.
+    Keying artifacts on the raw stem would fork the identity per run:
+    every re-download lands in a new project dir and the silence / WAV
+    / resume caches miss forever (re-detection + re-download of the
+    same URL every time). Stripping the trailing ``-<10 digits>``
+    restores a stable per-URL identity.
+
+    Local files whose names happen to end in ``-<10 digits>`` are
+    stripped too — a deliberate trade-off: the pattern is distinctive
+    enough that a false positive is unlikely (and such names are
+    typically yt-dlp exports anyway), while the alternative is a
+    per-run cache miss for every URL download.
+    """
+    if len(stem) > 11 and stem[-11] == "-" and stem[-10:].isdigit():
+        return stem[:-11]
+    return stem
+
+
 def artifact_stem(video_path: Path) -> str:
     """Per-source base name: ``<stem>_<path-hash>``.
 
@@ -225,8 +256,13 @@ def artifact_stem(video_path: Path) -> str:
     output, the WAV cache, the silence cache and the resume cache all
     embed it, so a single source identifier keeps artifacts of same-named
     sources in different directories independent.
+
+    The stem is epoch-stripped (see ``_epochless``): yt-dlp names a
+    download ``<id>-<epoch>.mp4`` with a fresh epoch per run, so without
+    the strip every artifact would re-key on every re-download of the
+    same URL.
     """
-    return f"{video_path.stem}_{source_path_key(video_path)}"
+    return f"{_epochless(video_path.stem)}_{source_path_key(video_path)}"
 
 
 def project_dir(output_dir: Path, video_stem: str, per_video_dir: bool) -> Path:
@@ -260,13 +296,20 @@ def ensure_project_dir(output_dir: Path, video_stem: str, per_video_dir: bool) -
     return p
 
 
-def move_into_project(file_path: Path, project_dir: Path) -> Path:
-    """Move ``file_path`` into ``project_dir`` (same filename). Returns new path.
+def move_into_project(
+    file_path: Path, project_dir: Path, dest_name: str | None = None
+) -> Path:
+    """Move ``file_path`` into ``project_dir`` (same filename by default).
+
+    ``dest_name`` overrides the destination filename — used to strip
+    the per-run yt-dlp epoch suffix from a downloaded source so the
+    moved file's identity (and every cache keyed on it) is stable
+    across runs of the same URL.
 
     If the target already exists, it is *replaced* (the incoming file wins):
     on a retry of a fresh download we must not silently keep the previous
-    run's stale video. If ``file_path`` is already inside ``project_dir``,
-    returns it unchanged.
+    run's stale video. If ``file_path`` is already inside ``project_dir``
+    under the target name, returns it unchanged.
 
     Uses :func:`shutil.move` (not :meth:`Path.rename`) so a cross-drive
     download dir → project dir move (e.g. temp on C:, project on D:)
@@ -291,9 +334,11 @@ def move_into_project(file_path: Path, project_dir: Path) -> Path:
     project_dir = Path(project_dir)
     if not file_path.exists():
         raise FileNotFoundError(f"Cannot move into project: source not found: {file_path}")
-    if file_path.parent == project_dir:
+    if dest_name is None:
+        dest_name = file_path.name
+    if file_path.parent == project_dir and file_path.name == dest_name:
         return file_path
-    new_path = project_dir / file_path.name
+    new_path = project_dir / dest_name
     project_dir.mkdir(parents=True, exist_ok=True)
     # Same volume as the target, so the final step is a rename, not a
     # copy. Unique name so a concurrent run's temp file can't collide.
@@ -399,13 +444,28 @@ def apply_per_video_dir(
     When ``per_video_dir`` is False, the user opted out of per-video
     subdirectories: the function returns its inputs unchanged so callers
     don't need to gate the call themselves. When True (default), a
-    subdirectory named after ``video_path``'s artifact stem (stem +
-    source-path hash) is created inside ``output_dir`` and the
-    downloaded source is moved into it.
+    subdirectory is created inside ``output_dir`` and the downloaded
+    source is moved into it:
+
+    - Downloaded sources get a project dir named after the *epochless*
+      yt-dlp id (``<id>/``) and are renamed to ``<id><ext>`` inside it.
+      The epochless name is what makes the identity — and every cache
+      keyed on it — stable across re-runs of the same URL, instead of
+      forking per download (see ``_epochless``).
+    - Local files get a project dir named ``<stem>_<path-hash>`` (stem +
+      source-path hash) and are never moved; the hash keeps two
+      same-named files in different directories independent.
     """
     if not per_video_dir:
         return output_dir, video_path
-    project_dir = ensure_project_dir(output_dir, artifact_stem(video_path), True)
+    stem = _epochless(video_path.stem)
     if is_downloaded:
-        video_path = move_into_project(video_path, project_dir)
+        project_name = stem
+    else:
+        project_name = f"{stem}_{source_path_key(video_path)}"
+    project_dir = ensure_project_dir(output_dir, project_name, True)
+    if is_downloaded:
+        video_path = move_into_project(
+            video_path, project_dir, dest_name=f"{stem}{video_path.suffix}"
+        )
     return project_dir, video_path

@@ -86,7 +86,7 @@ stream2video --show-completion      # Print the completion script for manual ins
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `-o, --output` | `./processed_videos` | Output directory |
+| `-o, --output` | `./processed_videos` | Output directory. When not passed, the config file's `output_dir` key is used |
 | `-e, --encoder` | `h264_mf` | `h264_nvenc`, `h264_amf`, `h264_mf`, `libx264` |
 | `-vq, --video-quality` | `source` | Encode quality preset: `source` (encoder defaults, default), `high` (10000k / CRF 18), `medium` (7000k / CRF 23), `low` (3500k / CRF 28) |
 | `-aq, --audio-quality` | `source` | Audio quality preset: `source` (codec defaults + native rate/channels, default), `high` (256k), `medium` (192k), `low` (128k) |
@@ -101,7 +101,7 @@ stream2video --show-completion      # Print the completion script for manual ins
 | `--low-process-priority` / `--no-low-process-priority` | off | Spawn ffmpeg at a lower scheduling priority so a long-running encode doesn't starve interactive applications. On Windows: `BELOW_NORMAL_PRIORITY_CLASS`; on Linux/macOS: nice +10. Useful for unattended batch processing on shared/desktop machines. Default off (normal priority, faster encoding). |
 | `--rlimit-as-mb` | `0` (off) | POSIX-only. When >0, cap each spawned ffmpeg subprocess's virtual address space to this many MiB via `RLIMIT_AS` in `preexec_fn`. `malloc`/`mmap` return `ENOMEM` (and ffmpeg bails) before the OS swaps or the Linux OOM killer kicks in — a hard, kernel-enforced complement to `--memory-limit-mb` (which samples RSS between polls and can miss a fast spike). On Windows this flag is ignored. Default 0 disables the cap. |
 | `--memory-limit-mb` | `auto` | RAM budget for the encode: `auto` (60% of total RAM at run start), a positive MB value, or `0` to disable the budget check (the OS reserve still applies). Requires psutil ([monitor]/[gui] extra). |
-| `--memory-reserve-mb` | `2048` | Hard floor of available RAM the pipeline never violates. Checked before the silence-detection and concat phases — if the system is already below the reserve, the run refuses to start instead of choking |
+| `--memory-reserve-mb` | `2048` | Hard floor of available RAM the pipeline never violates. Checked before the silence-detection and concat phases — if the system is already below the reserve, the run refuses to start instead of choking the machine (or falling into swap). |
 | `--preset` | `balanced` | Resource preset — a bundle of tunables (`x264_preset`, `x264_low_memory`, `encoder_threads`, `memory_limit_mb`, `batch_chunk_size`, `low_process_priority`) applied as a baseline before any explicit `--flag` overrides. `low_memory` trades speed for stability on 4-8 GB machines (`x264_low_memory=True`, `batch_chunk_size=20`, `low_process_priority=True`); `low_cpu` minimizes CPU usage (`x264_preset=ultrafast`, `encoder_threads=2`, `x264_low_memory=True`, `low_process_priority=True`); `balanced` reproduces the historical defaults; `maximum_performance` trades RAM for throughput (`x264_low_memory=False`, `memory_limit_mb=0`, `batch_chunk_size=80`). Explicit flags win on a per-key basis — e.g. `--preset low_memory --no-low-process-priority` keeps the other low-memory tunables but flips priority back off. |
 | `--download-timeout` | `28800` | Absolute ceiling for the whole download in seconds (8h, sized for big VODs). Ignored for local files. |
 | `--connect-timeout` | `300` | Seconds to wait for the first progress event (DNS+TLS+handshake+first byte) before killing yt-dlp with a clear timeout error. Increase on very slow / satellite links. |
@@ -110,14 +110,16 @@ stream2video --show-completion      # Print the completion script for manual ins
 | `--final-concat-timeout` | `86400` | Final concat-demuxer timeout in seconds (24h, absolute ceiling on the final pass). |
 | `--silence-timeout` | `36000` | Silence detection ceiling in seconds (10h). |
 | `--stall-timeout` | `300` | No-progress kill timeout in seconds (5 min). ffmpeg is killed if no progress line arrives within this window. |
+| `--stall-warning-timeout` | `120` | No-progress warning timeout in seconds (2 min). A stall warning is logged (and surfaced in the UI) when no progress line arrives within this window; the kill timer is `--stall-timeout`. |
 | `--waveform-timeout` | `300` | Waveform preview decode timeout in seconds (5 min). |
 | `--batch-chunk-size` | `40` | Number of keep-segments per batch filter invocation. Scaled down dynamically for large segment counts. |
 | `--min-part-bytes` | `1024` | Minimum bytes for a resumed part to be considered valid. Smaller files are re-encoded. |
-| `-f, --force` | — | Re-detect silence, ignore cache |
+| `-f, --force` / `--no-force` | — | Re-detect silence, ignore cache. `--no-force` pins it off so a config file with `force: true` can be overridden |
 | `-n, --dry-run` | — | Run silence detection and print a "what would be cut" summary (segment count, total length removed, expected output duration) without encoding |
 | `-c, --config` | — | YAML config file |
-| `--delete-after` | — | Delete downloaded source after successful compression |
-| `--per-video-dir` / `--no-per-video-dir` | (follows `per_video_dir` config) | Group all artifacts into `{output_dir}/{stem}_{hash}/` |
+| `--delete-after` / `--no-delete-after` | — | Delete downloaded source after successful compression. `--no-delete-after` pins it off so a config file with `delete_after: true` can be overridden |
+| `--per-video-dir` / `--no-per-video-dir` | (follows `per_video_dir` config) | Group all artifacts into `{output_dir}/{stem}_{hash}/` for local files, or `{output_dir}/{id}/` for downloaded sources (yt-dlp id, epoch-stripped so re-runs of the same URL reuse the same project dir and caches) |
+| `--completion-sound` / `--no-completion-sound` | on | Play the completion chime after a successful run (matches the GUI's "Sound when done" checkbox). `--no-completion-sound` disables it even when the config file says `completion_sound: true` |
 | `--proxy` | (follows `proxy` config) | Proxy server for downloads, e.g. `http://127.0.0.1:8080` or `socks5://user:pass@host:1080`. Empty = direct connection |
 | `-l, --log-level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `--log-format` | `rich` | `rich` (default, human-readable) or `json` (one JSON object per line, for ELK/Splunk/Loki) |

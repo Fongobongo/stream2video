@@ -826,7 +826,7 @@ class TestPipelineControllerTkIsolation:
         ``self.chk_*``, ``self.spin_*``) from there is unsafe because
         Tk widgets are main-thread-only. The GUI snapshots widget
         values in ``_start_pipeline`` (main thread) and passes them as
-        args; the worker reads only these local copies + ``self.config``
+        args; the worker reads only these local copies + ``self.settings``
         (a plain dict snapshot, safe to read from any thread).
 
         This test parses gui.py's AST and walks the body of
@@ -908,6 +908,7 @@ class TestCleanupIncompleteOnClose:
         partial = tmp_path / "partial_src.mp4.part"
         partial.write_bytes(b"partial data")
         controller._download_path = partial
+        controller._download_was_real = True
         output = tmp_path / "out_compressed.mp4"
         output.write_bytes(b"output header only")
         controller._output_path = output
@@ -934,7 +935,6 @@ class TestCleanupIncompleteOnClose:
         # Download phase finished successfully — the source is complete;
         # on close (mid concat) we must NOT delete a usable file the user
         # may want to reuse on the next run.
-        controller._download_complete = True
         controller._download_was_real = True
 
         controller.cleanup_incomplete_on_close()

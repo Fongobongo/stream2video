@@ -35,7 +35,7 @@ class RecentProjectsMixin:
     """Build + mutate the Recent Projects list in the left panel."""
 
     def _render_recent_projects(self) -> None:
-        """Rebuild the Recent Projects sub-section from self.config.
+        """Rebuild the Recent Projects sub-section from self.settings.
 
         Prunes entries whose directory no longer exists. Rows have a
         label (project name + tooltip with full path) and a trailing
@@ -59,9 +59,9 @@ class RecentProjectsMixin:
                 if tooltip is not None:
                     tooltip.destroy()
             child.destroy()
-        pruned = prune_recent_projects(self.config.get("recent_projects", []))
-        if pruned != self.config.get("recent_projects", []):
-            self.config["recent_projects"] = pruned
+        pruned = prune_recent_projects(self.settings.get("recent_projects", []))
+        if pruned != self.settings.get("recent_projects", []):
+            self.settings["recent_projects"] = pruned
         if not pruned:
             ctk.CTkLabel(
                 self.recent_frame,
@@ -142,11 +142,11 @@ class RecentProjectsMixin:
             # Runs on the Tk main loop: mutate config, re-render, and
             # persist from one place so a concurrent ``_save_settings``
             # can't serialize a half-updated list (the old code mutated
-            # ``self.config`` on the pipeline worker thread — a GIL-atomic
+            # ``self.settings`` on the pipeline worker thread — a GIL-atomic
             # rebinding, but visible to a concurrent main-thread save as
             # a lost update on disk).
-            self.config["recent_projects"] = add_recent_project(
-                self.config.get("recent_projects", []),
+            self.settings["recent_projects"] = add_recent_project(
+                self.settings.get("recent_projects", []),
                 path_str,
             )
             self._render_recent_projects()
@@ -159,10 +159,19 @@ class RecentProjectsMixin:
 
     def _remove_recent_entry(self, path_str: str) -> None:
         """Drop ``path_str`` from ``recent_projects`` and re-render the panel."""
-        self.config["recent_projects"] = [
-            p for p in self.config.get("recent_projects", []) if p != path_str
+        self.settings["recent_projects"] = [
+            p for p in self.settings.get("recent_projects", []) if p != path_str
         ]
         self._render_recent_projects()
+        # Persist immediately: every caller runs on the Tk main thread
+        # (button handlers or ``after(0, ...)`` marshalling), so a
+        # settings save here is safe — without it a removal was only
+        # flushed by the NEXT unrelated settings save (or never, if the
+        # app closed right after).
+        try:
+            self._save_settings()
+        except Exception as e:
+            _logger.warning("Failed to save settings after removing recent project: %s", e)
 
     def _delete_recent_project(self, path_str: str) -> None:
         """Confirm with the user, then recursively delete the project dir.

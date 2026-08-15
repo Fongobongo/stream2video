@@ -1,7 +1,7 @@
 """LifecycleMixin — settings I/O, restore defaults, on-close.
 
 Extracted from ``Stream2VideoGUI``: ``_save_settings`` (snapshot widgets
-→ settings.json), ``_load_settings`` (read settings.json → self.config),
+→ settings.json), ``_load_settings`` (read settings.json → self.settings),
 ``_restore_defaults``, ``_save_user_defaults``, ``_copy_cli_command``,
 ``_on_close`` (WM_DELETE_WINDOW handler — cancel running pipeline,
 delete incomplete output, save settings, destroy).
@@ -88,25 +88,25 @@ class LifecycleMixin:
             "low_process_priority": bool(self.chk_low_process_priority.get()),
             "preset": self.combo_preset.get(),
             "theme": self.combo_theme.get(),
-            "proxy": str(self.config.get("proxy", "")),
-            "proxy_active": bool(self.config.get("proxy_active", False)),
+            "proxy": str(self.settings.get("proxy", "")),
+            "proxy_active": bool(self.settings.get("proxy_active", False)),
             "window_geometry": self.geometry(),
         }
-        self.config.update(build_save_settings_snapshot(widgets))
+        self.settings.update(build_save_settings_snapshot(widgets))
         try:
-            _save_settings_to_disk(self.config)
+            _save_settings_to_disk(self.settings)
         except Exception as e:
             self._log(f"[WARN] Could not save settings: {e}")
 
     def _load_settings(self) -> None:
         loaded = _load_settings_from_disk()
         for key, value in loaded.items():
-            self.config[key] = value
+            self.settings[key] = value
 
     def _restore_defaults(self) -> None:
-        self.config = effective_defaults()
-        ctk.set_appearance_mode(self.config["theme"])
-        self.combo_theme.set(self.config["theme"])
+        self.settings = effective_defaults()
+        ctk.set_appearance_mode(self.settings["theme"])
+        self.combo_theme.set(self.settings["theme"])
         self.entry_input.delete(0, "end")
         self.entry_output.delete(0, "end")
         # Don't null the controller while a run is active: the worker
@@ -116,24 +116,24 @@ class LifecycleMixin:
         if not getattr(self, "running", False):
             self._active_controller: object | None = None
 
-        self.combo_method.set(self.config["method"])
-        self.combo_encoder.set(self.config["encoder"])
-        self._on_encoder_change(self.config["encoder"])
-        self.combo_video_quality.set(self.config["video_quality"])
-        self.combo_audio_quality.set(self.config.get("audio_quality", "medium"))
-        self.combo_download_quality.set(self.config["download_quality"])
-        self.combo_output_format.set(self.config.get("output_format", "video"))
-        self._set_checkbox(self.chk_force, self.config["force"])
-        self._set_checkbox(self.chk_delete, self.config["delete_after"])
-        self._set_checkbox(self.chk_per_video_dir, self.config["per_video_dir"])
-        self._set_checkbox(self.chk_completion_sound, self.config.get("completion_sound", False))
-        self._set_checkbox(self.chk_x264_low_memory, self.config.get("x264_low_memory", False))
-        self._set_checkbox(self.chk_use_crf, self.config.get("use_crf", False))
-        self._set_checkbox(self.chk_gapless_concat, self.config.get("gapless_concat", False))
+        self.combo_method.set(self.settings["method"])
+        self.combo_encoder.set(self.settings["encoder"])
+        self._on_encoder_change(self.settings["encoder"])
+        self.combo_video_quality.set(self.settings["video_quality"])
+        self.combo_audio_quality.set(self.settings.get("audio_quality", "source"))
+        self.combo_download_quality.set(self.settings["download_quality"])
+        self.combo_output_format.set(self.settings.get("output_format", "video"))
+        self._set_checkbox(self.chk_force, self.settings["force"])
+        self._set_checkbox(self.chk_delete, self.settings["delete_after"])
+        self._set_checkbox(self.chk_per_video_dir, self.settings["per_video_dir"])
+        self._set_checkbox(self.chk_completion_sound, self.settings.get("completion_sound", True))
+        self._set_checkbox(self.chk_x264_low_memory, self.settings.get("x264_low_memory", False))
+        self._set_checkbox(self.chk_use_crf, self.settings.get("use_crf", False))
+        self._set_checkbox(self.chk_gapless_concat, self.settings.get("gapless_concat", True))
         self._set_checkbox(
-            self.chk_low_process_priority, self.config.get("low_process_priority", False)
+            self.chk_low_process_priority, self.settings.get("low_process_priority", False)
         )
-        self.combo_preset.set(self.config.get("preset", "balanced"))
+        self.combo_preset.set(self.settings.get("preset", "balanced"))
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
         win_w, win_h = self._fit_to_screen(sw, sh)
@@ -141,7 +141,7 @@ class LifecycleMixin:
         for key in ("threshold", "min_silence", "margin"):
             slider = getattr(self, f"_slider_{key}", None)
             if slider:
-                val = self.config[key]
+                val = self.settings[key]
                 slider.set(val)
                 ev = getattr(slider, "_entry_val", None)
                 if ev:
@@ -154,7 +154,7 @@ class LifecycleMixin:
         self.lbl_silence.configure(text="Silence: —")
         self.lbl_encoder.configure(text="Encoder: —")
         if hasattr(self, "chk_proxy"):
-            if self.config.get("proxy_active", False):
+            if self.settings.get("proxy_active", False):
                 self.chk_proxy.select()
             else:
                 self.chk_proxy.deselect()
@@ -176,7 +176,7 @@ class LifecycleMixin:
 
     def _on_proxy_toggle(self) -> None:
         """Checkbox handler: persist the proxy on/off state."""
-        self.config["proxy_active"] = bool(self.chk_proxy.get())
+        self.settings["proxy_active"] = bool(self.chk_proxy.get())
         self._save_settings()
 
     def _set_proxy(self) -> None:
@@ -184,13 +184,13 @@ class LifecycleMixin:
 
         The entry is prefilled with the previously entered address so
         it can be edited. Empty = no proxy address; the value is always
-        kept in ``self.config["proxy"]`` (even while the proxy is
+        kept in ``self.settings["proxy"]`` (even while the proxy is
         disabled) so it isn't lost. Setting a non-empty address
         auto-enables the proxy checkbox; the address is passed to
         yt-dlp as ``--proxy`` only while ``proxy_active`` is on.
         """
         dialog = _ProxyInputDialog(
-            initial=str(self.config.get("proxy", "")),
+            initial=str(self.settings.get("proxy", "")),
             title="Download proxy",
             text=(
                 "Proxy server for downloads (empty = no proxy).\n"
@@ -202,9 +202,9 @@ class LifecycleMixin:
         if value is None:
             return  # cancelled
         value = value.strip()
-        self.config["proxy"] = value
-        if value and not self.config.get("proxy_active", False):
-            self.config["proxy_active"] = True
+        self.settings["proxy"] = value
+        if value and not self.settings.get("proxy_active", False):
+            self.settings["proxy_active"] = True
             if hasattr(self, "chk_proxy"):
                 self.chk_proxy.select()
         self._save_settings()
@@ -217,9 +217,9 @@ class LifecycleMixin:
         except Exception:
             pass
         widgets = {
-            "threshold": float(self.config["threshold"]),
-            "min_silence": float(self.config["min_silence"]),
-            "margin": float(self.config["margin"]),
+            "threshold": float(self.settings["threshold"]),
+            "min_silence": float(self.settings["min_silence"]),
+            "margin": float(self.settings["margin"]),
             "method": self.combo_method.get(),
             "encoder": self.combo_encoder.get(),
             "video_quality": self.combo_video_quality.get(),
@@ -236,10 +236,10 @@ class LifecycleMixin:
             "low_process_priority": bool(self.chk_low_process_priority.get()),
             "preset": self.combo_preset.get(),
             "theme": self.combo_theme.get(),
-            "proxy": str(self.config.get("proxy", "")),
-            "proxy_active": bool(self.config.get("proxy_active", False)),
+            "proxy": str(self.settings.get("proxy", "")),
+            "proxy_active": bool(self.settings.get("proxy_active", False)),
         }
-        snapshot = build_user_defaults_snapshot(widgets, current=self.config)
+        snapshot = build_user_defaults_snapshot(widgets, current=self.settings)
         try:
             save_user_defaults(snapshot)
         except Exception as e:
@@ -263,20 +263,20 @@ class LifecycleMixin:
         gapless_concat = bool(self.chk_gapless_concat.get())
         low_process_priority = bool(self.chk_low_process_priority.get())
         preset = self.combo_preset.get()
-        memory_limit_mb = self.config.get("memory_limit_mb", "auto")
-        memory_reserve_mb = self.config.get("memory_reserve_mb", 2048)
+        memory_limit_mb = self.settings.get("memory_limit_mb", "auto")
+        memory_reserve_mb = self.settings.get("memory_reserve_mb", 2048)
 
         out_path = Path(out_raw).expanduser()
         config_path = write_cli_config_yaml(
             out_path,
-            float(self.config["threshold"]),
-            float(self.config["min_silence"]),
-            float(self.config["margin"]),
+            float(self.settings["threshold"]),
+            float(self.settings["min_silence"]),
+            float(self.settings["margin"]),
         )
         if config_path is None:
             self._log("[WARN] Could not write CLI config (out_dir not writable)")
 
-        proxy_value = self.config.get("proxy", "") if self.config.get("proxy_active", False) else ""
+        proxy_value = self.settings.get("proxy", "") if self.settings.get("proxy_active", False) else ""
         # Audit #3: the copied command lands in the clipboard, the shell
         # history and the process list — a proxy password must NOT go
         # there silently. Copy without credentials by default (explicit
@@ -317,16 +317,16 @@ class LifecycleMixin:
             preset=preset,
             memory_limit_mb=memory_limit_mb,
             memory_reserve_mb=memory_reserve_mb,
-            segment_encode_timeout=self.config.get("segment_encode_timeout", 600),
-            final_concat_timeout=self.config.get("final_concat_timeout", 86400),
-            silence_timeout=self.config.get("silence_timeout", 36000),
-            stall_kill_timeout=self.config.get("stall_kill_timeout", 300),
-            waveform_timeout=self.config.get("waveform_timeout", 300),
-            batch_chunk_size=self.config.get("batch_chunk_size", 40),
-            min_part_bytes=self.config.get("min_part_bytes", 1024),
+            segment_encode_timeout=self.settings.get("segment_encode_timeout", 600),
+            final_concat_timeout=self.settings.get("final_concat_timeout", 86400),
+            silence_timeout=self.settings.get("silence_timeout", 36000),
+            stall_kill_timeout=self.settings.get("stall_kill_timeout", 300),
+            waveform_timeout=self.settings.get("waveform_timeout", 300),
+            batch_chunk_size=self.settings.get("batch_chunk_size", 40),
+            min_part_bytes=self.settings.get("min_part_bytes", 1024),
             config_path=config_path,
             proxy=proxy_copied,
-            per_video_dir=self.config.get("per_video_dir", True),
+            per_video_dir=self.settings.get("per_video_dir", True),
         )
         cmd_log = redact_proxy_in_cli_command(cmd, proxy_copied)
         self.clipboard_clear()

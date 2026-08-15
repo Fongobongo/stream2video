@@ -105,7 +105,7 @@ class TestBuildPipelineConfigFromSnapshot:
         assert cfg.delete_after is True
 
     def test_pulls_threshold_from_config_dict(self):
-        # Slider values are read from the GUI's own ``self.config`` (which
+        # Slider values are read from the GUI's own ``self.settings`` (which
         # is synced from the slider widgets at _start_pipeline time), not
         # from a widget read here.
         params = self._params()

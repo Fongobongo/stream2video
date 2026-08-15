@@ -102,7 +102,7 @@ class Stream2VideoGUI(
         # LifecycleMixin owns the config dict — read by every mixin and
         # mutated by ``_load_settings`` / ``_restore_defaults`` /
         # ``_save_settings``.
-        self.config = effective_defaults()
+        self.settings = effective_defaults()
 
         # Cross-thread dispatch infrastructure (host-owned).
         # ``TkDispatcher`` swallows ``TclError`` if the root was
@@ -117,9 +117,9 @@ class Stream2VideoGUI(
 
         # Merge disk-loaded settings on top of the defaults BEFORE the
         # widgets are built (the combos / entries read from
-        # ``self.config`` during construction).
+        # ``self.settings`` during construction).
         self._load_settings()
-        ctk.set_appearance_mode(self.config["theme"])
+        ctk.set_appearance_mode(self.settings["theme"])
 
         # Fit window to screen if resolution is small
         sw = self.winfo_screenwidth()
@@ -130,7 +130,7 @@ class Stream2VideoGUI(
             max(1, min(620, sh - 60)),
         )
 
-        geom = self.config.get("window_geometry")
+        geom = self.settings.get("window_geometry")
         if geom:
             try:
                 # Strict parse: reject malformed strings ("abcxdef",
@@ -168,7 +168,7 @@ class Stream2VideoGUI(
             textbox=self.txt_log,
             dispatcher=self._dispatcher,
             log_queue=self.log_queue,
-            theme=self.config["theme"],
+            theme=self.settings["theme"],
         )
         self._log_poller.setup_logging()
         self.after(100, self._log_poller.poll)
@@ -245,32 +245,32 @@ class Stream2VideoGUI(
         video_quality = self.combo_video_quality.get()
         audio_quality = self.combo_audio_quality.get()
         download_quality = self.combo_download_quality.get()
-        # Sync combo selections into self.config so build_pipeline_config
+        # Sync combo selections into self.settings so build_pipeline_config
         # (which reads from the config dict, not from PipelineWorkerParams)
         # picks up the current value. output_format drives the output file
         # extension and the audio-extract short-circuit in cut_and_concat,
-        # so a stale self.config value would produce the wrong output.
-        self.config["output_format"] = self.combo_output_format.get()
-        self.config["gapless_concat"] = bool(self.chk_gapless_concat.get())
-        self.config["low_process_priority"] = bool(self.chk_low_process_priority.get())
-        self.config["x264_low_memory"] = bool(self.chk_x264_low_memory.get())
-        self.config["use_crf"] = bool(self.chk_use_crf.get())
-        self.config["completion_sound"] = bool(self.chk_completion_sound.get())
+        # so a stale self.settings value would produce the wrong output.
+        self.settings["output_format"] = self.combo_output_format.get()
+        self.settings["gapless_concat"] = bool(self.chk_gapless_concat.get())
+        self.settings["low_process_priority"] = bool(self.chk_low_process_priority.get())
+        self.settings["x264_low_memory"] = bool(self.chk_x264_low_memory.get())
+        self.settings["use_crf"] = bool(self.chk_use_crf.get())
+        self.settings["completion_sound"] = bool(self.chk_completion_sound.get())
         force = bool(self.chk_force.get())
         per_video_dir = bool(self.chk_per_video_dir.get())
         delete_after = bool(self.chk_delete.get())
 
         # Build the run's config in a *copy*: ``apply_preset`` returns a
         # dict with the preset's tunables overlaid — merging that back
-        # into ``self.config`` would let the preset overwrite the user's
+        # into ``self.settings`` would let the preset overwrite the user's
         # explicit checkbox choices (e.g. an unchecked
         # low_process_priority vs low_memory's low=True) and then leak
         # those into user_defaults on the next "Save defaults".
-        # ``self.config`` keeps the widget state; the run gets its own
+        # ``self.settings`` keeps the widget state; the run gets its own
         # preset-applied snapshot. ``balanced`` is the identity preset,
         # so with it the snapshot keeps every checkbox value verbatim.
         preset_name = self.combo_preset.get()
-        run_config = dict(self.config)
+        run_config = dict(self.settings)
         if preset_name:
             run_config = apply_preset(run_config, preset_name)
         # Show the preset's effective values in the run log, not the
@@ -333,7 +333,7 @@ class Stream2VideoGUI(
             logger.warning("start disk preflight skipped", exc_info=True)
 
         # Snapshot config for the worker thread: the
-        # main thread keeps mutating ``self.config`` as the user moves
+        # main thread keeps mutating ``self.settings`` as the user moves
         # sliders AFTER Start, and the worker reads ~30 keys off the
         # same dict — a race that produced mixed runs (new threshold,
         # old min_silence). ``run_config`` is already the preset-applied
@@ -421,7 +421,7 @@ class Stream2VideoGUI(
         )
         worker = PipelineWorker(
             _PipelineGuiCallbacksAdapter(self),
-            config_snapshot if config_snapshot is not None else self.config,
+            config_snapshot if config_snapshot is not None else self.settings,
         )
         self._pipeline_start = time.monotonic()
         try:

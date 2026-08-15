@@ -35,7 +35,7 @@ from stream2video.config import USER_DEFAULT_KEYS
 
 # Canonical key order for ``settings.json`` — session-only state
 # (``window_geometry``, ``recent_projects``) is included; pure tunables
-# (threshold / min_silence / margin) come from ``self.config`` (slider
+# (threshold / min_silence / margin) come from ``self.settings`` (slider
 # floats) not from individual widget reads.
 SAVE_SETTINGS_KEYS: tuple[str, ...] = (
     "input_path",
@@ -138,13 +138,13 @@ def build_user_defaults_snapshot(
 
     ``widgets`` has the same shape as for
     :func:`build_save_settings_snapshot` (the threshold / min_silence /
-    margin floats come from the slider-synced ``self.config`` in the
+    margin floats come from the slider-synced ``self.settings`` in the
     GUI, not from individual widget reads — the GUI's existing
     ``_sync_slider_entries`` call already normalises them). Returns a
     new dict containing exactly the keys in ``USER_DEFAULTS_KEYS``.
 
     Keys absent from ``widgets`` are taken from ``current`` (the GUI's
-    live ``self.config``) when supplied — that dict holds the *current
+    live ``self.settings``) when supplied — that dict holds the *current
     effective* values, including ones the user set via an earlier
     ``user_defaults.json`` / preset but that have no dedicated widget
     (``encoder_threads``, ``output_fps``, ``memory_*``, timeouts, …).

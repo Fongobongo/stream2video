@@ -297,21 +297,21 @@ class TestEncoderChange:
         _flush_events(gui, 100)
         assert gui.lbl_encoder_desc.cget("text") == ""
 
-    def test_on_encoder_change_stores_in_config(self, gui):
+    def test_on_encoder_change_stores_in_settings(self, gui):
         gui._on_encoder_change("h264_amf")
-        assert gui.config["encoder"] == "h264_amf"
+        assert gui.settings["encoder"] == "h264_amf"
 
 
 class TestRestoreDefaults:
     """Restore defaults resets all combos / entries / sliders."""
 
-    def test_restore_defaults_resets_config(self, gui):
-        gui.config["encoder"] = "h264_nvenc"
-        gui.config["method"] = "batch"
+    def test_restore_defaults_resets_settings(self, gui):
+        gui.settings["encoder"] = "h264_nvenc"
+        gui.settings["method"] = "batch"
         gui._restore_defaults()
         _flush_events(gui, 200)
-        assert gui.config["encoder"] == CONFIG_DEFAULTS["encoder"]
-        assert gui.config["method"] == CONFIG_DEFAULTS["method"]
+        assert gui.settings["encoder"] == CONFIG_DEFAULTS["encoder"]
+        assert gui.settings["method"] == CONFIG_DEFAULTS["method"]
 
     def test_restore_defaults_resets_combos(self, gui):
         gui.combo_method.set("batch")
@@ -339,10 +339,10 @@ class TestRestoreDefaults:
         assert gui.lbl_encoder.cget("text") == "Encoder: —"
 
     def test_restore_defaults_resets_theme(self, gui):
-        gui.config["theme"] = "light"
+        gui.settings["theme"] = "light"
         gui._restore_defaults()
         _flush_events(gui, 200)
-        assert gui.config["theme"] == CONFIG_DEFAULTS["theme"]
+        assert gui.settings["theme"] == CONFIG_DEFAULTS["theme"]
         assert gui.combo_theme.get() == CONFIG_DEFAULTS["theme"]
 
 
@@ -421,7 +421,7 @@ class TestProxySecretHandling:
         assert "super-secret" not in log_text
         assert "socks5://***:***@host:1080" in log_text
         # The value is still remembered in full for actual use.
-        assert gui.config["proxy"] == secret
+        assert gui.settings["proxy"] == secret
 
     def test_copy_cli_command_logs_redacted_command(self, gui, tmp_path: Path):
         # Copying the CLI command with an active proxy used to log the
@@ -429,11 +429,16 @@ class TestProxySecretHandling:
         # carry the masked proxy; the copied (clipboard) command keeps
         # the real one.
         secret = "socks5://user:super-secret@host:1080"
-        gui.config["proxy"] = secret
-        gui.config["proxy_active"] = True
+        gui.settings["proxy"] = secret
+        gui.settings["proxy_active"] = True
         gui.entry_output.delete(0, "end")
         gui.entry_output.insert(0, str(tmp_path))
-        gui._copy_cli_command()
+        # The credential-carrying proxy makes ``_copy_cli_command`` ask
+        # whether to include the password — answer Yes so the clipboard
+        # command keeps the real credentials and we can assert the LOG
+        # line still redacts them.
+        with patch("stream2video.gui.messagebox.askyesno", return_value=True):
+            gui._copy_cli_command()
         _flush_events(gui, 200)
         log_text = gui.txt_log.get("1.0", "end")
         assert "super-secret" not in log_text

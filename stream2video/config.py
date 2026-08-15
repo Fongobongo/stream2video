@@ -70,8 +70,7 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     # ``cut_then_encode`` already achieves this (one encode pass total),
     # but it sacrifices frame accuracy (-c copy snaps to keyframes);
     # ``gapless_concat`` keeps frame accuracy AND gapless audio. Default
-    # False preserves the historical behaviour (concat demuxer, faster).
-    # Default True: per-segment AAC priming (~21ms at 48kHz) accumulates
+    # True: per-segment AAC priming (~21ms at 48kHz) accumulates
     # as A/V drift on multi-segment outputs — the gapless concat filter
     # adds priming only once. Users who want the old (faster, concat
     # demuxer) behaviour can flip it off.
@@ -498,7 +497,17 @@ def coerce_typed_value(key: str, value: Any) -> Any:
             return int(value)
         return value
     if isinstance(default, str):
-        return value if isinstance(value, str) else None
+        if not isinstance(value, str):
+            return None
+        # Enum-valued string keys (method, encoder, *_quality, theme,
+        # ...) are checked against their VALID_* whitelist so a
+        # hand-edited settings.json / user_defaults.json can't smuggle
+        # a bogus value past the GUI's comboboxes and crash the run
+        # mid-pipeline with an obscure ffmpeg/validator error.
+        valid = _ENUM_VALIDATORS.get(key)
+        if valid is not None and value not in valid:
+            return None
+        return value
     if isinstance(default, list):
         if not isinstance(value, list):
             return None
@@ -522,6 +531,23 @@ def coerce_typed_value(key: str, value: Any) -> Any:
 # entry is EMPTY (so the entry itself can't reveal the element type).
 # Keep in sync with CONFIG_DEFAULTS; used by coerce_typed_value.
 _LIST_ELEMENT_TYPES: dict[str, type] = {"recent_projects": str}
+
+# Enum-valued string keys validated by coerce_typed_value against their
+# VALID_* whitelists. Keys WITHOUT an entry keep the historical
+# type-only check. Keep in sync with the enum_specs list in
+# cli_config.load_config (CLI-side validation).
+_ENUM_VALIDATORS: dict[str, tuple[str, ...]] = {
+    "method": tuple(VALID_METHODS),
+    "encoder": tuple(VALID_ENCODERS),
+    "video_quality": tuple(VALID_QUALITIES),
+    "audio_quality": tuple(VALID_QUALITIES),
+    "download_quality": tuple(VALID_DOWNLOAD_QUALITIES),
+    "software_fallback": tuple(VALID_SOFTWARE_FALLBACKS),
+    "x264_preset": tuple(VALID_X264_PRESETS),
+    "output_fps": tuple(VALID_OUTPUT_FPS),
+    "output_format": tuple(VALID_OUTPUT_FORMATS),
+    "theme": tuple(VALID_THEMES),
+}
 
 
 def load_user_defaults() -> dict[str, Any]:

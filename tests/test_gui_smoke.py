@@ -56,12 +56,12 @@ def gui():
 
 
 class TestGuiInstantiation:
-    def test_app_instance_has_config(self, gui):
-        assert hasattr(gui, "config")
-        assert isinstance(gui.config, dict)
+    def test_app_instance_has_settings(self, gui):
+        assert hasattr(gui, "settings")
+        assert isinstance(gui.settings, dict)
         # CONFIG_DEFAULTS keys are all present.
         for key in CONFIG_DEFAULTS:
-            assert key in gui.config, f"missing key {key!r} in gui.config"
+            assert key in gui.settings, f"missing key {key!r} in gui.settings"
 
     def test_required_widgets_exist(self, gui):
         # Verify the widget attributes the pipeline worker and helpers

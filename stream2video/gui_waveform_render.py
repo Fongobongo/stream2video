@@ -120,9 +120,9 @@ class WaveformRenderMixin:
         # Read current slider values (sync first in case FocusOut didn't fire).
         self._sync_slider_entries()
         config = {
-            "threshold": float(self.config["threshold"]),
-            "min_silence": float(self.config["min_silence"]),
-            "margin": float(self.config["margin"]),
+            "threshold": float(self.settings["threshold"]),
+            "min_silence": float(self.settings["min_silence"]),
+            "margin": float(self.settings["margin"]),
         }
 
         # Resolve the same output dir the pipeline uses — the final
@@ -168,13 +168,13 @@ class WaveformRenderMixin:
                     peaks, duration = read_peaks_from_stream(
                         wav_cache,
                         target_buckets=800,
-                        timeout=self.config.get("waveform_timeout", 300),
+                        timeout=self.settings.get("waveform_timeout", 300),
                     )
                 else:
                     peaks, duration = read_peaks_from_stream(
                         in_path,
                         target_buckets=800,
-                        timeout=self.config.get("waveform_timeout", 300),
+                        timeout=self.settings.get("waveform_timeout", 300),
                     )
                 if token != self._waveform_render_token:
                     return
@@ -240,7 +240,7 @@ class WaveformRenderMixin:
                             # for hours. The user-configured waveform
                             # timeout bounds the preview exactly like the
                             # peak-read paths above.
-                            timeout=self.config.get("waveform_timeout", 300),
+                            timeout=self.settings.get("waveform_timeout", 300),
                             # Stale-render cancels (new render started /
                             # window closed) kill the ffmpeg child via
                             # cancel_process("preview"); without this the
@@ -384,7 +384,7 @@ class WaveformRenderMixin:
         # main thread freezes the UI for every 1s live-poll tick while a
         # pipeline runs, so build the image on a worker thread and only
         # marshal the final widget ``configure`` back to the main loop.
-        threshold_db = float(self.config["threshold"])
+        threshold_db = float(self.settings["threshold"])
 
         def _render_then_apply() -> None:
             try:
@@ -532,8 +532,8 @@ class WaveformRenderMixin:
                         self._safe_status_set("Cancelled / no segments detected")
                 else:
                     config = {
-                        "threshold": float(self.config["threshold"]),
-                        "min_silence": float(self.config["min_silence"]),
+                        "threshold": float(self.settings["threshold"]),
+                        "min_silence": float(self.settings["min_silence"]),
                         "margin": margin,
                     }
                     cached = load_silence_cache(in_path, out_dir, config)

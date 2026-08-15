@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import shutil
 import signal
+import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -31,7 +32,7 @@ from stream2video.cli_helpers import (
     console,
     logger,
 )
-from stream2video.cli_resolver import make_resolver
+from stream2video.cli_resolver import is_from_cli, make_resolver
 from stream2video.config import (
     CONFIG_DEFAULTS,
     DEFAULT_PRESET,
@@ -48,6 +49,7 @@ from stream2video.download import (
     VideoNotAvailableError,
 )
 from stream2video.formatters import fmt_completion_summary, fmt_dry_run_summary
+from stream2video.completion_sound import play_completion_sound
 from stream2video.gui_helpers import build_download_status
 from stream2video.pipeline_controller import (
     PipelineCallbacks,
@@ -138,10 +140,6 @@ def _run_doctor(config_file: Path | None = None) -> bool:
     pass, 1 otherwise. Non-critical items (psutil, YAML config file) only
     print a warning — the CLI still works without them.
     """
-    import shutil
-    import subprocess
-    import sys
-
     from rich.table import Table
 
     from stream2video.config import _base_dir, settings_path, user_defaults_path
@@ -335,10 +333,11 @@ def main(
     ),
     force: bool | None = typer.Option(
         None,
-        "--force",
+        "--force/--no-force",
         "-f",
         help="Re-detect silence, ignore cache. If not passed, falls back to "
-        "the config file's `force` key (default False).",
+        "the config file's `force` key (default False); --no-force pins it "
+        "off so a config file with `force: true` can be overridden.",
     ),
     dry_run: bool = typer.Option(
         False,
@@ -483,15 +482,24 @@ def main(
     ),
     delete_after: bool | None = typer.Option(
         None,
-        "--delete-after",
+        "--delete-after/--no-delete-after",
         help="Delete downloaded source file after successful compression. If not "
-        "passed, falls back to the config file's `delete_after` key (default False).",
+        "passed, falls back to the config file's `delete_after` key (default "
+        "False); --no-delete-after pins it off so a config file with "
+        "`delete_after: true` can be overridden.",
     ),
     per_video_dir: bool | None = typer.Option(
         None,
         "--per-video-dir/--no-per-video-dir",
         help="Group all artifacts (source, WAV cache, JSON cache, output, log) "
         "into a per-video subdirectory. Default follows config/per_video_dir.",
+    ),
+    completion_sound: bool | None = typer.Option(
+        None,
+        "--completion-sound/--no-completion-sound",
+        help="Play the completion chime after a successful run (matches the "
+        "GUI's 'Sound when done' checkbox). If not passed, falls back to the "
+        "config file's `completion_sound` key (default True).",
     ),
     doctor: bool = typer.Option(
         False,
@@ -589,12 +597,21 @@ def main(
         "ffmpeg is killed if no progress line arrives within this window. "
         "If not passed, the config file's `stall_kill_timeout` key is used.",
     ),
+    stall_warning_timeout: int = typer.Option(
+        CONFIG_DEFAULTS["stall_warning_timeout"],
+        "--stall-warning-timeout",
+        help="No-progress WARNING timeout in seconds (default 120 = 2 min). "
+        "A stall warning is logged (and surfaced in the UI) when no progress "
+        "line arrives within this window; the kill timer is `--stall-timeout`. "
+        "If not passed, the config file's `stall_warning_timeout` key is used.",
+    ),
     waveform_timeout: int = typer.Option(
         CONFIG_DEFAULTS["waveform_timeout"],
         "--waveform-timeout",
         help="Waveform preview decode timeout in seconds (default 300 = 5 min). "
-        "GUI-only tunable — accepted here so a copied GUI CLI command parses, "
-        "but it has no effect on this CLI run (no waveform preview is rendered).",
+        "Accepted and range-validated for parity with the config key (the GUI "
+        "emits it in copied commands); the CLI itself renders no waveform "
+        "preview, so it has no further effect on this run.",
     ),
     batch_chunk_size: int = typer.Option(
         CONFIG_DEFAULTS["batch_chunk_size"],
@@ -708,24 +725,6 @@ def main(
         raise typer.Exit(1)
     _console_handler.setLevel(level)
 
-    # --doctor: environment diagnostics, no pipeline. Runs BEFORE
-    # output_dir creation so a diagnostics invocation doesn't leave a
-    # side-effect directory behind (mkdir ran earlier and
-    # also fired before config validation, so a bad YAML + --doctor
-    # combination created junk directories and a raw PermissionError
-    # traceback when the target was unwritable).
-    if doctor:
-        _doctor_ok = _run_doctor(config_file)
-        raise typer.Exit(0 if _doctor_ok else 1)
-
-    # Ensure output directory exists (after doctor/config validation).
-    output_dir.mkdir(parents=True, exist_ok=True)
-    log_file = output_dir / "stream2video.log"
-
-    if not _JSON_LOG_MODE:
-        console.print("\n[bold cyan]stream2video[/bold cyan] - Compress by removing silence")
-        console.print(f"Logs saved to: {log_file}\n")
-
     # ``signal.getsignal`` / ``signal.signal`` can only be called from the
     # interpreter's main thread; a host embedding ``cli.main`` in a worker
     # thread would otherwise crash here with ``ValueError``. When that
@@ -762,13 +761,43 @@ def main(
 
     fh = None
     try:
-        fh = _make_file_handler(log_file)
-        logger.addHandler(fh)
-
         # Load configuration. ``load_config`` strictly validates BOTH numeric
         # ranges (CONFIG_RANGES) AND enum keys (method/encoder/...), so a
         # bad YAML value for any of these cannot sneak through here.
         config = load_config(config_file)
+
+        # Resolve the effective output directory: an explicit -o/--output
+        # wins; otherwise honour the config file's ``output_dir`` key
+        # (parity with the GUI worker, which reads the same key from
+        # settings.json), else the historical ``./processed_videos``
+        # default. The typer option's default stays as the fallback for
+        # hosts that call main() with an explicit value.
+        if not is_from_cli(ctx, "output_dir"):
+            output_dir = Path(config.get("output_dir") or "./processed_videos")
+
+        # Ensure the output directory exists — deliberately AFTER config
+        # load and resolution, so an invalid config aborts before any
+        # directory is created and the config's ``output_dir`` is
+        # honoured (the mkdir used to run on the typer default before
+        # the YAML was even read, both ignoring the key and littering a
+        # stray ./processed_videos on a config error). A failure here
+        # (permission, read-only drive, path too long) is a clear
+        # startup error, not a mid-pipeline crash.
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            console.print(
+                f"[red]Cannot create output directory:[/red] {output_dir} ({e})"
+            )
+            raise typer.Exit(1)
+        log_file = output_dir / "stream2video.log"
+
+        if not _JSON_LOG_MODE:
+            console.print("\n[bold cyan]stream2video[/bold cyan] - Compress by removing silence")
+            console.print(f"Logs saved to: {log_file}\n")
+
+        fh = _make_file_handler(log_file)
+        logger.addHandler(fh)
 
         # Apply the resource preset. The preset bundles tunables
         # (x264_low_memory, memory_limit_mb, batch_chunk_size,
@@ -855,6 +884,11 @@ def main(
         resolved_stall_kill_timeout: int = resolver.resolve(
             "stall_kill_timeout", stall_kill_timeout
         )
+        resolved_stall_warning_timeout: int = resolver.resolve(
+            "stall_warning_timeout", stall_warning_timeout
+        )
+        resolved_waveform_timeout: int = resolver.resolve("waveform_timeout", waveform_timeout)
+        resolved_completion_sound: bool = resolver.resolve("completion_sound", completion_sound)
         resolved_min_part_bytes: int = resolver.resolve("min_part_bytes", min_part_bytes)
 
         # P1: proxy — honour YAML + CLI. The resolver's ``proxy`` kind
@@ -907,7 +941,8 @@ def main(
             silence_timeout=resolved_silence_timeout,
             stall_kill_timeout=resolved_stall_kill_timeout,
             min_part_bytes=resolved_min_part_bytes,
-            stall_warning_timeout=int(config.get("stall_warning_timeout", 120)),
+            stall_warning_timeout=resolved_stall_warning_timeout,
+            waveform_timeout=resolved_waveform_timeout,
             batch_chunk_size=batch_chunk_size,
             dry_run=dry_run,
         )
@@ -1280,6 +1315,17 @@ def main(
         # step (audit #11) — it owns the download + delete lifecycle, so
         # this block must not exist here anymore.
         logger.info(f"Successfully compressed video to {output_video}")
+
+        # Completion chime (CLI ↔ GUI parity): the GUI's worker plays
+        # ``completion_sound`` from the same config key. Best-effort —
+        # playback failure returns a warning string instead of raising.
+        if resolved_completion_sound:
+            try:
+                _sound_warning = play_completion_sound(enabled=True)
+                if _sound_warning:
+                    console.print(f"[yellow]{_sound_warning}[/yellow]")
+            except Exception:
+                logger.debug("play_completion_sound raised", exc_info=True)
 
     except typer.Exit:
         raise

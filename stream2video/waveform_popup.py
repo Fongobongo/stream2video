@@ -9,7 +9,7 @@ the overlay tracks the running detection.
 Historically the store was keyed by *resolved video path* — but the
 popup is opened against whatever path the user typed into the input
 entry, while the pipeline worker publishes under the *resolved
-download path* (``<id>-<epoch>.mp4`` after ``apply_per_video_dir``).
+download path* (``<id>.mp4`` after ``apply_per_video_dir``'s epoch strip).
 The two keys never matched for URL-runs, so the live overlay stayed
 frozen. The store is therefore keyed by **run id** instead: a
 monotonically-increasing counter that the pipeline worker bumps at the

@@ -37,7 +37,13 @@ from stream2video.concat import (
     cut_and_concat,
     generate_keep_segments,
 )
-from stream2video.config import VALID_QUALITIES
+from stream2video.config import (
+    VALID_DOWNLOAD_QUALITIES,
+    VALID_OUTPUT_FPS,
+    VALID_QUALITIES,
+    VALID_SOFTWARE_FALLBACKS,
+    VALID_X264_PRESETS,
+)
 from stream2video.download import (
     DiskSpaceError,
     DownloadCancelledError,
@@ -139,8 +145,7 @@ class PipelineConfig:
     # Gapless concat (AAC priming fix). When True, the segment path's
     # final join uses the ``concat`` filter (re-encode) instead of the
     # concat demuxer (stream copy) so per-segment AAC priming doesn't
-    # accumulate as A/V drift on multi-segment outputs. Default False
-    # preserves the historical behaviour (concat demuxer, faster).
+    # accumulate as A/V drift on multi-segment outputs. Default True.
     gapless_concat: bool
     # Lower ffmpeg scheduling priority (opt-in). When True,
     # spawned ffmpeg subprocesses use BELOW_NORMAL_PRIORITY_CLASS on
@@ -431,13 +436,13 @@ class PipelineController:
     # they're still populated up to the point where the failure occurred.
     _download_path: Path | None = field(default=None, init=False)
     _output_path: Path | None = field(default=None, init=False)
-    # Latched True once the download phase returns with a file on disk
+    # True once the download phase returns with a file on disk
     # (``download_result.is_downloaded``). From that point the source is
     # a fully-downloaded user asset; a subsequent cancel/error in the
     # silence/concat phases must NOT unlink it — the cost of re-fetching
     # a multi-GB VOD dwarfs the disk cost of keeping it. ``False``
     # throughout a local-file run and until the download phase returns.
-    _download_complete: bool = field(default=False, init=False)
+    _download_was_real: bool = field(default=False, init=False)
     # Resolved per-run output directory (per_video_dir project dir when
     # enabled, else cfg.output_dir). Declared explicitly instead of being
     # set ad-hoc in _run_download_phase and read back via getattr — the
@@ -447,7 +452,6 @@ class PipelineController:
     _output_dir_resolved: Path | None = field(default=None, init=False)
     _pipeline_start: float = field(default=0.0, init=False)
     _progress_plan: ProgressPlan = field(default_factory=ProgressPlan, init=False)
-    _download_was_real: bool = field(default=True, init=False)
     _src_duration: float | None = field(default=None, init=False)
 
     def _set_status(self, text: str, *, force: bool = False) -> None:
@@ -487,7 +491,7 @@ class PipelineController:
         partial byte-sink.
         """
         if self._download_path is not None and self._download_path.exists():
-            if partial_only and (self._download_complete or self._download_was_real):
+            if partial_only and self._download_was_real:
                 self.cb.on_log(
                     f"Keeping completed download for possible reuse: {self._download_path}"
                 )
@@ -727,12 +731,11 @@ class PipelineController:
         self._output_dir_resolved = output_dir
 
         self._download_path = video_path if download_result.is_downloaded else None
-        self._download_was_real = download_result.is_downloaded
         # From here on the download, when one happened, is *complete*:
         # the phases above (see ``_cleanup_download_path`` docstring)
         # switch to partial-only cleanup so a later cancel/error leaves
         # the file for the user's next retry.
-        self._download_complete = download_result.is_downloaded
+        self._download_was_real = download_result.is_downloaded
 
         # Fire the mid-pipeline hook so the GUI can update its
         # recent-projects panel, output label, and file-info widgets
@@ -1011,7 +1014,7 @@ class PipelineController:
         current_phase = "cutting"
         controller = self
 
-        def _set_phase(name: str, *, force: bool = False) -> None:
+        def _set_phase(name: str) -> None:
             nonlocal current_phase, concat_start
             if name == current_phase:
                 return
@@ -1051,7 +1054,7 @@ class PipelineController:
                     controller.cb.on_overall(elapsed, None, False)
             else:
                 if current_phase != "concatenating":
-                    _set_phase("concatenating", force=True)
+                    _set_phase("concatenating")
                 if concat_start is None:
                     # Invariant guard, not control flow: `_set_phase` above
                     # sets concat_start; raising beats a TypeError from
@@ -1219,6 +1222,25 @@ def validate_pipeline_config(cfg: PipelineConfig) -> list[str]:
         errors.append(f"Unknown video_quality {cfg.video_quality!r}.")
     if cfg.audio_quality not in VALID_QUALITIES:
         errors.append(f"Unknown audio_quality {cfg.audio_quality!r}.")
+    if cfg.download_quality not in VALID_DOWNLOAD_QUALITIES:
+        errors.append(f"Unknown download_quality {cfg.download_quality!r}.")
+    if cfg.software_fallback not in VALID_SOFTWARE_FALLBACKS:
+        errors.append(f"Unknown software_fallback {cfg.software_fallback!r}.")
+    if cfg.x264_preset not in VALID_X264_PRESETS:
+        errors.append(f"Unknown x264_preset {cfg.x264_preset!r}.")
+    if cfg.output_fps not in VALID_OUTPUT_FPS:
+        errors.append(f"Unknown output_fps {cfg.output_fps!r}.")
+    if not (
+        cfg.encoder_threads == "auto"
+        or (
+            isinstance(cfg.encoder_threads, int)
+            and not isinstance(cfg.encoder_threads, bool)
+            and cfg.encoder_threads > 0
+        )
+    ):
+        errors.append(
+            f"encoder_threads {cfg.encoder_threads!r} must be 'auto' or a positive integer."
+        )
     if cfg.output_format not in ("video", "mp3", "opus", "aac", "wav", "flac"):
         errors.append(
             f"Unknown output_format {cfg.output_format!r} "

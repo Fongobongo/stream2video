@@ -10,6 +10,11 @@
 - **`--proxy` CLI flag** — pass an HTTP or SOCKS5 proxy for downloads, matching the existing GUI proxy dialog. `http://127.0.0.1:8080` or `socks5://user:pass@host:1080`.
 - **Shell completion** — `stream2video --install-completion` installs Bash / Zsh / Fish / PowerShell completion (powered by Typer). `--show-completion` prints the script for manual install.
 - **Docker image** — `Dockerfile` plus a CLI-only entrypoint, so you can run the pipeline in a container without a local python/ffmpeg install.
+- **`--stall-warning-timeout` flag** — no-progress *warning* timeout, mirroring the `stall_warning_timeout` YAML key (previously the key was config-only while every other pipeline timeout had a flag).
+- **`--completion-sound` / `--no-completion-sound` flag** — the CLI now plays the same completion chime as the GUI's "Sound when done" checkbox (default on, follows the config key), and a copied GUI command can pin it off with `--no-completion-sound`.
+- **`--no-force` / `--no-delete-after` flags** — a config file with `force: true` / `delete_after: true` can now be overridden from the command line (`-f` still works).
+- **CLI honours the config's `output_dir`** — `-o/--output` wins when passed; otherwise the YAML `output_dir` key is used (parity with the GUI worker). The directory is also created only *after* config load and validation, so an invalid config no longer litters a stray `./processed_videos`.
+- **Downloaded sources get a stable per-URL identity** — the yt-dlp `%(id)s-%(epoch)s.%(ext)s` epoch suffix is stripped when the file is moved into the per-video project dir (`{output_dir}/{id}/{id}.mp4`), so re-runs of the same URL reuse the project dir, WAV cache, silence cache and resume checkpoints instead of forking per download.
 
 ### Fixed
 
@@ -40,6 +45,15 @@
 - **Subprocess hygiene**: registered processes are now reliably killed on GUI crash and on close-during-running; cancel no longer leaves a zombie ffmpeg holding the output file open (which used to trip `WinError 32` on the next cleanup).
 - **Dockerfile**: the test stage now copies `tests/` (previously `pytest -q` ran zero tests), stages are named (`test` / `cli`) so `docker build .` builds the documented default, and the comment about the `[gui]` extra matches reality (`[dev]` does pull it; headless import still skips cleanly).
 - **Doc strings / error messages aligned with behaviour**: gapless tree-intermediate docstring corrected (libx264 CRF 18 + PCM, not ffv1), `raw_concat.mkv` → `raw_concat.mp4` in the changelog, and the `_audio_opts` unknown-quality error lists the same `source/high/medium/low` set as `_audio_bitrate`.
+- **Validation now covers the full config surface**: `coerce_typed_value` rejects enum-key values outside their `VALID_*` lists (hand-edited settings / user_defaults can no longer smuggle a bogus `method` / `encoder` / `quality` / `theme` through), and `validate_pipeline_config` checks `download_quality`, `software_fallback`, `x264_preset`, `output_fps` and `encoder_threads` like the CLI's resolver already did. The segment path's fps filter now reuses the batch path's `_fps_vf_option` helper, so an invalid `output_fps` can't reach ffmpeg as `fps=bogus`.
+- **Lossless audio join no longer passes a bitrate knob** — `_run_audio_concat_filter` accepts a `lossless` flag and omits `-b:a` for flac/wav joins (the bitrate option was a silent no-op at best and misleading in the logged command line at worst).
+- **Keep segments are floored at 0.1s** — `generate_keep_segments` drops sub-100ms keeps (detector blips that would produce truncated MP4s) and merges keeps separated by a silence gap smaller than the floor.
+- **GUI defaults corrected** — the audio-quality fallback is `source` (was `medium`), and the `completion_sound` / `gapless_concat` widget fallbacks default True, matching `CONFIG_DEFAULTS`; the gapless tooltip no longer claims "Default off".
+- **Recent Projects removal is persisted immediately** — `_remove_recent_entry` now saves settings, so a removal wasn't lost if the app closed right after (previously only flushed by the next unrelated save).
+- **Silence-cache validation is a single shared gate** — the final-cache loader and the resume probe-position reader now run the same `_read_cache_meta` checks (freshness, source identity, config match) instead of two drifting copies.
+- **GUI state dict renamed `self.config` → `self.settings`** — the attribute no longer shadows the Tk `config()` method on the window (CustomTkinter never called it today, but a stray call would have been a silent no-op); tests updated to match.
+- **Dead code removed**: the `--doctor` branch inside `main()` (the eager `_doctor_callback` already handled it), the `pending_start` property on `SilenceSegment`, the duplicate `_download_complete` / `_download_was_real` fields, and the `force` parameter on the controller's phase callback.
+- **Test fix**: `test_copy_cli_command_logs_redacted_command` now patches `messagebox.askyesno` — the credential-carrying proxy made `_copy_cli_command` open a real dialog that hung the suite on machines with a display.
 
 ## [0.3] - 2026-08-01
 

@@ -67,7 +67,7 @@ class TestUserDefaultsKeys:
 
     def test_slider_tunables_present(self):
         # threshold / min_silence / margin are slider values, NOT in
-        # SAVE_SETTINGS_KEYS (they live on ``self.config`` and are
+        # SAVE_SETTINGS_KEYS (they live on ``self.settings`` and are
         # separately persisted) — but they ARE in user_defaults so a
         # user's slider tunables survive a GUI reset.
         for k in ("threshold", "min_silence", "margin"):

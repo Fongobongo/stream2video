@@ -37,7 +37,10 @@ class SilenceSegment:
     def __init__(self, start: float, end: float):
         self.start = start
         self.end = end
-        self.duration = max(0.0, end - start)
+
+    @property
+    def duration(self) -> float:
+        return max(0.0, self.end - self.start)
 
     def __repr__(self) -> str:
         return f"SilenceSegment({self.start:.2f}s - {self.end:.2f}s, duration={self.duration:.2f}s)"
@@ -120,11 +123,6 @@ class SilenceParser:
     def segments(self) -> list[SilenceSegment]:
         """Snapshot of the segments detected so far (raw, pre-margin)."""
         return list(self._segments)
-
-    @property
-    def pending_start(self) -> float | None:
-        """The timestamp of the unmatched ``silence_start``, if any."""
-        return self._pending_start
 
     def seed_segments(self, segments: list[SilenceSegment]) -> None:
         """Pre-seed the parser with segments from a resume checkpoint.

@@ -31,7 +31,7 @@ class MainWindowBuildMixin:
 
     def _on_theme_change(self, choice: str) -> None:
         ctk.set_appearance_mode(choice)
-        self.config["theme"] = choice
+        self.settings["theme"] = choice
         # Re-skin the log's warn/error tag colours to match the new theme.
         poller = getattr(self, "_log_poller", None)
         if poller is not None:
@@ -95,7 +95,7 @@ class MainWindowBuildMixin:
         self.combo_theme = ctk.CTkComboBox(
             info_frame, values=VALID_THEMES, state="readonly", command=self._on_theme_change
         )
-        self.combo_theme.set(self.config["theme"])
+        self.combo_theme.set(self.settings["theme"])
         self.combo_theme.pack(fill="x", padx=5, pady=(0, 4))
 
         ctk.CTkButton(
@@ -113,7 +113,7 @@ class MainWindowBuildMixin:
         proxy_row.grid_columnconfigure(1, weight=1)
         self.chk_proxy = ctk.CTkCheckBox(proxy_row, text="Use proxy", command=self._on_proxy_toggle)
         self.chk_proxy.grid(row=0, column=0, sticky="w")
-        if self.config.get("proxy_active", False):
+        if self.settings.get("proxy_active", False):
             self.chk_proxy.select()
         self.btn_proxy = ctk.CTkButton(proxy_row, text="Set proxy…", command=self._set_proxy)
         self.btn_proxy.grid(row=0, column=1, sticky="e")
@@ -160,8 +160,8 @@ class MainWindowBuildMixin:
             placeholder_text="video.mp4 or https://...",
         )
         self.entry_input.pack(side="left", fill="x", expand=True)
-        if self.config.get("input_path"):
-            self.input_var.set(self.config["input_path"])
+        if self.settings.get("input_path"):
+            self.input_var.set(self.settings["input_path"])
         # Refresh the Waveform button whenever the input path changes
         # (typing, paste, Browse, programmatic). Only enabled when the
         # field points at a viewable local file.
@@ -176,8 +176,8 @@ class MainWindowBuildMixin:
         ctk.CTkLabel(row2, text="Output:", width=58, anchor="w").pack(side="left", padx=(0, 5))
         self.entry_output = ctk.CTkEntry(row2, placeholder_text="processed_videos")
         self.entry_output.pack(side="left", fill="x", expand=True)
-        if self.config.get("output_dir"):
-            self.entry_output.insert(0, self.config["output_dir"])
+        if self.settings.get("output_dir"):
+            self.entry_output.insert(0, self.settings["output_dir"])
         ctk.CTkButton(row2, text="Browse", width=70, command=self._browse_output).pack(
             side="right", padx=(5, 0)
         )
@@ -197,7 +197,7 @@ class MainWindowBuildMixin:
             "threshold",
             -60,
             -5,
-            self.config["threshold"],
+            self.settings["threshold"],
             tooltip="Audio below this level is considered silence. Lower (-30) removes more noise, higher (-5) only cuts loud pauses.",
         )
         self._add_slider(
@@ -206,7 +206,7 @@ class MainWindowBuildMixin:
             "min_silence",
             0.1,
             60,
-            self.config["min_silence"],
+            self.settings["min_silence"],
             tooltip="Minimum silence duration to cut (seconds). Longer values prevent choppy edits.",
         )
         self._add_slider(
@@ -215,7 +215,7 @@ class MainWindowBuildMixin:
             "margin",
             -3,
             5,
-            self.config["margin"],
+            self.settings["margin"],
             tooltip="How much to shrink silence zones. Positive = shrink silence (keep more audio around phrases). Negative = expand silence (cut more aggressively). 0 = no adjustment.",
         )
 
@@ -239,7 +239,7 @@ class MainWindowBuildMixin:
         self.combo_method = ctk.CTkComboBox(
             opt_frame, values=VALID_METHODS, state="readonly", width=108
         )
-        self.combo_method.set(self.config["method"])
+        self.combo_method.set(self.settings["method"])
         self.combo_method.grid(row=0, column=1, sticky="ew", padx=(0, 8), pady=(0, 2))
         _Tooltip(
             self.combo_method,
@@ -258,7 +258,7 @@ class MainWindowBuildMixin:
             command=self._on_encoder_change,
             width=108,
         )
-        self.combo_encoder.set(self.config["encoder"])
+        self.combo_encoder.set(self.settings["encoder"])
         self.combo_encoder.grid(row=0, column=3, sticky="ew", padx=(0, 5), pady=(0, 2))
         _Tooltip(
             self.combo_encoder,
@@ -282,7 +282,7 @@ class MainWindowBuildMixin:
         self.combo_video_quality = ctk.CTkComboBox(
             opt_frame, values=VALID_QUALITIES, state="readonly", width=108
         )
-        self.combo_video_quality.set(self.config["video_quality"])
+        self.combo_video_quality.set(self.settings["video_quality"])
         self.combo_video_quality.grid(row=2, column=1, sticky="ew", padx=(0, 8), pady=(0, 2))
         _Tooltip(
             self.combo_video_quality,
@@ -298,7 +298,7 @@ class MainWindowBuildMixin:
         self.combo_audio_quality = ctk.CTkComboBox(
             opt_frame, values=VALID_QUALITIES, state="readonly", width=108
         )
-        self.combo_audio_quality.set(self.config.get("audio_quality", "source"))
+        self.combo_audio_quality.set(self.settings.get("audio_quality", "source"))
         self.combo_audio_quality.grid(row=2, column=3, sticky="ew", padx=(0, 5), pady=(0, 2))
         _Tooltip(
             self.combo_audio_quality,
@@ -313,7 +313,7 @@ class MainWindowBuildMixin:
         self.combo_download_quality = ctk.CTkComboBox(
             opt_frame, values=VALID_DOWNLOAD_QUALITIES, state="readonly", width=108
         )
-        self.combo_download_quality.set(self.config["download_quality"])
+        self.combo_download_quality.set(self.settings["download_quality"])
         self.combo_download_quality.grid(row=3, column=1, sticky="ew", padx=(0, 8), pady=(0, 2))
         _Tooltip(
             self.combo_download_quality,
@@ -331,13 +331,13 @@ class MainWindowBuildMixin:
         self.combo_output_format = ctk.CTkComboBox(
             opt_frame, values=VALID_OUTPUT_FORMATS, state="readonly", width=108
         )
-        self.combo_output_format.set(self.config.get("output_format", "video"))
+        self.combo_output_format.set(self.settings.get("output_format", "video"))
         self.combo_output_format.grid(row=3, column=3, sticky="ew", padx=(0, 5), pady=(0, 2))
         _Tooltip(
             self.combo_output_format,
             "Output container/codec.\nvideo — H.264 + AAC MP4 (default)\nmp3 / opus / aac(m4a) — lossy audio only\nwav / flac — lossless audio only\nAudio-only outputs drop the video stream.",
         )
-        self._on_encoder_change(self.config["encoder"])
+        self._on_encoder_change(self.settings["encoder"])
 
         toggle_frame = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
         toggle_frame.pack(fill="x", padx=5, pady=(2, 1))
@@ -345,22 +345,22 @@ class MainWindowBuildMixin:
         toggle_frame.grid_columnconfigure(1, weight=1)
 
         self.chk_force = ctk.CTkCheckBox(toggle_frame, text="Force re-detect silence")
-        if self.config.get("force"):
+        if self.settings.get("force"):
             self.chk_force.select()
         self.chk_force.grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(1, 2))
 
         self.chk_delete = ctk.CTkCheckBox(toggle_frame, text="Delete downloaded source")
-        if self.config.get("delete_after"):
+        if self.settings.get("delete_after"):
             self.chk_delete.select()
         self.chk_delete.grid(row=0, column=1, sticky="w", padx=(0, 0), pady=(1, 2))
 
         self.chk_per_video_dir = ctk.CTkCheckBox(toggle_frame, text="Project subdirectory")
-        if self.config.get("per_video_dir"):
+        if self.settings.get("per_video_dir"):
             self.chk_per_video_dir.select()
         self.chk_per_video_dir.grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(1, 2))
 
         self.chk_completion_sound = ctk.CTkCheckBox(toggle_frame, text="Sound when done")
-        if self.config.get("completion_sound", False):
+        if self.settings.get("completion_sound", True):
             self.chk_completion_sound.select()
         self.chk_completion_sound.grid(row=1, column=1, sticky="w", padx=(0, 0), pady=(1, 2))
         _Tooltip(
@@ -385,7 +385,7 @@ class MainWindowBuildMixin:
             state="readonly",
             width=180,
         )
-        self.combo_preset.set(self.config.get("preset", DEFAULT_PRESET))
+        self.combo_preset.set(self.settings.get("preset", DEFAULT_PRESET))
         self.combo_preset.pack(side="left")
         _Tooltip(
             self.combo_preset,
@@ -412,7 +412,7 @@ class MainWindowBuildMixin:
             advanced_toggle_frame,
             text="Low-memory x264",
         )
-        if self.config.get("x264_low_memory", False):
+        if self.settings.get("x264_low_memory", False):
             self.chk_x264_low_memory.select()
         self.chk_x264_low_memory.grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(1, 2))
         _Tooltip(
@@ -427,7 +427,7 @@ class MainWindowBuildMixin:
             advanced_toggle_frame,
             text="Use CRF",
         )
-        if self.config.get("use_crf", False):
+        if self.settings.get("use_crf", False):
             self.chk_use_crf.select()
         self.chk_use_crf.grid(row=1, column=1, sticky="w", padx=(0, 0), pady=(1, 2))
         _Tooltip(
@@ -441,7 +441,7 @@ class MainWindowBuildMixin:
             advanced_toggle_frame,
             text="Gapless audio concat",
         )
-        if self.config.get("gapless_concat", False):
+        if self.settings.get("gapless_concat", True):
             self.chk_gapless_concat.select()
         self.chk_gapless_concat.grid(row=0, column=1, sticky="w", padx=(0, 0), pady=(1, 2))
         _Tooltip(
@@ -450,7 +450,7 @@ class MainWindowBuildMixin:
             "per-segment AAC priming (~21ms per segment) doesn't "
             "accumulate as A/V drift on multi-segment outputs. Video "
             "is stream-copied (no quality loss); only audio is "
-            "re-encoded. Default off (concat demuxer, faster). "
+            "re-encoded. Default on (matches the config default). "
             "Equivalent to cut_then_encode's gapless property but "
             "with frame accuracy.",
         )
@@ -459,7 +459,7 @@ class MainWindowBuildMixin:
             advanced_toggle_frame,
             text="Low process priority",
         )
-        if self.config.get("low_process_priority", False):
+        if self.settings.get("low_process_priority", False):
             self.chk_low_process_priority.select()
         self.chk_low_process_priority.grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(1, 2))
         _Tooltip(

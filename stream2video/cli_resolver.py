@@ -150,6 +150,22 @@ PARAM_SPECS: dict[str, dict[str, Any]] = {
 }
 
 
+def is_from_cli(ctx: typer.Context | None, name: str) -> bool:
+    """True when the user explicitly passed ``name`` on the command line.
+
+    Public so hosts (cli.py, tests, copied-command builders) can ask the
+    same question the resolver answers internally — e.g. whether a bool
+    flag was explicitly flipped so a generated command can mirror it.
+    """
+    if ParameterSource is None or ctx is None:
+        return False
+    try:
+        return ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
+    except (AttributeError, ValueError):
+        # Typer < 0.9 lacks get_parameter_source; treat as "not from CLI"
+        return False
+
+
 class _Resolver:
     """Resolve CLI flags against the YAML config.
 
@@ -170,13 +186,7 @@ class _Resolver:
 
     def _source_is_commandline(self, name: str) -> bool:
         """True when the user explicitly passed the flag on the command line."""
-        if ParameterSource is None or self._ctx is None:
-            return False
-        try:
-            return self._ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
-        except (AttributeError, ValueError):
-            # Typer < 0.9 lacks get_parameter_source; treat as "not from CLI"
-            return False
+        return is_from_cli(self._ctx, name)
 
     def _fail(self, name: str, value: Any, msg: str) -> None:
         """Print a red validation error and exit with code 1."""

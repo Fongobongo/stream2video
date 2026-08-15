@@ -358,6 +358,73 @@ class TestSameStemIndependence:
             assert resume_a.name.startswith(artifact_stem(a))
 
 
+class TestDownloadedEpochStripping:
+    """yt-dlp ``<id>-<epoch>.mp4`` downloads must get a stable per-URL identity.
+
+    The ``%(epoch)s`` outtmpl field makes the raw filename different on
+    every run; without epoch stripping the project dir and every cache
+    keyed on the artifact stem fork per re-download of the same URL
+    (silence re-detection + WAV re-extraction every run)."""
+
+    def test_epochless_strips_only_trailing_10_digit_epoch(self):
+        from stream2video.paths import _epochless
+
+        assert _epochless("vid123-1755000000") == "vid123"
+        assert _epochless("vid123") == "vid123"
+        assert _epochless("vid123-12345") == "vid123-12345"  # not 10 digits
+        assert _epochless("vid123-12345678901") == "vid123-12345678901"  # 11 digits
+        assert _epochless("my-clip-1755000000") == "my-clip"
+        assert _epochless("-1755000000") == "-1755000000"  # id empty after strip → keep
+
+    def test_apply_per_video_dir_moves_download_to_epochless_name(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "vid123-1755000000.mp4"
+            src.write_text("data")
+            out = root / "out"
+            project, moved = apply_per_video_dir(out, src, is_downloaded=True)
+            assert project == out / "vid123"
+            assert moved == project / "vid123.mp4"
+            assert moved.read_text() == "data"
+            assert not src.exists()
+
+    def test_downloaded_identity_stable_across_epochs(self):
+        """Two runs of the same URL (different epochs) must land in the
+        same project dir with the same artifact identity, so the silence
+        / WAV / resume caches are reused instead of missed."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "out"
+            src1 = root / "vid123-1755000000.mp4"
+            src1.write_text("a")
+            project1, moved1 = apply_per_video_dir(out, src1, is_downloaded=True)
+            id1 = artifact_stem(moved1)
+            src2 = root / "vid123-1755000001.mp4"
+            src2.write_text("b")
+            project2, moved2 = apply_per_video_dir(out, src2, is_downloaded=True)
+            assert project1 == project2 == out / "vid123"
+            assert artifact_stem(moved2) == id1
+            assert moved2.read_text() == "b", "fresh download must replace the old one"
+
+    def test_local_files_keep_path_hash_project_names(self):
+        """The epoch strip must not collapse same-named LOCAL files in
+        different directories into one project dir."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            a = root / "channel_a" / "clip.mp4"
+            b = root / "channel_b" / "clip.mp4"
+            a.parent.mkdir()
+            b.parent.mkdir()
+            a.write_text("aaa")
+            b.write_text("bbb")
+            out = root / "out"
+            out_a, _ = apply_per_video_dir(out, a, is_downloaded=False)
+            out_b, _ = apply_per_video_dir(out, b, is_downloaded=False)
+            assert out_a != out_b
+            assert out_a.name.startswith("clip_")
+            assert out_b.name.startswith("clip_")
+
+
 class TestProjectMarker:
     """mark_project_dir / is_marked_project_dir — the app-owns-this-dir claim."""
 

@@ -18,7 +18,7 @@ import shlex
 import sys
 from pathlib import Path
 
-from stream2video.config import CONFIG_DEFAULTS
+from stream2video.config import CONFIG_DEFAULTS, effective_defaults
 from stream2video.formatters import fmt_clock_time, fmt_size, fmt_speed, fmt_time
 
 # Maximum length of the GUI's status-line text (per line when wrapped).
@@ -216,6 +216,7 @@ def build_cli_command(
     min_part_bytes: int = CONFIG_DEFAULTS["min_part_bytes"],
     force: bool = False,
     delete_after: bool = False,
+    completion_sound: bool = CONFIG_DEFAULTS["completion_sound"],
     config_path: Path | None = None,
     proxy: str = "",
     per_video_dir: bool = CONFIG_DEFAULTS["per_video_dir"],
@@ -237,14 +238,16 @@ def build_cli_command(
 
     The shape mirrors what the CLI actually accepts (see
     ``stream2video.cli.main``). Defaults are taken from
-    ``CONFIG_DEFAULTS``; flags are appended only when their value
-    diverges from that default — that keeps the copied command readable
-    when the user hasn't customised everything. Two booleans invert
-    that rule because the CLI's own default resolves through the config
-    file, which defaults to True: ``gapless_concat`` and
-    ``per_video_dir`` are emitted as their ``--no-*`` forms when False,
-    so a GUI that switched them off still reproduces in the pasted
-    command.
+    ``effective_defaults()`` — CONFIG_DEFAULTS plus any user
+    ``user_defaults.json`` overrides, i.e. the exact starting point
+    ``cli_config.load_config`` uses — flags are appended only when their
+    value diverges from that default, keeping the copied command
+    readable when the user hasn't customised everything. Booleans whose
+    config default is True invert that rule because the CLI's own
+    default resolves through the config file: ``gapless_concat``,
+    ``per_video_dir`` and ``completion_sound`` are emitted as their
+    ``--no-*`` forms when False, so a GUI that switched them off still
+    reproduces in the pasted command.
 
     ``config_path``: when set, the GUI writes the slider-only values
     (threshold/min_silence/margin) to this YAML file and passes it via
@@ -264,10 +267,13 @@ def build_cli_command(
     if proxy:
         parts.extend(["--proxy", _quote_arg(proxy, target_shell)])
     # Newer flags — only append when they're not the default so the
-    # copied command stays compact. The defaults match CONFIG_DEFAULTS
-    # so a user who hasn't touched the advanced panel gets a clean
-    # command-line reproducing their GUI choices.
-    if audio_quality != CONFIG_DEFAULTS["audio_quality"]:
+    # copied command stays compact. The defaults come from
+    # ``effective_defaults()`` — the same starting point
+    # ``cli_config.load_config`` uses — so a user who hasn't touched the
+    # advanced panel gets a clean command-line reproducing their GUI
+    # choices.
+    _defaults = effective_defaults()
+    if audio_quality != _defaults["audio_quality"]:
         parts.extend(["--audio-quality", audio_quality])
     if software_fallback != "ask":
         parts.extend(["--software-fallback", software_fallback])
@@ -283,38 +289,40 @@ def build_cli_command(
         parts.append("--x264-low-memory")
     if use_crf:
         parts.append("--use-crf")
-    # ``gapless_concat`` / ``per_video_dir`` default True in the config,
-    # and the CLI's own default follows the config file — so the FALSE
-    # state must be spelled out, or the pasted command would silently
-    # run with the config default (True).
+    # ``gapless_concat`` / ``per_video_dir`` / ``completion_sound``
+    # default True in the config, and the CLI's own default follows the
+    # config file — so the FALSE state must be spelled out, or the
+    # pasted command would silently run with the config default (True).
     if not gapless_concat:
         parts.append("--no-gapless-concat")
     if low_process_priority:
         parts.append("--low-process-priority")
-    if preset != CONFIG_DEFAULTS["preset"]:
+    if preset != _defaults["preset"]:
         parts.extend(["--preset", preset])
-    if memory_limit_mb != CONFIG_DEFAULTS["memory_limit_mb"]:
+    if memory_limit_mb != _defaults["memory_limit_mb"]:
         parts.extend(["--memory-limit-mb", str(memory_limit_mb)])
-    if memory_reserve_mb != CONFIG_DEFAULTS["memory_reserve_mb"]:
+    if memory_reserve_mb != _defaults["memory_reserve_mb"]:
         parts.extend(["--memory-reserve-mb", str(memory_reserve_mb)])
     # Phase timeouts. Only appended when non-default so the
     # copied command stays readable when the user hasn't customised.
-    if segment_encode_timeout != CONFIG_DEFAULTS["segment_encode_timeout"]:
+    if segment_encode_timeout != _defaults["segment_encode_timeout"]:
         parts.extend(["--segment-timeout", str(segment_encode_timeout)])
-    if final_concat_timeout != CONFIG_DEFAULTS["final_concat_timeout"]:
+    if final_concat_timeout != _defaults["final_concat_timeout"]:
         parts.extend(["--final-concat-timeout", str(final_concat_timeout)])
-    if silence_timeout != CONFIG_DEFAULTS["silence_timeout"]:
+    if silence_timeout != _defaults["silence_timeout"]:
         parts.extend(["--silence-timeout", str(silence_timeout)])
-    if stall_kill_timeout != CONFIG_DEFAULTS["stall_kill_timeout"]:
+    if stall_kill_timeout != _defaults["stall_kill_timeout"]:
         parts.extend(["--stall-timeout", str(stall_kill_timeout)])
-    if waveform_timeout != CONFIG_DEFAULTS["waveform_timeout"]:
+    if waveform_timeout != _defaults["waveform_timeout"]:
         parts.extend(["--waveform-timeout", str(waveform_timeout)])
-    if batch_chunk_size != CONFIG_DEFAULTS["batch_chunk_size"]:
+    if batch_chunk_size != _defaults["batch_chunk_size"]:
         parts.extend(["--batch-chunk-size", str(batch_chunk_size)])
-    if min_part_bytes != CONFIG_DEFAULTS["min_part_bytes"]:
+    if min_part_bytes != _defaults["min_part_bytes"]:
         parts.extend(["--min-part-bytes", str(min_part_bytes)])
     if not per_video_dir:
         parts.append("--no-per-video-dir")
+    if not completion_sound:
+        parts.append("--no-completion-sound")
     if force:
         parts.append("-f")
     if delete_after:

@@ -216,6 +216,92 @@ def load_silence_cache(
     return segments
 
 
+def _read_cache_meta(
+    cache_path: Path,
+    video_path: Path,
+    config: dict,
+    *,
+    log_misses: bool = True,
+) -> dict | None:
+    """Shared validity gate for silence cache files (final cache + resume).
+
+    Returns the parsed JSON payload when the cache is fresh (not older
+    than the source), source-identical (recorded name/size vs actual)
+    and config-matching (threshold/min_silence/margin); None on any
+    failure. Both cache readers run this so a stale/foreign/mismatched
+    file can never yield segments *or* a resume seek point.
+
+    ``log_misses`` gates the diagnostic messages (the final-cache loader
+    wants them; the resume probe reader silently treats a miss as
+    "no checkpoint").
+
+    Note on representation: the config comparison converts both sides
+    to float first, because JSON round-trips lose the int/float
+    distinction (``-30`` loads back as ``-30``, a YAML default
+    ``-30.0`` stays float) and a raw ``!=`` would falsely invalidate
+    the cache on that representation difference alone.
+    """
+    try:
+        cache_mtime = cache_path.stat().st_mtime
+        src_stat = video_path.stat()
+    except OSError as e:
+        # Either file vanished between the caller's existence check and
+        # here (AV scan, user delete) — treat as a cache miss, not a crash.
+        if log_misses:
+            logger.info(f"Silence cache stat failed ({e}); treating as miss")
+        return None
+    if cache_mtime < src_stat.st_mtime:
+        if log_misses:
+            logger.info(f"Silence cache outdated (source file newer): {cache_path.name}")
+        return None
+    try:
+        # encoding="utf-8" matches _save_cache; without it a source name
+        # containing non-ASCII chars raises UnicodeDecodeError on cp1251
+        # Windows locales instead of a graceful cache miss.
+        with open(cache_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+        if log_misses:
+            logger.warning(f"Could not read silence cache: {e}")
+        return None
+    # Source identity: the cache filename only embeds the
+    # stem, so two different videos named ``a.mp4`` in the same output
+    # dir would otherwise share one cache and cut each other's content.
+    # mtime is also forgeable (robocopy /COPYALL preserves it), so check
+    # the recorded name AND byte size against the actual source.
+    recorded_name = data.get("source")
+    if recorded_name is not None and recorded_name != video_path.name:
+        if log_misses:
+            logger.info(
+                f"Silence cache ignored: source name mismatch "
+                f"(cached {recorded_name!r}, actual {video_path.name!r})"
+            )
+        return None
+    recorded_size = data.get("source_size")
+    if recorded_size is not None and recorded_size != src_stat.st_size:
+        if log_misses:
+            logger.info(
+                f"Silence cache ignored: source size mismatch "
+                f"(cached {recorded_size}, actual {src_stat.st_size})"
+            )
+        return None
+    # Cache key comparison — see the note in the docstring about the
+    # float() coercion before the strict ==.
+    for key in ("threshold", "min_silence", "margin"):
+        cached = data.get("config", {}).get(key)
+        current = config.get(key)
+        try:
+            if float(cached) != float(current):  # type: ignore[arg-type]
+                if log_misses:
+                    logger.info(f"Silence cache ignored: config mismatch ({key})")
+                return None
+        except (TypeError, ValueError):
+            if log_misses:
+                logger.info(f"Silence cache ignored: config mismatch ({key})")
+            return None
+    return data
+
+
 def _load_silence_cache_from_path(
     cache_path: Path,
     video_path: Path,
@@ -228,66 +314,12 @@ def _load_silence_cache_from_path(
     mismatch (name or size), malformed JSON, config mismatch, or
     malformed segments. The final cache stores margin-applied results;
     for resume, the caller uses the raw progressive_segments directly
-    (no cache load).
+    (no cache load). Validation itself lives in the shared
+    ``_read_cache_meta`` gate.
     """
-    try:
-        cache_mtime = cache_path.stat().st_mtime
-        src_stat = video_path.stat()
-    except OSError as e:
-        # Either file vanished between the caller's existence check and
-        # here (AV scan, user delete) — treat as a cache miss, not a crash.
-        logger.info(f"Silence cache stat failed ({e}); treating as miss")
+    data = _read_cache_meta(cache_path, video_path, config)
+    if data is None:
         return None
-    if cache_mtime < src_stat.st_mtime:
-        logger.info(f"Silence cache outdated (source file newer): {cache_path.name}")
-        return None
-    try:
-        # encoding="utf-8" matches _save_cache; without it a source name
-        # containing non-ASCII chars raises UnicodeDecodeError on cp1251
-        # Windows locales instead of a graceful cache miss.
-        with open(cache_path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
-        logger.warning(f"Could not read silence cache: {e}")
-        return None
-    # Source identity: the cache filename only embeds the
-    # stem, so two different videos named ``a.mp4`` in the same output
-    # dir would otherwise share one cache and cut each other's content.
-    # mtime is also forgeable (robocopy /COPYALL preserves it), so check
-    # the recorded name AND byte size against the actual source.
-    recorded_name = data.get("source")
-    if recorded_name is not None and recorded_name != video_path.name:
-        logger.info(
-            f"Silence cache ignored: source name mismatch "
-            f"(cached {recorded_name!r}, actual {video_path.name!r})"
-        )
-        return None
-    recorded_size = data.get("source_size")
-    if recorded_size is not None and recorded_size != src_stat.st_size:
-        logger.info(
-            f"Silence cache ignored: source size mismatch "
-            f"(cached {recorded_size}, actual {src_stat.st_size})"
-        )
-        return None
-    # Cache key comparison: compare the *numeric* values, not
-    # raw ``!=``. JSON round-trips lose the int/float distinction
-    # (``-30`` loads back as ``-30``, a YAML default ``-30.0`` stays
-    # float), and an exact-Python-equality ``!=`` falsely invalidates
-    # the cache on that representation difference alone. A tolerance
-    # comparison would have the opposite problem: a user-typed
-    # ``-30.0001`` silently matching a ``-30.0`` cache. Converting both
-    # sides to ``float`` first gets the strict-equality semantic we
-    # want while being representation-agnostic.
-    for key in ("threshold", "min_silence", "margin"):
-        cached = data.get("config", {}).get(key)
-        current = config.get(key)
-        try:
-            if float(cached) != float(current):  # type: ignore[arg-type]
-                logger.info(f"Silence cache ignored: config mismatch ({key})")
-                return None
-        except (TypeError, ValueError):
-            logger.info(f"Silence cache ignored: config mismatch ({key})")
-            return None
     try:
         return [SilenceSegment(s["start"], s["end"]) for s in data["segments"]]
     except (KeyError, TypeError, ValueError) as e:
@@ -301,33 +333,18 @@ def load_resume_probe_position(cache_path: Path, video_path: Path, config: dict)
     A checkpoint with ZERO detected segments
     (healthy source, hours already scanned) must resume from the probe
     position, not from t=0. Re-runs the same validation as
-    ``_load_silence_cache_from_path`` so a stale/foreign/mismatched
-    checkpoint never yields a seek point. Returns None when the field
-    is absent (legacy checkpoint) or invalid — the caller then falls
-    back to the last segment's end, or to a fresh scan.
+    ``_read_cache_meta`` (shared with the final-cache loader) so a
+    stale/foreign/mismatched checkpoint never yields a seek point
+    (silently — misses are the normal "no checkpoint yet" case here).
+    Returns None when the field is absent (legacy checkpoint) or
+    invalid — the caller then falls back to the last segment's end,
+    or to a fresh scan.
     """
-    try:
-        cache_mtime = cache_path.stat().st_mtime
-        src_stat = video_path.stat()
-    except OSError:
+    data = _read_cache_meta(
+        cache_path, video_path, config, log_misses=False
+    )
+    if data is None:
         return None
-    if cache_mtime < src_stat.st_mtime:
-        return None
-    try:
-        with open(cache_path, encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return None
-    if data.get("source") is not None and data.get("source") != video_path.name:
-        return None
-    if data.get("source_size") is not None and data.get("source_size") != src_stat.st_size:
-        return None
-    for key in ("threshold", "min_silence", "margin"):
-        try:
-            if float(data.get("config", {}).get(key)) != float(config.get(key)):  # type: ignore[arg-type]
-                return None
-        except (TypeError, ValueError):
-            return None
     pos = data.get("probe_position")
     if pos is None:
         return None

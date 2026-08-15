@@ -194,7 +194,10 @@ def _run_segment_concat(
                         # too, but the filter is the documented way
                         # to do it post-encode PTS normalisation and
                         # matches the batch path's filter chain shape.
-                        ["-vf", f"fps={options.output_fps}"] if options.output_fps != "source" else []
+                        # ``_fps_vf_option`` reuses the batch path's
+                        # VALID_OUTPUT_FPS gate so a bad value can't
+                        # reach ffmpeg as ``fps=bogus``.
+                        _c._fps_vf_option(options.output_fps)
                     ),
                     "-c:v",
                     vcodec,

@@ -22,6 +22,7 @@ def _run_audio_concat_filter(
     codec: str,
     extra_opts: list[str],
     total_duration: float,
+    lossless: bool = False,
     progress_callback: Callable[[float], None] | None = None,
     cancel_callback: Callable[[], bool] | None = None,
     timeout: int = _FINAL_CONCAT_TIMEOUT,
@@ -47,6 +48,13 @@ def _run_audio_concat_filter(
     n = len(part_paths)
     if n == 0:
         raise _c.ConcatError("audio concat filter: no parts to join")
+
+    # Bitrate knob: only meaningful for lossy codecs. Lossless formats
+    # (flac/wav) ignore ``-b:a`` anyway; omitting it keeps the ffmpeg
+    # command line readable in the log.
+    bitrate_opts: list[str] = []
+    if not lossless:
+        bitrate_opts = _c._audio_bitrate_opts(options.audio_quality)
 
     # Build the -i inputs and the [N:a]concat=n=N:v=0:a=1 filter graph.
     inputs: list[str] = []
@@ -74,7 +82,7 @@ def _run_audio_concat_filter(
             # Bitrate first so ``extra_opts`` (already carrying e.g.
             # explicit sample-rate / channel pins) can override on a
             # later flag — ffmpeg takes the LAST occurrence of each option.
-            *_c._audio_bitrate_opts(options.audio_quality),
+            *bitrate_opts,
             *_c._audio_opts(options.audio_quality),
             *extra_opts,
             str(output_path),
@@ -281,6 +289,7 @@ def _run_audio_extract(
                 codec=codec,
                 extra_opts=extra_opts,
                 total_duration=total_duration,
+                lossless=lossless,
                 progress_callback=progress_callback,
                 cancel_callback=cancel_callback,
                 timeout=options.final_concat_timeout,

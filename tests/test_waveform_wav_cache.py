@@ -24,7 +24,7 @@ def _gui_stub(
     """Build a minimal GUI stub with just enough attrs for _run() to work.
 
     Returns a MagicMock whose instance attributes mimic the real GUI
-    (entry_input, config, _log, _tk_after, ...). The `_run` closure is
+    (entry_input, settings, _log, _tk_after, ...). The `_run` closure is
     invoked inline so we can assert the read_peaks_from_stream args.
     """
     in_path = tmp_path / "video.mp4"
@@ -36,7 +36,7 @@ def _gui_stub(
     g.entry_input.get.return_value = str(in_path)
     g.entry_output.get.return_value = str(out_dir)
     g.chk_per_video_dir.get.return_value = False  # keep paths flat
-    g.config = {"threshold": -30.0, "min_silence": 2.0, "margin": 0.5, "waveform_timeout": 300}
+    g.settings = {"threshold": -30.0, "min_silence": 2.0, "margin": 0.5, "waveform_timeout": 300}
     g._waveform_render_token = 0
     g._waveform_running = False
     g.running = False  # pipeline not running -> no post-render poller

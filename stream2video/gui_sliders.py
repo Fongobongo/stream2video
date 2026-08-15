@@ -71,7 +71,7 @@ class SlidersMixin:
         def on_change(v: Any, k: str = key, ev: Any = entry_val) -> None:
             ev.delete(0, "end")
             ev.insert(0, format_slider_entry_value(float(v)))
-            self.config[k] = round(float(v), 1)
+            self.settings[k] = round(float(v), 1)
             # The threshold drives a line in the waveform preview; re-render
             # via a debounced timer so a slider drag does not pile up
             # render calls. Other sliders (min_silence, margin) only
@@ -95,7 +95,7 @@ class SlidersMixin:
                 entry_val.insert(0, format_slider_entry_value(float(sv.get())))
                 return
             sv.set(val)
-            self.config[k] = val
+            self.settings[k] = val
             entry_val.delete(0, "end")
             entry_val.insert(0, format_slider_entry_value(val))
             if k == "threshold":
@@ -119,7 +119,7 @@ class SlidersMixin:
         slider.set(default)
         entry.delete(0, "end")
         entry.insert(0, format_slider_entry_value(default))
-        self.config[key] = default
+        self.settings[key] = default
 
     def _sync_slider_entries(self) -> None:
         # Build the entries dict the pure
@@ -142,4 +142,4 @@ class SlidersMixin:
                     bounds[key] = (float(slider.cget("from_")), float(slider.cget("to")))
         updates = sync_slider_entries(entries, bounds)
         for key, val in updates.items():
-            self.config[key] = val
+            self.settings[key] = val

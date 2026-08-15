@@ -25,7 +25,7 @@ class EncoderPanelMixin:
         self._encoder_tester: EncoderTester | None = None
 
     def _on_encoder_change(self, choice: str) -> None:
-        self.config["encoder"] = choice
+        self.settings["encoder"] = choice
         self.lbl_encoder_desc.configure(text=get_encoder_description(choice))
 
     def _test_encoders(self) -> None:

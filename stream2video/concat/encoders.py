@@ -299,6 +299,22 @@ def _fps_filter_chain(output_fps: str) -> str:
     return ""
 
 
+def _fps_vf_option(output_fps: str) -> list[str]:
+    """Return the ffmpeg ``-vf fps=X`` option pair for the segment path.
+
+    ``source`` (default) returns ``[]`` — the encoder receives the
+    original PTS without any fps filter. A numeric target (``24`` /
+    ``25`` / ``30`` / ``50`` / ``60``) returns ``["-vf", "fps=X"]``.
+    Invalid values are dropped with a warning (the same
+    ``VALID_OUTPUT_FPS`` gate as ``_fps_filter_chain``), so a bad
+    config can never reach ffmpeg as ``fps=bogus``.
+    """
+    chain = _fps_filter_chain(output_fps)
+    if not chain:
+        return []
+    return ["-vf", chain[1:]]
+
+
 # Public back-compat registry: maps each supported encoder to
 # its default (medium) options. Kept as a documented public API because:
 #   1. Tests use it as a sanity check that VALID_ENCODERS and the
