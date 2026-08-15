@@ -129,7 +129,7 @@ class TestDryRun:
 
         calls: list[str] = []
 
-        def _counted(reserve_mb: int, phase: str, _cb=None) -> bool:
+        def _counted(reserve_mb: int, phase: str, **kwargs) -> bool:
             calls.append(phase)
             return True
 

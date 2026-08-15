@@ -45,18 +45,18 @@ class _JsonFormatter(logging.Formatter):
         # land in ``record.__dict__`` alongside the reserved attributes.
         # Common keys are hoisted into the top level so queries like
         # ``step="download" AND status="ok"`` work without knowing the
-        # record's class-path. When the caller's extra collides with a
-        # reserved top-level name (e.g. pipeline_controller already logs
-        # its own ``duration_s``), the extra value would silently
-        # OVERWRITE the reserved one — surface the extra under a
-        # ``extra_`` prefix instead so both values survive.
-        _RESERVED = {"ts", "level", "logger", "msg", "v", "exc"}
+        # record's class-path. The top-level keys (``ts``/``level``/
+        # ``logger``/``msg``/``v``/``exc``) are owned by this formatter,
+        # and the hoisted names are a fixed list that never collides
+        # with them — so no ``extra_``-prefix guard is needed (the
+        # historical version carried a dead ``_RESERVED`` collision
+        # branch whose premise — that these keys could overwrite the
+        # reserved ones — was false; audit R4.2).
         for key in ("step", "phase", "duration_s", "bytes", "src", "dst"):
             val = record.__dict__.get(key)
             if val is None:
                 continue
-            target = key if key not in _RESERVED else f"extra_{key}"
-            obj[target] = val
+            obj[key] = val
         return json.dumps(obj, default=str, ensure_ascii=False)
 
 

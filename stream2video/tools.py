@@ -153,11 +153,11 @@ def _spawn_with_retry(
             # also discarded BELOW_NORMAL_PRIORITY_CLASS — so a
             # low-priority retry silently ran at normal priority exactly
             # when the machine was already under the AV/filter-driver
-            # load that triggered the retry in the first place
-            # (fix-plan #17). On POSIX ``creationflags`` is Windows-only
+            # load that triggered the retry in the first place. On POSIX
+            # ``creationflags`` is Windows-only
             # plumbing: passing a non-zero value raises ValueError
             # instead of FileNotFoundError, which would hide the retry
-            # path entirely (B11 audit).
+            # path entirely.
             orig_flags = int(kwargs.get("creationflags", 0))
             if os.name == "nt":
                 try_kwargs = {**kwargs, "creationflags": orig_flags & ~0x08000000}
@@ -190,7 +190,7 @@ def _spawn_with_retry(
             # The spawn failure may have been a transiently-blocked ffmpeg
             # (winget shim, AV filter). A previously-run smoke test cached
             # False for the whole process; drop it so the re-resolved
-            # binary gets re-smoke-tested (B11 audit: "encoder unavailable"
+            # binary gets re-smoke-tested ("encoder unavailable"
             # used to stick until app restart).
             try:
                 from stream2video.concat.encoders import reset_encoder_check_cache

@@ -272,6 +272,36 @@ class TestBuildCliCommand:
         assert "--memory-limit-mb" not in cmd
         assert "--memory-reserve-mb" not in cmd
 
+    def test_boolean_defaults_match_config_defaults(self):
+        # Parity: the GUI's copied command must agree with
+        # CONFIG_DEFAULTS (gapless_concat=True, per_video_dir=True,
+        # audio_quality="source"). At the defaults no --no-* flag is
+        # emitted; flipping the config value to False must emit it.
+        defaults = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+        )
+        assert "--no-gapless-concat" not in defaults
+        assert "--no-per-video-dir" not in defaults
+        assert "--audio-quality" not in defaults
+
+        flipped = build_cli_command(
+            "x",
+            Path("./o"),
+            method="segment",
+            encoder="libx264",
+            video_quality="medium",
+            download_quality="best",
+            gapless_concat=False,
+            per_video_dir=False,
+        )
+        assert "--no-gapless-concat" in flipped
+        assert "--no-per-video-dir" in flipped
+
     def test_memory_limit_flags_appended_when_non_default(self):
         cmd = build_cli_command(
             "x",
@@ -287,7 +317,7 @@ class TestBuildCliCommand:
         assert "--memory-reserve-mb 1024" in cmd
 
     def test_phase_timeout_flags_omitted_at_defaults(self):
-        # P3.4: all phase-timeout flags default to their historical
+        # All phase-timeout flags default to their historical
         # values; when nothing is customised, the copied command stays
         # compact (no --segment-timeout 600 etc. noise).
         cmd = build_cli_command(

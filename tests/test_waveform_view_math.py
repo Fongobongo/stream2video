@@ -1,5 +1,5 @@
 """Tests for stream2video.waveform_view_math (pure zoom / pan / render
-math extracted from gui.py — Этап 10 incremental refactor).
+math extracted from gui.py — incremental refactor).
 
 These functions take primitive numeric args and return tuples. No Tk,
 no side effects, no I/O — every behavior the GUI relies on for view

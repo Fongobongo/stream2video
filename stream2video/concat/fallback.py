@@ -60,7 +60,7 @@ def _run_with_fallback(
 
     On encoder fallback the per-method working directory (``_<stem>_segments``
     / ``_<stem>_batch`` / ``_<stem>_cut``) is RETAGGED with the libx264
-    run's manifest identity instead of being wiped (C13 audit) — the
+    run's manifest identity instead of being wiped — the
     retry's per-file resume gate then re-validates every part (size +
     MP4 probe + audio probe + duration) so a corrupt HW write (e.g.
     h264_mf MP4s without a moov atom on some Windows builds) is
@@ -89,7 +89,7 @@ def _run_with_fallback(
     work_dir = output_path.parent / f"_{output_path.stem}{work_suffix}"
 
     def _cleanup(failed_enc: str) -> None:
-        # C13 audit: the old behaviour wiped the WHOLE work dir — hours
+        # The old behaviour wiped the WHOLE work dir — hours
         # of correctly-encoded parts went to the bin because ONE segment
         # failed on the hardware encoder. Now we keep the parts and just
         # retag the dir with the libx264 run's identity: the retry's
@@ -271,7 +271,7 @@ def _with_libx264_fallback(
     ``x264_low_memory`` reduces the encoder's frame-buffer footprint
     (see ``encoder_opts`` for details).
 
-    Two exception classes bypass the retry entirely (fix-plan #10):
+    Two exception classes bypass the retry entirely:
 
       * ``FFmpegOutOfMemoryError`` — the hardware encoder died by OOM.
         Retrying with libx264 (which allocates MORE memory for its

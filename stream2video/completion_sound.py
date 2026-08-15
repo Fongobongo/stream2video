@@ -57,7 +57,7 @@ def ensure_completion_chime(path: Path | None = None, *, kind: str = "success") 
     # The temp name is UNIQUE per process (``mkstemp``), not derived
     # from ``out.name``: a deterministic name let process A truncate the
     # file process B was mid-write into, corrupting the WAV after A's
-    # rename (B11 audit).
+    # rename.
     fd, tmp_name = tempfile.mkstemp(prefix=f".{out.name}.", suffix=".tmp", dir=str(out.parent))
     tmp = Path(tmp_name)
     try:

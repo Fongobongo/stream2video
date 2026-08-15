@@ -220,7 +220,7 @@ def fmt_zoom_text(zoom_level: float) -> str:
     and comparing the rounded value against 10 moves the switch
     point to where the user actually sees it.
     """
-    # Non-finite guard (C18 audit): a NaN zoom (0/0 view math on a
+    # Non-finite guard: a NaN zoom (0/0 view math on a
     # degenerate duration) must render as "?" — formatting NaN directly
     # produces "nanx" in the status line, and ``round(nan)`` raises
     # ValueError on some Python builds.

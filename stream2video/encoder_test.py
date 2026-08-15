@@ -1,5 +1,5 @@
-"""Encoder test orchestration extracted from ``gui.py`` (Этап 10
-incremental refactor).
+"""Encoder test orchestration extracted from ``gui.py`` (incremental
+refactor).
 
 The GUI's ``Test encoder`` button spawns a worker thread that runs
 ``check_encoder`` (a real ffmpeg smoke test — see
@@ -146,7 +146,7 @@ class EncoderTester:
                 with self._lock:
                     self._running = False
                 # Defer the button restoration to the Tk main loop so
-                # all widget writes happen from the same thread (P1.10).
+                # all widget writes happen from the same thread.
                 # If the GUI is being torn down right now (scheduler
                 # raises), don't crash the daemon thread on top of that —
                 # the button state is moot when its window is gone.

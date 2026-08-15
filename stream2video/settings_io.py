@@ -1,5 +1,5 @@
 """Pure snapshot + I/O helpers for the GUI's settings / defaults
-persistence — extracted from ``gui.py`` (Этап 10 incremental refactor).
+persistence — extracted from ``gui.py`` (incremental refactor).
 
 Three categories of pure logic live here:
 
@@ -191,7 +191,7 @@ def write_cli_config_yaml(
     Security: ``filename`` must be a plain file name (no path
     components). ``(out_dir / "../evil.yaml").resolve()`` would
     otherwise escape the output directory — the parameter is part of
-    the public surface, so enforce the invariant here (fix-plan #23).
+    the public surface, so enforce the invariant here.
     Atomicity: not strictly required for a tiny CLI config — a partial
     write is acceptable because the caller tolerates ``None``.
     """

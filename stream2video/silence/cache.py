@@ -129,7 +129,7 @@ def _save_cache(
         probe_position: Source-time position (seconds) ffmpeg had decoded
                up to when this checkpoint was written. Recorded so a
                resume with ZERO detected segments still restarts from the
-               checkpoint instead of from t=0 (fix-plan #3b).
+               checkpoint instead of from t=0.
 
     Note: with ``fsync=False`` (resume checkpoint path), a kernel crash
     between ``json.dump`` and ``os.replace`` could leave the previous
@@ -250,7 +250,7 @@ def _load_silence_cache_from_path(
     except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
         logger.warning(f"Could not read silence cache: {e}")
         return None
-    # Source identity (fix-plan #8): the cache filename only embeds the
+    # Source identity: the cache filename only embeds the
     # stem, so two different videos named ``a.mp4`` in the same output
     # dir would otherwise share one cache and cut each other's content.
     # mtime is also forgeable (robocopy /COPYALL preserves it), so check
@@ -269,7 +269,7 @@ def _load_silence_cache_from_path(
             f"(cached {recorded_size}, actual {src_stat.st_size})"
         )
         return None
-    # Cache key comparison (P2.14): compare the *numeric* values, not
+    # Cache key comparison: compare the *numeric* values, not
     # raw ``!=``. JSON round-trips lose the int/float distinction
     # (``-30`` loads back as ``-30``, a YAML default ``-30.0`` stays
     # float), and an exact-Python-equality ``!=`` falsely invalidates
@@ -298,7 +298,7 @@ def _load_silence_cache_from_path(
 def load_resume_probe_position(cache_path: Path, video_path: Path, config: dict) -> float | None:
     """Return the ``probe_position`` recorded in a resume checkpoint.
 
-    Needed for fix-plan #3b: a checkpoint with ZERO detected segments
+    A checkpoint with ZERO detected segments
     (healthy source, hours already scanned) must resume from the probe
     position, not from t=0. Re-runs the same validation as
     ``_load_silence_cache_from_path`` so a stale/foreign/mismatched

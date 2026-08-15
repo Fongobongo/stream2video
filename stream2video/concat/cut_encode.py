@@ -42,7 +42,6 @@ from stream2video.concat.constants import (
 )
 from stream2video.memory import MemoryMonitor
 from stream2video.tools import ffmpeg_path
-from stream2video.utils import get_video_start_time
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +112,7 @@ def _run_cut_then_encode(
     cut_dir = output_path.parent / f"_{output_path.stem}_cut"
     raw_concat_path = cut_dir / "raw_concat.mp4"
 
-    # Resume manifest (P0.6): same structure as the other methods so
+    # Resume manifest: same structure as the other methods so
     # a mismatch in source / encoder / keep_segments / pipeline_version
     # wipes the work dir.
     manifest = _c._build_manifest(
@@ -134,12 +133,15 @@ def _run_cut_then_encode(
     cut_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # start_time compensation (P1.16) — keep_segments are in detected
-        # PTS time; input-side -ss positions by file position. See segment.py
-        # for the full rationale. No-op on clean sources (start_time=0).
-        start_offset = get_video_start_time(video_path)
-        if start_offset < 0.0:
-            start_offset = 0.0
+        # ``keep_segments`` are in the *detected* timeline that silence
+        # detection produced. The WAV mirror is a plain PCM file, so its
+        # timestamps start at 0 — even on a source with a non-zero
+        # container ``start_time`` (OBS ``-itsoffset``) the detected
+        # segments are in user-visible source-time coordinates. Input-side
+        # ``-ss`` positions by file position, the same space — no
+        # start_time compensation is needed (verified on ffmpeg 8.1.1;
+        # see segment.py). The batch path compensates only its ``trim``
+        # endpoints, which operate in ``-copyts`` PTS space.
 
         # ── Phase 1: Cut pass (encode each segment to MP4) ──
         # Progress: 0.0 .. 0.4 (cut is fast, so a small slice of the bar).
@@ -206,7 +208,7 @@ def _run_cut_then_encode(
             # the output is frame-accurate on modern ffmpeg. ``-t dur``
             # bounds both video and audio to exactly ``dur`` — no
             # extra ``trim``/``atrim`` filter is needed (the segment
-            # method has been doing this since P1.13; verified on
+            # method has been doing this; verified on
             # ffmpeg 8.1.1 with a GOP=30 source). The audio re-encode
             # here (instead of the previous stream copy) avoids the
             # KF-snap overrun that broke segment boundaries.
@@ -218,13 +220,7 @@ def _run_cut_then_encode(
                 "-progress",
                 "pipe:1",
                 "-ss",
-                # start_time compensation (P1.16) — keep_segments are
-                # in detected PTS time; input-side -ss positions by
-                # file position. On a source with a non-zero container
-                # start_time (OBS -itsoffset) the demuxer's position 0 is
-                # PTS start_time, so an uncompensated seek lands start_time
-                # seconds too late and the keep segment is clipped early.
-                str(max(0.0, start - start_offset)),
+                str(max(0.0, start)),
                 "-i",
                 str(video_path),
                 "-t",
@@ -250,7 +246,7 @@ def _run_cut_then_encode(
                         *_c._audio_opts(audio_quality),
                     ]
                 )
-            # FPS conversion (P1.4): when ``output_fps != 'source'`` the
+            # FPS conversion: when ``output_fps != 'source'`` the
             # ``fps=`` filter duplicates/drops frames to the target CFR.
             # Apply on the encode side so each segment is independently
             # CFR; the lossless phase-2 concat then joins CFR parts with

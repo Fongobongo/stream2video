@@ -1,5 +1,5 @@
 """Tk main-loop dispatcher + log queue plumbing — extracted from
-``gui.py`` (Этап 10 incremental refactor).
+``gui.py`` (incremental refactor).
 
 The GUI's worker threads must talk to the Tk main loop instead of
 touching widgets directly (Tk widgets are not thread-safe). Two pieces
@@ -123,7 +123,7 @@ class LogQueuePoller:
     """
 
     _POLL_INTERVAL_MS = 100
-    _MAX_LOG_LINES = 10_000  # fix-plan #28: unbounded growth = GUI memory leak
+    _MAX_LOG_LINES = 10_000  # Unbounded growth = GUI memory leak
 
     def __init__(
         self,
@@ -238,7 +238,7 @@ class LogQueuePoller:
                     # Trim the oldest lines once the log outgrows the
                     # budget — otherwise a multi-hour run's log widget
                     # accumulates tens of thousands of lines and the GUI's
-                    # memory footprint grows unboundedly (fix-plan #28).
+                    # memory footprint grows unboundedly.
                     # Tk line indices are 1-based; deleting 1..extra removes
                     # exactly the oldest ``extra`` lines and shifts every
                     # subsequent line down — our own ``_line_count`` tracks

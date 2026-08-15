@@ -1,4 +1,4 @@
-"""LifecycleMixin — settings I/O, restore defaults, on-close (Этап 10 mixin).
+"""LifecycleMixin — settings I/O, restore defaults, on-close.
 
 Extracted from ``Stream2VideoGUI``: ``_save_settings`` (snapshot widgets
 → settings.json), ``_load_settings`` (read settings.json → self.config),
@@ -112,7 +112,12 @@ class LifecycleMixin:
         self.entry_output.delete(0, "end")
         self._output_path = None
         self._download_path = None
-        self._active_controller: object | None = None
+        # Don't null the controller while a run is active: the worker
+        # thread still targets it (progress callbacks, on-close cleanup
+        # in ``_on_close`` reads it). Only a *finished* run's dangling
+        # reference is reset here.
+        if not getattr(self, "running", False):
+            self._active_controller: object | None = None
 
         self.combo_method.set(self.config["method"])
         self.combo_encoder.set(self.config["encoder"])
@@ -302,6 +307,7 @@ class LifecycleMixin:
             min_part_bytes=self.config.get("min_part_bytes", 1024),
             config_path=config_path,
             proxy=proxy_value,
+            per_video_dir=self.config.get("per_video_dir", True),
         )
         cmd_log = redact_proxy_in_cli_command(cmd, proxy_value)
         self.clipboard_clear()
@@ -355,7 +361,7 @@ class LifecycleMixin:
                     cleanup()
             except Exception:
                 _logger.debug("controller cleanup on close failed", exc_info=True)
-        # fix-plan #20: flush any uncommitted slider entry text into
+        # Flush any uncommitted slider entry text into
         # config BEFORE _save_settings reads it. A user typing into the
         # numeric entry and closing the window (without FocusOut, which
         # normally triggers the commit) silently lost the typed value

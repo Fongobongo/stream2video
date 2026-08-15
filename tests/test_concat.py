@@ -54,7 +54,7 @@ def test_final_concat_fresh_set_stream_copies(tmp_path: Path):
 def test_final_concat_mixed_set_resyncs_audio(tmp_path: Path):
     args = _final_concat_cmd(tmp_path, audio_resync=True, audio_quality="high")
     # Video stays lossless; only the audio is re-encoded through the
-    # async resampler (B6 audit) with the caller's quality bitrate.
+    # async resampler with the caller's quality bitrate.
     assert args[args.index("-c:v") + 1] == "copy"
     af = args[args.index("-af") + 1]
     assert af == "aresample=async=1:first_pts=0"

@@ -1,4 +1,4 @@
-"""Tests for stream2video.encoder_test (extracted from gui.py — Этап 10).
+"""Tests for stream2video.encoder_test (extracted from gui.py).
 
 Covers:
   * ``ENCODER_DESCRIPTIONS`` / ``get_encoder_description`` — registry

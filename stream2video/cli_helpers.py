@@ -24,8 +24,7 @@ from rich.logging import RichHandler
 # (e.g. from tests, or from a host application embedding the library)
 # doesn't reconfigure the root logger. The historical ``basicConfig``
 # at import time would override the host's own logging config, which is
-# especially noisy for GUI embeds and pytest's caplog. See P2.9 in the
-# fix plan.
+# especially noisy for GUI embeds and pytest's caplog.
 _console_handler = RichHandler(rich_tracebacks=True)
 logger = logging.getLogger("stream2video")
 
@@ -34,7 +33,7 @@ app = typer.Typer(help="Compress stream recordings by removing silence")
 
 # Tracks the SIGINT handler THIS module installed so cli.py can detect
 # a double-main() run by identity rather than by a fragile name/module
-# heuristic (fix-plan #19: a refactor that renames the closure breaks
+# heuristic (a refactor that renames the closure breaks
 # the name check silently).
 _installed_sigint_handler: Callable[..., None] | None = None
 

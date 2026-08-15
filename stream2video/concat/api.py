@@ -71,7 +71,7 @@ def cut_and_concat(
             f"(use {' or '.join(repr(f) for f in VALID_OUTPUT_FORMATS)})"
         )
 
-    # fix-plan #6: an exclusive lock file prevents a second concurrent
+    # An exclusive lock file prevents a second concurrent
     # run (GUI + CLI, two CLIs) from interleaving -y writes into the
     # same output_path and silently corrupting each other. It MUST be
     # taken before any probe/encoder work below (ffprobe, generate_keep,
@@ -275,7 +275,7 @@ def _run_locked(
     # segment/batch builders omit ``-c:a`` / audio mapping for
     # audio-less sources (otherwise ffmpeg fails with "Output file
     # does not contain any stream" when ``-map 0:a:0`` is requested
-    # on a video-only input). See P1.14 in the fix plan.
+    # on a video-only input).
     source_has_audio = _c.has_audio_stream(video_path)
     if not source_has_audio:
         logger.info(f"Source {video_path.name} has no audio stream -- encoding video-only")

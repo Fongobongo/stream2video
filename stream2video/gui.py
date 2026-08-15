@@ -199,7 +199,7 @@ class Stream2VideoGUI(
 
     # ── Pipeline orchestration glue (host) ────────────────────────
     #
-    # ``_start_pipeline`` reads widgets in the Tk main thread (P1.10)
+    # ``_start_pipeline`` reads widgets in the Tk main thread
     # and spawns ``_pipeline_worker`` on a background thread. The worker
     # builds a ``PipelineWorker`` (from ``pipeline_worker.py``) and
     # forwards an immutable ``PipelineWorkerParams`` snapshot; the
@@ -236,7 +236,7 @@ class Stream2VideoGUI(
 
         # Read controls (in main thread — Tk widget reads are unsafe from
         # worker threads; the worker receives the values as args, see
-        # _pipeline_worker's signature and P1.10 in the fix plan).
+        # _pipeline_worker's signature).
         input_raw = self.entry_input.get().strip()
         output_dir = Path(self.entry_output.get().strip() or "./processed_videos")
         output_dir = output_dir.resolve()
@@ -260,14 +260,15 @@ class Stream2VideoGUI(
         per_video_dir = bool(self.chk_per_video_dir.get())
         delete_after = bool(self.chk_delete.get())
 
-        # Build the run's config in a *copy* (fix R4): ``apply_preset``
-        # returns a dict with the PRESET_MANAGED_KEYS forced to the preset
-        # values — merging that back into ``self.config`` would let the
-        # preset overwrite the user's explicit checkbox choices (e.g. an
-        # unchecked low_process_priority vs low_memory's low=True) and
-        # then leak those into user_defaults on the next "Save defaults".
+        # Build the run's config in a *copy*: ``apply_preset`` returns a
+        # dict with the preset's tunables overlaid — merging that back
+        # into ``self.config`` would let the preset overwrite the user's
+        # explicit checkbox choices (e.g. an unchecked
+        # low_process_priority vs low_memory's low=True) and then leak
+        # those into user_defaults on the next "Save defaults".
         # ``self.config`` keeps the widget state; the run gets its own
-        # preset-applied snapshot.
+        # preset-applied snapshot. ``balanced`` is the identity preset,
+        # so with it the snapshot keeps every checkbox value verbatim.
         preset_name = self.combo_preset.get()
         run_config = dict(self.config)
         if preset_name:
@@ -331,7 +332,7 @@ class Stream2VideoGUI(
             # silently skipped — log at warning so it isn't invisible.
             logger.warning("start disk preflight skipped", exc_info=True)
 
-        # Snapshot config for the worker thread (fix-plan #11): the
+        # Snapshot config for the worker thread: the
         # main thread keeps mutating ``self.config`` as the user moves
         # sliders AFTER Start, and the worker reads ~30 keys off the
         # same dict — a race that produced mixed runs (new threshold,
@@ -398,7 +399,7 @@ class Stream2VideoGUI(
              that implements the :class:`PipelineGuiCallbacks` Protocol
              the worker expects. Every adapter method funnels back
              through ``self._tk_after`` so the worker never touches a
-             widget directly (P1.10).
+             widget directly.
           2. Build the immutable ``PipelineWorkerParams`` snapshot from
              the already-snapshoted widget values.
           3. Stamp ``self._pipeline_start`` (the GUI tracks wall-clock
@@ -482,7 +483,7 @@ class _PipelineGuiCallbacksAdapter:
     only on a thin Protocol callable surface). So the GUI hands the
     worker a tiny adapter object that funnels every call back through
     the GUI's main-thread dispatcher (``_tk_after``) — the worker never
-    touches a widget directly (P1.10).
+    touches a widget directly.
 
     ``cancel_event`` is just the GUI's own ``self._cancel_event`` — the
     worker reads it directly so the existing ``_cancel_pipeline`` path

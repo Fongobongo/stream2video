@@ -75,7 +75,7 @@ class TestCliMemoryReservePreflight:
             )
 
         assert result.exit_code == 1
-        assert "Not enough free RAM" in result.output
+        assert "is below reserve" in result.output
 
     def test_continues_when_ram_above_reserve(self, tmp_path: Path):
         from typer.testing import CliRunner
@@ -463,7 +463,7 @@ class TestCliPerVideoDir:
 
 
 class TestB11CliSanitization:
-    """B11 audit cluster: CLI validation must match YAML (CONFIG_RANGES
+    """CLI validation must match YAML (CONFIG_RANGES
     ceilings), proxy must be a str, JSON logging must be idempotent
     across repeated main() calls, and the doctor argv scan must not
     swallow the next flag as a --config value."""

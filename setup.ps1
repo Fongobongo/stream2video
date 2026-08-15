@@ -26,9 +26,14 @@ if ((-not $Args) -or $Update -or $Gui) {
     & pip install -e $pkg
     if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
 
-    # GUI dependency (optional)
-    if (-not (python -c "import customtkinter" 2>$null)) {
-        pip install customtkinter --quiet 2>&1 | Out-Null
+    # GUI extras (optional). Must match run_gui.cmd's ".[gui,monitor]":
+    # the GUI imports customtkinter + PIL (waveform rendering) + psutil
+    # (memory monitor) at startup — installing bare customtkinter used
+    # to pass the guard and then crash the GUI on the PIL import
+    # (R4.5 audit: the two installers produced different environments).
+    if ($Gui -and -not (python -c "import customtkinter, PIL, psutil" 2>$null)) {
+        $guiPkg = if ($Dev) { "$ScriptDir[dev,gui,monitor]" } else { "$ScriptDir[gui,monitor]" }
+        pip install -e $guiPkg --quiet 2>&1 | Out-Null
     }
     Write-Ok "Python dependencies installed"
 }

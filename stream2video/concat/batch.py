@@ -107,39 +107,41 @@ def _run_batch_concat(
     )
     _c._ensure_fresh_work_dir(batch_dir, manifest)
 
-    # PTS shift compensation (fix-plan §4: "Broken/non-zero timestamps").
+    # PTS shift handling on sources with a non-zero container
+    # ``start_time`` (OBS ``-itsoffset`` captures, mid-file re-muxes):
+    # the first frame's PTS is shifted by ``start_time`` seconds.
     #
-    # Sources captured with ``-itsoffset`` (OBS streams, mid-file
-    # re-muxes) have a non-zero container ``start_time`` — the first
-    # frame's PTS is shifted by a few seconds even though the per-frame
-    # duration is unchanged. The batch path's ``-copyts`` preserves
-    # these shifted PTS into the filter graph, so an absolute-time
-    # ``trim={s}:{e}`` filter (where ``s``/``e`` are user-visible
-    # source-time coordinates 0..N) would never match any frame on a
-    # shifted source — every frame's PTS is ``start_time`` above the
-    # trim window, so the chunk encodes 0 frames. Empirically verified:
-    # a 6s testsrc source with ``-itsoffset 5.0`` and trim=2.0:4.0
-    # produced 0 frames.
+    # The two timeline spaces involved move in OPPOSITE directions
+    # relative to each other:
+    #   * ``keep_segments`` (and thus ``chunk_start``/``chunk_end``) are
+    #     in *detected* time — the WAV mirror is a plain PCM file whose
+    #     timestamps start at 0, so segments are user-visible source
+    #     coordinates (verified: silencedetect on a shifted source
+    #     reports the same boundaries as on the unshifted one).
+    #   * input-side ``-ss`` seeks by *file position*, which is the same
+    #     user-visible space — NO compensation needed on the seek.
+    #   * ``-copyts`` preserves the shifted PTS into the filter graph,
+    #     so the ``trim={s}:{e}`` filters (which match PTS values) must
+    #     have their endpoints moved UP by ``start_time`` to land in the
+    #     right place; on a clean source (start_time=0) this is a no-op.
     #
-    # The input-side ``-ss`` is interpreted by ffmpeg's MP4/MOV demuxer
-    # in *file position* (source-time) terms, NOT in container-PST
-    # terms — so a ``-ss 6.5`` on a source whose first frame has PTS=5
-    # finds nothing (the demuxer thinks the file ends at duration+0
-    # rather than duration+start_time). The two compensations therefore
-    # move in opposite directions:
-    #   * seek_to is shifted DOWN by ``start_time`` (file-position seek);
-    #   * trim endpoints are shifted UP by ``start_time`` (PTS-space).
-    # For a clean source (start_time=0) both shifts are zero, so the
-    # historical behaviour is preserved exactly. Probed once before the
-    # chunk loop so it doesn't add an ffprobe call per chunk.
+    # Empirically verified on ffmpeg 8.1.1 with a 6s source shifted by
+    # ``-itsoffset 5``: an uncompensated ``trim=2:4`` with a compensated
+    # seek decodes 0 frames (seek lands start_time seconds too early);
+    # the formula below (plain seek + PTS-shifted trim) produces the
+    # full chunk. Earlier code also subtracted ``start_time`` from the
+    # seek — that double compensation truncated or emptied every chunk
+    # on shifted sources, and the original "0 frames" report was blamed
+    # on the wrong side.
+    #
+    # Negative start_time is clamped to 0. A negative container
+    # start_time (e.g. -2.0 from DTS-based captures) means ffmpeg shifts
+    # timestamps so the earliest DTS starts at 0 — the actual PTS
+    # timeline IS 0-indexed, and compensating would shift the trim
+    # windows early by |start_time|, cutting real content the user wants
+    # to keep. ffmpeg's ``-avoid_negative_ts`` at the muxer level already
+    # zeroes the DTS side; we just need to not double-compensate here.
     start_time = get_video_start_time(video_path)
-    # Clamp negative start_time to 0. A negative container start_time
-    # (e.g. -2.0 from DTS-based captures) means ffmpeg shifts timestamps
-    # so the earliest DTS starts at 0 — the actual PTS timeline IS
-    # 0-indexed, and compensating would shift the trim windows early by
-    # |start_time|, cutting real content the user wants to keep.
-    # ffmpeg's ``-avoid_negative_ts`` at the muxer level already zeroes
-    # the DTS side; we just need to not double-compensate here.
     if start_time < 0.0:
         start_time = 0.0
 
@@ -178,7 +180,7 @@ def _run_batch_concat(
 
             chunk_start = chunk[0][0]
             chunk_end = chunk[-1][1]
-            # P1.4: windowed decode. Previously each chunk read the
+            # Windowed decode. Previously each chunk read the
             # entire source from t=0 even though only [chunk_start,
             # chunk_end] was relevant -- on a 6h stream with 100 chunks
             # that's 600h of wasted decode. Coarse-seek ffmpeg to the
@@ -192,21 +194,19 @@ def _run_batch_concat(
             # never match). A small keyframe-safety margin is added so
             # the seek doesn't drop a frame at the chunk's left edge.
             #
-            # PTS compensation: on sources with a non-zero
-            # ``start_time`` the seek value is decremented (see the
-            # long comment above ``get_video_start_time``) while the
-            # ``trim`` endpoints below are incremented by the same
-            # amount. Both compensations are no-ops when start_time=0.
+            # ``chunk_start``/``chunk_end`` are user-visible source
+            # coordinates and input-side ``-ss`` seeks by file position
+            # (the same space) — no start_time adjustment here; only the
+            # ``trim`` endpoints below move into ``-copyts`` PTS space
+            # (see the comment above ``get_video_start_time``).
             _CHUNK_SEEK_MARGIN = 0.5
-            seek_to = max(0.0, chunk_start - _CHUNK_SEEK_MARGIN - start_time)
+            seek_to = max(0.0, chunk_start - _CHUNK_SEEK_MARGIN)
             # Window length must be a pure function of the chunk span +
             # the margins, NOT ``chunk_end - seek_to``: the seek already
-            # backs off by ``start_time`` (and the margin), so the old
-            # formula decoded up to ``margin + start_time`` seconds of
-            # unwanted tail per chunk. On ``start_time=30`` itsoffset
-            # sources that undercut the windowed-decode win by ~30s per
-            # chunk — harmless for output (the ``trim`` below still
-            # selects the right frames) but needlessly slow.
+            # backs off by the margin, so the old formula decoded up to
+            # ``margin`` seconds of unwanted tail per chunk — harmless
+            # for output (the ``trim`` below still selects the right
+            # frames) but needlessly slow.
             chunk_dur = (chunk_end + _CHUNK_SEEK_MARGIN) - (chunk_start - _CHUNK_SEEK_MARGIN)
 
             # Frame-accurate, gapless chunk filter -- ``trim`` per keep
@@ -260,7 +260,7 @@ def _run_batch_concat(
                 # shifted PTS timeline. For start_time=0 this is
                 # identical to the historical absolute-source-time path.
                 #
-                # P1.17: when ``output_fps != "source"``, splice an
+                # When ``output_fps != "source"``, splice an
                 # ``fps=<target>`` filter AFTER ``setpts=PTS-STARTPTS``
                 # so the new PTS cadence is the source's, not the
                 # synthetic ``N/FRAME_RATE`` one. ``fps`` duplicates or
@@ -274,7 +274,7 @@ def _run_batch_concat(
                 # reference a non-existent input pad and ffmpeg would
                 # fail mid-graph. The concat filter's ``a=1`` flag is
                 # similarly dropped for audio-less sources so the output
-                # is video-only. See P1.14 in the fix plan.
+                # is video-only.
                 #
                 # ``apad`` + ``atrim=0:duration`` pads/trims the audio
                 # chain to exactly match the video chain's duration so
@@ -334,7 +334,7 @@ def _run_batch_concat(
                         "error",
                         "-progress",
                         "pipe:1",
-                        # P1.4: windowed decode. ``-ss`` before ``-i``
+                        # Windowed decode. ``-ss`` before ``-i``
                         # fast-seeks to chunk_start; ``-copyts`` keeps
                         # source PTS so the absolute-time ``trim=...``
                         # filters below still match. ``-t`` must also sit
@@ -363,7 +363,7 @@ def _run_batch_concat(
                         # (and the graph therefore produced [outa]).
                         # Without this guard a video-only source would
                         # fail with "Stream map '[outa]' matches no
-                        # stream" -- see P1.14.
+                        # stream".
                         *(
                             [
                                 "-map",
@@ -377,7 +377,7 @@ def _run_batch_concat(
                             else []
                         ),
                         *(
-                            # P0.9: ``fps`` in the filter graph can
+                            # ``fps`` in the filter graph can
                             # duplicate frames past the keep window's
                             # duration while the audio branch is clamped
                             # by ``atrim=0:{e-s}`` — without ``-shortest``
@@ -411,7 +411,7 @@ def _run_batch_concat(
                 f"batch: resumed {skipped}/{n_chunks} already encoded, encoded {n_chunks - skipped}"
             )
 
-        # Final concat demuxer pass -- shared with _run_segment_concat (P2.6).
+        # Final concat demuxer pass -- shared with _run_segment_concat.
         part_paths = [batch_dir / f"chunk_{ci:04d}.mp4" for ci in range(n_chunks)]
         _c._run_final_concat(
             batch_dir,
@@ -427,7 +427,7 @@ def _run_batch_concat(
             low_process_priority=low_process_priority,
             rlimit_as_mb=rlimit_as_mb,
             memory_monitor_factory=memory_monitor_factory,
-            # B6 audit: same mixed-set seam correction as _run_segment_concat.
+            # Same mixed-set seam correction as _run_segment_concat.
             audio_resync=bool(skipped) and source_has_audio,
             audio_quality=audio_quality,
         )

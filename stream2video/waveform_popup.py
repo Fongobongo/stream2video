@@ -1,5 +1,5 @@
 """Thread-safe store of in-memory live silence segments for the GUI —
-extracted from ``gui.py`` (Этап 10 incremental refactor).
+extracted from ``gui.py`` (incremental refactor).
 
 The pipeline worker's ``on_live_segment`` callback receives segments as
 ``detect_silence`` discovers them and publishes them to whoever is
@@ -109,7 +109,7 @@ class LiveSegmentsStore:
         :meth:`begin_run` would clear it anyway, but doing it here
         keeps the store small between runs.
 
-        ``run_id`` gates the clear (B10 audit): a STALE worker (its run
+        ``run_id`` gates the clear: a STALE worker (its run
         already superseded by a newer ``Start``) must not wipe the newer
         run's freshly published segments. With ``run_id=None`` the clear
         is unconditional (historical behaviour, used by tests / popup
@@ -123,7 +123,6 @@ class LiveSegmentsStore:
     def current_run_id(self) -> int | None:
         """Return the most recently allocated run id, or None before the
         first :meth:`begin_run`. Used by the worker to tell whether it
-        is still the current run before mutating shared UI state
-        (B10 audit)."""
+        is still the current run before mutating shared UI state."""
         with self._lock:
             return self._next_run_id if self._next_run_id > 0 else None

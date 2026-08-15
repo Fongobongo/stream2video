@@ -1,4 +1,4 @@
-"""Media correctness regression tests (P2.3 + Этап 1 acceptance).
+"""Media correctness regression tests.
 
 These tests guard against the frame-loss / FPS-mangling / A-V desync
 regressions documented in the fix plan. They:
@@ -14,9 +14,9 @@ regressions documented in the fix plan. They:
        - r_frame_rate matches the source.
 
 The historical bugs these tests catch:
-  * P0.1 — segment double-seek cut ~0.5s off each segment;
-  * P0.2 — ``setpts=N/FRAME_RATE/TB`` turned 30 FPS into 25 FPS;
-  * P0.4 — ``apad`` added 100ms per segment, accumulating drift.
+  * Segment double-seek cut ~0.5s off each segment;
+  * ``setpts=N/FRAME_RATE/TB`` turned 30 FPS into 25 FPS;
+  * ``apad`` added 100ms per segment, accumulating drift.
 
 Skipped when ffmpeg/ffprobe aren't on PATH so the suite still runs in
 environments without the toolchain.
@@ -251,7 +251,7 @@ def test_keep_two_segments_4s_120_frames(method: str, synthetic_source: Path, tm
     """Original reproduction: silence (2,4) → keep [(0,2),(4,6)].
 
     Expected output: 4.0s, 120 frames at 30 FPS. The historical bugs
-    (P0.1 double-seek, P0.2 setpts=N/FRAME_RATE/TB, P0.4 apad drift)
+    (double-seek, setpts=N/FRAME_RATE/TB, apad drift)
     produced 4.72s/135 frames (segment) and 5.05s/151 frames (batch).
     """
     out = tmp_path / f"out_{method}.mp4"
@@ -284,7 +284,7 @@ def test_keep_two_segments_4s_120_frames(method: str, synthetic_source: Path, tm
 @pytest.mark.parametrize("method", ["segment", "batch"])
 @pytest.mark.parametrize("fps", [24, 25, 30, 50, 60])
 def test_cfr_fps_preserved(method: str, fps: int, tmp_path: Path):
-    """CFR source at ``fps`` must come out at the same FPS (Этап 1).
+    """CFR source at ``fps`` must come out at the same FPS.
 
     With ``output_fps='source'`` (the default), no ``-r``/``fps`` filter
     is added; the encoder preserves the input's PTS cadence. A 4s keep
@@ -340,7 +340,7 @@ def test_silence_at_end(method: str, synthetic_source: Path, tmp_path: Path):
     """Silence at EOF — keep segment is [(0,4)] = 4s/120 frames.
 
     Trailing silence is closed at media duration by the silence
-    detector (P1.12); this test verifies the cut respects that.
+    detector; this test verifies the cut respects that.
     """
     out = tmp_path / f"out_end_{method}.mp4"
     silence = [SilenceSegment(4.0, 6.0)]
@@ -406,7 +406,7 @@ def test_100_keep_segments(method: str, tmp_path: Path):
     rounding effects.
 
     This catches:
-      * accumulated drift from per-segment padding (P0.4);
+      * accumulated drift from per-segment padding;
       * batch path's trim+concat with 100 segments (filter graph
         complexity / memory);
       * segment path's per-segment encode + concat list length.
@@ -532,7 +532,7 @@ def test_audio_quality_high_preserves_bitrate(synthetic_source: Path, tmp_path: 
 
     The exact AAC ABR target depends on the encoder, but 'high' (256k)
     must beat 'low' (128k) by a clear margin — otherwise the user's
-    choice has no effect (the historical P0.3 bug: hard-coded 128k).
+    choice has no effect (the historical bug: hard-coded 128k).
     """
     out_high = tmp_path / "out_high.mp4"
     out_low = tmp_path / "out_low.mp4"
@@ -587,7 +587,7 @@ def test_output_fps_60_doubles_frames(synthetic_source: Path, tmp_path: Path):
 
     A 4s keep at 30 FPS source with output_fps='60' must produce
     240 frames (60*4) — the fps filter duplicates frames to match the
-    target. This is the documented trade-off (P1.17).
+    target. This is the documented trade-off.
     """
     out = tmp_path / "out_60.mp4"
     silence = [SilenceSegment(2.0, 4.0)]
@@ -613,7 +613,7 @@ def test_output_fps_60_doubles_frames(synthetic_source: Path, tmp_path: Path):
 def test_audio_less_source_produces_video_only(tmp_path: Path):
     """Source without an audio stream produces a valid video-only MP4.
 
-    P1.14: previously the segment path passed ``-c:a aac`` unconditionally
+    Previously the segment path passed ``-c:a aac`` unconditionally
     and failed with "Output file does not contain any stream" on a
     video-only input.
     """
@@ -808,7 +808,7 @@ def test_multiple_audio_streams(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Non-AAC input codecs (fix-plan §4: "AAC, Opus и MP3 input audio").
+# Non-AAC input codecs.
 #
 # The pipeline historically normalised every input to AAC stereo via
 # ``-c:a aac -ar 48000 -ac 2`` (see ``_audio_opts()`` in concat.py).
@@ -929,7 +929,7 @@ def test_non_aac_input_audio_normalized_to_aac(
 
 
 # ---------------------------------------------------------------------------
-# Channel layout normalisation (fix-plan §4: "Mono/stereo/5.1").
+# Channel layout normalisation.
 #
 # ``-ac 2`` forces the output to stereo regardless of the input layout,
 # so mono and 5.1 inputs must be up/down-mixed by the AAC encoder.
@@ -1022,7 +1022,7 @@ def test_channel_layout_normalised_to_stereo(method: str, channel_layout: str, t
 
 
 # ---------------------------------------------------------------------------
-# Non-zero / shifted start PTS (fix-plan §4: "Broken/non-zero timestamps").
+# Non-zero / shifted start PTS.
 #
 # Sources captured by OBS with ``-output_ts_offset`` or re-muxed from a
 # mid-file cut may have non-zero start PTS. The pipeline must normalise
@@ -1156,6 +1156,144 @@ def test_non_zero_start_pts_normalised_to_zero(method: str, tmp_path: Path):
         f"{method}: shifted-PTS frames {frames} != 120; info={info}"
     )
     _assert_av_in_sync(info)
+
+
+def _make_color_segments_source(out: Path, *, ts_offset: float = 5.0) -> None:
+    """Source with three 2s color segments (red/blue/green) + sine audio,
+    then re-muxed with ``-itsoffset`` so the container PTS starts at
+    ``ts_offset`` (same shift mechanism as ``_make_shifted_pts_source``).
+
+    The solid colors make the CONTENT measurable after lossy re-encode
+    (average pixel of red ≈ (253,0,0), blue ≈ (0,0,254), green ≈ (0,127,0)
+    in yuv420p limited range).
+    """
+    colors = ["red", "blue", "green"]
+    cmd = ["ffmpeg", "-y", "-loglevel", "error"]
+    for c in colors:
+        cmd += ["-f", "lavfi", "-i", f"color=c={c}:duration=2:size=320x240:rate=30"]
+    cmd += ["-f", "lavfi", "-i", "sine=frequency=440:duration=6:sample_rate=48000"]
+    joins = "".join(f"[{i}:v]" for i in range(3))
+    cmd += [
+        "-filter_complex",
+        f"{joins}concat=n=3:v=1:a=0[v]",
+        "-map",
+        "[v]",
+        "-map",
+        "3:a",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-shortest",
+    ]
+    raw = out.with_suffix(".raw.mp4")
+    subprocess.run([*cmd, str(raw)], check=True)
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-itsoffset",
+            f"{ts_offset}",
+            "-i",
+            str(raw),
+            "-c",
+            "copy",
+            str(out),
+        ],
+        check=True,
+    )
+
+
+def _probe_pixel(path: Path, t: float) -> tuple[int, int, int]:
+    """Average RGB of the decoded frame at ``t`` seconds.
+
+    ``-ss`` is placed AFTER ``-i`` so the seek is output-side (frame
+    accurate; the color sources are short, so decoding from 0 is cheap).
+    ``scale=1:1:flags=area`` averages the whole frame, ``rgb24`` raw
+    output then gives exactly 3 bytes (R,G,B). (signalstats-based
+    probing proved unreliable here: metadata=print's per-frame lines
+    aren't guaranteed to end at the seeked frame.)
+    """
+    out = subprocess.run(
+        [
+            "ffmpeg",
+            "-loglevel",
+            "error",
+            "-i",
+            str(path),
+            "-ss",
+            f"{t}",
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=1:1:flags=area",
+            "-pix_fmt",
+            "rgb24",
+            "-f",
+            "rawvideo",
+            "-",
+        ],
+        capture_output=True,
+        check=True,
+    )
+    if len(out.stdout) != 3:
+        raise AssertionError(f"expected 3 RGB bytes for {path}@{t}s, got {len(out.stdout)}")
+    return out.stdout[0], out.stdout[1], out.stdout[2]
+
+
+@pytest.mark.parametrize("method", ["segment", "batch"])
+def test_keep_content_matches_source_timeline(method: str, tmp_path: Path):
+    """Content regression: keeps are located in SOURCE time.
+
+    The frame-count/start_time probes only prove the container looks
+    right; this test decodes actual PIXELS. With silence=[2,4) on the
+    red/blue/green source, the output must be red (0-2s) + green
+    (2-4s): first frame ≈ red luma, frame at t=3.0 ≈ green luma. If
+    a method interpreted the shifted container PTS (``-itsoffset
+    5.0``) as source time, the keeps would land on the wrong colors
+    (or empty regions) and both luma checks would fail.
+    """
+    src = tmp_path / "src_colorshifted.mp4"
+    _make_color_segments_source(src, ts_offset=5.0)
+    src_start = _probe_start_time(src)
+    assert src_start is not None and src_start > 1.0, (
+        f"source start_time {src_start} should be > 1s"
+    )
+
+    out = tmp_path / f"out_colors_{method}.mp4"
+    silence = [SilenceSegment(2.0, 4.0)]
+    cut_and_concat(
+        src,
+        silence,
+        out,
+        method=method,
+        encoder="libx264",
+        video_quality="medium",
+    )
+    info = _probe(out)
+    frames = info.get("nb_read_frames_video")
+    assert frames is not None and abs(frames - 120) <= 1, (
+        f"{method}: colors frames {frames} != 120; info={info}"
+    )
+
+    y_first = _probe_pixel(out, 0.0)
+    assert y_first[0] > 200 and y_first[1] < 80 and y_first[2] < 80, (
+        f"{method}: first frame {y_first} != red — keeps "
+        f"mis-located in shifted time?; info={info}"
+    )
+    y_late = _probe_pixel(out, 3.0)
+    assert y_late[0] < 80 and 60 < y_late[1] < 200 and y_late[2] < 80, (
+        f"{method}: t=3.0 frame {y_late} != green — keeps "
+        f"mis-located in shifted time?; info={info}"
+    )
 
 
 def test_shifted_pts_long_offset_survives(tmp_path: Path):
@@ -1368,7 +1506,7 @@ def test_audio_quality_affects_lossy_bitrate(synthetic_source: Path, tmp_path: P
     """audio_quality controls the bitrate on lossy formats (mp3).
 
     high=256k must beat low=128k by a clear margin, otherwise the user's
-    audio_quality choice has no effect (the historical P0.3 bug:
+    audio_quality choice has no effect (the historical bug:
     hard-coded 128k regardless of the requested preset).
     """
     out_high = tmp_path / "out_high.mp3"

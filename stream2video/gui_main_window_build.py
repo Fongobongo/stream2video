@@ -1,4 +1,4 @@
-"""MainWindowBuildMixin — _build_ui constructor (Этап 10 mixin).
+"""MainWindowBuildMixin — _build_ui constructor.
 
 Extracted from ``Stream2VideoGUI``: the heavy ``_build_ui`` method that
 constructs every widget in the three-column layout (Info / Controls /
@@ -291,7 +291,7 @@ class MainWindowBuildMixin:
 
         # Audio quality preset — bitrate of the AAC encode. Kept separate
         # from video_quality so a 192k/256k source is not silently downgraded
-        # to 128k (P0.3 in the fix plan).
+        # to 128k.
         ctk.CTkLabel(opt_frame, text="Audio:", width=62, anchor="w").grid(
             row=2, column=2, sticky="w", padx=(0, 4), pady=(0, 2)
         )
@@ -371,10 +371,9 @@ class MainWindowBuildMixin:
 
         # Resource preset — bundle of tunables (x264_low_memory,
         # memory_limit_mb, batch_chunk_size, low_process_priority). The
-        # combobox sets a baseline; the individual checkboxes/inputs
-        # below still win on a per-key basis (their last write to
-        # self.config during _collect_gui_state takes precedence over
-        # preset application during _start_pipeline).
+        # combobox's preset is applied to the run's config snapshot at
+        # Start (see _start_pipeline); ``balanced`` is the identity
+        # preset, so with it the checkbox choices below are used as-is.
         preset_row = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
         preset_row.pack(fill="x", padx=5, pady=(2, 2))
         ctk.CTkLabel(preset_row, text="Resource preset:", width=112, anchor="w").pack(
@@ -392,17 +391,16 @@ class MainWindowBuildMixin:
             self.combo_preset,
             "Resource preset — a bundle of tunables (x264_low_memory, "
             "memory_limit_mb, batch_chunk_size, low_process_priority) "
-            "applied as a baseline before any explicit overrides.\n"
+            "applied on top of the current settings at Start.\n"
             "  - low_memory: 4-8 GB machines (x264_low_memory=True, "
             "batch_chunk_size=20, low_process_priority=True).\n"
-            "  - balanced: historical defaults.\n"
+            "  - balanced: no changes (identity).\n"
             "  - maximum_performance: trade RAM for throughput "
             "(x264_low_memory=False, memory_limit_mb=0, "
             "batch_chunk_size=80).\n"
-            "Explicit checkboxes below still override the preset on "
-            "a per-key basis — e.g. pick 'low_memory' then uncheck "
-            "'low_process_priority' to keep the other low-memory "
-            "tunables but restore normal scheduling priority.",
+            "The preset's own keys win over the matching checkboxes "
+            "below for the run; pick 'balanced' to have the checkboxes "
+            "applied verbatim.",
         )
 
         advanced_toggle_frame = ctk.CTkFrame(ctrl_frame, fg_color="transparent")

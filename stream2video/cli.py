@@ -113,7 +113,7 @@ def _doctor_callback(ctx: typer.Context, param: Any, value: bool) -> bool:
             if arg in ("--config", "-c"):
                 # The value must actually be the next token AND not look
                 # like another flag (``-c --doctor`` would otherwise
-                # become Path("--doctor")). (B11 audit.)
+                # become Path("--doctor")).
                 if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
                     cfg = Path(argv[i + 1])
                 break
@@ -126,7 +126,7 @@ def _doctor_callback(ctx: typer.Context, param: Any, value: bool) -> bool:
         # ``--log-format json`` is also non-eager, so it hasn't populated
         # _JSON_LOG_MODE yet when --doctor fires. Scan argv again (same
         # rationale as --config above) so the doctor's "line-per-object"
-        # contract actually fires (fix-plan #27).
+        # contract actually fires.
         global _JSON_LOG_MODE
         for i, arg in enumerate(argv):
             if arg == "--log-format" and i + 1 < len(argv) and argv[i + 1] == "json":
@@ -658,7 +658,7 @@ def main(
         )
         raise typer.Exit(1)
 
-    # Configure root logging ONCE at entry — see P2.9 in the fix plan.
+    # Configure root logging ONCE at entry.
     # Previously ``logging.basicConfig`` ran at import time, which
     # hijacked the root logger of any host application that imported
     # stream2video.cli (tests, GUI embeds, downstream tools). Doing it
@@ -721,7 +721,7 @@ def main(
 
     # --doctor: environment diagnostics, no pipeline. Runs BEFORE
     # output_dir creation so a diagnostics invocation doesn't leave a
-    # side-effect directory behind (B11 audit: mkdir ran earlier and
+    # side-effect directory behind (mkdir ran earlier and
     # also fired before config validation, so a bad YAML + --doctor
     # combination created junk directories and a raw PermissionError
     # traceback when the target was unwritable).
@@ -757,7 +757,7 @@ def main(
     # Marking the installed handler's owner lets the ``finally`` block
     # detect that case and restore ``SIG_DFL`` instead, which is the only
     # well-defined "previous" state a bare script had before the CLI ran.
-    # fix-plan #19: identity check against the module-level reference in
+    # Identity check against the module-level reference in
     # cli_helpers, not a name+module heuristic — a refactor that renamed
     # the closure would break the old check silently.
     import stream2video.cli_helpers as _ch
@@ -1003,7 +1003,7 @@ def main(
                     # advances meaningfully.
                     progress.update(task1, total=None, completed=0.0)
 
-                # P2.7: delegate the description formatting to the shared
+                # Delegate the description formatting to the shared
                 # helper so the CLI and GUI stay in sync. Previously the
                 # CLI rolled its own percent/speed/ETA string here; when
                 # the GUI's format diverged (different separator, different
@@ -1096,7 +1096,7 @@ def main(
                 if download_result.is_downloaded:
                     logger.info(f"Moved source into project dir: {video_path}")
                 if fh is not None:
-                    # Safe swap (fix-plan #13): the old handler must stay
+                    # Safe swap: the old handler must stay
                     # attached until the new one is proven constructible —
                     # but on Windows the open FileHandler holds a lock that
                     # blocks shutil.move (WinError 32), so the move happens
@@ -1149,12 +1149,17 @@ def main(
 
             # Pre-flight memory-reserve check, same as the GUI controller.
             # Refuse to start a heavy phase when available RAM is already
-            # below the configured reserve.
-            if not check_memory_reserve(resolved_memory_reserve_mb, "silence detection"):
-                console.print(
-                    f"[red]Not enough free RAM:[/red] below reserve "
-                    f"{resolved_memory_reserve_mb} MB -- refusing to start silence detection."
-                )
+            # below the configured reserve. The message comes from
+            # memory.check_memory_reserve itself (via ``on_log``) so the
+            # console shows the ONE canonical wording — the CLI used to
+            # print its own third formulation ("Not enough free RAM: ..."),
+            # which duplicated the same warning with different words
+            # (audit R4.6).
+            if not check_memory_reserve(
+                resolved_memory_reserve_mb,
+                "silence detection",
+                on_log=lambda msg: console.print(f"[red]{msg}[/red]"),
+            ):
                 raise typer.Exit(1)
 
             try:
@@ -1168,7 +1173,7 @@ def main(
                         progress.update(task2, completed=min(f * 100, 100))
 
                     # Resume cache: the CLI and GUI share ONE canonical
-                    # path (fix-plan #4): ``build_resume_cache_path``
+                    # path: ``build_resume_cache_path``
                     # embeds a hash of the resolved source path so two
                     # videos that share a stem but live in different
                     # directories don't share one resume file. Previously
@@ -1302,11 +1307,11 @@ def main(
                     progress.update(task_concat, completed=min((fraction - 0.9) / 0.1 * 100, 100))
 
             try:
-                if not check_memory_reserve(resolved_memory_reserve_mb, "concat phase"):
-                    console.print(
-                        f"[red]Not enough free RAM:[/red] below reserve "
-                        f"{resolved_memory_reserve_mb} MB -- refusing to start concat."
-                    )
+                if not check_memory_reserve(
+                    resolved_memory_reserve_mb,
+                    "concat phase",
+                    on_log=lambda msg: console.print(f"[red]{msg}[/red]"),
+                ):
                     raise typer.Exit(1)
                 output_video = output_dir / f"{artifact_stem(video_path)}_{output_suffix}"
 

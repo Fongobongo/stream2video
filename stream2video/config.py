@@ -24,14 +24,14 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     # preserves the historical behaviour (no thread hint) so an upgrade
     # doesn't quietly change the load profile of an existing user.
     "encoder_threads": "auto",
-    # Output FPS policy (P1.17). ``source`` (default) preserves the
+    # Output FPS policy. ``source`` (default) preserves the
     # input's frame cadence — no -r / -fps_mode is added to the encoder
     # command, so a 30 FPS source comes out at 30 FPS without frame
     # duplication. ``24`` / ``25`` / ``30`` / ``50`` / ``60`` force a
     # CFR conversion via the ``fps`` filter; the docs warn about the
     # size/quality cost of duplicated frames.
     "output_fps": "source",
-    # RAM budget (P1.17 / Этап 8A). ``auto`` = 60% of total RAM at the
+    # RAM budget. ``auto`` = 60% of total RAM at the
     # start of the run; a positive int is taken as a MB cap. ``None`` /
     # ``0`` disables the budget check (only the OS reserve remains).
     "memory_limit_mb": "auto",
@@ -76,14 +76,14 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     # adds priming only once. Users who want the old (faster, concat
     # demuxer) behaviour can flip it off.
     "gapless_concat": True,
-    # Lower ffmpeg scheduling priority (opt-in, P3.x). When True, ffmpeg
+    # Lower ffmpeg scheduling priority (opt-in). When True, ffmpeg
     # subprocesses are spawned at BELOW_NORMAL_PRIORITY_CLASS on Windows
     # and nice +10 on POSIX so a long-running encode doesn't starve
     # interactive applications. Useful for unattended batch processing
     # on shared/desktop machines. Default False preserves the historical
     # behaviour (normal priority, faster encoding).
     "low_process_priority": False,
-    # RLIMIT_AS cap for ffmpeg subprocesses (POSIX-only, opt-in, P3.x).
+    # RLIMIT_AS cap for ffmpeg subprocesses (POSIX-only, opt-in).
     # When > 0, every spawned ffmpeg subprocess is forked with
     # ``resource.setrlimit(RLIMIT_AS, (cap, cap))`` in preexec_fn so
     # it cannot allocate more than this many MiB of virtual address
@@ -96,7 +96,7 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     # only memory door there). 0 disables the cap (default) and
     # preserves the historical behaviour.
     "rlimit_as_mb": 0,
-    # Download watchdog timeouts (P1.6). Absolute ceiling + two-stage
+    # Download watchdog timeouts. Absolute ceiling + two-stage
     # watchdog so a stalled connection doesn't wait the full ceiling.
     # Exposed via --download-timeout / --connect-timeout /
     # --no-progress-timeout in the CLI; the GUI uses these defaults.
@@ -111,7 +111,7 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     # address in "proxy" is always kept (so it's not lost when the proxy
     # is temporarily disabled; the dialog re-opens prefilled).
     "proxy_active": False,
-    # Pipeline phase timeouts (P3.4). Exposed via CLI flags
+    # Pipeline phase timeouts. Exposed via CLI flags
     # (--segment-timeout / --final-concat-timeout / --silence-timeout
     # / --stall-timeout) and plumbed through PipelineConfig; module-
     # level constants in concat.py / silence.py remain as fallbacks
@@ -121,14 +121,14 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     "silence_timeout": 36000,  # 10h silence detection ceiling
     "stall_kill_timeout": 300,  # 5 min no-progress -> kill ffmpeg
     "stall_warning_timeout": 120,  # 2 min no-progress -> warn
-    # Waveform preview decode timeout (P3.4). Bounds the ffmpeg
+    # Waveform preview decode timeout. Bounds the ffmpeg
     # invocation that reads peaks for the popup.
     "waveform_timeout": 300,  # 5 min
-    # Batch chunk size (P3.4). Number of keep-segments per batch
+    # Batch chunk size. Number of keep-segments per batch
     # filter invocation; scaled down dynamically for large counts.
     "batch_chunk_size": 40,
-    # Minimum bytes for a resumed part file to be considered valid
-    # (P3.4). Smaller files are treated as corrupt and re-encoded.
+    # Minimum bytes for a resumed part file to be considered valid.
+    # Smaller files are treated as corrupt and re-encoded.
     "min_part_bytes": 1024,
     "preset": "balanced",
     "force": False,
@@ -156,17 +156,16 @@ CONFIG_DEFAULTS: dict[str, Any] = {
 }
 
 # ---------------------------------------------------------------------------
-# Resource presets (P3.x). Bundle existing tunables (x264_low_memory,
+# Resource presets. Bundle existing tunables (x264_low_memory,
 # memory_limit_mb, memory_reserve_mb, batch_chunk_size, low_process_priority,
 # encoder_threads) into three named profiles so a user can pick a goal at a
 # glance instead of toggling six flags. ``balanced`` is the empty identity
-# preset — it applies no overrides itself, but applying it still resets all
-# PRESET_MANAGED_KEYS back to CONFIG_DEFAULTS so switching presets in the GUI
-# doesn't stay sticky.
-# The other two override only the tunables
-# listed below — pipeline-only settings (method, encoder, *_quality,
-# threshold, min_silence, margin, timeouts, gapless_concat) always come from
-# the user's existing config and are *never* touched by apply_preset.
+# preset — applying it changes nothing, so a user's config (YAML values,
+# GUI checkbox choices) survives untouched.
+# Each preset overrides only the tunables listed below — pipeline-only
+# settings (method, encoder, *_quality, threshold, min_silence, margin,
+# timeouts, gapless_concat) always come from the user's existing config and
+# are *never* touched by apply_preset.
 #
 # ``low_memory`` trades speed for stability on 4-8 GB machines:
 #   * x264_low_memory=True → rc-lookahead=10 / ref=1 / bframes=0 (smaller
@@ -200,10 +199,9 @@ PRESETS: dict[str, dict[str, Any]] = {
         "x264_low_memory": True,
         "low_process_priority": True,
     },
-    # balanced: identity preset — the GUI resets preset-managed tunables
-    # to CONFIG_DEFAULTS when the user switches back to balanced (see
-    # PRESET_MANAGED_KEYS); no additional overrides here so a user's YAML
-    # ``gapless_concat: false`` isn't silently re-enabled on every run.
+    # balanced: identity preset — applies no overrides, so a user's YAML
+    # (``x264_low_memory: true`` etc.) and the GUI's checkbox choices are
+    # never silently overwritten by the default preset.
     "balanced": {},
     "maximum_performance": {
         "x264_low_memory": False,
@@ -214,31 +212,26 @@ PRESETS: dict[str, dict[str, Any]] = {
 
 PRESET_NAMES = tuple(PRESETS.keys())
 DEFAULT_PRESET = "balanced"
-PRESET_MANAGED_KEYS = frozenset(
-    key for name, values in PRESETS.items() if name != DEFAULT_PRESET for key in values
-)
 
 
 def apply_preset(config: dict[str, Any], preset: str) -> dict[str, Any]:
     """Return a new config dict with the preset's tunables applied.
 
     Pure: doesn't mutate ``config``. Unknown ``preset`` raises
-    ``ValueError`` so the CLI / GUI can surface the typo. When ``preset``
-    equals ``balanced`` the returned dict resets preset-managed tunables
-    to ``CONFIG_DEFAULTS``. This lets the GUI undo a previously selected
-    resource preset without requiring a restart.
+    ``ValueError`` so the CLI / GUI can surface the typo.
 
-    Presets only touch the union of tunables listed in ``PRESETS``;
-    anything else the user set is preserved. Callers that have explicit
-    per-field overrides should apply them after this function.
+    Presets only overlay the keys listed in ``PRESETS[preset]``;
+    everything else the user set is preserved verbatim (YAML values,
+    GUI checkbox choices). ``balanced`` is the identity preset — the
+    returned dict differs from ``config`` only in the ``preset`` key.
+    Callers that have explicit per-field overrides should apply them
+    after this function.
     """
     if preset not in PRESETS:
         raise ValueError(
             f"Unknown preset {preset!r} (use {' or '.join(repr(p) for p in PRESET_NAMES)})"
         )
     out = dict(config)
-    for key in PRESET_MANAGED_KEYS:
-        out[key] = CONFIG_DEFAULTS[key]
     out.update(PRESETS[preset])
     out["preset"] = preset
     return out
@@ -248,7 +241,7 @@ CONFIG_RANGES = {
     "threshold": (-60, -5),
     "min_silence": (0.1, 60),
     "margin": (-3, 5),
-    # Pipeline phase timeouts (P3.4). Lower bound 1s rejects typos /
+    # Pipeline phase timeouts. Lower bound 1s rejects typos /
     # accidental zero; upper bound 7 days accommodates pathological
     # long-running encodes without making the watchdog effectively
     # disabled.
@@ -260,6 +253,16 @@ CONFIG_RANGES = {
     "waveform_timeout": (10, 3600),
     "batch_chunk_size": (1, 500),
     "min_part_bytes": (1, 10485760),
+    # Download watchdogs: same "1s floor / sane ceiling"
+    # contract as the phase timeouts, mirrored by PARAM_SPECS so the
+    # CLI rejects what YAML rejects.
+    "download_timeout": (1, 604800),
+    "connect_timeout": (1, 3600),
+    "no_progress_timeout": (1, 86400),
+    # Memory budgets in MiB. 0 disables the cap; the ceiling is a pure
+    # overflow guard, far beyond any real machine.
+    "memory_reserve_mb": (0, 1048576),
+    "rlimit_as_mb": (0, 1048576),
 }
 
 VALID_METHODS: list[str] = ["segment", "batch", "cut_then_encode"]
@@ -295,7 +298,7 @@ VALID_X264_PRESETS: list[str] = [
     "slower",
 ]
 
-# Output FPS policy (P1.17). ``source`` preserves the input's frame
+# Output FPS policy. ``source`` preserves the input's frame
 # cadence; the integer values force a CFR conversion.
 VALID_OUTPUT_FPS: list[str] = ["source", "24", "25", "30", "50", "60"]
 
@@ -395,7 +398,7 @@ USER_DEFAULT_KEYS: list[str] = [
     "no_progress_timeout",
     "proxy",
     "proxy_active",
-    # Pipeline phase timeouts + tuning (P3.4)
+    # Pipeline phase timeouts + tuning
     "segment_encode_timeout",
     "final_concat_timeout",
     "silence_timeout",
@@ -481,6 +484,15 @@ def coerce_typed_value(key: str, value: Any) -> Any:
     if isinstance(default, int | float):
         if isinstance(value, bool) or not isinstance(value, int | float):
             return None
+        # YAML/JSON numbers have no int/float distinction the way
+        # Python does — ``2048.0`` parses as float. For an INT-typed
+        # default, coerce integral floats back to int so a
+        # ``memory_reserve_mb: 2048.0`` doesn't leak a float into an
+        # int-typed PipelineConfig slot (mirrors the ``memory_limit_mb``
+        # special case above). Non-integral floats pass through for
+        # float-typed defaults.
+        if isinstance(default, int) and isinstance(value, float):
+            return int(value)
         return value
     if isinstance(default, str):
         return value if isinstance(value, str) else None

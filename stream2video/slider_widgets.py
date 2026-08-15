@@ -1,5 +1,5 @@
 """Pure slider text parsing / formatting helpers — extracted from
-``gui.py`` (Этап 10 incremental refactor).
+``gui.py`` (incremental refactor).
 
 The GUI's slider rows pair a ``CTkSlider`` with a ``CTkEntry`` so the
 user can either drag or type the value. Two parsing / formatting

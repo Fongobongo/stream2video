@@ -1,4 +1,4 @@
-"""DialogsMixin — file open / directory picker dialogs (Этап 10 mixin).
+"""DialogsMixin — file open / directory picker dialogs.
 
 Extracted from ``Stream2VideoGUI``: the ``_browse_input`` /
 ``_browse_output`` handlers that pop a ``tkinter.filedialog`` chooser

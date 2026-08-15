@@ -10,6 +10,7 @@ the render pipeline live in sibling modules.
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from tkinter import Event
 from typing import Any
@@ -41,8 +42,8 @@ class WaveformWindowMixin:
         self.lbl_wave_status: ctk.CTkLabel | None = None
         self._waveform_ctk_image: ctk.CTkImage | None = None
         self._waveform_render_token = 0
-        # Live-poller session token (B8 audit): ``_apply_view`` bumps
-        # ``_waveform_render_token`` on EVERY render (fix-plan #12) to
+        # Live-poller session token: ``_apply_view`` bumps
+        # ``_waveform_render_token`` on EVERY render to
         # invalidate in-flight PIL renders, so a live poller that checked
         # that token died after its first overlay update. This token is
         # bumped only when a NEW render cycle starts, so the poller can
@@ -300,7 +301,19 @@ class WaveformWindowMixin:
         self._tk_after(50, self._render_waveform_preview)
 
     def _on_waveform_close(self) -> None:
-        """Destroy the waveform popup and null its refs."""
+        """Destroy the waveform popup, null its refs, and reset state.
+
+        Retires in-flight renders/pollers (token bumps) and kills the
+        preview ffmpeg on a background thread — ``cancel_process``
+        blocks up to its timeout (kill + wait + pipe-close), so running
+        it on the Tk main thread would freeze the whole GUI while the
+        popup closes.
+        """
+        # Retire any in-flight render (PIL worker) and live poller so
+        # they see the tokens move and return instead of touching the
+        # destroyed widgets.
+        self._waveform_render_token += 1
+        self._waveform_poll_token += 1
         wave_win = getattr(self, "_wave_window", None)
         if wave_win is not None:
             wave_win.destroy()
@@ -326,10 +339,34 @@ class WaveformWindowMixin:
                 pass
             self._waveform_tooltip_after_id = None
         self._waveform_last_motion_event = None
+        # Reset the waveform *state* (not just the widget refs): a
+        # stale peaks/duration/output_dir from the previous popup would
+        # leak into the next open (e.g. the "Render" button would draw
+        # the OLD video's waveform).
+        self._waveform_peaks = []
+        self._waveform_duration = 0.0
+        self._waveform_margin = 0.0
+        self._waveform_output_dir = None
+        self._waveform_video_name = ""
+        self._waveform_video_path = None
+        self._waveform_view_start = 0.0
+        self._waveform_view_end = 0.0
+        self._waveform_cursor_frac = 0.5
+        self._waveform_cursor_known = False
+        self._waveform_last_segments = []
+        self._waveform_running = False
         # Kill any ffmpeg subprocess spawned for audio peaks (Phase 1)
         # or dry-run detect (Phase 2) so it doesn't linger after popup
-        # close. Uses the scoped "preview" owner (P1.11 / utils.py).
-        cancel_process("preview", timeout=5.0)
+        # close. Uses the scoped "preview" owner (utils.py).
+        # Runs off the Tk thread: kill+wait+pipe-close can take up to
+        # the 5 s timeout, and the GUI must stay responsive while the
+        # popup closes (e.g. a user closing the window during a long
+        # peak-extraction drags a frozen main loop otherwise).
+        threading.Thread(
+            target=lambda: cancel_process("preview", timeout=5.0),
+            daemon=True,
+            name="waveform-close-cancel",
+        ).start()
 
     def _on_waveform_window_configure(self, event: Any) -> None:
         """Re-render the waveform when the popup is resized.

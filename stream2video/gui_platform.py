@@ -1,4 +1,4 @@
-"""Platform helpers extracted from ``gui.py`` (Этап 10 incremental).
+"""Platform helpers extracted from ``gui.py``.
 
 Pure / OS-level operations that don't depend on Tk state: directory
 size probing and the cross-platform "open in file manager" call.

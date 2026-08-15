@@ -262,10 +262,10 @@ class TestSaveUserDefaults:
 
 
 class TestPipelinePhaseTimeouts:
-    """P3.4: pipeline phase timeouts + tunables exposed via CONFIG_DEFAULTS.
+    """Pipeline phase timeouts + tunables exposed via CONFIG_DEFAULTS.
 
     These were previously module-level constants in concat.py / silence.py
-    / waveform.py; the fix-plan's P3.4 task moved them into the shared config
+    / waveform.py; the task moved them into the shared config
     so the CLI / GUI can override without code edits.
     """
 
@@ -280,7 +280,7 @@ class TestPipelinePhaseTimeouts:
             "batch_chunk_size",
             "min_part_bytes",
         ):
-            assert key in CONFIG_DEFAULTS, f"missing P3.4 key {key!r}"
+            assert key in CONFIG_DEFAULTS, f"missing key {key!r}"
 
     def test_phase_timeout_defaults_match_historical_values(self):
         # Defaults must match the historical module-level constants so
@@ -417,18 +417,26 @@ class TestApplyPreset:
         assert out == CONFIG_DEFAULTS
         assert out is not CONFIG_DEFAULTS  # copy, not alias
 
-    def test_balanced_resets_preset_tunables(self):
-        # Switching back to balanced must undo values left by another
-        # preset; otherwise the GUI preset combo becomes sticky until
-        # restart.
+    def test_balanced_preserves_user_tunables(self):
+        # Balanced is the identity preset: it must NOT reset preset-managed
+        # keys to CONFIG_DEFAULTS — a YAML with ``x264_low_memory: true`` /
+        # ``x264_preset: slow`` / ``memory_limit_mb: 4096`` or GUI checkbox
+        # choices would otherwise be silently wiped on every run (the
+        # previous reset-to-defaults behaviour, audit P0-1).
         cfg = dict(CONFIG_DEFAULTS)
         cfg["x264_low_memory"] = True
         cfg["batch_chunk_size"] = 20
         cfg["low_process_priority"] = True
+        cfg["x264_preset"] = "slow"
+        cfg["encoder_threads"] = 4
+        cfg["memory_limit_mb"] = 4096
         out = apply_preset(cfg, "balanced")
-        assert out["x264_low_memory"] is CONFIG_DEFAULTS["x264_low_memory"]
-        assert out["batch_chunk_size"] == CONFIG_DEFAULTS["batch_chunk_size"]
-        assert out["low_process_priority"] is CONFIG_DEFAULTS["low_process_priority"]
+        assert out["x264_low_memory"] is True
+        assert out["batch_chunk_size"] == 20
+        assert out["low_process_priority"] is True
+        assert out["x264_preset"] == "slow"
+        assert out["encoder_threads"] == 4
+        assert out["memory_limit_mb"] == 4096
         assert out["preset"] == "balanced"
 
     def test_low_memory_overrides_tunables(self):

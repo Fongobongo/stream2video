@@ -1,4 +1,4 @@
-"""Resume manifest handling (P0.6).
+"""Resume manifest handling.
 
 A manifest is written next to the segment/batch working directory the
 first time a run starts. On resume, the manifest is loaded and validated
@@ -66,7 +66,7 @@ def _source_identity(video_path: Path) -> dict:
     concat list references segments by their position in the run, so a
     path rename invalidates the work dir deliberately.
 
-    ``head_tail_hash`` (fix-plan #24): catches the case where a copy
+    ``head_tail_hash``: catches the case where a copy
     tool preserved both mtime and size but the *content* changed —
     re-downloads of the same stream land exactly here (same duration →
     same size; robocopy preserves mtime).

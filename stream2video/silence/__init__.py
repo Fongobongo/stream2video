@@ -52,8 +52,6 @@ from stream2video.silence.parser import (
     _RESUME_THROTTLE_S,
     _SAMPLE_VERIFY_DURATION,
     _SEGMENT_MATCH_TOLERANCE,
-    _SILENCE_END_RE,
-    _SILENCE_START_RE,
     _SILENCE_TIMEOUT,
     SilenceCancelledError,
     SilenceDetectionError,
@@ -62,7 +60,6 @@ from stream2video.silence.parser import (
     SilenceSegment,
     _noop_on_segment,
     _parse_ffmpeg_output,
-    _to_float,
     apply_margin,
 )
 from stream2video.silence.pipeline import detect_silence
@@ -93,8 +90,6 @@ __all__ = [
     "_RESUME_THROTTLE_S",
     "_SAMPLE_VERIFY_DURATION",
     "_SEGMENT_MATCH_TOLERANCE",
-    "_SILENCE_END_RE",
-    "_SILENCE_START_RE",
     "_SILENCE_TIMEOUT",
     "SilenceCancelledError",
     "SilenceDetectionError",
@@ -112,7 +107,6 @@ __all__ = [
     "_run_silencedetect",
     "_sample_segments_match",
     "_save_cache",
-    "_to_float",
     "apply_margin",
     "build_resume_cache_path",
     "build_silence_cache_path",

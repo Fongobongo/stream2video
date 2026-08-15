@@ -283,8 +283,8 @@ class TestFfmpegInvocation:
         assert elapsed < 5.0, f"Cancel took {elapsed:.1f}s, expected <5s"
 
     def test_run_ffmpeg_stall_watchdog_kills_on_no_progress(self):
-        """Fix-plan P1.5 / section 4: "Stall detector не срабатывает при
-        полном молчании ffmpeg".
+        """Stall detector не срабатывает при
+        полном молчании ffmpeg.
 
         When ffmpeg produces no ``out_time_us=`` progress line for longer
         than ``stall_kill`` seconds, the stall watchdog (a daemon thread
@@ -638,7 +638,7 @@ class TestEncoderFallbackCleanup:
         )
 
     def test_fallback_preserves_parts_and_retags_manifest(self, tmp_path: Path):
-        """C13 audit: the libx264 fallback must NOT wipe the work dir —
+        """The libx264 fallback must NOT wipe the work dir —
         hours of correctly-encoded HW parts survive as reusable files,
         and the manifest is retagged to the libx264 identity so the
         retry's ``_ensure_fresh_work_dir`` accepts the dir and its
@@ -693,6 +693,9 @@ class TestEncoderQualityPresets:
         legacy = {
             "h264_mf": ["-b:v", "7000k", "-quality", "100"],
             "h264_amf": ["-usage", "transcoding", "-quality", "speed", "-b:v", "7000k"],
+            # The historical ``-cq 18`` was dropped in the P0 audit —
+            # a hard-coded quality floor fights the quality ladder and
+            # belongs to the use_crf=True path only.
             "h264_nvenc": [
                 "-preset",
                 "p7",
@@ -702,8 +705,6 @@ class TestEncoderQualityPresets:
                 "7000k",
                 "-maxrate",
                 "7000k",
-                "-cq",
-                "18",
             ],
             "libx264": [
                 "-b:v",
@@ -743,10 +744,10 @@ class TestEncoderQualityPresets:
                     assert opts[m_idx + 1] == br, f"{enc} {q}: -maxrate must be {br}"
 
     def test_use_crf_tracks_quality_for_all_encoders(self):
-        from stream2video.concat import _X264_CRF
+        from stream2video.concat import _CRF_PER_QUALITY
 
-        assert _X264_CRF == {"high": "18", "medium": "23", "low": "28"}
-        for q, crf in _X264_CRF.items():
+        assert _CRF_PER_QUALITY == {"high": "18", "medium": "23", "low": "28"}
+        for q, crf in _CRF_PER_QUALITY.items():
             opts = encoder_opts("libx264", q, use_crf=True)
             idx = opts.index("-crf")
             assert opts[idx + 1] == crf
@@ -755,7 +756,10 @@ class TestEncoderQualityPresets:
             nvenc = encoder_opts("h264_nvenc", q, use_crf=True)
             assert "-cq" in nvenc
             assert nvenc[nvenc.index("-cq") + 1] == crf
-            assert "-b:v" not in nvenc
+            # CRF-like NVENC mode must disable the target bitrate
+            # (``-b:v 0``) or the wrapper falls back to a default
+            # bitrate model and ``-cq`` is ignored.
+            assert nvenc[nvenc.index("-b:v") + 1] == "0"
 
             amf = encoder_opts("h264_amf", q, use_crf=True)
             assert "-qp_i" in amf
@@ -801,7 +805,12 @@ class TestEncoderQualityPresets:
     def test_source_video_quality_maps_to_high_in_crf_mode(self):
         for enc in ("h264_mf", "h264_amf", "h264_nvenc", "libx264"):
             opts = encoder_opts(enc, "source", use_crf=True)
-            assert "-b:v" not in opts
+            if enc == "h264_nvenc":
+                # CRF-like NVENC mode disables the target bitrate
+                # with ``-b:v 0`` so ``-cq`` is the sole control.
+                assert opts[opts.index("-b:v") + 1] == "0"
+            else:
+                assert "-b:v" not in opts
             if enc == "libx264":
                 assert opts[opts.index("-crf") + 1] == "18"
             elif enc == "h264_nvenc":
@@ -831,7 +840,7 @@ class TestEncoderQualityPresets:
         """When the primary encoder is unavailable, the libx264 fallback
         must use the same video_quality preset (CRF) the user requested.
         """
-        from stream2video.concat import _X264_CRF
+        from stream2video.concat import _CRF_PER_QUALITY
 
         calls: list[tuple[str, list[str]]] = []
 
@@ -857,13 +866,13 @@ class TestEncoderQualityPresets:
         # The fallback libx264 call must use CRF 28 (low preset).
         libx264_opts = calls[-1][1]
         crf_idx = libx264_opts.index("-crf")
-        assert libx264_opts[crf_idx + 1] == _X264_CRF["low"]
+        assert libx264_opts[crf_idx + 1] == _CRF_PER_QUALITY["low"]
 
 
 class TestEncoderThreadsPosition:
     """``-threads`` must appear after the encoder spec and before output path.
 
-    The fix plan (Этап 3, item 17) requires that ``-threads N`` is
+    The fix plan requires that ``-threads N`` is
     positioned AFTER ``-c:v libx264`` (or the HW encoder equivalent) so
     it caps the encoder's thread pool, not the decoder's. This is tested
     at the ``encoder_opts()`` level since the full command construction
@@ -905,7 +914,7 @@ class TestEncoderThreadsPosition:
 
 
 class TestResumeManifestValidation:
-    """P3.4 / fix-plan §4 Resume/failure: manifest mismatch scenarios.
+    """Manifest mismatch scenarios.
 
     These cover the resume-failure matrix items that don't need a real
     ffmpeg encode — manifest validation is pure dict comparison and can
@@ -1097,8 +1106,7 @@ class TestSourceIdentity:
 
 
 class TestFfprobeIsValidMp4:
-    """_ffprobe_is_valid_mp4 — corrupt/missing-moov detection (fix-plan §4
-    Resume/failure: corrupt/missing-moov temp file).
+    """_ffprobe_is_valid_mp4 — corrupt/missing-moov detection.
 
     Skipped when ffprobe isn't on PATH so the suite still runs in
     environments without ffmpeg installed.
@@ -1224,7 +1232,7 @@ class TestFfprobeIsValidMedia:
 
 
 class TestSegmentResumeSkipCrashArtifact:
-    """Fix-plan section 4 Resume/failure: crash mid-segment.
+    """Resume/failure: crash mid-segment.
 
     When ffmpeg crashes mid-encode (e.g. power failure, OOM kill), it
     leaves a truncated MP4 without a moov atom on disk. On the next run,
@@ -1421,7 +1429,7 @@ class TestSegmentResumeSkipCrashArtifact:
 
 
 class TestBatchResumeSkipCrashArtifact:
-    """Fix-plan section 4 Resume/failure: crash mid-batch.
+    """Resume/failure: crash mid-batch.
 
     Same scenario as TestSegmentResumeSkipCrashArtifact but for the
     batch path: a truncated chunk file (crash artifact) must be

@@ -1,4 +1,4 @@
-"""FileInfoMixin — Info panel population (Этап 10 mixin).
+"""FileInfoMixin — Info panel population.
 
 Extracted from ``Stream2VideoGUI``: the ``_update_file_info`` method
 that updates ``File:`` / ``Size:`` / ``Duration:`` labels in the left
@@ -20,7 +20,7 @@ class FileInfoMixin:
     """Populates the left-panel Info labels from a source path."""
 
     def _update_file_info(self, path: Path) -> None:
-        # Generation token (C18 audit): a slow ffprobe from an OLD file
+        # Generation token: a slow ffprobe from an OLD file
         # must not overwrite the labels after the user picked a NEW one.
         # Each call bumps the token; the async callback only writes when
         # its token is still current.
@@ -43,7 +43,7 @@ class FileInfoMixin:
             dur = get_video_duration(path)
             if not dur:
                 return
-            # P1.10: tkinter is not thread-safe. ``self.after`` from a
+            # Tkinter is not thread-safe. ``self.after`` from a
             # worker thread can race with the main loop's widget
             # teardown; ``_tk_after`` is the project's only safe entry
             # point for cross-thread widget writes.

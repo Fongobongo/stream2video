@@ -1,7 +1,7 @@
 """Tests for stream2video.waveform_popup.LiveSegmentsStore.
 
 The store replaced the GUI's inline ``self._live_segments`` dict +
-``self._live_segments_lock`` pair back in Этап 10 with a tiny
+``self._live_segments_lock`` pair back with a tiny
 unit-testable class. In v0.3+ it was *path-keyed*; that let a popup
 opened on the typed input path miss every live publish from a
 URL-pipeline run (which is keyed by the *resolved download path*).

@@ -1,4 +1,4 @@
-"""ProgressUiMixin — progress bar / status line / cancel button (Этап 10 mixin).
+"""ProgressUiMixin — progress bar / status line / cancel button.
 
 Extracted from ``Stream2VideoGUI``: the ``_ui_*`` family (worker-
 thread → main-thread dispatchers for every progress widget), the
@@ -73,8 +73,7 @@ class ProgressUiMixin:
         self._download_path: Path | None = None
         # ETA smoother + overall-progress snapshot used by ``_ui_overall``
         # to render the whole-pipeline ETA (``Total: X / ~Y``). Smoothed
-        # so the readout doesn't jitter second-to-second (P1.1/P1.2 of
-        # the progress-UI improvement plan).
+        # so the readout doesn't jitter second-to-second.
         self._phase_eta_smoother = EtaSmoother()
         self._overall_progress: float = 0.0
         # Theme default cached at widget-build time (``_build_ui``) so a

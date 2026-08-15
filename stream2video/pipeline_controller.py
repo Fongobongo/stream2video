@@ -1,4 +1,4 @@
-"""Pipeline controller extracted from ``gui.py`` (Этап 10 incremental).
+"""Pipeline controller extracted from ``gui.py``.
 
 The pipeline worker in ``gui._pipeline_worker`` is a ~350-line method
 that interleaves:
@@ -79,7 +79,7 @@ def _unlink_with_retry(path: Path, attempts: int = 5, delay_s: float = 0.2) -> b
     virus scanner or Windows Search indexer for tens of milliseconds
     (WinError 32). A bare ``unlink()`` then fails and the cleanup helper
     leaves garbage on disk — exactly the "failed run leaves a stale file"
-    bug the cleanup was designed to prevent (fix-plan #22). Retries with
+    bug the cleanup was designed to prevent. Retries with
     a short sleep absorb the transient lock; a final failure is logged
     with the full path so the user can delete it manually.
     """
@@ -102,8 +102,8 @@ class PipelineConfig:
     """Immutable snapshot of the pipeline inputs.
 
     The GUI snapshots widget values into this dataclass in the main
-    thread (Tk widgets are not thread-safe for cross-thread access —
-    see P1.10) and passes it to the worker thread. The worker reads
+    thread (Tk widgets are not thread-safe for cross-thread access)
+    and passes it to the worker thread. The worker reads
     only these local copies, so a concurrent slider / settings change
     doesn't race with the running pipeline.
     """
@@ -144,12 +144,12 @@ class PipelineConfig:
     # accumulate as A/V drift on multi-segment outputs. Default False
     # preserves the historical behaviour (concat demuxer, faster).
     gapless_concat: bool
-    # Lower ffmpeg scheduling priority (opt-in, P3.x). When True,
+    # Lower ffmpeg scheduling priority (opt-in). When True,
     # spawned ffmpeg subprocesses use BELOW_NORMAL_PRIORITY_CLASS on
     # Windows and nice +10 on POSIX so a long encode doesn't starve
     # interactive applications. See subprocess_kwargs in utils.py.
     low_process_priority: bool
-    # RLIMIT_AS cap for ffmpeg subprocesses (POSIX-only, opt-in, P3.x).
+    # RLIMIT_AS cap for ffmpeg subprocesses (POSIX-only, opt-in).
     # When > 0, the child is forked with resource.setrlimit(RLIMIT_AS,
     # (cap, cap)) so it cannot allocate more than this MiB of virtual
     # address space. No-op on Windows. See subprocess_kwargs in utils.py.
@@ -161,7 +161,7 @@ class PipelineConfig:
     # "socks5://..."). Empty string = direct connection. Passed to
     # yt-dlp as --proxy; ignored for local files.
     proxy: str = ""
-    # Pipeline phase timeouts + tuning (P3.4). Plumbed into
+    # Pipeline phase timeouts + tuning. Plumbed into
     # detect_silence / cut_and_concat / read_peaks_from_stream; module-
     # level constants in concat.py / silence.py / waveform.py remain
     # as fallbacks for direct callers that don't pass config values.
@@ -503,7 +503,7 @@ class PipelineController:
     def cleanup_incomplete_on_close(self) -> None:
         """Best-effort removal of artifacts left mid-run when the app closes.
 
-        B9 audit: the GUI's ``_on_close`` historically chased its own
+        The GUI's ``_on_close`` historically chased its own
         ``_output_path`` / ``_download_path`` fields, which were NEVER
         populated — the real paths live here, stamped by the download
         and concat phases. The worker registers this controller on the
@@ -657,6 +657,8 @@ class PipelineController:
                 connect_timeout=self.cfg.connect_timeout,
                 no_progress_timeout=self.cfg.no_progress_timeout,
                 proxy=self.cfg.proxy,
+                low_process_priority=self.cfg.low_process_priority,
+                rlimit_as_mb=self.cfg.rlimit_as_mb,
             )
         except DownloadCancelledError as e:
             # Mid-download cancel leaves a truncated file; surface that
@@ -776,7 +778,7 @@ class PipelineController:
             "margin": self.cfg.margin,
         }
 
-        # Canonical resume path shared with the CLI (fix-plan #4): both
+        # Canonical resume path shared with the CLI: both
         # front-ends must address the same checkpoint file, otherwise a
         # GUI-cancelled run is invisible to the CLI resume and vice versa.
         resume_cache_path = build_resume_cache_path(video_path, output_dir)

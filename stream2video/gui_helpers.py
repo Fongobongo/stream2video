@@ -1,4 +1,4 @@
-"""Pure-function helpers extracted from ``gui.py`` (P2.x in the fix plan).
+"""Pure-function helpers extracted from ``gui.py``.
 
 These functions have no Tk / no side effects so they can be unit-tested
 without instantiating the GUI. The GUI class delegates formatting and
@@ -16,6 +16,7 @@ from __future__ import annotations
 import shlex
 from pathlib import Path
 
+from stream2video.config import CONFIG_DEFAULTS
 from stream2video.formatters import fmt_clock_time, fmt_size, fmt_speed, fmt_time
 
 # Maximum length of the GUI's status-line text (per line when wrapped).
@@ -81,30 +82,31 @@ def build_cli_command(
     encoder: str,
     video_quality: str,
     download_quality: str,
-    audio_quality: str = "medium",
-    software_fallback: str = "ask",
-    x264_preset: str = "medium",
-    encoder_threads: str | int = "auto",
-    output_fps: str = "source",
+    audio_quality: str = CONFIG_DEFAULTS["audio_quality"],
+    software_fallback: str = CONFIG_DEFAULTS["software_fallback"],
+    x264_preset: str = CONFIG_DEFAULTS["x264_preset"],
+    encoder_threads: str | int = CONFIG_DEFAULTS["encoder_threads"],
+    output_fps: str = CONFIG_DEFAULTS["output_fps"],
     output_format: str = "video",
     x264_low_memory: bool = False,
     use_crf: bool = False,
-    gapless_concat: bool = False,
+    gapless_concat: bool = CONFIG_DEFAULTS["gapless_concat"],
     low_process_priority: bool = False,
-    preset: str = "balanced",
-    memory_limit_mb: str | int = "auto",
-    memory_reserve_mb: int = 2048,
-    segment_encode_timeout: int = 600,
-    final_concat_timeout: int = 86400,
-    silence_timeout: int = 36000,
-    stall_kill_timeout: int = 300,
-    waveform_timeout: int = 300,
-    batch_chunk_size: int = 40,
-    min_part_bytes: int = 1024,
+    preset: str = CONFIG_DEFAULTS["preset"],
+    memory_limit_mb: str | int = CONFIG_DEFAULTS["memory_limit_mb"],
+    memory_reserve_mb: int = CONFIG_DEFAULTS["memory_reserve_mb"],
+    segment_encode_timeout: int = CONFIG_DEFAULTS["segment_encode_timeout"],
+    final_concat_timeout: int = CONFIG_DEFAULTS["final_concat_timeout"],
+    silence_timeout: int = CONFIG_DEFAULTS["silence_timeout"],
+    stall_kill_timeout: int = CONFIG_DEFAULTS["stall_kill_timeout"],
+    waveform_timeout: int = CONFIG_DEFAULTS["waveform_timeout"],
+    batch_chunk_size: int = CONFIG_DEFAULTS["batch_chunk_size"],
+    min_part_bytes: int = CONFIG_DEFAULTS["min_part_bytes"],
     force: bool = False,
     delete_after: bool = False,
     config_path: Path | None = None,
     proxy: str = "",
+    per_video_dir: bool = CONFIG_DEFAULTS["per_video_dir"],
 ) -> str:
     """Build the equivalent CLI invocation for the current GUI settings.
 
@@ -114,11 +116,15 @@ def build_cli_command(
     clipboard.
 
     The shape mirrors what the CLI actually accepts (see
-    ``stream2video.cli.main``). The newer flags (``--audio-quality``,
-    ``--software-fallback``, ``--x264-preset``, ``--encoder-threads``,
-    ``--output-fps``) are appended only when their value diverges from
-    the default — that keeps the copied command readable when the user
-    hasn't customised everything.
+    ``stream2video.cli.main``). Defaults are taken from
+    ``CONFIG_DEFAULTS``; flags are appended only when their value
+    diverges from that default — that keeps the copied command readable
+    when the user hasn't customised everything. Two booleans invert
+    that rule because the CLI's own default resolves through the config
+    file, which defaults to True: ``gapless_concat`` and
+    ``per_video_dir`` are emitted as their ``--no-*`` forms when False,
+    so a GUI that switched them off still reproduces in the pasted
+    command.
 
     ``config_path``: when set, the GUI writes the slider-only values
     (threshold/min_silence/margin) to this YAML file and passes it via
@@ -141,7 +147,7 @@ def build_cli_command(
     # copied command stays compact. The defaults match CONFIG_DEFAULTS
     # so a user who hasn't touched the advanced panel gets a clean
     # command-line reproducing their GUI choices.
-    if audio_quality != "medium":
+    if audio_quality != CONFIG_DEFAULTS["audio_quality"]:
         parts.extend(["--audio-quality", audio_quality])
     if software_fallback != "ask":
         parts.extend(["--software-fallback", software_fallback])
@@ -157,32 +163,38 @@ def build_cli_command(
         parts.append("--x264-low-memory")
     if use_crf:
         parts.append("--use-crf")
-    if gapless_concat:
-        parts.append("--gapless-concat")
+    # ``gapless_concat`` / ``per_video_dir`` default True in the config,
+    # and the CLI's own default follows the config file — so the FALSE
+    # state must be spelled out, or the pasted command would silently
+    # run with the config default (True).
+    if not gapless_concat:
+        parts.append("--no-gapless-concat")
     if low_process_priority:
         parts.append("--low-process-priority")
-    if preset != "balanced":
+    if preset != CONFIG_DEFAULTS["preset"]:
         parts.extend(["--preset", preset])
-    if memory_limit_mb != "auto":
+    if memory_limit_mb != CONFIG_DEFAULTS["memory_limit_mb"]:
         parts.extend(["--memory-limit-mb", str(memory_limit_mb)])
-    if memory_reserve_mb != 2048:
+    if memory_reserve_mb != CONFIG_DEFAULTS["memory_reserve_mb"]:
         parts.extend(["--memory-reserve-mb", str(memory_reserve_mb)])
-    # P3.4: phase timeouts. Only appended when non-default so the
+    # Phase timeouts. Only appended when non-default so the
     # copied command stays readable when the user hasn't customised.
-    if segment_encode_timeout != 600:
+    if segment_encode_timeout != CONFIG_DEFAULTS["segment_encode_timeout"]:
         parts.extend(["--segment-timeout", str(segment_encode_timeout)])
-    if final_concat_timeout != 86400:
+    if final_concat_timeout != CONFIG_DEFAULTS["final_concat_timeout"]:
         parts.extend(["--final-concat-timeout", str(final_concat_timeout)])
-    if silence_timeout != 36000:
+    if silence_timeout != CONFIG_DEFAULTS["silence_timeout"]:
         parts.extend(["--silence-timeout", str(silence_timeout)])
-    if stall_kill_timeout != 300:
+    if stall_kill_timeout != CONFIG_DEFAULTS["stall_kill_timeout"]:
         parts.extend(["--stall-timeout", str(stall_kill_timeout)])
-    if waveform_timeout != 300:
+    if waveform_timeout != CONFIG_DEFAULTS["waveform_timeout"]:
         parts.extend(["--waveform-timeout", str(waveform_timeout)])
-    if batch_chunk_size != 40:
+    if batch_chunk_size != CONFIG_DEFAULTS["batch_chunk_size"]:
         parts.extend(["--batch-chunk-size", str(batch_chunk_size)])
-    if min_part_bytes != 1024:
+    if min_part_bytes != CONFIG_DEFAULTS["min_part_bytes"]:
         parts.extend(["--min-part-bytes", str(min_part_bytes)])
+    if not per_video_dir:
+        parts.append("--no-per-video-dir")
     if force:
         parts.append("-f")
     if delete_after:
@@ -446,7 +458,7 @@ def build_completion_summary(
 
     Pure function — no Tk / no side effects — so it can be unit-tested
     without instantiating the GUI. Previously lived inline in
-    ``gui._build_completion_summary`` (Этап 10 extraction).
+    ``gui._build_completion_summary``.
 
     Returns a dict with keys:
       - status:    one-line headline for the status bar: 'Complete!' plus

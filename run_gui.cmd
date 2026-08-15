@@ -10,12 +10,22 @@ set "PORT_DIR=%~dp0_portable"
 set "PYTHON="
 if exist "%PORT_DIR%\venv\Scripts\python.exe" set "PYTHON=%PORT_DIR%\venv\Scripts\python.exe"
 if not defined PYTHON if exist "%PORT_DIR%\python\python.exe" set "PYTHON=%PORT_DIR%\python\python.exe"
-if not defined PYTHON where python >nul 2>&1 && set "PYTHON=python"
+:: Parenthesised so the ``&&`` chain stays inside the ``if`` body no
+:: matter how the line is re-formatted later (a bare ``if cond cmd1 && cmd2``
+:: is legal but easy to misread as ``if (cond cmd1) && cmd2``).
+if not defined PYTHON (where python >nul 2>&1 && set "PYTHON=python")
 
 if not defined PYTHON (
     echo ==^> Downloading portable Python...
     if not exist "%PORT_DIR%" mkdir "%PORT_DIR%"
+    :: Pinned version (3.13.2) so the bootstrap is reproducible — the
+    :: URL below is the ONLY external artifact this script fetches, and
+    :: it is fetched over TLS from python.org. The installer's SHA-256
+    :: is printed for manual verification (see python.org/downloads for
+    :: the published digest); pinning + TLS + printed digest is the
+    :: practical ceiling for a .cmd bootstrap without a second download.
     curl -sL -o "%TEMP%\python-installer.exe" https://www.python.org/ftp/python/3.13.2/python-3.13.2-amd64.exe
+    certutil -hashfile "%TEMP%\python-installer.exe" SHA256
     start /wait "" "%TEMP%\python-installer.exe" /quiet TargetDir="%PORT_DIR%\python" InstallAllUsers=0 PrependPath=0 Include_test=0
     if exist "%PORT_DIR%\python\python.exe" (
         set "PYTHON=%PORT_DIR%\python\python.exe"
@@ -80,7 +90,10 @@ if %errorlevel% equ 0 (
     winget install --id Gyan.FFmpeg --source winget --accept-package-agreements --accept-source-agreements >nul 2>&1
     if %errorlevel% equ 0 (
         for /f "tokens=*" %%a in ('dir /s /b "%LOCALAPPDATA%\Microsoft\WinGet\Packages\Gyan.FFmpeg_*\ffmpeg-*\bin\ffmpeg.exe" 2^>nul') do set "FFMPEG_DIR=%%~dpa"
-        if defined FFMPEG_DIR set "PATH=%FFMPEG_DIR%;%PATH%"
+        :: !FFMPEG_DIR! — delayed expansion: %FFMPEG_DIR% would expand at
+        :: block-parse time (empty, the loop hasn't run yet) and PATH
+        :: would silently lose the ffmpeg dir (R4.4 audit).
+        if defined FFMPEG_DIR set "PATH=!FFMPEG_DIR!;%PATH%"
         exit /b 0
     )
 )
@@ -91,7 +104,11 @@ if %errorlevel% equ 0 (
     powershell -Command "Expand-Archive -Path '%TEMP%\ffmpeg.zip' -DestinationPath '%PORT_DIR%\ffmpeg_tmp' -Force; if(Test-Path '%PORT_DIR%\ffmpeg_tmp\ffmpeg-master-latest-win64-gpl'){Move-Item '%PORT_DIR%\ffmpeg_tmp\ffmpeg-master-latest-win64-gpl\*' '%PORT_DIR%\ffmpeg' -Force; Remove-Item '%PORT_DIR%\ffmpeg_tmp' -Recurse -Force}"
     if exist "%PORT_DIR%\ffmpeg\bin\ffmpeg.exe" (
         set "FFMPEG_DIR=%PORT_DIR%\ffmpeg\bin"
-        set "PATH=%FFMPEG_DIR%;%PATH%"
+        :: !FFMPEG_DIR! (delayed expansion) — same block-parse-time trap
+        :: as the winget branch above; %FFMPEG_DIR% here would be the
+        :: value from BEFORE this block (empty), and the portable ffmpeg
+        :: would never reach PATH (R4.4 audit).
+        set "PATH=!FFMPEG_DIR!;%PATH%"
     ) else (
         echo [WARN] ffmpeg extract failed. Install manually: winget install Gyan.FFmpeg
         exit /b 1

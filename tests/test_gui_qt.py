@@ -1,4 +1,4 @@
-"""pytest-qt event-loop tests for the GUI (Этап 10 / P2.2 completion).
+"""pytest-qt event-loop tests for the GUI.
 
 These tests drive the real Tk event loop (via ``qtbot.wait`` /
 ``update()``) to verify state transitions the smoke tests can't cover:

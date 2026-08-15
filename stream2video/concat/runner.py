@@ -72,7 +72,7 @@ def _run_ffmpeg(
     ``_wait_with_cancel`` — so a healthy-but-slow encode also dies at the
     configured ceiling, not only after stdout EOF.
 
-    ``memory_monitor`` (optional, P1.17): when provided, the monitor's
+    ``memory_monitor`` (optional): when provided, the monitor's
     daemon thread is started AFTER the subprocess is spawned and stopped
     in the finally block. The monitor fires ``cancel_callback`` on a
     hard memory threshold, which routes through the same cancel path
@@ -88,7 +88,7 @@ def _run_ffmpeg(
         f"cwd={os.getcwd()!r}, shell={os.getenv('COMSPEC', '?')}"
     )
     try:
-        # popen_with_retry (fix-plan #26 parity with download.py): a
+        # popen_with_retry (parity with download.py): a
         # winget shim / AV filter driver can transiently report
         # FileNotFoundError for a binary that exists on the next
         # spawn attempt; the helper re-resolves the path and retries
@@ -163,7 +163,7 @@ def _run_ffmpeg(
         # line resets the latch so a *new* stall period warns again once.
         stall_warned = False
 
-        # fix-plan #7: pre-first-progress stall budget. The full
+        # Pre-first-progress stall budget. The full
         # ``stall_kill`` window (default 300s) is meant for *mid-encode*
         # stalls; an ffmpeg that hasn't emitted a single ``out_time_us``
         # line is usually wedged on a broken/corrupt input (or probing
@@ -179,7 +179,7 @@ def _run_ffmpeg(
         )
         got_first_progress = False
 
-        # P1.5: stall watchdog. The ``track_progress=True`` branch checks
+        # Stall watchdog. The ``track_progress=True`` branch checks
         # ``elapsed_since_progress`` inside its readline loop, but readline
         # blocks until ffmpeg emits a line -- a fully-hung ffmpeg (deadlock,
         # no stdout at all) would never surface as a stall there. This
@@ -249,7 +249,7 @@ def _run_ffmpeg(
                 if track_progress:
                     stdout_pipe = process.stdout
                     assert stdout_pipe is not None
-                    # P1.5: use a queue-based reader so the consumer loop
+                    # Use a queue-based reader so the consumer loop
                     # can check cancel / stall between reads without
                     # blocking on readline(). A hung ffmpeg that stops
                     # emitting stdout would block readline() forever;
@@ -380,7 +380,7 @@ def _run_ffmpeg(
                             f"{label} stalled -- no progress for > {stall_kill}s, "
                             "process killed by watchdog"
                         )
-                    # P3.x: surface OOM as a dedicated error so the CLI/GUI
+                    # Surface OOM as a dedicated error so the CLI/GUI
                     # can hint the user to lower the memory budget or pick
                     # the Low-memory preset, instead of dumping the raw
                     # stderr. SIGKILL on POSIX (rc -9 / 137) or stderr
@@ -488,7 +488,7 @@ def _run_subprocess_cmd(
     segment index for progress.
     """
     try:
-        # popen_with_retry here as well (fix-plan #26 parity): the
+        # popen_with_retry here as well (parity): the
         # transient winget-shim FNF is just as fatal for the cut phase.
         # Tests still intercept at ``stream2video.concat.subprocess.Popen``
         # (the helper delegates to that symbol).

@@ -1,4 +1,4 @@
-"""Tests for stream2video.gui_platform (Этап 10 incremental).
+"""Tests for stream2video.gui_platform.
 
 Pure / OS-level helpers extracted from gui.py so they can be unit-
 tested without driving the Tk main loop: directory size probing and

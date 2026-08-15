@@ -102,9 +102,18 @@ def load_config(config_file: Path | None, console: Any) -> dict:
                     raise typer.Exit(1)
 
                 # Only rewrite when the type changed meaningfully —
-                # YAML ``40`` parses as int and should stay int.
-                if isinstance(original, int) and value.is_integer():
-                    config[key] = original
+                # YAML ``40`` parses as int and should stay int, and a
+                # YAML ``40.0`` on an INT-typed key (timeouts, sizes)
+                # must not leak a float into the int-typed PipelineConfig
+                # slots downstream. Float-typed keys (threshold, margin)
+                # keep their float even when integral (``-30.0``).
+                if value.is_integer():
+                    if isinstance(original, int):
+                        config[key] = original
+                    elif isinstance(CONFIG_DEFAULTS.get(key), int):
+                        config[key] = int(value)
+                    else:
+                        config[key] = value
                 else:
                     config[key] = value
 

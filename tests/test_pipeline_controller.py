@@ -1,4 +1,4 @@
-"""Tests for stream2video.pipeline_controller (Этап 10 incremental).
+"""Tests for stream2video.pipeline_controller.
 
 The pipeline controller's run() body still lives in gui._pipeline_worker
 because it's deeply intertwined with Tk callback dispatch. These tests
@@ -633,7 +633,7 @@ class TestPipelineControllerRun:
                 controller.run()
 
     def test_cancel_then_restart_resumes_via_cache(self, tmp_path: Path):
-        """Fix-plan section 4 Resume/failure: "Cancel и повторный запуск CLI/GUI".
+        """Cancel и повторный запуск CLI/GUI.
 
         When the user cancels mid-detection and then re-runs, the second
         run must pick up the cached silence segments from the first run
@@ -757,7 +757,7 @@ class TestPipelineControllerRun:
 
 
 class TestPipelineControllerTkIsolation:
-    """Fix-plan §4 GUI/threading: "Ни одного Tk call из worker thread".
+    """Ни одного Tk call из worker thread.
 
     PipelineController is the worker-thread surface — if it imported
     Tkinter (or customtkinter), the worker would be able to call widgets
@@ -820,7 +820,7 @@ class TestPipelineControllerTkIsolation:
         )
 
     def test_pipeline_worker_does_not_read_widgets_directly(self):
-        """Fix-plan P1.10: ``_pipeline_worker`` runs on a background
+        """``_pipeline_worker`` runs on a background
         thread; reading Tk widgets (``self.combo_*``, ``self.entry_*``,
         ``self.chk_*``, ``self.spin_*``) from there is unsafe because
         Tk widgets are main-thread-only. The GUI snapshots widget
@@ -869,13 +869,13 @@ class TestPipelineControllerTkIsolation:
                 )
         assert not violations, (
             "_pipeline_worker reads Tk widgets directly from the worker "
-            "thread (P1.10 violation). Snapshot the value in _start_pipeline "
+            "thread. Snapshot the value in _start_pipeline "
             "(main thread) and pass it as a positional arg:\n  " + "\n  ".join(violations)
         )
 
 
 class TestCleanupIncompleteOnClose:
-    """B9 audit: the GUI's on-close cleanup used to chase its OWN
+    """The GUI's on-close cleanup used to chase its OWN
     ``_output_path`` / ``_download_path`` fields — which are NEVER
     populated (the real paths live in the PipelineController, stamped
     by the download/concat phases). ``cleanup_incomplete_on_close`` is
@@ -943,7 +943,7 @@ class TestCleanupIncompleteOnClose:
         assert any("Keeping completed download" in m for m in calls["log"])
 
     def test_never_raises_on_cleanup_failure(self, tmp_path: Path):
-        controller, calls, partial, output = self._controller_with_paths(tmp_path)
+        controller, calls, _partial, _output = self._controller_with_paths(tmp_path)
 
         def _boom(*args, **kwargs):
             raise OSError("locked by another process")

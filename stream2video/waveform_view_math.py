@@ -1,5 +1,5 @@
 """Pure view math for the waveform popup — extracted from ``gui.py``
-(Этап 10 incremental refactor).
+(incremental refactor).
 
 These functions take primitive args (no ``self``, no Tk widgets) so they
 can be unit-tested without the GUI main loop. The GUI class delegates

@@ -141,7 +141,7 @@ class WaveformRenderMixin:
         # Start a new poller session: any previously-running live poller
         # (started by an earlier Render click) must retire — it would
         # otherwise keep re-rendering the overlay on top of this fresh
-        # render cycle (B8 audit).
+        # render cycle.
         self._waveform_poll_token += 1
         self._waveform_running = True
         self._safe_status_set("Loading...")
@@ -216,7 +216,7 @@ class WaveformRenderMixin:
                     from stream2video.silence.cache import build_silence_cache_path
 
                     cache_path = build_silence_cache_path(in_path, out_dir)
-                    # P1.16: dry-run detection.
+                    # Dry-run detection.
                     self._tk_after(
                         0,
                         lambda: self._safe_status_set(
@@ -234,7 +234,7 @@ class WaveformRenderMixin:
                             in_path,
                             threshold=float(config["threshold"]),
                             min_silence=float(config["min_silence"]),
-                            # C18 audit: the dry-run detect used the
+                            # The dry-run detect used the
                             # module-level 10h silence_timeout fallback —
                             # a preview decode could sit on a hung ffmpeg
                             # for hours. The user-configured waveform
@@ -328,7 +328,7 @@ class WaveformRenderMixin:
         if not self._waveform_peaks or self._waveform_duration <= 0:
             return
 
-        # fix-plan #12: every drag/zoom/pan calls _apply_view; without a
+        # Every drag/zoom/pan calls _apply_view; without a
         # token bump here each call captured the SAME token and every
         # render result was accepted, queuing dozens of PIL renders on
         # worker threads per mouse gesture. Invalidate prior renders
@@ -483,9 +483,9 @@ class WaveformRenderMixin:
     ) -> None:
         """Re-read the in-memory live store every second and re-render
         the overlay if the segment count or visible window changed."""
-        # B8 audit: compare against the POLL session token, not the
+        # Compare against the POLL session token, not the
         # render token. ``_apply_view`` bumps the render token on every
-        # render (fix-plan #12) to retire in-flight PIL renders; if this
+        # render to retire in-flight PIL renders; if this
         # poller checked that one it would die right after its first
         # overlay update. The poll token only moves when a new render
         # cycle starts (Render click), which is what should retire a

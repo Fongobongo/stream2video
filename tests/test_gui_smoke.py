@@ -1,4 +1,4 @@
-"""GUI widget smoke tests (Этап 10 / P2.2).
+"""GUI widget smoke tests.
 
 These tests instantiate the actual ``Stream2VideoGUI`` class WITHOUT
 calling ``mainloop()`` — they verify that the widgets are created, the
@@ -157,7 +157,7 @@ class TestGuiPipelineState:
 
 
 class TestToolkitCallbackDispatch:
-    """Fix-plan section 4 GUI/threading: "Реальный toolkit smoke test на Windows".
+    """Реальный toolkit smoke test на Windows.
 
     The worker thread's callbacks (on_progress / on_status / on_log /
     on_overall / on_total / on_pipeline_complete) must dispatch to the Tk

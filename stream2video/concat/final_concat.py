@@ -36,7 +36,7 @@ def _run_final_concat(
 ) -> None:
     """Build ``concat.txt`` and run the final concat-demuxer pass.
 
-    Shared by ``_run_segment_concat`` and ``_run_batch_concat`` (P2.6).
+    Shared by ``_run_segment_concat`` and ``_run_batch_concat``.
     Both methods previously had identical 30-line blocks here: open
     ``concat.txt``, write one ``file <name>`` line per part, run
     ``ffmpeg -fflags +genpts -f concat -safe 0 -i ... -c copy``,
@@ -49,7 +49,7 @@ def _run_final_concat(
     10% of the overall progress bar -- both call sites reserve 0..0.9
     for the per-segment encodes and 0.9..1.0 for this final concat.
 
-    **Seam resync (B6 audit).** A mixed part set -- some parts resumed
+    **Seam resync.** A mixed part set -- some parts resumed
     from an earlier run, some freshly encoded -- can carry slightly
     different audio timebases, so ``-c copy`` joints are audible as
     A/V drift or clipped samples at the seams. The historically-suggested

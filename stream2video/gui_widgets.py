@@ -1,4 +1,4 @@
-"""Standalone widget helpers extracted from ``gui.py`` (Этап 10 incremental).
+"""Standalone widget helpers extracted from ``gui.py``.
 
 The GUI class in ``gui.py`` is a 2900-line monolith. Reducing it in one
 big-bang refactor would be high-risk without comprehensive GUI tests, so

@@ -1,4 +1,4 @@
-"""Settings I/O extracted from ``gui.py`` (Этап 10 incremental).
+"""Settings I/O extracted from ``gui.py``.
 
 Pure functions for serialising / deserialising the GUI's settings.json
 so they can be unit-tested without instantiating the GUI. The GUI class

@@ -10,13 +10,14 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
+from stream2video.config import CONFIG_DEFAULTS
 from stream2video.tools import popen_with_retry
 from stream2video.utils import (
     _STDERR_HEAD_LINES,
     _STDERR_TAIL_LINES,
     CANCEL_POLL_INTERVAL,
-    no_window_kwargs,
     registered_process,
+    subprocess_kwargs,
 )
 
 logger = logging.getLogger(__name__)
@@ -105,30 +106,29 @@ def _is_local_file(path_str: str) -> bool:
         return False
 
 
-_DOWNLOAD_TIMEOUT = 28800
-
-# Watchdog timeouts for download connectivity / liveness. ``_DOWNLOAD_TIMEOUT``
-# is the absolute ceiling for the whole download (8h, sized for big VODs);
-# the watchdogs below catch the much more common failure modes where the
-# connection hangs without yt-dlp ever reporting an error and the 8h
-# ceiling would leave the user staring at a frozen progress bar.
+# Watchdog timeouts for download connectivity / liveness. ``download_timeout``
+# (CONFIG_DEFAULTS, 8h) is the absolute ceiling for the whole download,
+# sized for big VODs; the watchdogs below catch the much more common failure
+# modes where the connection hangs without yt-dlp ever reporting an error
+# and the 8h ceiling would leave the user staring at a frozen progress bar.
 #
-# ``_CONNECT_TIMEOUT`` — first byte / first progress event after start.
+# ``connect_timeout`` — first byte / first progress event after start.
 # Covers DNS failure, TCP/TLS handshake hang, and the initial buffering
 # before yt-dlp emits its first progress line. If no progress arrives
 # within this window the download is killed with a clear timeout error
 # instead of waiting for the 8h ceiling.
 #
-# ``_NO_PROGRESS_TIMEOUT`` — gap between consecutive progress events.
+# ``no_progress_timeout`` — gap between consecutive progress events.
 # If yt-dlp goes silent for this long mid-download the connection has
 # almost certainly stalled (server stopped sending, route black-holed,
 # etc). The 8h ceiling is far too long for this case.
 #
-# Both values are deliberately generous so a slow-but-alive connection
-# (mobile network, saturated shared uplink) doesn't get killed
-# prematurely. Tunable via env vars for users with very slow links.
-_CONNECT_TIMEOUT = 300  # 5 min — DNS+handshake+first byte
-_NO_PROGRESS_TIMEOUT = 1800  # 30 min — mid-download stall
+# All three live in ``CONFIG_DEFAULTS`` (config.py) — the single source
+# of truth the CLI, GUI, and pipeline all read; the function defaults
+# below are lookups of the same table so a caller that omits them gets
+# exactly the configured values (R2.17 audit: the values used to be
+# duplicated here as module constants, so a config change didn't move
+# the function defaults).
 
 # yt-dlp format selectors by quality preset.
 #
@@ -138,7 +138,7 @@ _NO_PROGRESS_TIMEOUT = 1800  # 30 min — mid-download stall
 # (Opus vs AAC) that the separate audio stream offers. The new default
 # mirrors the other presets: ``bestvideo+bestaudio`` first (yt-dlp merges
 # with ffmpeg when needed), with a pre-merged file as the fallback so a
-# site without separate tracks still works. See P1.2 in the fix plan.
+# site without separate tracks still works.
 #
 # The fallback ``/best`` at the end of the resolution-capped selectors
 # is kept: if a site only serves a pre-merged stream larger than the
@@ -411,10 +411,12 @@ def download(
     cancel_callback: Callable[[], bool] | None = None,
     quality: str = "best",
     progress_callback: Callable[[DownloadProgress], None] | None = None,
-    download_timeout: int = _DOWNLOAD_TIMEOUT,
-    connect_timeout: int = _CONNECT_TIMEOUT,
-    no_progress_timeout: int = _NO_PROGRESS_TIMEOUT,
+    download_timeout: int = CONFIG_DEFAULTS["download_timeout"],
+    connect_timeout: int = CONFIG_DEFAULTS["connect_timeout"],
+    no_progress_timeout: int = CONFIG_DEFAULTS["no_progress_timeout"],
     proxy: str = "",
+    low_process_priority: bool = False,
+    rlimit_as_mb: int = 0,
 ) -> DownloadResult:
     """
     Download video from URL via yt-dlp CLI, or pass through a local file.
@@ -436,6 +438,10 @@ def download(
             when yt-dlp doesn't know it yet. Called from the stdout drain
             thread — callers must be thread-safe (the CLI's Rich task update
             is; the GUI schedules onto the Tk main loop via ``after``).
+        low_process_priority: spawn yt-dlp at BELOW_NORMAL priority (Windows)
+            / nice 10 (POSIX), matching the concat runner's ffmpeg policy.
+        rlimit_as_mb: POSIX-only RLIMIT_AS cap in MiB for the yt-dlp child
+            (no-op on Windows); 0 disables.
 
     Returns:
         DownloadResult with `path` to the file and `is_downloaded` flag
@@ -515,7 +521,7 @@ def download(
 
     logger.info(f"Downloading: {url}")
     try:
-        # popen_with_retry (fix-plan #26): a winget shim / AV filter driver
+        # popen_with_retry: a winget shim / AV filter driver
         # intermittently returns FileNotFoundError on spawn; an 8-hour VOD
         # download must survive that transient.
         process = popen_with_retry(
@@ -536,7 +542,7 @@ def download(
             encoding="utf-8",
             errors="replace",
             bufsize=1,
-            **no_window_kwargs(),
+            **subprocess_kwargs(low_process_priority, rlimit_as_mb),
         )
     except FileNotFoundError as e:
         raise DownloadError("yt-dlp not found (install via 'pip install yt-dlp')") from e
@@ -547,8 +553,8 @@ def download(
 
         # Watchdog state. ``last_progress_time`` is updated by the stdout
         # drain thread each time a parseable progress line arrives; the main
-        # loop checks it against ``_CONNECT_TIMEOUT`` (before first progress)
-        # and ``_NO_PROGRESS_TIMEOUT`` (mid-download). A non-None value also
+        # loop checks it against ``connect_timeout`` (before first progress)
+        # and ``no_progress_timeout`` (mid-download). A non-None value also
         # tells the UI layer that yt-dlp is actually pushing bytes, not just
         # sitting on an idle connection.
         #
@@ -735,7 +741,7 @@ def download(
             # (next block), so the join is bounded; a missed join could leak
             # the daemon thread's pipe reads until process exit on Windows.
             #
-            # Kill-first (fix-plan #1): on any path that ISN'T one of the
+            # Kill-first: on any path that ISN'T one of the
             # four explicit kills above (an unexpected exception from the
             # progress callback, KeyboardInterrupt, OSError, ...) the yt-dlp
             # child would otherwise survive us — an orphaned process keeps

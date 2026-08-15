@@ -1,4 +1,4 @@
-"""Logging handler extracted from ``gui.py`` (Этап 10 incremental).
+"""Logging handler extracted from ``gui.py``.
 
 ``QueueHandler`` is a tiny ``logging.Handler`` that pushes formatted
 records onto a ``queue.Queue``. The GUI's log textbox polls the queue

@@ -135,8 +135,7 @@ def read_peaks_from_stream(
         # used to buffer the entire 16 kHz mono s16le stream in RAM. The
         # previous code peaked at ~230 MB / 2h and ~690-920 MB / 6-8h; with
         # chunked reading the peak memory is bounded by ``_READ_CHUNK_BYTES``
-        # + the (fixed-size) peaks list, regardless of duration. See P1.15
-        # in the fix plan.
+        # + the (fixed-size) peaks list, regardless of duration.
         #
         # Strategy: collect a peak per ``_BUCKET_SAMPLES`` samples (a fixed
         # small window so the peaks list can't grow unbounded). After the

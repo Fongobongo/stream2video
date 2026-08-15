@@ -1,4 +1,4 @@
-"""SlidersMixin — threshold / min_silence / margin slider rows (Этап 10 mixin).
+"""SlidersMixin — threshold / min_silence / margin slider rows.
 
 Extracted from ``Stream2VideoGUI``: ``_add_slider`` (builds a labelled
 slider row with editable value field + Default button), ``_reset_default``

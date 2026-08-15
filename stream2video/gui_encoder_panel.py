@@ -1,4 +1,4 @@
-"""EncoderPanelMixin — encoder combobox + Test encoder button (Этап 10 mixin).
+"""EncoderPanelMixin — encoder combobox + Test encoder button.
 
 Extracted from ``Stream2VideoGUI``: ``_test_encoders`` (the button
 handler that runs a real ffmpeg smoke test on the picked encoder) and

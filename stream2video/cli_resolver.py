@@ -76,19 +76,33 @@ PARAM_SPECS: dict[str, dict[str, Any]] = {
     "gapless_concat": {"kind": "bool"},
     "low_process_priority": {"kind": "bool"},
     "completion_sound": {"kind": "bool"},
-    # The ``max`` bound comes from CONFIG_RANGES — the SAME ceiling
-    # cli_config applies to YAML, so ``--stall-kill-timeout 99999`` is
-    # rejected exactly like its YAML twin ``stall_kill_timeout: 99999``
-    # (B11 audit: the CLI used to accept values the config file rejected
-    # — a silent divergence between the two configuration surfaces). The
-    # ``min`` bound is mirrored from CONFIG_RANGES the same way: a
-    # ``--stall-timeout 5`` must be rejected like ``stall_kill_timeout:
-    # 5`` in YAML (the 10s floor exists so a typo'd timeout can't turn
-    # the watchdog into a kill-on-startup on slow media).
-    "memory_reserve_mb": {"kind": "int", "min": 0},
-    "download_timeout": {"kind": "int", "min": 1},
-    "connect_timeout": {"kind": "int", "min": 1},
-    "no_progress_timeout": {"kind": "int", "min": 1},
+    # The ``min``/``max`` bounds come from CONFIG_RANGES — the SAME
+    # limits cli_config applies to YAML, so ``--stall-kill-timeout
+    # 99999`` is rejected exactly like its YAML twin
+    # ``stall_kill_timeout: 99999`` (the CLI used to accept
+    # values the config file rejected — a silent divergence between the
+    # two configuration surfaces). The floors exist so a typo'd timeout
+    # can't turn the watchdog into a kill-on-startup on slow media.
+    "memory_reserve_mb": {
+        "kind": "int",
+        "min": CONFIG_RANGES["memory_reserve_mb"][0],
+        "max": CONFIG_RANGES["memory_reserve_mb"][1],
+    },
+    "download_timeout": {
+        "kind": "int",
+        "min": CONFIG_RANGES["download_timeout"][0],
+        "max": CONFIG_RANGES["download_timeout"][1],
+    },
+    "connect_timeout": {
+        "kind": "int",
+        "min": CONFIG_RANGES["connect_timeout"][0],
+        "max": CONFIG_RANGES["connect_timeout"][1],
+    },
+    "no_progress_timeout": {
+        "kind": "int",
+        "min": CONFIG_RANGES["no_progress_timeout"][0],
+        "max": CONFIG_RANGES["no_progress_timeout"][1],
+    },
     "silence_timeout": {"kind": "int", "min": 1, "max": CONFIG_RANGES["silence_timeout"][1]},
     "segment_encode_timeout": {
         "kind": "int",
@@ -105,9 +119,23 @@ PARAM_SPECS: dict[str, dict[str, Any]] = {
         "min": CONFIG_RANGES["stall_kill_timeout"][0],
         "max": CONFIG_RANGES["stall_kill_timeout"][1],
     },
+    "stall_warning_timeout": {
+        "kind": "int",
+        "min": CONFIG_RANGES["stall_warning_timeout"][0],
+        "max": CONFIG_RANGES["stall_warning_timeout"][1],
+    },
+    "waveform_timeout": {
+        "kind": "int",
+        "min": CONFIG_RANGES["waveform_timeout"][0],
+        "max": CONFIG_RANGES["waveform_timeout"][1],
+    },
     "batch_chunk_size": {"kind": "int", "min": 1, "max": CONFIG_RANGES["batch_chunk_size"][1]},
     "min_part_bytes": {"kind": "int", "min": 1, "max": CONFIG_RANGES["min_part_bytes"][1]},
-    "rlimit_as_mb": {"kind": "int", "min": 0},
+    "rlimit_as_mb": {
+        "kind": "int",
+        "min": CONFIG_RANGES["rlimit_as_mb"][0],
+        "max": CONFIG_RANGES["rlimit_as_mb"][1],
+    },
     # Auto-or-int: the CLI flag arrives as a string; when COMMANDLINE
     # the resolver tries ``int(value)``, falling back to ``"auto"``
     # (case-insensitive). Config values are already coerced.
@@ -245,7 +273,7 @@ class _Resolver:
             if from_cli:
                 # CLI --proxy URL explicitly enables the proxy. YAML
                 # numbers (``proxy: 8080``) are coerced to str so yt-dlp
-                # receives a URL-ish value, never an int (B11 audit: an
+                # receives a URL-ish value, never an int (an
                 # int proxy leaked into the subprocess argv as "8080" —
                 # yt-dlp then mis-parsed it as an option).
                 return str(value) if value else ""

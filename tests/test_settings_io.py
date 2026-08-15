@@ -1,5 +1,5 @@
 """Tests for stream2video.settings_io (pure snapshot / YAML helpers
-extracted from gui.py — Этап 10 incremental refactor).
+extracted from gui.py — incremental refactor).
 
 The GUI's ``_save_settings`` / ``_save_user_defaults`` /
 ``_copy_cli_command`` previously inlined the field list / key ordering

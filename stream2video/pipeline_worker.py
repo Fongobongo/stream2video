@@ -1,5 +1,5 @@
 """Background pipeline orchestration for the GUI — extracted from
-``gui.py`` (Этап 10 incremental refactor).
+``gui.py`` (incremental refactor).
 
 The GUI's ``_pipeline_worker`` worker thread did three things inline:
   1. Built the immutable :class:`stream2video.pipeline_controller.PipelineConfig`
@@ -30,7 +30,7 @@ All of that is now:
     and lets the worker own the orchestration.
 
 The GUI's own ``_pipeline_worker`` becomes a tiny adapter:
-  1. Read widgets in the Tk main thread (P1.10) into a
+  1. Read widgets in the Tk main thread into a
      ``PipelineWorkerParams`` dataclass.
   2. Spawn a worker thread that calls ``PipelineWorker.run(snapshot)``.
 The orchestration (PipelineController → callback mapping → exception
@@ -63,7 +63,7 @@ logger = logging.getLogger("stream2video.pipeline_worker")
 class PipelineWorkerParams:
     """Widget snapshot taken in the Tk main thread and forwarded to
     the worker — the worker is forbidden from touching Tk widgets
-    directly (P1.10 in the fix plan).
+    directly.
 
     Mirrors the positional args the GUI's ``_pipeline_worker`` method
     accepted, plus the GUI's config dict reference (only the slider
@@ -145,7 +145,7 @@ class PipelineGuiCallbacks(Protocol):
 
     def current_live_run_id(self) -> int | None: ...
 
-    # B9 audit: the worker registers the live PipelineController so the
+    # The worker registers the live PipelineController so the
     # GUI's on-close handler can clean up artifacts through the one
     # object that knows the resolved paths (the GUI's own fields are
     # never populated).
@@ -364,7 +364,7 @@ class PipelineWorker:
     def _is_current_run(self, live_run_id: int) -> bool:
         """True while this worker's run is still the newest one.
 
-        B10 audit: UI callbacks (status line, failure style, completion
+        UI callbacks (status line, failure style, completion
         sound, running flag) mutate shared GUI state. If the user pressed
         Start again while a previous worker was still unwinding its error
         path, that stale worker would otherwise overwrite the NEW run's
@@ -478,7 +478,7 @@ class PipelineWorker:
                 on_fallback_consent=self._gui.ask_fallback_consent,
             )
 
-            # B9 audit: the controller owns the REAL resolved paths
+            # The controller owns the REAL resolved paths
             # (``_download_path`` / ``_output_path``) — the GUI's own
             # ``_output_path`` / ``_download_path`` fields are never
             # populated (dead on-close cleanup). Register the active
@@ -503,7 +503,7 @@ class PipelineWorker:
             # the stale overlay snapshot instead of leaking it into the
             # next waveform-open on the same file.
         except PipelineCancelled:
-            # B10 audit: a STALE worker (a newer Start superseded this
+            # A STALE worker (a newer Start superseded this
             # run before the error surfaced) must not overwrite the new
             # run's status/style/sound. Guard every mutating UI call.
             if self._is_current_run(live_run_id):
@@ -552,7 +552,7 @@ class PipelineWorker:
             # Always drop the live-segments snapshot, even when a typed
             # Pipeline*Error skipped the success path above. Run-keyed
             # (not path-keyed) so this clears *this* run only — a stale
-            # worker must NOT wipe a newer run's segments (B10 audit).
+            # worker must NOT wipe a newer run's segments.
             try:
                 self._gui.pop_live_segments(live_run_id)
             except Exception:
@@ -561,7 +561,7 @@ class PipelineWorker:
                 self._gui.clear_active_controller()
             except Exception:
                 logger.debug("clear_active_controller failed", exc_info=True)
-            # B10 audit: only the CURRENT run may flip the running flag.
+            # Only the CURRENT run may flip the running flag.
             # A stale worker setting running=False while a newer run is in
             # flight would re-enable the Start button mid-run and let the
             # user launch a third pipeline over a live one.

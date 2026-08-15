@@ -17,7 +17,6 @@ from stream2video.concat.constants import (
 from stream2video.config import OUTPUT_FORMAT_SPECS
 from stream2video.memory import MemoryMonitor
 from stream2video.tools import ffmpeg_path
-from stream2video.utils import get_video_start_time
 
 logger = logging.getLogger(__name__)
 
@@ -190,13 +189,15 @@ def _run_audio_extract(
         encoded_keep = 0.0
         skipped = 0
 
-        # start_time compensation (P1.16) — same rationale as the segment
-        # path: keep_segments are in detected PTS time, input-side -ss
-        # positions by file position. Subtract the container start_time
-        # once (no-op on clean sources).
-        start_offset = get_video_start_time(video_path)
-        if start_offset < 0.0:
-            start_offset = 0.0
+        # ``keep_segments`` are in the *detected* timeline that silence
+        # detection produced. The WAV mirror is a plain PCM file, so its
+        # timestamps start at 0 — even on a source with a non-zero
+        # container ``start_time`` (OBS ``-itsoffset``) the detected
+        # segments are in user-visible source-time coordinates. Input-side
+        # ``-ss`` positions by file position, the same space — no
+        # start_time compensation is needed (verified on ffmpeg 8.1.1;
+        # see segment.py). The batch path compensates only its ``trim``
+        # endpoints, which operate in ``-copyts`` PTS space.
 
         for i, (start, end) in enumerate(keep_segments):
             if cancel_callback and cancel_callback():
@@ -246,7 +247,7 @@ def _run_audio_extract(
                     "-progress",
                     "pipe:1",
                     "-ss",
-                    f"{max(0.0, start - start_offset):.6f}",
+                    f"{max(0.0, start):.6f}",
                     "-i",
                     str(video_path),
                     "-t",

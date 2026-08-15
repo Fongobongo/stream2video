@@ -42,7 +42,6 @@ _CRF_PER_QUALITY: dict[str, str] = {
     "medium": "23",
     "low": "28",
 }
-_X264_CRF: dict[str, str] = dict(_CRF_PER_QUALITY)  # back-compat alias
 _MF_QUALITY_PER_QUALITY: dict[str, str] = {
     "high": "100",
     "medium": "75",
@@ -56,7 +55,7 @@ _encoder_check_lock = threading.Lock()
 def reset_encoder_check_cache() -> None:
     """Drop cached smoke-test results.
 
-    B11 audit: a transient spawn failure (winget shim target briefly
+    A transient spawn failure (winget shim target briefly
     blocked by AV/filter drivers) cached ``False`` for the whole process
     — the encoder then stayed "unavailable" even after the PATH fix the
     retry logic performed. Called alongside ``reset_tool_cache`` in the
@@ -118,7 +117,7 @@ def encoder_opts(
     ``x264_preset`` (libx264 only): one of ``VALID_X264_PRESETS``. Default
     ``medium`` preserves historical behaviour; users with unstable /
     overclocked CPUs can pass ``ultrafast``/``veryfast`` for a lighter
-    load. See P0.5 in the fix plan.
+    load.
 
     ``encoder_threads``: ``"auto"`` (no ``-threads`` flag, ffmpeg chooses)
     or a positive int. For libx264 the flag goes AFTER the encoder in the
@@ -175,7 +174,12 @@ def encoder_opts(
                 *threads_opt,
             ]
         if encoder == "h264_nvenc":
-            return ["-preset", "p7", "-rc", "vbr", "-cq", crf, *threads_opt]
+            # CRF-like constant-quality mode (P0 audit): ``-rc vbr`` +
+            # ``-cq`` alone makes the wrapper fall back to its default
+            # bitrate model and the quality value is ignored (or the
+            # encode fails). ``-b:v 0`` is the documented way to disable
+            # the target bitrate so ``-cq`` becomes the sole control.
+            return ["-preset", "p7", "-rc", "vbr", "-cq", crf, "-b:v", "0", *threads_opt]
         # h264_amf
         return [
             "-usage",
@@ -222,6 +226,12 @@ def encoder_opts(
         if encoder == "h264_amf":
             return ["-usage", "transcoding", "-quality", "speed", "-b:v", bitrate, *threads_opt]
         if encoder == "h264_nvenc":
+            # Constrained VBR (NVIDIA's recommended offline model):
+            # ``-b:v`` is the target, ``-maxrate`` the worst-case cap.
+            # No ``-cq`` here — a hard-coded quality floor would fight
+            # the user's quality preset (CRF 18 floor on a 3500k "low"
+            # encode defeats the point of the ladder); use_crf=True is
+            # the dedicated constant-quality path.
             return [
                 "-preset",
                 "p7",
@@ -231,8 +241,6 @@ def encoder_opts(
                 bitrate,
                 "-maxrate",
                 bitrate,
-                "-cq",
-                "18",
                 *threads_opt,
             ]
         return [*threads_opt]
@@ -245,18 +253,16 @@ def encoder_opts(
     if encoder == "h264_amf":
         return ["-usage", "transcoding", "-quality", "speed", "-b:v", bitrate, *threads_opt]
     if encoder == "h264_nvenc":
-        # NVENC rate-control model (P2.12): constrained VBR via
+        # NVENC rate-control model: constrained VBR via
         # ``-rc vbr`` with ``-b:v`` (target) and ``-maxrate`` (cap)
-        # both set to the preset bitrate, plus ``-cq 18`` as the
-        # quality floor. This is NVIDIA's recommended RC model for
-        # offline encoding: VBR lets the encoder spend bits where
-        # they're needed (motion, detail) while ``-maxrate``
-        # guarantees a worst-case size, and ``-cq`` prevents quality
-        # from dropping below 18 even when the bitrate budget would
-        # allow it. ``-preset p7`` is the slowest / highest-quality
-        # NVENC preset (lookahead enabled, 2-pass). On a 6h stream
-        # this is ~5-10x faster than libx264 -preset medium at
-        # similar quality.
+        # both set to the preset bitrate. VBR lets the encoder spend
+        # bits where they're needed (motion, detail) while ``-maxrate``
+        # guarantees a worst-case size. ``-preset p7`` is the slowest /
+        # highest-quality NVENC preset (lookahead enabled). On a 6h
+        # stream this is ~5-10x faster than libx264 -preset medium at
+        # similar quality. (The old hard-coded ``-cq 18`` quality floor
+        # was dropped in the P0 audit: it contradicted the low/medium
+        # bitrate targets and belongs to the use_crf=True path only.)
         return [
             "-preset",
             "p7",
@@ -266,8 +272,6 @@ def encoder_opts(
             bitrate,
             "-maxrate",
             bitrate,
-            "-cq",
-            "18",
             *threads_opt,
         ]
     # libx264 -- encoder-independent quality: use the same bitrate
@@ -337,7 +341,7 @@ def _fps_filter_chain(output_fps: str) -> str:
     return ""
 
 
-# Public back-compat registry (P2.11): maps each supported encoder to
+# Public back-compat registry: maps each supported encoder to
 # its default (medium) options. Kept as a documented public API because:
 #   1. Tests use it as a sanity check that VALID_ENCODERS and the
 #      encoder registry stay in sync.
@@ -358,71 +362,81 @@ def check_encoder(name: str) -> bool:
     GPL-removed codecs). We now run the same 1-frame lavfi smoke test
     for every encoder; the cache keeps it free for the test-encoder
     button's repeated calls.
+
+    The smoke test itself runs WITHOUT the lock — it can take up to
+    ``ENCODER_CHECK_TIMEOUT``, and concurrent callers (e.g. the GUI's
+    encoder tester racing a pipeline start) would otherwise serialize
+    on the check. Only the cache read/write is locked (double-checked
+    locking): a duplicate in-flight smoke test for the same encoder is
+    a wasted subprocess, not a correctness bug.
     """
     with _encoder_check_lock:
         if name in _encoder_check_cache:
             return _encoder_check_cache[name]
-        try:
-            r = run_with_retry(
-                [
-                    ffmpeg_path(),
-                    "-y",
-                    "-v",
-                    "error",
-                    "-f",
-                    "lavfi",
-                    "-i",
-                    "color=c=black:s=64x64:d=0.1",
-                    # Match the real pipeline's pixel format: lavfi `color`
-                    # produces RGB, and min-cut ffmpeg builds without the
-                    # auto-inserted format conversion would fail libx264
-                    # (yuv420p-only encoder) here even though the actual
-                    # encode commands (`vcodec_opts` add `-pix_fmt yuv420p`)
-                    # would succeed -- a false-negative that then raised
-                    # EncoderUnavailableError on a working ffmpeg.
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-c:v",
-                    name,
-                    "-frames:v",
-                    "1",
-                    "-f",
-                    "null",
-                    "-",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=ENCODER_CHECK_TIMEOUT,
-                **no_window_kwargs(),
-            )
-        except subprocess.TimeoutExpired:
-            logger.warning(f"{name} smoke test timed out after {ENCODER_CHECK_TIMEOUT}s")
+    try:
+        r = run_with_retry(
+            [
+                ffmpeg_path(),
+                "-y",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:d=0.1",
+                # Match the real pipeline's pixel format: lavfi `color`
+                # produces RGB, and min-cut ffmpeg builds without the
+                # auto-inserted format conversion would fail libx264
+                # (yuv420p-only encoder) here even though the actual
+                # encode commands (`vcodec_opts` add `-pix_fmt yuv420p`)
+                # would succeed -- a false-negative that then raised
+                # EncoderUnavailableError on a working ffmpeg.
+                "-pix_fmt",
+                "yuv420p",
+                "-c:v",
+                name,
+                "-frames:v",
+                "1",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=ENCODER_CHECK_TIMEOUT,
+            **no_window_kwargs(),
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning(f"{name} smoke test timed out after {ENCODER_CHECK_TIMEOUT}s")
+        with _encoder_check_lock:
             _encoder_check_cache[name] = False
-            return False
-        except FileNotFoundError:
-            # ffmpeg binary missing/blocked at spawn time (winget shim
-            # target, AV filter driver, PATH break). ``run_with_retry``
-            # re-raises after its retries. Report "unavailable" instead
-            # of crashing -- the caller (``--doctor``, encoder tester)
-            # is a diagnostics surface that must degrade gracefully
-            # (B11 audit: ``--doctor`` without ffmpeg crashed with an
-            # unhandled FileNotFoundError).
-            logger.warning(f"{name} smoke test failed to spawn ffmpeg (missing or blocked)")
+        return False
+    except FileNotFoundError:
+        # ffmpeg binary missing/blocked at spawn time (winget shim
+        # target, AV filter driver, PATH break). ``run_with_retry``
+        # re-raises after its retries. Report "unavailable" instead
+        # of crashing -- the caller (``--doctor``, encoder tester)
+        # is a diagnostics surface that must degrade gracefully
+        # (``--doctor`` without ffmpeg crashed with an
+        # unhandled FileNotFoundError).
+        logger.warning(f"{name} smoke test failed to spawn ffmpeg (missing or blocked)")
+        with _encoder_check_lock:
             _encoder_check_cache[name] = False
-            return False
-        ok = r.returncode == 0
-        if not ok and name == "libx264":
-            # libx264 is the safety net -- if it's gone, the user needs to
-            # reinstall ffmpeg with x264 support, not be told to "pick
-            # a different encoder".
-            logger.error(
-                f"libx264 smoke test FAILED (rc={r.returncode}); "
-                f"stderr: {r.stderr[:300]!r}. Your ffmpeg build is missing the "
-                f"x264 library -- reinstall ffmpeg (e.g. `winget install "
-                f"Gyan.FFmpeg` on Windows) or install a build with libx264 support."
-            )
+        return False
+    ok = r.returncode == 0
+    if not ok and name == "libx264":
+        # libx264 is the safety net -- if it's gone, the user needs to
+        # reinstall ffmpeg with x264 support, not be told to "pick
+        # a different encoder".
+        logger.error(
+            f"libx264 smoke test FAILED (rc={r.returncode}); "
+            f"stderr: {r.stderr[:300]!r}. Your ffmpeg build is missing the "
+            f"x264 library -- reinstall ffmpeg (e.g. `winget install "
+            f"Gyan.FFmpeg` on Windows) or install a build with libx264 support."
+        )
+    with _encoder_check_lock:
         _encoder_check_cache[name] = ok
-        return ok
+    return ok
 
 
 def get_video_encoder(

@@ -2,7 +2,7 @@
 
 Two concurrent runs (GUI + CLI, or two CLIs) pointed at the same
 ``output_path`` would otherwise interleave ``-y`` writes into the same
-file and silently corrupt each other (fix-plan #6). The lock is a small
+file and silently corrupt each other. The lock is a small
 sibling file created with ``O_CREAT | O_EXCL`` — atomic on every
 filesystem, no third-party dependency, and it self-describes: while
 ``out.mp4.lock`` exists, a second run fails fast with a clear message
@@ -64,7 +64,7 @@ def acquire_output_lock(output_path: Path) -> Path:
     (pid + source path hint) in case a stale lock survives a crash and
     the user wonders what it is.
 
-    Stale-lock handling (C15 audit): a lock whose pid is gone — or
+    Stale-lock handling: a lock whose pid is gone — or
     unreadable — is presumed abandoned (BSOD, ``kill -9``, power loss)
     and is reclaimed instead of bricking the next run forever. A lock
     whose pid is ALIVE is refused unconditionally — regardless of the

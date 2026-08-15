@@ -8,7 +8,7 @@ import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import IO, Any
+from typing import IO
 
 from stream2video.tools import ffprobe_path
 
@@ -190,6 +190,7 @@ def get_video_start_time(video_path: Path) -> float:
         subprocess.TimeoutExpired,
         ValueError,
         FileNotFoundError,
+        OSError,
     ) as e:
         logger.warning(f"Could not determine video start_time for {video_path}: {e}")
         return 0.0
@@ -204,7 +205,7 @@ def estimate_disk_need(
     """Estimate typical and worst-case peak disk need for a concat run.
 
     Extracted from pipeline_controller so the GUI can pre-flight on Start
-    click (P1.10 — widget reads are main-thread-only; the controller's
+    click (widget reads are main-thread-only; the controller's
     estimate runs too late, after cutting already started). Returns
     (typical_bytes, worst_bytes) including a headroom buffer (20% or 512MB).
     Pure — no I/O except the caller's size/duration.
@@ -277,7 +278,7 @@ def has_audio_stream(video_path: Path) -> bool:
     "Output file does not contain any stream" when audio mapping is
     requested). Probed once at the start of ``cut_and_concat`` so the
     per-segment encode can skip audio options entirely for audio-less
-    sources. See P1.14 in the fix plan.
+    sources.
     """
     cmd = [
         ffprobe_path(),
@@ -365,7 +366,7 @@ def drain_stderr_lines(
             # bytes sentinel never matches in text mode, where readline()
             # returns "" at EOF — the drain would spin forever (bounded
             # only by the caller's _wait_for_drain timeout) and the
-            # stderr sink would stay partially filled (C14 audit).
+            # stderr sink would stay partially filled.
             while True:
                 raw = pipe.readline()
                 if not raw:
@@ -409,7 +410,7 @@ def drain_stderr_lines(
         # the caller reads a PARTIAL sink and mis-classifies the run —
         # e.g. an OOM line still in the pipe becomes a generic
         # FFmpegError and the "lower the memory budget" hint is lost
-        # (C14 audit). The thread always finishes once the pipe closes
+        # The thread always finishes once the pipe closes
         # (process death), so 30s only stretches the bounded wait; it
         # never extends the subprocess lifetime.
         stop_event.wait(timeout=timeout)
@@ -424,7 +425,7 @@ def read_lines_queue(pipe: IO[bytes]) -> tuple[queue.Queue[bytes | None], thread
     can't be interrupted from the consumer side), this returns a
     ``queue.Queue`` the consumer can poll with a timeout. The consumer
     loop can check cancel events / stall timeouts between reads without
-    blocking on ``readline()`` — which is the P1.5 stall-detection
+    blocking on ``readline()`` — which is the stall-detection
     gap: a hung ffmpeg that stops emitting stdout blocks ``readline()``
     forever, preventing the inline stall check from running.
 
@@ -471,7 +472,7 @@ def read_lines_queue(pipe: IO[bytes]) -> tuple[queue.Queue[bytes | None], thread
     return q, thread
 
 
-# Scoped process registry (P1.11). The historical single-slot
+# Scoped process registry. The historical single-slot
 # ``_active_proc`` (removed) was overwritten by every subprocess — a
 # parallel preview waveform and a pipeline encode raced for the slot, and
 # one's ``finally`` cleared the other's registration, so cancel/close
@@ -507,7 +508,7 @@ def set_active_process(proc: subprocess.Popen | None, owner: str = "default") ->
 
     Passing ``proc=None`` removes the registration. Multiple owners can
     coexist (e.g. "pipeline" + "preview") so parallel subprocesses don't
-    clobber each other's registration — see P1.11 in the fix plan.
+    clobber each other's registration.
     """
     with _proc_registry_lock:
         if proc is None:
@@ -559,7 +560,7 @@ def cancel_process(owner: str, timeout: float = 2.0) -> bool:
     except Exception:
         logger.exception(f"cancel_process({owner!r}): kill() failed")
         return False
-    # fix-plan #15: wait for the child to actually reap BEFORE closing
+    # Wait for the child to actually reap BEFORE closing
     # our pipe handles. On Windows, closing a pipe handle while a drain
     # thread is blocked in a synchronous ReadFile on it does NOT wake
     # the reader (no EBADF is delivered to the in-flight read); the
@@ -572,7 +573,7 @@ def cancel_process(owner: str, timeout: float = 2.0) -> bool:
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         logger.warning("cancel_process(%r): process did not exit within %.1fs", owner, timeout)
-        # fix-plan #15: fall through to closing the pipes anyway — if the
+        # Fall through to closing the pipes anyway — if the
         # child survives (killed but wedged), the drain threads blocked in
         # ReadFile need our handle-close to see EOF and unwind. Returning
         # False here without closing would leak them until process exit.
@@ -689,7 +690,7 @@ def subprocess_kwargs(low_priority: bool = False, rlimit_as_mb: int = 0) -> dict
 
 
 # ---------------------------------------------------------------------------
-# OOM detection (P3.x). ffmpeg's exit code doesn't directly say "I was
+# OOM detection. ffmpeg's exit code doesn't directly say "I was
 # killed by the OOM killer" — the Linux kernel sends SIGKILL (the process
 # dies before it can log anything), and on Windows the exit code is 1
 # (generic). The signals we *do* have:
@@ -741,151 +742,3 @@ def looks_like_oom(returncode: int | None, stderr_text: str) -> bool:
         return False
     lower = stderr_text.lower()
     return any(marker in lower for marker in _OOM_STDERR_MARKERS)
-
-
-# ---------------------------------------------------------------------------
-# Shared subprocess runner (P2.4)
-# ---------------------------------------------------------------------------
-# Popen + stderr drain + cancel_monitor + pipe cleanup was duplicated across
-# concat._run_ffmpeg, silence._run_silencedetect, silence._extract_audio_wav,
-# silence.detect_silence_stream, download.download, and waveform.read_peaks_from_stream.
-# Each had its own slightly-different version of the same try/finally +
-# set_active_process + drain_stderr_lines + close pattern. The duplication
-# was the root cause of P1.13 (decimal comma) — the silence parser was
-# inlined into each call site and drifted.
-#
-# ``SubprocessRunner`` is a context manager that owns the Popen, drains
-# stderr into a list (with an optional on_line callback for progressive
-# parsing), registers the process with the scoped supervisor, and guarantees
-# pipe cleanup in __exit__. The caller still owns the high-level flow
-# (timeout, stall watchdog, progress parsing) because those vary per call
-# site; the runner just eliminates the boilerplate that was identical
-# everywhere.
-#
-# Not yet wired into the legacy call sites — the existing ones still use
-# their inline patterns (some legitimately diverge: the concat runner adds
-# a stall watchdog + memory monitor, silence detection overlays a
-# progressive parser, download streams yt-dlp's stdout). Retrofitting them
-# is intentionally out of scope: each migration risks re-introducing the
-# exact lifecycle bugs the inline versions encode fixes for (P1.5 stall
-# watchdog, P1.13 decimal comma, P1.11 scoped registry). New code should
-# use this runner so the next refactor doesn't have to repeat the dedup.
-
-
-class SubprocessRunner:
-    """Context manager that runs a subprocess with stderr drain + cleanup.
-
-    Spawns the process on entry; on exit, drains stderr, joins the drain
-    thread, closes both pipes, and clears the active-process registration
-    (so cancel/close can't reach a dead handle). The process itself is
-    NOT waited for here — callers are responsible for ``proc.wait()``
-    with their own timeout / cancel logic, because those vary per call
-    site (ffmpeg -progress loop is different from yt-dlp stdout drain).
-
-    Usage:
-        with SubprocessRunner(cmd, owner="pipeline") as runner:
-            proc = runner.process
-            # ... read proc.stdout, call proc.wait(timeout=...), etc.
-        # stderr_lines is fully populated here
-        lines = runner.stderr_lines
-
-    The ``owner`` string routes the process into the scoped supervisor
-    (P1.11) so cancel_process(owner="preview") doesn't kill the pipeline.
-
-    The ``on_line`` callback (optional) is invoked with each decoded
-    stderr line. Useful for progressive parsers (silencedetect) that
-    want to update state as lines arrive instead of waiting for the
-    full stderr at exit. Exceptions raised by the callback are logged
-    and swallowed so a buggy callback doesn't kill the drain thread.
-    """
-
-    def __init__(
-        self,
-        cmd: list[str],
-        *,
-        owner: str = "default",
-        on_line: Callable[[str], None] | None = None,
-        stdout_pipe: int = subprocess.PIPE,
-        stderr_pipe: int = subprocess.PIPE,
-        text: bool = False,
-        bufsize: int = -1,
-    ) -> None:
-        self.cmd = cmd
-        self.owner = owner
-        self.on_line = on_line
-        self._stdout_pipe = stdout_pipe
-        self._stderr_pipe = stderr_pipe
-        self._text = text
-        self._bufsize = bufsize
-        self.process: subprocess.Popen | None = None
-        self.stderr_lines: list[str] = []
-        self._wait_for_drain: Callable[[], None] | None = None
-        self._drain_done = False
-
-    def __enter__(self) -> "SubprocessRunner":
-        try:
-            self.process = subprocess.Popen(
-                self.cmd,
-                stdout=self._stdout_pipe,
-                stderr=self._stderr_pipe,
-                text=self._text,
-                bufsize=self._bufsize,
-                **no_window_kwargs(),
-            )
-        except FileNotFoundError as e:
-            raise FileNotFoundError(
-                f"Executable not found in PATH while running {self.cmd[0]!r}"
-            ) from e
-        try:
-            set_active_process(self.process, owner=self.owner)
-            stderr = self.process.stderr
-            if stderr is not None:
-                self._wait_for_drain = drain_stderr_lines(
-                    stderr, self.stderr_lines, on_line=self.on_line
-                )
-        except Exception:
-            # Half-entered state: Popen succeeded but registration/drain
-            # setup raised. ``__exit__`` won't run for a failed ``__enter__``,
-            # so kill the child and clear the registry slot here or the
-            # ffmpeg would leak as an orphan.
-            try:
-                self.process.kill()
-            except Exception:
-                logger.debug("SubprocessRunner.__enter__ cleanup: kill() failed", exc_info=True)
-            set_active_process(None, owner=self.owner)
-            raise
-        return self
-
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
-        # Drain stderr in case the caller raised before reaching its
-        # own wait_for_drain() call — without this the drain thread
-        # would outlive the context and leak the pipe read.
-        if self._wait_for_drain is not None and not self._drain_done:
-            try:
-                self._wait_for_drain()
-            except Exception:
-                logger.debug("drain_stderr_lines wait failed on exit", exc_info=True)
-        set_active_process(None, owner=self.owner)
-        if self.process is not None:
-            if self.process.stdout is not None:
-                try:
-                    self.process.stdout.close()
-                except OSError:
-                    pass
-            if self.process.stderr is not None:
-                try:
-                    self.process.stderr.close()
-                except OSError:
-                    pass
-
-    def drain_stderr(self) -> None:
-        """Block until the stderr drain thread has finished.
-
-        Call this after ``process.wait()`` returns so ``stderr_lines``
-        is fully populated before the caller inspects it. Safe to call
-        multiple times (idempotent — marks the drain as done so the
-        ``__exit__`` cleanup doesn't repeat the wait).
-        """
-        if self._wait_for_drain is not None and not self._drain_done:
-            self._wait_for_drain()
-            self._drain_done = True

@@ -474,7 +474,7 @@ class TestNetworkErrorClassification:
 
     These are unit tests on the classifier; full subprocess-level
     coverage requires real yt-dlp sources and is deferred to the
-    integration test matrix (see fix-plan §4 Download).
+    integration test matrix.
     """
 
     def test_offline_is_download_error(self):
@@ -539,7 +539,7 @@ class TestNetworkErrorClassification:
 
 
 class TestDownloadCancelDuringMerge:
-    """Fix-plan section 4 Download: "Cancel во время download и merge".
+    """Cancel во время download и merge.
 
     yt-dlp's merge phase (combining bestvideo+bestaudio into a single
     MP4) runs AFTER the download completes but BEFORE the final file

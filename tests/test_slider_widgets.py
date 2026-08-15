@@ -1,5 +1,5 @@
 """Tests for stream2video.slider_widgets (pure slider text parsing +
-formatting helpers extracted from gui.py — Этап 10 incremental).
+formatting helpers extracted from gui.py).
 
 The slider rows in the GUI pair a draggable ``CTkSlider`` with an
 editable ``CTkEntry`` that lets the user type the value. The pure math

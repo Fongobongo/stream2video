@@ -1,4 +1,4 @@
-"""Tests for stream2video.pipeline_worker (extracted from gui.py — Этап 10).
+"""Tests for stream2video.pipeline_worker (extracted from gui.py).
 
 Covers:
   * ``PipelineWorkerParams`` — frozen dataclass, snapshots widget reads.
@@ -41,7 +41,7 @@ from stream2video.pipeline_worker import (
 class TestPipelineWorkerParams:
     def test_is_frozen(self):
         # Frozen dataclass so the worker can't mutate it mid-run
-        # (P1.10: the GUI snapshots widgets in the main thread and the
+        # (The GUI snapshots widgets in the main thread and the
         # worker reads only local copies — mutability would defeat that).
         params = PipelineWorkerParams(
             input_raw="vid.mp4",
@@ -562,7 +562,7 @@ class TestPipelineWorkerRun:
         assert gui.running_state_changes[-1] is False
 
     def test_registers_active_controller_and_clears_it_in_finally(self):
-        """B9 audit: the worker registers the live controller on the GUI
+        """The worker registers the live controller on the GUI
         (so ``_on_close`` can clean artifacts through it) and clears the
         reference in ``finally`` — no stale controller survives a run."""
         gui = _FakeGuiCallbacks()
@@ -592,7 +592,7 @@ class TestPipelineWorkerRun:
         assert gui.last_pop_run_id == gui.live_segments_runs
 
     def test_stale_worker_error_does_not_mutate_ui(self):
-        """B10 audit: a worker whose run was superseded (newer Start) must
+        """A worker whose run was superseded (newer Start) must
         not overwrite the new run's status / failure style / sound."""
         gui = _FakeGuiCallbacks()
         worker = PipelineWorker(

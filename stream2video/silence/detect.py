@@ -3,9 +3,11 @@
 import logging
 import queue
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import NoReturn
 
 from stream2video import silence as _c
 from stream2video.concat.constants import _OOM_HINT
@@ -13,8 +15,6 @@ from stream2video.silence.cache import _save_cache
 from stream2video.silence.parser import (
     _RESUME_THROTTLE_N,
     _RESUME_THROTTLE_S,
-    _SILENCE_END_RE,
-    _SILENCE_START_RE,
     _SILENCE_TIMEOUT,
     SilenceCancelledError,
     SilenceDetectionError,
@@ -23,7 +23,6 @@ from stream2video.silence.parser import (
     SilenceSegment,
     _noop_on_segment,
     _parse_ffmpeg_output,
-    _to_float,
 )
 from stream2video.tools import popen_with_retry
 from stream2video.utils import (
@@ -37,6 +36,25 @@ from stream2video.utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _kill_and_raise(proc: subprocess.Popen, exc: BaseException) -> NoReturn:
+    """Kill the ffmpeg child and reap it before propagating ``exc``.
+
+    Mirrors the concat runner's ``_kill_and_raise``: on Windows
+    ``kill()`` (TerminateProcess) is asynchronous, and letting the
+    exception escape without a bounded ``wait()`` keeps the process
+    handles — and any file the child had open — alive long enough for
+    the caller's cleanup (unlink of a partial WAV, rmtree of a work
+    dir) to trip WinError 32 (file busy). The 30s bound matches
+    runner.py; a child that ignores the kill is un-reapable anyway.
+    """
+    proc.kill()
+    try:
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        pass  # already dead or un-killable; nothing more to reap
+    raise exc from None
 
 
 def detect_silence_stream(
@@ -112,9 +130,9 @@ def detect_silence_stream(
     assert proc.stderr is not None
     pipe = proc.stderr
 
-    # P2.5: unified parser. Previously this function had its own
+    # Unified parser. Previously this function had its own
     # inline ``m_s = _SILENCE_START_RE.search(line)`` loop with a
-    # ``float()`` call that broke on decimal commas (P1.13). Using
+    # ``float()`` call that broke on decimal commas. Using
     # :class:`SilenceParser` here keeps the parsing logic in one place
     # so a future change (e.g. a new ``silence_duration`` field)
     # only needs to be made once.
@@ -142,14 +160,12 @@ def detect_silence_stream(
                     # wedged child can ignore it, leaving an unbounded
                     # wait() here blocked forever (the runner.py paths all
                     # use a 30s bound for the same reason).
-                    proc.kill()
-                    try:
-                        proc.wait(timeout=30)
-                    except subprocess.TimeoutExpired:
-                        pass
-                    raise SilenceDetectionError(
-                        f"ffmpeg timeout after {timeout}s (no stderr output)"
-                    ) from None
+                    _kill_and_raise(
+                        proc,
+                        SilenceDetectionError(
+                            f"ffmpeg timeout after {timeout}s (no stderr output)"
+                        ),
+                    )
                 try:
                     raw = line_queue.get(timeout=CANCEL_POLL_INTERVAL)
                 except queue.Empty:
@@ -172,10 +188,12 @@ def detect_silence_stream(
             try:
                 proc.wait(timeout=30)
             except subprocess.TimeoutExpired:
-                proc.kill()
-                raise SilenceDetectionError(
-                    "ffmpeg silencedetect did not exit 30s after stderr EOF — killed"
-                ) from None
+                _kill_and_raise(
+                    proc,
+                    SilenceDetectionError(
+                        "ffmpeg silencedetect did not exit 30s after stderr EOF — killed"
+                    ),
+                )
             if proc.returncode != 0:
                 if looks_like_oom(proc.returncode, ""):
                     raise SilenceOutOfMemoryError(
@@ -192,8 +210,7 @@ def detect_silence_stream(
             # duration and closes it via ``SilenceParser.finalize``).
             return parser.finalize(duration=None)
     except subprocess.TimeoutExpired as e:
-        proc.kill()
-        raise SilenceDetectionError(f"ffmpeg timeout after {e.timeout}s") from e
+        _kill_and_raise(proc, SilenceDetectionError(f"ffmpeg timeout after {e.timeout}s"))
     finally:
         pipe.close()
 
@@ -342,55 +359,28 @@ def _run_silencedetect(
     assert stderr_pipe is not None and stdout_pipe is not None
     stderr_lines: list[str] = []
 
-    # State for progressive parsing. Only used when on_segment is set; the
-    # batch path ignores these and re-parses the accumulated stderr at the
-    # end. We mutate `progressive_segments` only from the drain thread (the
-    # only place `_on_line` runs), so no lock is needed.
-    # On resume, `progressive_segments` starts with the pre-seeded initial
-    # segments so the callback sees the full picture from the first
-    # silence_end line and the throttled save covers everything detected
-    # so far (initial + new), not just the new ones.
-    progressive_segments: list[SilenceSegment] = list(initial_segments) if initial_segments else []
-
-    # Pre-seed the callback with the initial segments so the GUI's live
-    # overlay is correct from the moment the pipeline starts. This is
-    # the one exception to the "callback fires on the drain thread"
-    # rule — the GUI's callback is thread-safe (lock-protected dict
-    # update), and firing here closes the gap between the worker
-    # pre-seeding to [] and the first silence_end line arriving.
-    if progressive_segments and on_segment is not None:
-        on_segment(list(progressive_segments))
-
-    # Last decoded source position (absolute seconds, -copyts space).
-    # Updated from ``out_time_us`` progress lines and recorded into resume
-    # checkpoints as ``probe_position`` so a resume that found ZERO
-    # segments still restarts from the probe frontier instead of t=0
-    # (fix-plan #3b -- previously a clean source's hours-long scan was
-    # lost because ``resume_from`` was derived only from segment ends).
-    last_progress_pos: list[float] = [float(resume_from) if resume_from is not None else 0.0]
-
-    pending_start: list[float | None] = [None]  # mutable container so the
-    # closure can assign without `nonlocal`.
-
-    # Throttled resume save state. Mutable lists let the closure update
+    # Progressive parsing state. Only used when on_segment is set; the
+    # batch path ignores this and re-parses the accumulated stderr at
+    # the end. All segment-list mutation happens inside ``SilenceParser``
+    # (parser.py — the unified parser), whose ``feed`` runs only on the
+    # drain thread, so the segment list itself needs no lock. On resume
+    # the parser is pre-seeded with the initial segments so the callback
+    # sees the full picture from the first silence_end line and the
+    # throttled save covers everything detected so far (initial + new),
+    # not just the new ones.
+    #
+    # Throttled resume save state. Mutable lists let the closures update
     # them without `nonlocal` declarations.
     last_save_time: list[float] = [0.0]
     last_save_count: list[int] = [0]
     if resume_save_path is not None:
         last_save_time[0] = time.monotonic()
 
-    def _on_line(line: str) -> None:
-        m_s = _SILENCE_START_RE.search(line)
-        if m_s:
-            pending_start[0] = _to_float(m_s.group(1))
-            return
-        m_e = _SILENCE_END_RE.search(line)
-        if m_e and pending_start[0] is not None:
-            progressive_segments.append(SilenceSegment(pending_start[0], _to_float(m_e.group(1))))
-            pending_start[0] = None
-            if on_segment is not None:
-                on_segment(list(progressive_segments))
-            _maybe_save_resume()
+    # The resume save runs from TWO threads — the drain thread (a new
+    # silence_end line) and the stdout loop (a moving probe frontier on
+    # a clean source). Two concurrent ``_save_cache`` writes to the same
+    # path would tear the checkpoint file, so the save is serialized.
+    _save_lock = threading.Lock()
 
     def _maybe_save_resume() -> None:
         """Checkpoint the current segment list + probe position to disk
@@ -400,46 +390,77 @@ def _run_silencedetect(
         """
         if resume_save_path is None or resume_save_config is None:
             return
-        new_count = len(progressive_segments) - len(initial_segments or [])
-        now = time.monotonic()
-        # Save when N new segments arrived OR the throttle interval passed
-        # AND the probe moved (a clean source accumulates no segments but
-        # still scans forward — that progress must be checkpointed, or a
-        # multi-hour silent scan is lost on cancel (fix-plan #3b)).
-        moved = last_progress_pos[0] - (float(resume_from) if resume_from is not None else 0.0)
-        if new_count <= 0 and not (moved > 0 and now - last_save_time[0] >= _RESUME_THROTTLE_S):
-            return
-        if (
-            now - last_save_time[0] < _RESUME_THROTTLE_S
-            and new_count - last_save_count[0] < _RESUME_THROTTLE_N
-        ):
-            return
-        try:
-            _save_cache(
-                resume_save_path,
-                input_path,
-                progressive_segments,
-                resume_save_config,
-                indent=None,
-                fsync=False,
-                probe_position=last_progress_pos[0],
+        with _save_lock:
+            segments = parser.segments
+            new_count = len(segments) - len(initial_segments or [])
+            now = time.monotonic()
+            # Save when N new segments arrived OR the throttle interval
+            # passed AND the probe moved (a clean source accumulates no
+            # segments but still scans forward — that progress must be
+            # checkpointed, or a multi-hour silent scan is lost on
+            # cancel).
+            moved = last_progress_pos[0] - (
+                float(resume_from) if resume_from is not None else 0.0
             )
-            last_save_time[0] = now
-            last_save_count[0] = new_count
-        except OSError as e:
-            # Resume saves are best-effort — a failed checkpoint just
-            # means the next run starts from a slightly earlier point.
-            logger.warning(f"Resume cache save failed: {e}")
+            if new_count <= 0 and not (moved > 0 and now - last_save_time[0] >= _RESUME_THROTTLE_S):
+                return
+            if (
+                now - last_save_time[0] < _RESUME_THROTTLE_S
+                and new_count - last_save_count[0] < _RESUME_THROTTLE_N
+            ):
+                return
+            try:
+                _save_cache(
+                    resume_save_path,
+                    input_path,
+                    segments,
+                    resume_save_config,
+                    indent=None,
+                    fsync=False,
+                    probe_position=last_progress_pos[0],
+                )
+                last_save_time[0] = now
+                last_save_count[0] = new_count
+            except OSError as e:
+                # Resume saves are best-effort — a failed checkpoint just
+                # means the next run starts from a slightly earlier point.
+                logger.warning(f"Resume cache save failed: {e}")
+
+    def _on_new_segment(segments: list[SilenceSegment]) -> None:
+        if on_segment is not None:
+            on_segment(segments)
+        _maybe_save_resume()
+
+    parser = SilenceParser(on_segment=_on_new_segment)
+    if initial_segments:
+        parser.seed_segments(initial_segments)
+
+    # Pre-seed the callback with the initial segments so the GUI's live
+    # overlay is correct from the moment the pipeline starts. This is
+    # the one exception to the "callback fires on the drain thread"
+    # rule — the GUI's callback is thread-safe (lock-protected dict
+    # update), and firing here closes the gap between the worker
+    # pre-seeding to [] and the first silence_end line arriving.
+    if initial_segments and on_segment is not None:
+        on_segment(list(initial_segments))
+
+    # Last decoded source position (absolute seconds, -copyts space).
+    # Updated from ``out_time_us`` progress lines and recorded into resume
+    # checkpoints as ``probe_position`` so a resume that found ZERO
+    # segments still restarts from the probe frontier instead of t=0
+    # (previously a clean source's hours-long scan was
+    # lost because ``resume_from`` was derived only from segment ends).
+    last_progress_pos: list[float] = [float(resume_from) if resume_from is not None else 0.0]
 
     if on_segment is not None:
-        wait_for_drain = drain_stderr_lines(stderr_pipe, stderr_lines, on_line=_on_line)
+        wait_for_drain = drain_stderr_lines(stderr_pipe, stderr_lines, on_line=parser.feed)
     else:
         wait_for_drain = drain_stderr_lines(stderr_pipe, stderr_lines)
     drain_done = False
 
     try:
         with registered_process(process), cancel_monitor(process, cancel_callback) as cancelled:
-            # P1.5: use queue-based reader so cancel checks run between
+            # Use queue-based reader so cancel checks run between
             # reads without blocking on readline().
             line_queue, _reader_thread = read_lines_queue(stdout_pipe)
             # Wall-clock deadline measured from spawn — matches the
@@ -451,24 +472,27 @@ def _run_silencedetect(
             deadline = (time.monotonic() + timeout) if timeout else None
             while True:
                 if deadline is not None and time.monotonic() > deadline:
-                    process.kill()
-                    raise SilenceDetectionError(
-                        f"ffmpeg silencedetect timeout after {timeout}s (no stdout EOF — killed)"
-                    ) from None
+                    _kill_and_raise(
+                        process,
+                        SilenceDetectionError(
+                            f"ffmpeg silencedetect timeout after {timeout}s (no stdout EOF — killed)"
+                        ),
+                    )
                 try:
                     raw_line = line_queue.get(timeout=CANCEL_POLL_INTERVAL)
                 except queue.Empty:
                     # No new line — check cancel inline.
                     if cancel_callback is not None and cancel_callback():
-                        process.kill()
-                        raise SilenceCancelledError("silence detection cancelled") from None
+                        _kill_and_raise(process, SilenceCancelledError("silence detection cancelled"))
                     if cancelled.is_set():
-                        raise SilenceCancelledError("silence detection cancelled") from None
+                        _kill_and_raise(process, SilenceCancelledError("silence detection cancelled"))
                     if deadline is not None and time.monotonic() > deadline:
-                        process.kill()
-                        raise SilenceDetectionError(
-                            f"ffmpeg silencedetect timeout after {timeout}s (no stdout EOF — killed)"
-                        ) from None
+                        _kill_and_raise(
+                            process,
+                            SilenceDetectionError(
+                                f"ffmpeg silencedetect timeout after {timeout}s (no stdout EOF — killed)"
+                            ),
+                        )
                     continue
                 if raw_line is None:
                     break  # EOF
@@ -480,10 +504,9 @@ def _run_silencedetect(
                 # Polling the callback inline on every line keeps cancel
                 # responsive once a line does arrive, matching concat.py.
                 if cancel_callback is not None and cancel_callback():
-                    process.kill()
-                    raise SilenceCancelledError("silence detection cancelled")
+                    _kill_and_raise(process, SilenceCancelledError("silence detection cancelled"))
                 if cancelled.is_set():
-                    raise SilenceCancelledError("silence detection cancelled")
+                    _kill_and_raise(process, SilenceCancelledError("silence detection cancelled"))
                 line = raw_line.decode("utf-8", errors="replace").strip()
                 if line.startswith("out_time_us="):
                     try:
@@ -512,10 +535,12 @@ def _run_silencedetect(
             try:
                 process.wait(timeout=30)
             except subprocess.TimeoutExpired:
-                process.kill()
-                raise SilenceDetectionError(
-                    "ffmpeg silencedetect did not exit 30s after stdout EOF — killed"
-                ) from None
+                _kill_and_raise(
+                    process,
+                    SilenceDetectionError(
+                        "ffmpeg silencedetect did not exit 30s after stdout EOF — killed"
+                    ),
+                )
             wait_for_drain()
             drain_done = True
 
@@ -537,38 +562,10 @@ def _run_silencedetect(
                 # caller passed a known ``duration`` (always the case
                 # for the canonical pipeline via ``_probe_duration``),
                 # close the segment at the end of the media so the cut
-                # plan reflects what the user actually heard. See P1.12
-                # in the fix plan.
-                if pending_start[0] is not None and duration is not None and duration > 0:
-                    pending_start_t = pending_start[0]
-                    # ``pending_start_t`` may already exceed duration
-                    # (ffmpeg clamps the reported time to the actual
-                    # packet PTS, which on a truncated file can be a
-                    # hair past the probed container duration). Clamp
-                    # start to duration so we don't emit a (start>end)
-                    # segment; in that degenerate case the segment is
-                    # dropped.
-                    clamped_start = min(pending_start_t, duration)
-                    if clamped_start < duration:
-                        logger.info(
-                            f"Trailing silence_start at t={pending_start_t:.3f}s "
-                            f"had no matching silence_end; closing at media "
-                            f"duration {duration:.3f}s"
-                        )
-                        progressive_segments.append(SilenceSegment(clamped_start, duration))
-                        on_segment(list(progressive_segments))
-                    else:
-                        logger.debug(
-                            f"Trailing silence_start at t={pending_start_t:.3f}s "
-                            f"is at/after duration {duration:.3f}s; dropping"
-                        )
-                elif pending_start[0] is not None:
-                    logger.warning(
-                        "Unmatched silence_start (no silence_end) and no "
-                        "media duration available; dropped — ffmpeg output "
-                        "may be truncated"
-                    )
-                return list(progressive_segments)
+                # plan reflects what the user actually heard.
+                # ``SilenceParser.finalize`` implements this and
+                # fires ``on_segment`` for the appended trailing segment.
+                return parser.finalize(duration=duration)
             # Batch path: the parser closes a trailing silence_start at
             # the *effective* media duration when we know it. When a
             # ``duration_limit`` clip was applied (sample-verify probes
@@ -686,14 +683,16 @@ def _extract_audio_wav(
                     deadline = time.monotonic() + timeout
                 while True:
                     if deadline is not None and time.monotonic() > deadline:
-                        process.kill()
-                        raise SilenceDetectionError(f"ffmpeg extract timeout after {timeout}s")
+                        _kill_and_raise(
+                            process, SilenceDetectionError(f"ffmpeg extract timeout after {timeout}s")
+                        )
                     try:
                         raw = q.get(timeout=0.2)
                     except queue.Empty:
                         if cancelled.is_set() or (cancel_callback and cancel_callback()):
-                            process.kill()
-                            raise SilenceCancelledError("audio extraction cancelled") from None
+                            _kill_and_raise(
+                                process, SilenceCancelledError("audio extraction cancelled")
+                            )
                         if process.poll() is not None:
                             break
                         continue
@@ -724,10 +723,12 @@ def _extract_audio_wav(
                 try:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    process.kill()
-                    raise SilenceDetectionError(
-                        "ffmpeg extract did not exit 5s after progress EOF — killed"
-                    ) from None
+                    _kill_and_raise(
+                        process,
+                        SilenceDetectionError(
+                            "ffmpeg extract did not exit 5s after progress EOF — killed"
+                        ),
+                    )
             else:
                 if cancelled.is_set():
                     raise SilenceCancelledError("audio extraction cancelled")
@@ -750,9 +751,8 @@ def _extract_audio_wav(
             # rc == 0 and no cancel: the WAV is complete and cacheable.
             completed = True
     except subprocess.TimeoutExpired as e:
-        process.kill()
         wav_path.unlink(missing_ok=True)
-        raise SilenceDetectionError(f"ffmpeg extract timeout after {e.timeout}s") from e
+        _kill_and_raise(process, SilenceDetectionError(f"ffmpeg extract timeout after {e.timeout}s"))
     finally:
         if not drain_done:
             wait_for_drain()

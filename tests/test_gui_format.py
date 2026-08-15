@@ -168,7 +168,7 @@ class TestFmtZoomText:
         assert fmt_zoom_text(9.96) == "10x"
 
     def test_nan_renders_unknown(self):
-        """C18 audit: a NaN zoom (0/0 view math on a degenerate
+        """A NaN zoom (0/0 view math on a degenerate
         duration) must not crash or print 'nanx' — the status line
         shows '?' instead."""
         assert fmt_zoom_text(float("nan")) == "?"

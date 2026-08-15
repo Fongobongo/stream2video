@@ -44,8 +44,8 @@ from stream2video.concat.audio import _run_audio_concat_filter, _run_audio_extra
 from stream2video.concat.batch import _run_batch_concat
 from stream2video.concat.cut_encode import _run_cut_then_encode
 from stream2video.concat.encoders import (
+    _CRF_PER_QUALITY,
     _VIDEO_BITRATES,
-    _X264_CRF,
     ENCODER_OPTS,
     _fps_filter_chain,
     _threads_opt,
@@ -175,9 +175,9 @@ _GAPLESS_MAX_INPUTS_PER_CALL: int = 200
 __all__ = [
     "ENCODER_OPTS",
     "PIPELINE_VERSION",
+    "_CRF_PER_QUALITY",
     "_GAPLESS_MAX_INPUTS_PER_CALL",
     "_VIDEO_BITRATES",
-    "_X264_CRF",
     "CancelledError",
     "ConcatError",
     "ConcatLockError",

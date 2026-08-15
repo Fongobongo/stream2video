@@ -55,7 +55,7 @@ def detect_silence(
                 -20 when called directly via the API; that diverged from the
                 config-file / GUI value of -30, so an API call cut more
                 aggressively than a config-file run on the same source. The
-                defaults are now unified (see P1.7 in the fix plan).
+                defaults are now unified.
         min_silence: Minimum silence duration in seconds (default from
                 CONFIG_DEFAULTS, currently 2.0, range [0.1, 60]).
         margin: How much to shrink silence zones in seconds (default from
@@ -110,7 +110,7 @@ def detect_silence(
     if not -3 <= margin <= 5:
         raise ValueError(f"Margin must be in range [-3, 5], got {margin}")
 
-    # P3.4: timeout override from config. None = use module-level fallback.
+    # Timeout override from config. None = use module-level fallback.
     effective_timeout = timeout if timeout is not None else _SILENCE_TIMEOUT
 
     current_config = {
@@ -120,7 +120,7 @@ def detect_silence(
     }
 
     # Resume cache: load and validate, then rename to a ``.inuse``
-    # sidecar instead of unlinking (fix-plan #3). A previous crash
+    # sidecar instead of unlinking. A previous crash
     # between the old load-then-unlink window could lose ALL checkpointed
     # progress; the rename keeps the data on disk until this run writes
     # fresh checkpoints, at which point the .inuse file is redundant.
@@ -437,7 +437,7 @@ def detect_silence(
             timeout=effective_timeout,
         )
 
-    # fix-plan #14: ffprobe can fail (timeout, corrupt container) and
+    # ffprobe can fail (timeout, corrupt container) and
     # return None for duration. Without a media duration apply_margin
     # can't clamp a negative margin to the file end, and the concat
     # stage's generate_keep_segments() then raises "Could not determine

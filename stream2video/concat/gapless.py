@@ -93,7 +93,7 @@ def _concat_filter_one_pass(
             "-c:a",
             audio_codec,
             *audio_opts,
-            # B16 audit: the concat filter joins video frames and audio
+            # The concat filter joins video frames and audio
             # PCM whose lengths can differ by a fraction of a frame at the
             # tail (per-part encode rounding, AAC priming, dropped final
             # frame). Without ``-shortest`` the muxer extends the output to
@@ -101,7 +101,7 @@ def _concat_filter_one_pass(
             # silence, or a silent audio tail — making the output play
             # longer than the keep window at every join. ``-shortest``
             # truncates at the shorter stream, matching the segment
-            # path's per-part guard (segment.py P0.9).
+            # path's per-part guard (segment.py).
             "-shortest",
             *_movflags,
             str(output_path),
@@ -277,7 +277,7 @@ def _run_gapless_segment_concat(
         # The estimate ``total_groups_est`` is computed from the INITIAL
         # max_inputs; deeper levels can shrink max_inputs below it, so
         # completed_groups can overshoot 1.0 — clamp so the UI never sees
-        # the bar regress past the 0.98 tree-phase ceiling (fix-plan #18).
+        # the bar regress past the 0.98 tree-phase ceiling.
         frac = min(completed_groups / max(1, total_groups_est), 1.0)
         progress_callback(min(0.9 + frac * 0.08, 0.98))
 
@@ -285,6 +285,30 @@ def _run_gapless_segment_concat(
     # whole tree (groups G0..Gn are 0.9..0.98). The per-group figure is
     # read by ``for_each_input``-style ETA smoothing inside the loop.
     _tree_group_dur = (total_duration / max(1, total_groups_est)) if total_duration > 0 else 0
+
+    # Per-run duration cache: the per-group ``_chunk_dur``
+    # is probe-based (ffprobe per part) and only feeds progress scaling,
+    # but a naive ``sum(get_video_duration(p) for p in chunk)`` fires one
+    # ffprobe per part at EVERY tree level — the L0 intermediates are
+    # re-probed at L1, L1's at L2, ... (≈ N·k/(k-1) probes for N parts).
+    # Cache by path and seed it with each group's computed sum when the
+    # intermediate is written, so the next level reuses the number
+    # instead of re-probing: exactly N probes total (all at L0) for a
+    # cold tree, zero additional probes for L1+.
+    _dur_cache: dict[str, float] = {}
+
+    def _cached_group_dur(chunk: list[Path]) -> float:
+        total = 0.0
+        for p in chunk:
+            d = _dur_cache.get(str(p))
+            if d is None:
+                try:
+                    d = _c.get_video_duration(p) or 0.0
+                except Exception:
+                    d = 0.0
+                _dur_cache[str(p)] = d
+            total += d
+        return total
 
     while len(current) > max_inputs:
         # Intermediate paths (``tree_dir\L{level}_{g:05d}.mkv``) are
@@ -305,7 +329,7 @@ def _run_gapless_segment_concat(
                 raise _c.CancelledError(f"gapless tree L{level} cancelled")
             reuse = inter.exists() and inter.stat().st_size >= _MIN_PART_BYTES
             if reuse:
-                # fix-plan #18: video-stream-only validation accepts an
+                # Video-stream-only validation accepts an
                 # intermediate whose AUDIO track was truncated by a
                 # mid-write crash (moov-less audio body). The gapless path
                 # only runs on sources with audio, so both streams must
@@ -327,7 +351,7 @@ def _run_gapless_segment_concat(
                     # probe is read-only), but NOT detecting one would let a
                     # truncated intermediate sneak into the output — the
                     # very hole the probe exists to close. Re-encode instead
-                    # of silently trusting the size check (B7 audit).
+                    # of silently trusting the size check.
                     logger.warning(
                         f"gapless tree L{level}: ffprobe validation failed for {inter}; "
                         f"re-encoding group {g} to be safe",
@@ -361,10 +385,7 @@ def _run_gapless_segment_concat(
             # cuts). PCM stays sample-accurate via concat filter.
             # Intra-group out_time_us so 4/4 doesn't freeze 1-2 mins per group.
             # Use chunk duration for scaling (sum of segment durations).
-            try:
-                _chunk_dur = sum(_c.get_video_duration(p) or 0 for p in chunk)
-            except Exception:
-                _chunk_dur = _tree_group_dur
+            _chunk_dur = _cached_group_dur(chunk)
             if _chunk_dur <= 0:
                 _chunk_dur = _tree_group_dur
 
@@ -404,6 +425,10 @@ def _run_gapless_segment_concat(
             completed_groups += 1
             _report_tree_progress()
             next_level.append(inter)
+            # Seed the cache so the next tree level reuses this group's
+            # computed sum instead of re-probing the fresh intermediate
+            # with ffprobe.
+            _dur_cache[str(inter)] = _chunk_dur
         current = next_level
         level += 1
 

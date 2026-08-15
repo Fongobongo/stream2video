@@ -1,4 +1,4 @@
-"""RecentProjectsMixin — Recent Projects sub-panel (Этап 10 mixin).
+"""RecentProjectsMixin — Recent Projects sub-panel.
 
 Extracted from ``Stream2VideoGUI``: render the recent-projects rows,
 add a project to the list (called from the pipeline worker thread via

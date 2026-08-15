@@ -1,6 +1,6 @@
 """RAM/VRAM monitoring and OS-level guardrails.
 
-P1.17 / Этап 8A in the fix plan. Tracks the active ffmpeg/yt-dlp
+Tracks the active ffmpeg/yt-dlp
 subprocess's RSS so a runaway encode (large filter graph, 4K VFR source)
 can be detected and cancelled BEFORE the OS swaps itself to death —
 the historical failure mode on long streams where the user's only
@@ -145,7 +145,7 @@ class MemoryMonitor:
         # ``memory_limit_mb=None`` disables the RSS budget check. The
         # OS reserve then remains as a warning-only signal — it never
         # cancels the task, so with no budget configured encode RAM is
-        # effectively unbounded (as it was before P1.17).
+        # effectively unbounded (as it was before).
         self.memory_limit_mb = memory_limit_mb
         self.memory_reserve_mb = memory_reserve_mb
         self.soft_threshold_frac = soft_threshold_frac
@@ -170,7 +170,7 @@ class MemoryMonitor:
             logger.warning(
                 "psutil not installed — MemoryMonitor is a no-op. "
                 "Install with `pip install psutil` to enable RSS-based "
-                "memory guardrails (P1.17)."
+                "memory guardrails."
             )
 
     def start(self) -> None:
