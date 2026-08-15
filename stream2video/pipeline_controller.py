@@ -1273,19 +1273,45 @@ def validate_pipeline_config(cfg: PipelineConfig) -> list[str]:
     # Numeric ranges — the SAME CONFIG_RANGES the YAML loader and the
     # CLI resolver enforce, so the GUI worker rejects a stale
     # settings.json value (``stall_kill_timeout: 9``, ``threshold: -70``)
-    # with the same message family as the CLI. Previously only
-    # threshold / min_silence / margin were checked here; the timeouts
-    # and memory keys flowed through unchecked and surfaced as a
-    # mid-pipeline watchdog error instead of a clear pre-flight message.
-    # The auto_or_int keys are handled by the dedicated checks above
-    # (their ``"auto"`` string is not a number; see
-    # ``config.AUTO_OR_INT_KEYS``).
+    # with the same message family as the CLI. The auto_or_int keys are
+    # handled by the dedicated checks above (their ``"auto"`` string is
+    # not a number; see ``config.AUTO_OR_INT_KEYS``).
+    # A value of the WRONG TYPE is an error too (audit P2): previously
+    # the loop ``continue``-d on non-number values, so a
+    # ``download_timeout="abc"`` from a direct API host passed
+    # validation and crashed later deep in a subprocess timeout call.
     for key, (lo, hi) in CONFIG_RANGES.items():
         if key in AUTO_OR_INT_KEYS:
             continue
         value = getattr(cfg, key)
-        if not isinstance(value, int | float) or isinstance(value, bool):
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            errors.append(f"{key} {value!r} must be a number.")
             continue
         if not lo <= value <= hi:
             errors.append(f"{key} {value} out of range [{lo}, {hi}].")
+    # Float-typed slots must stay float: an int leaked into
+    # ``threshold`` still satisfies the range check above (int is a
+    # number), but a strict-bool / strict-type audit keeps the contract
+    # tight for direct API hosts. The three slider keys are the only
+    # float-typed ones in CONFIG_RANGES.
+    for key in ("threshold", "min_silence", "margin"):
+        value = getattr(cfg, key)
+        if not isinstance(value, float):
+            errors.append(f"{key} {value!r} must be a float.")
+    # Strict bool audit — ``force=1`` (int) would be truthy-equivalent,
+    # but the CLI resolver rejects non-bool config values for these
+    # keys; mirror that strictness for direct API callers.
+    for key in (
+        "force",
+        "delete_after",
+        "per_video_dir",
+        "x264_low_memory",
+        "use_crf",
+        "gapless_concat",
+        "low_process_priority",
+        "dry_run",
+    ):
+        value = getattr(cfg, key)
+        if not isinstance(value, bool):
+            errors.append(f"{key} {value!r} must be true or false.")
     return errors

@@ -270,7 +270,11 @@ def parse_advanced_widgets(
 
     The fallback keeps a half-typed field from crashing the run with a
     ``TypeError``/``ValueError`` — the widget shows the bad text, the
-    run uses the last known-good value. Pure: no widget reads, no I/O.
+    run uses the last known-good value. Callers that must REJECT invalid
+    text instead of silently substituting (Start / Copy CLI command)
+    check :func:`validate_advanced_widgets` FIRST — the two functions
+    share the same parsing rules so they can never disagree about what
+    "invalid" means. Pure: no widget reads, no I/O.
     """
     current = current or {}
     out: dict[str, Any] = {}
@@ -290,6 +294,51 @@ def parse_advanced_widgets(
         except ValueError:
             out[key] = current.get(key, _CONFIG_DEFAULTS.get(key))
     return out
+
+
+def validate_advanced_widgets(raw: dict[str, str]) -> dict[str, str]:
+    """Validate the Advanced-section widget text; return per-key errors.
+
+    Empty dict = every widget parses. A non-empty result maps each bad
+    key to a human-readable error string, mirroring the CLI resolver's
+    rejection messages (enum keys quote the valid choices; int keys
+    quote the allowed range). The GUI's Start / Copy gates block on
+    these errors so the run can never silently use a value different
+    from what the entry shows (audit P2: the CLI rejects ``abc`` with an
+    explicit error; the GUI used to run with the previous value while
+    still showing the typed garbage — a false "applied" impression).
+
+    Pure: no widget reads, no I/O; exactly the parse rules of
+    :func:`parse_advanced_widgets` plus range checks against
+    ``CONFIG_RANGES`` — the same bounds the CLI resolver and
+    ``validate_pipeline_config`` enforce.
+    """
+    from stream2video.config import CONFIG_RANGES
+
+    errors: dict[str, str] = {}
+    for key, spec in ADVANCED_WIDGET_SPECS.items():
+        value = raw.get(key)
+        if value is None:
+            continue
+        if spec["kind"] == "combo":
+            valid = tuple(spec["valid"])
+            if value not in valid:
+                errors[key] = f"{key} {value!r} (use {' or '.join(repr(v) for v in valid)})"
+            continue
+        text = str(value).strip()
+        if spec["value_type"] == "auto_or_int" and text.lower() == "auto":
+            continue
+        try:
+            parsed = int(text)
+        except ValueError:
+            what = "an integer" if spec["value_type"] == "int" else "'auto' or an integer"
+            errors[key] = f"{key} {value!r} (must be {what})"
+            continue
+        lo, hi = CONFIG_RANGES[key]
+        if not lo <= parsed <= hi:
+            allowed = f"'auto' or {lo}..{hi}" if spec["value_type"] == "auto_or_int" else f"{lo}..{hi}"
+            errors[key] = f"{key} {parsed} out of range [{allowed}]"
+    return errors
 
 
 def build_settings_payload(

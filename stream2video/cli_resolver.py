@@ -64,6 +64,23 @@ class _Resolver:
         self._ctx = ctx
         self._config = config
         self._console = console
+        # Explicit --proxy-active/--no-proxy-active pin (audit P1). None =
+        # "no explicit choice" — the proxy kind then falls back to the
+        # config's proxy_active gate. Set via :meth:`pin_proxy_active`
+        # BEFORE resolving "proxy".
+        self._proxy_active_pin: bool | None = None
+
+    def pin_proxy_active(self, active: bool) -> None:
+        """Pin the proxy gate state from an explicit CLI flag.
+
+        Called before ``resolve("proxy", ...)`` when the user passed
+        ``--proxy-active`` / ``--no-proxy-active``. The pin overrides
+        the config's ``proxy_active`` key in either direction — the
+        copied-command case: the GUI's proxy checkbox OFF pastes as
+        ``--no-proxy-active`` so a ``proxy_active: true`` stored in
+        user_defaults.json cannot re-enable the stored address.
+        """
+        self._proxy_active_pin = bool(active)
 
     def _source_is_commandline(self, name: str) -> bool:
         """True when the user explicitly passed the flag on the command line."""
@@ -183,11 +200,21 @@ class _Resolver:
 
         if kind == "proxy":
             if from_cli:
-                # CLI --proxy URL explicitly enables the proxy. YAML
-                # numbers (``proxy: 8080``) are coerced to str so yt-dlp
-                # receives a URL-ish value, never an int (an
-                # int proxy leaked into the subprocess argv as "8080" —
-                # yt-dlp then mis-parsed it as an option).
+                # CLI --proxy URL explicitly enables the proxy... unless
+                # an explicit --no-proxy-active pin (audit P1) flips it
+                # off (``--proxy http://p --no-proxy-active`` pins the
+                # address but keeps direct connections — rare, but the
+                # pin is the later, more explicit choice and wins).
+                if self._proxy_active_pin is False:
+                    return ""
+                return str(value) if value else ""
+            if self._proxy_active_pin is not None:
+                # Explicit gate flag without an explicit URL: True means
+                # use the stored address, False disables the proxy even
+                # when the config keeps proxy_active: true.
+                if not self._proxy_active_pin:
+                    return ""
+                value = self._config.get("proxy", "")
                 return str(value) if value else ""
             # YAML: proxy_active is the gate. Without it the address
             # stays inert — the user can toggle it on in the GUI later.

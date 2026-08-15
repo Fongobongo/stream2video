@@ -32,7 +32,7 @@ from typing import Any
 
 import customtkinter as ctk
 
-from stream2video.config import apply_preset, effective_defaults
+from stream2video.config import effective_defaults
 from stream2video.gui_advanced import AdvancedSettingsMixin
 from stream2video.gui_dialogs import DialogsMixin
 from stream2video.gui_encoder_panel import EncoderPanelMixin
@@ -165,6 +165,14 @@ class Stream2VideoGUI(
         # reads ``btn_waveform`` — it already has a getattr guard).
         self._build_ui()
 
+        # A hand-edited settings.json may hold a preset whose managed
+        # values diverge from the widgets just built from that file —
+        # ``combo_preset.set()`` doesn't fire the combobox command, so
+        # sync the managed widgets to the preset here (no-op for
+        # balanced / already-consistent settings). See
+        # ``LifecycleMixin._sync_preset_on_load``.
+        self._sync_preset_on_load()
+
         # Wire the log queue → textbox poller once ``txt_log`` exists.
         # ``theme`` selects the warn/error tag colours for the log text.
         self._log_poller = LogQueuePoller(
@@ -235,6 +243,23 @@ class Stream2VideoGUI(
             )
             return
 
+        # Validation gate (audit P2): reject invalid Advanced entries
+        # up-front instead of running with a silent fallback while the
+        # widget still shows the bad text. Mirrors the CLI resolver,
+        # which rejects the same input with an explicit error.
+        adv_errors = self._advanced_widget_errors()
+        if adv_errors:
+            for err in adv_errors.values():
+                self._log(f"[ERROR] Invalid setting: {err}")
+            messagebox.showerror(
+                "Invalid settings",
+                "Some Advanced settings are invalid:\n\n"
+                + "\n".join(adv_errors.values())
+                + "\n\nFix them and try again.",
+                parent=self,
+            )
+            return
+
         self._set_running(True)
         self._cancel_event.clear()
         self.progress.set(0)
@@ -273,27 +298,18 @@ class Stream2VideoGUI(
         per_video_dir = widget_values["per_video_dir"]
         delete_after = widget_values["delete_after"]
 
-        # Build the run's config in a *copy*: ``apply_preset`` returns a
-        # dict with the preset's tunables overlaid — merging that back
-        # into ``self.settings`` would let the preset overwrite the user's
-        # explicit checkbox choices (e.g. an unchecked
-        # low_process_priority vs low_memory's low=True) and then leak
-        # those into user_defaults on the next "Save defaults".
-        # ``self.settings`` keeps the widget state; the run gets its own
-        # preset-applied snapshot. ``balanced`` is the identity preset,
-        # so with it the snapshot keeps every checkbox value verbatim.
-        # The EXPLICIT widget choices are then re-applied on top of the
-        # preset (CLI semantics: an explicit --flag beats the preset —
-        # in the GUI the widgets ARE the explicit surface), so a preset
-        # can no longer force e.g. x264_low_memory=True against an
-        # unchecked checkbox.
+        # Build the run's config from the widget snapshot — the widgets
+        # ARE the run's single source of truth (audit round 10: the
+        # preset no longer overlays ``run_config`` at Start; selecting a
+        # preset syncs its tunables INTO the managed widgets via
+        # ``_on_preset_change``, so what the user sees is exactly what
+        # runs and what the copied command pins). Re-applying the preset
+        # here used to be overwritten by the widget snapshot anyway,
+        # which is what made the selected preset a silent no-op while
+        # the copied command's ``--preset`` ran differently (audit P1).
         preset_name = widget_values["preset"]
         run_config = dict(self.settings)
-        if preset_name:
-            run_config = apply_preset(run_config, preset_name)
         run_config.update(widget_values)
-        # Show the preset's effective values in the run log, not the
-        # stale widget-state ones.
         run_config["preset"] = preset_name
 
         # Pre-flight disk space warning on Start click (before any work).

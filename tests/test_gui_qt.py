@@ -34,7 +34,7 @@ import pytest
 pytest.importorskip("PIL", reason="gui.py requires Pillow ([gui] extra)")
 pytest.importorskip("customtkinter", reason="gui.py requires customtkinter ([gui] extra)")
 
-from stream2video.config import CONFIG_DEFAULTS
+from stream2video.config import CONFIG_DEFAULTS, PRESETS
 from stream2video.pipeline_worker import PipelineWorkerParams
 
 
@@ -405,6 +405,94 @@ class TestCloseWindow:
         assert gui.running
         assert gui.winfo_exists()
         gui._set_running(False)
+
+
+class TestPresetSync:
+    """Selecting / loading a preset keeps the managed widgets in sync."""
+
+    def test_on_preset_change_syncs_widgets_and_settings(self, gui):
+        gui._on_preset_change("low_memory")
+        _flush_events(gui, 100)
+        for key, value in PRESETS["low_memory"].items():
+            assert gui.settings[key] == value, key
+        assert bool(gui.chk_x264_low_memory.get()) == PRESETS["low_memory"]["x264_low_memory"]
+        assert bool(gui.chk_low_process_priority.get()) == PRESETS["low_memory"][
+            "low_process_priority"
+        ]
+        assert gui.combo_preset.get() == "low_memory"
+        gui._restore_defaults()
+        _flush_events(gui, 200)
+
+    def test_on_preset_change_syncs_advanced_entries(self, gui):
+        gui._on_preset_change("low_cpu")
+        _flush_events(gui, 100)
+        # x264_preset + encoder_threads are Advanced widgets.
+        assert gui.combo_x264_preset.get() == PRESETS["low_cpu"]["x264_preset"]
+        assert gui.entry_encoder_threads.get() == str(PRESETS["low_cpu"]["encoder_threads"])
+        gui._restore_defaults()
+        _flush_events(gui, 200)
+
+    def test_balanced_is_identity(self, gui):
+        before = dict(gui.settings)
+        gui._on_preset_change("balanced")
+        _flush_events(gui, 100)
+        assert gui.settings == before or set(gui.settings) == set(before)
+        # No managed value may change.
+        for preset in PRESETS.values():
+            for key in preset:
+                assert gui.settings.get(key) == before.get(key), key
+
+    def test_sync_preset_on_load_noop_when_consistent(self, gui):
+        gui.combo_preset.set("balanced")
+        gui.settings["preset"] = "balanced"
+        before = dict(gui.settings)
+        gui._sync_preset_on_load()
+        _flush_events(gui, 100)
+        assert gui.settings == before
+
+    def test_sync_preset_on_load_repairs_divergent_settings(self, gui):
+        """A hand-edited settings.json: preset=low_memory but the
+        managed values still at factory — the combo would show the
+        preset while the widgets lie. _sync_preset_on_load must push
+        the preset's values into settings AND the widgets."""
+        gui.settings.update(dict(CONFIG_DEFAULTS))
+        gui.settings["preset"] = "low_memory"
+        gui.combo_preset.set("low_memory")
+        # Widget state still at factory (what a divergent file loads).
+        gui.chk_x264_low_memory.deselect()
+        gui.chk_low_process_priority.deselect()
+        gui.entry_batch_chunk_size.delete(0, "end")
+        gui.entry_batch_chunk_size.insert(0, str(CONFIG_DEFAULTS["batch_chunk_size"]))
+
+        gui._sync_preset_on_load()
+        _flush_events(gui, 100)
+
+        for key, value in PRESETS["low_memory"].items():
+            assert gui.settings[key] == value, key
+        assert bool(gui.chk_x264_low_memory.get()) is True
+        assert bool(gui.chk_low_process_priority.get()) is True
+        assert gui.entry_batch_chunk_size.get() == str(PRESETS["low_memory"]["batch_chunk_size"])
+        gui._restore_defaults()
+        _flush_events(gui, 200)
+
+    def test_sync_preset_on_load_noop_for_consistent_preset(self, gui):
+        """When the stored preset's values already match settings,
+        startup must NOT rewrite the widgets (the divergent-check
+        short-circuits)."""
+        gui.settings.update(dict(CONFIG_DEFAULTS))
+        gui.settings.update(PRESETS["low_memory"])
+        gui.settings["preset"] = "low_memory"
+        gui.chk_x264_low_memory.select()
+        gui.chk_low_process_priority.select()
+        before_widgets = {
+            "x264_low_memory": bool(gui.chk_x264_low_memory.get()),
+            "low_process_priority": bool(gui.chk_low_process_priority.get()),
+            "batch_chunk_size": gui.entry_batch_chunk_size.get(),
+        }
+        with patch.object(gui, "_on_preset_change") as mock_change:
+            gui._sync_preset_on_load()
+        mock_change.assert_not_called()
+        assert bool(gui.chk_x264_low_memory.get()) == before_widgets["x264_low_memory"]
 
 
 class TestProxySecretHandling:

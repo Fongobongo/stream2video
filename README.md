@@ -14,7 +14,7 @@ Downloads VOD from YouTube/Twitch, detects silence via audio analysis, cuts out 
 - **Output FPS policy** — `source` (default) preserves the input's frame cadence without duplication; `24`/`25`/`30`/`50`/`60` force CFR conversion via the `fps` filter (duplicated frames warn about file-size cost).
 - **Gapless audio by default** — re-encodes audio in the final join pass so per-segment AAC priming (~21ms) doesn't accumulate as A/V drift on multi-segment outputs. Disable with `--no-gapless-concat` for the faster stream-copy join.
 - **Dry run** — `--dry-run` shows what would be cut without encoding, so you can tune `threshold` / `min_silence` / `margin` against a real video in seconds.
-- **Proxy support** — `--proxy` (HTTP / SOCKS5) for downloads on restricted networks.
+- **Proxy support** — `--proxy` (HTTP / SOCKS5) for downloads on restricted networks. `--proxy-active` / `--no-proxy-active` pin the gate on/off, overriding a stored `proxy_active: true` — copied GUI commands carry `--no-proxy-active` so a paste never silently re-enables a stored proxy.
 - **JSON logging** — `--log-format json` emits one JSON object per line for ELK / Splunk / Loki.
 - **`--doctor`** — quick environment diagnostic (Python, ffmpeg, available encoders, RAM, config location) without running the pipeline.
 - **Shell completion** — `stream2video --install-completion` for Bash / Zsh / Fish / PowerShell.
@@ -121,6 +121,7 @@ stream2video --show-completion      # Print the completion script for manual ins
 | `--per-video-dir` / `--no-per-video-dir` | (follows `per_video_dir` config) | Group all artifacts into `{output_dir}/{stem}_{hash}/` for local files, or `{output_dir}/{id}/` for downloaded sources (yt-dlp id, epoch-stripped so re-runs of the same URL reuse the same project dir and caches) |
 | `--completion-sound` / `--no-completion-sound` | on | Play the completion chime after a successful run (matches the GUI's "Sound when done" checkbox). `--no-completion-sound` disables it even when the config file says `completion_sound: true` |
 | `--proxy` | (follows `proxy` config) | Proxy server for downloads, e.g. `http://127.0.0.1:8080` or `socks5://user:pass@host:1080`. Empty = direct connection |
+| `--proxy-active` / `--no-proxy-active` | (follows `proxy_active` config) | Pin the proxy gate on or off explicitly, overriding a stored `proxy_active: true` in `user_defaults.json` / config YAML. Passing neither flag leaves the config value in charge; passing a `--proxy` URL without a gate flag enables the proxy implicitly. Copied GUI commands emit `--no-proxy-active` when the GUI's proxy checkbox is off, so a paste can never silently re-enable a stored proxy |
 | `-l, --log-level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `--log-format` | `rich` | `rich` (default, human-readable) or `json` (one JSON object per line, for ELK/Splunk/Loki) |
 | `--doctor` | — | Print environment diagnostics (Python version, ffmpeg/encoders, RAM, config location) and exit. Works without an input path |
@@ -193,7 +194,7 @@ margin: 0.15
 | `min_part_bytes` | positive int (1-10485760) | `1024` | Minimum bytes for a resumed part to be considered valid. Smaller files are re-encoded. |
 | `per_video_dir` | bool | `true` | When true, all artifacts (downloaded source, WAV, JSON, log, compressed, temp dirs) are collected into `{output_dir}/{stem}_{hash}/` instead of living in the base `output_dir`. Local source files are never moved/copied — they stay where you put them. |
 | `proxy` | string | `` (off) | Proxy server for downloads, e.g. `http://127.0.0.1:8080` or `socks5://user:pass@host:1080`. Empty = no proxy. Passed to yt-dlp only while `proxy_active` is true. Also settable via `--proxy`. |
-| `proxy_active` | bool | `false` | When true, the address in `proxy` is actually used for downloads (`yt-dlp --proxy ...`). When false, the address is kept (so a temporarily-disabled proxy isn't lost) but no proxy is applied. The GUI has a checkbox and a "Set proxy" dialog; the CLI's `--proxy` flag turns this on automatically. |
+| `proxy_active` | bool | `false` | When true, the address in `proxy` is actually used for downloads (`yt-dlp --proxy ...`). When false, the address is kept (so a temporarily-disabled proxy isn't lost) but no proxy is applied. The GUI has a checkbox and a "Set proxy" dialog; the CLI's `--proxy` flag turns this on automatically. Pinnable from the CLI via `--proxy-active` / `--no-proxy-active` (a stored `true` can be overridden without editing the file). |
 | `log_format` | `rich`/`json` | `rich` | Console log format. `rich` (default, human-readable markup) or `json` (one JSON object per line, for log aggregation). Also settable via `--log-format`. |
 
 ## Project directory

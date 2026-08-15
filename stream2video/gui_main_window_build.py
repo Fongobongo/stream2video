@@ -371,9 +371,11 @@ class MainWindowBuildMixin:
         )
 
         # Resource preset — bundle of tunables (x264_low_memory,
-        # memory_limit_mb, batch_chunk_size, low_process_priority). The
-        # combobox's preset is applied to the run's config snapshot at
-        # Start (see _start_pipeline); ``balanced`` is the identity
+        # memory_limit_mb, batch_chunk_size, low_process_priority).
+        # Selecting a preset pushes its tunables into the widgets it
+        # manages (``_on_preset_change``), so the widgets always show
+        # what the run will use; Start's ``apply_preset`` re-applies the
+        # same overlay on its snapshot. ``balanced`` is the identity
         # preset, so with it the checkbox choices below are used as-is.
         preset_row = ctk.CTkFrame(ctrl_frame, fg_color="transparent")
         preset_row.pack(fill="x", padx=5, pady=(2, 2))
@@ -385,6 +387,7 @@ class MainWindowBuildMixin:
             values=list(PRESET_NAMES),
             state="readonly",
             width=180,
+            command=self._on_preset_change,
         )
         self.combo_preset.set(self.settings.get("preset", DEFAULT_PRESET))
         self.combo_preset.pack(side="left")
@@ -392,8 +395,9 @@ class MainWindowBuildMixin:
             self.combo_preset,
             "Resource preset — a bundle of tunables (x264_low_memory, "
             "memory_limit_mb, batch_chunk_size, low_process_priority, "
-            "x264_preset, encoder_threads) applied on top of the "
-            "current settings at Start.\n"
+            "x264_preset, encoder_threads) applied when selected: the "
+            "managed fields below are updated immediately so they always "
+            "show what the run will use.\n"
             "  - low_memory: 4-8 GB machines (x264_low_memory=True, "
             "batch_chunk_size=20, low_process_priority=True).\n"
             "  - low_cpu: minimize CPU usage for background encoding "
@@ -403,10 +407,8 @@ class MainWindowBuildMixin:
             "  - maximum_performance: trade RAM for throughput "
             "(x264_low_memory=False, memory_limit_mb=0, "
             "batch_chunk_size=80).\n"
-            "Explicit checkbox / field choices below win over the "
-            "preset's keys for the run (like an explicit CLI flag "
-            "beats --preset); pick 'balanced' to have them applied "
-            "verbatim.",
+            "After selection you can still tweak any managed field "
+            "individually — the last explicit change wins.",
         )
 
         advanced_toggle_frame = ctk.CTkFrame(ctrl_frame, fg_color="transparent")

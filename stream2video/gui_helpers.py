@@ -18,7 +18,7 @@ import shlex
 import sys
 from pathlib import Path
 
-from stream2video.config import CONFIG_DEFAULTS, effective_defaults
+from stream2video.config import CONFIG_DEFAULTS, PRESETS, apply_preset, effective_defaults
 from stream2video.formatters import fmt_clock_time, fmt_size, fmt_speed, fmt_time
 from stream2video.param_specs import (
     CLI_BOOL_FLAG_ORDER,
@@ -177,6 +177,11 @@ def _quote_arg(arg: str, target_shell: str | None = None) -> str:
     * ``posix``: delegates to :func:`shlex.quote`.
     """
     shell = _default_target_shell() if target_shell is None else target_shell
+    if not arg:
+        # Empty argument — must stay quoted or the token vanishes and
+        # swallows the NEXT flag (``--proxy --method``); see the
+        # proxy-active-with-empty-address pin in build_cli_command.
+        return '""' if shell == CMD_SHELL else "''"
     if shell == POWERSHELL_SHELL:
         return _quote_powershell_arg(arg)
     if shell == CMD_SHELL:
@@ -225,6 +230,7 @@ def build_cli_command(
     completion_sound: bool = CONFIG_DEFAULTS["completion_sound"],
     config_path: Path | None = None,
     proxy: str = "",
+    proxy_active: bool = CONFIG_DEFAULTS["proxy_active"],
     per_video_dir: bool = CONFIG_DEFAULTS["per_video_dir"],
     target_shell: str | None = None,
 ) -> str:
@@ -252,12 +258,18 @@ def build_cli_command(
     ``user_defaults.json`` overrides, i.e. the exact starting point
     ``cli_config.load_config`` uses — flags are appended only when their
     value diverges from that default, keeping the copied command
-    readable when the user hasn't customised everything. Booleans whose
-    config default is True invert that rule because the CLI's own
-    default resolves through the config file: ``gapless_concat``,
-    ``per_video_dir`` and ``completion_sound`` are emitted as their
-    ``--no-*`` forms when False, so a GUI that switched them off still
-    reproduces in the pasted command.
+    readable when the user hasn't customised everything. Bool flags use
+    the same divergence rule (positive flag when the divergent value is
+    True, ``--no-*`` when False), so a GUI that switched a toggle off
+    that a user_defaults.json keeps on still pins the off-state in the
+    pasted command (audit P1: the ``--no-proxy-active`` case).
+
+    ``proxy_active`` mirrors the GUI's "Use proxy" checkbox: when True
+    AND ``proxy`` carries an address, the address travels via
+    ``--proxy``; the gate flag (``--proxy-active`` /
+    ``--no-proxy-active``) is emitted whenever the GUI's checkbox state
+    diverges from the effective default, so the paste can't silently
+    re-enable a proxy from user_defaults.json.
 
     ``config_path``: legacy — when set, appends ``-c <path>`` so a
     pasted command loads an extra YAML. The GUI no longer needs it (the
@@ -274,14 +286,32 @@ def build_cli_command(
     parts.extend(["--method", method, "--encoder", encoder])
     parts.extend(["--video-quality", video_quality])
     parts.extend(["--download-quality", download_quality])
-    if proxy:
+    # Proxy address: pinned whenever the GUI's checkbox is ON — even
+    # when the address is empty (``--proxy ''``) so a stale address in
+    # user_defaults.json cannot sneak into the paste (the CLI resolver
+    # treats an explicit --proxy as the gate; an explicit empty value
+    # pins "direct connection" regardless of a stored address).
+    if proxy or proxy_active:
         parts.extend(["--proxy", _quote_arg(proxy, target_shell)])
     # Conditional value flags — appended only when they're not the
     # effective default so the copied command stays compact. The names,
     # flag spellings, order and defaults all come from the shared
     # param_specs table (the same table the CLI's resolver uses), so
     # the GUI and the CLI cannot drift apart on flag names.
+    #
+    # The divergence baseline for PRESET-MANAGED keys is the value the
+    # preset would apply on the CLI side (``apply_preset`` runs before
+    # the CLI's resolver), not the bare effective default: with
+    # ``--preset low_memory`` and the user having switched
+    # low_process_priority back off, the GUI value equals the effective
+    # default (False) but the CLI's preset overlay would force True —
+    # the flag must be spelled out or the paste silently runs the
+    # preset's value (audit P1 follow-up).
     _defaults = effective_defaults()
+    if preset in PRESETS:
+        _preset_applied = apply_preset(_defaults, preset)
+    else:
+        _preset_applied = _defaults
     _values = {
         "audio_quality": audio_quality,
         "software_fallback": software_fallback,
@@ -308,15 +338,20 @@ def build_cli_command(
         "min_part_bytes": min_part_bytes,
         "preset": preset,
     }
+    _preset_managed = {k for p in PRESETS.values() for k in p}
     for _name in CLI_VALUE_FLAG_ORDER:
         _value = _values[_name]
-        if _value != _defaults[_name]:
+        _baseline = _preset_applied.get(_name) if _name in _preset_managed else _defaults[_name]
+        if _value != _baseline:
             parts.extend([PARAM_SPECS[_name]["flag"], str(_value)])
-    # Bool flags. ``bool_emit`` in the spec table decides the spelling:
-    # "positive" flags are appended when True, "negative" (``--no-*``)
-    # flags when False — a GUI that switched a default-on toggle off
-    # must spell it out or the pasted command would silently run with
-    # the config default (True).
+    # Bool flags. A value that diverges from the effective default is
+    # ALWAYS spelled out — the positive flag for True, the spec table's
+    # ``--no-*`` form for False — so the copied command is
+    # self-contained even when a user_defaults.json override holds the
+    # opposite value. The deciding case: the GUI's proxy checkbox OFF
+    # against an inherited ``proxy_active: true`` must paste as
+    # ``--no-proxy-active`` or the CLI re-enables the stored proxy
+    # (audit P1).
     _bools = {
         "x264_low_memory": x264_low_memory,
         "use_crf": use_crf,
@@ -326,14 +361,16 @@ def build_cli_command(
         "completion_sound": completion_sound,
         "force": force,
         "delete_after": delete_after,
+        "proxy_active": proxy_active,
     }
     for _name in CLI_BOOL_FLAG_ORDER:
         _spec = PARAM_SPECS[_name]
-        if _spec["bool_emit"] == "negative":
-            if not _bools[_name]:
-                parts.append(_spec["flag"])
-        elif _bools[_name]:
-            parts.append(_spec["flag"])
+        _value = _bools[_name]
+        _baseline = bool(_preset_applied.get(_name)) if _name in _preset_managed else bool(
+            _defaults[_name]
+        )
+        if _value != _baseline:
+            parts.append(_spec["flag"] if _value else _spec["flag_off"])
     return " ".join(parts)
 
 

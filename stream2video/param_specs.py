@@ -49,12 +49,15 @@ from stream2video.config import (
 #   * ``proxy``       — special: CLI --proxy implies proxy_active=True
 ParamKind = Literal["enum", "bool", "int", "float", "auto_or_int", "proxy"]
 
-# How a bool parameter is spelled in a copied CLI command:
-#   * ``positive`` — the flag is emitted when the value is True
-#     (e.g. ``--use-crf``, ``-f``);
-#   * ``negative`` — the flag is emitted when the value is False
-#     (e.g. ``--no-gapless-concat``, ``--no-per-video-dir``).
-BoolEmitRule = Literal["positive", "negative"]
+# Bool parameters carry BOTH spellings in the spec table because a copied
+# command must be able to pin either direction: the emitted form is chosen
+# by comparing the GUI value against the EFFECTIVE defaults (CONFIG_DEFAULTS
+# + user_defaults.json). A value that diverges from the effective default is
+# always spelled out — the positive flag when True, the ``--no-*`` flag when
+# False — so a pasted command can never silently fall back to a user-default
+# override the GUI didn't show (audit P1: a ``proxy_active: true`` in
+# user_defaults.json re-enabled a proxy the GUI had switched off because the
+# copied command carried no negative flag).
 
 # The declarative spec table. Order matters only for readability; the
 # resolver iterates over whatever order the caller passes names in.
@@ -68,8 +71,10 @@ BoolEmitRule = Literal["positive", "negative"]
 #   max        — for ``int`` / ``float`` / ``auto_or_int``: maximum
 #                accepted value
 #   flag       — the CLI flag emitted for this parameter in a copied
-#                command (for negative-emit bools: the ``--no-*`` form)
-#   bool_emit  — for ``bool``: ``positive`` or ``negative`` (see above)
+#                command (the positive form; for bools see ``flag_off``)
+#   flag_off   — for ``bool``: the negative (``--no-*``) form; emitted
+#                when the value diverges from the effective default and
+#                is False
 PARAM_SPECS: dict[str, dict[str, Any]] = {
     # String-enum parameters with VALID_* whitelists.
     "method": {"kind": "enum", "valid": VALID_METHODS, "flag": "--method"},
@@ -86,19 +91,39 @@ PARAM_SPECS: dict[str, dict[str, Any]] = {
     "output_fps": {"kind": "enum", "valid": VALID_OUTPUT_FPS, "flag": "--output-fps"},
     "output_format": {"kind": "enum", "valid": VALID_OUTPUT_FORMATS, "flag": "--output-format"},
     # Bool toggle parameters. Tri-state on CLI (None = fall back to
-    # config), stored as plain bool in YAML.
-    "force": {"kind": "bool", "bool_emit": "positive", "flag": "-f"},
-    "delete_after": {"kind": "bool", "bool_emit": "positive", "flag": "--delete-after"},
-    "per_video_dir": {"kind": "bool", "bool_emit": "negative", "flag": "--no-per-video-dir"},
-    "x264_low_memory": {"kind": "bool", "bool_emit": "positive", "flag": "--x264-low-memory"},
-    "use_crf": {"kind": "bool", "bool_emit": "positive", "flag": "--use-crf"},
-    "gapless_concat": {"kind": "bool", "bool_emit": "negative", "flag": "--no-gapless-concat"},
+    # config), stored as plain bool in YAML. ``flag`` / ``flag_off`` are
+    # the positive / negative spellings; the copied-command builder
+    # chooses by comparing the value to the effective defaults.
+    "force": {"kind": "bool", "flag": "-f", "flag_off": "--no-force"},
+    "delete_after": {"kind": "bool", "flag": "--delete-after", "flag_off": "--no-delete-after"},
+    "per_video_dir": {"kind": "bool", "flag": "--per-video-dir", "flag_off": "--no-per-video-dir"},
+    "x264_low_memory": {
+        "kind": "bool",
+        "flag": "--x264-low-memory",
+        "flag_off": "--no-x264-low-memory",
+    },
+    "use_crf": {"kind": "bool", "flag": "--use-crf", "flag_off": "--no-use-crf"},
+    "gapless_concat": {"kind": "bool", "flag": "--gapless-concat", "flag_off": "--no-gapless-concat"},
     "low_process_priority": {
         "kind": "bool",
-        "bool_emit": "positive",
         "flag": "--low-process-priority",
+        "flag_off": "--no-low-process-priority",
     },
-    "completion_sound": {"kind": "bool", "bool_emit": "negative", "flag": "--no-completion-sound"},
+    "completion_sound": {
+        "kind": "bool",
+        "flag": "--completion-sound",
+        "flag_off": "--no-completion-sound",
+    },
+    # Proxy gate. ``proxy_active: true`` in user_defaults.json must not
+    # re-enable the proxy under a copied command whose GUI had the proxy
+    # switched off — the builder emits ``--no-proxy-active`` whenever the
+    # GUI value (False) diverges from the effective default. The flag only
+    # gates; the address still travels via ``--proxy``.
+    "proxy_active": {
+        "kind": "bool",
+        "flag": "--proxy-active",
+        "flag_off": "--no-proxy-active",
+    },
     # Float-typed silence-tuning keys (GUI sliders). ``min``/``max``
     # come from CONFIG_RANGES — the same limits cli_config applies to
     # YAML.
@@ -277,4 +302,5 @@ CLI_BOOL_FLAG_ORDER: tuple[str, ...] = (
     "completion_sound",
     "force",
     "delete_after",
+    "proxy_active",
 )

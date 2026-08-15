@@ -21,11 +21,13 @@ from typing import Any
 
 import customtkinter as ctk
 
+from stream2video.config import PRESETS
 from stream2video.gui_widgets import Tooltip as _Tooltip
 from stream2video.settings_io import (
     ADVANCED_WIDGET_NAMES,
     ADVANCED_WIDGET_SPECS,
     parse_advanced_widgets,
+    validate_advanced_widgets,
 )
 
 
@@ -73,11 +75,28 @@ class AdvancedSettingsMixin:
         via the pure ``parse_advanced_widgets`` helper (unparseable
         text falls back to the current settings value).
         """
-        raw = {
-            key: getattr(self, ADVANCED_WIDGET_NAMES[key]).get()
-            for key in ADVANCED_WIDGET_SPECS
-        }
-        return parse_advanced_widgets(raw, current=self.settings)
+        return parse_advanced_widgets(self._raw_advanced_widget_values(), current=self.settings)
+
+    def _raw_advanced_widget_values(self) -> dict[str, str]:
+        """Read every Advanced widget's raw string (Tk main thread only).
+
+        Shared by the typed parse (:meth:`_read_advanced_widget_values`)
+        and the validation gate (:meth:`_advanced_widget_errors`) so both
+        read the exact same strings the user sees — the gate must not
+        disagree with the parse about what "invalid" means.
+        """
+        return {key: getattr(self, ADVANCED_WIDGET_NAMES[key]).get() for key in ADVANCED_WIDGET_SPECS}
+
+    def _advanced_widget_errors(self) -> dict[str, str]:
+        """Per-key error strings for invalid Advanced widget content.
+
+        Empty dict = all widgets parse and are in range. Mirrors the CLI
+        resolver's validation (audit P2): the same ``abc`` entry text that
+        the CLI rejects with "Invalid X (use ...)" also blocks Start /
+        Copy CLI command here, so the GUI can no longer run with a value
+        different from what its own field shows.
+        """
+        return validate_advanced_widgets(self._raw_advanced_widget_values())
 
     def _set_advanced_widget_values(self, values: dict[str, Any]) -> None:
         """Push a config dict (e.g. restored defaults) into the widgets."""
@@ -91,3 +110,47 @@ class AdvancedSettingsMixin:
             else:
                 widget.delete(0, "end")
                 widget.insert(0, str(value))
+
+    def _on_preset_change(self, preset: str) -> None:
+        """Sync the preset-managed widgets when the resource preset changes.
+
+        Previously the preset was applied to ``run_config`` at Start and
+        then immediately overwritten by the widget snapshot — the preset
+        was a no-op (audit P1). Now the preset's tunables are pushed into
+        the widgets that manage them (and into ``self.settings``) at
+        selection time, so the widgets SHOW what the run will use; Start
+        re-applies the preset on its snapshot and the widget snapshot
+        matches it exactly. ``balanced`` changes nothing (identity
+        preset), so a user's explicit choices below survive a round-trip
+        through 'balanced'.
+        """
+        if preset not in PRESETS:
+            return
+        overrides = PRESETS[preset]
+        self.settings.update(overrides)
+        self.settings["preset"] = preset
+        # Programmatic callers (``_sync_preset_on_load`` at startup,
+        # ``_restore_defaults``) land here without firing the combobox
+        # command, so keep the combo in sync too. ``.set()`` on a
+        # readonly combo doesn't invoke ``command`` — no recursion.
+        if self.combo_preset.get() != preset:
+            self.combo_preset.set(preset)
+        if not overrides:
+            return
+        for key, value in overrides.items():
+            spec = ADVANCED_WIDGET_SPECS.get(key)
+            if spec is not None:
+                widget = getattr(self, ADVANCED_WIDGET_NAMES[key])
+                if spec["kind"] == "combo":
+                    widget.set(str(value))
+                else:
+                    widget.delete(0, "end")
+                    widget.insert(0, str(value))
+            elif key == "x264_low_memory":
+                self._set_checkbox(self.chk_x264_low_memory, bool(value))
+            elif key == "low_process_priority":
+                self._set_checkbox(self.chk_low_process_priority, bool(value))
+        # Persist right away (parity with _on_proxy_toggle): the synced
+        # widget values must survive a restart even when the user never
+        # clicks another save point.
+        self._save_settings()

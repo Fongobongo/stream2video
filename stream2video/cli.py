@@ -87,6 +87,7 @@ def _doctor_callback(ctx: typer.Context, param: Any, value: bool) -> bool:
     without an input path.
     """
     if value:
+        global _JSON_LOG_MODE
         # ``--doctor`` is eager: it may fire before the *non-eager*
         # ``--config`` option has been parsed, so ``ctx.params`` does not
         # reliably contain ``config_file``. Scan argv directly — cheap,
@@ -115,7 +116,6 @@ def _doctor_callback(ctx: typer.Context, param: Any, value: bool) -> bool:
         # _JSON_LOG_MODE yet when --doctor fires. Scan argv again (same
         # rationale as --config above) so the doctor's "line-per-object"
         # contract actually fires.
-        global _JSON_LOG_MODE
         for i, arg in enumerate(argv):
             if arg == "--log-format" and i + 1 < len(argv) and argv[i + 1] == "json":
                 _JSON_LOG_MODE = True
@@ -123,7 +123,17 @@ def _doctor_callback(ctx: typer.Context, param: Any, value: bool) -> bool:
             if arg.startswith("--log-format=") and arg.split("=", 1)[1] == "json":
                 _JSON_LOG_MODE = True
                 break
-        ok = _run_doctor(cfg)
+        # The eager callback exits BEFORE main() — its ``finally``
+        # logging restore never runs, so any state mutated above (the
+        # ``--log-format json`` scan sets _JSON_LOG_MODE) must be reset
+        # before returning or it leaks into the next main() call in the
+        # same process (audit P1/P2). try/finally wraps _run_doctor so
+        # an exception inside the diagnostics still resets the flag
+        # before propagating.
+        try:
+            ok = _run_doctor(cfg)
+        finally:
+            _JSON_LOG_MODE = False
         raise typer.Exit(0 if ok else 1)
     return value
 
@@ -551,6 +561,16 @@ def main(
         "or socks5://user:pass@host:1080. Empty (default) = direct "
         "connection. Passed to yt-dlp.",
     ),
+    proxy_active: bool | None = typer.Option(
+        None,
+        "--proxy-active/--no-proxy-active",
+        help="Gate for the proxy address stored in user_defaults.json / config "
+        "YAML. Passing it explicitly pins the proxy on (with the --proxy URL) or "
+        "off, overriding any proxy_active: true in the config files. If not "
+        "passed, the config file's `proxy_active` key (default False) decides. "
+        "Copied GUI commands use --no-proxy-active when the GUI has the proxy "
+        "switched off, so a paste can't silently re-enable a stored proxy.",
+    ),
     memory_limit_mb: str = typer.Option(
         str(CONFIG_DEFAULTS["memory_limit_mb"]),
         "--memory-limit-mb",
@@ -672,6 +692,7 @@ def main(
     2. Detect silence segments
     3. Cut and concatenate video
     """
+    global _JSON_LOG_MODE
 
     # Validate log_format BEFORE any logging happens so an unknown format
     # exits cleanly instead of producing half-Rich/half-JSON output.
@@ -691,6 +712,21 @@ def main(
     # here keeps the CLI's user-facing logging behaviour (Rich stderr
     # handler + DEBUG-level root) for ``stream2video`` invocations
     # while leaving importers' logging untouched.
+    # Snapshot every piece of logging state this invocation rewrites so
+    # the ``finally`` block can restore it: a host calling main() twice
+    # in one process (embeds, tests with CliRunner) used to leak the
+    # first run's JSON mode into the second — ``console.stderr`` stayed
+    # True, the JSON handler stayed attached, ``_JSON_LOG_MODE`` stayed
+    # True and the "rich" run printed to stderr through a JSON handler
+    # (audit P1/P2).
+    _root_logger = logging.getLogger()
+    _logging_snapshot = (
+        list(_root_logger.handlers),
+        _root_logger.level,
+        logger.propagate,
+        list(logger.handlers),
+        console.stderr,
+    )
     if log_format_lower == "json":
         # JSON structured logging — replace the Rich console handler with
         # a JSON formatter writing to stdout so the caller can pipe the
@@ -721,7 +757,6 @@ def main(
         # banners, or summaries may leak into stdout, or a downstream
         # ``| jq .`` breaks on the first non-JSON line.
         console.stderr = True
-        global _JSON_LOG_MODE
         _JSON_LOG_MODE = True
     else:
         _JSON_LOG_MODE = False
@@ -919,6 +954,13 @@ def main(
         # run goes through the proxy. YAML's ``proxy: url`` is inert unless
         # paired with ``proxy_active: true`` so a config file doesn't
         # silently change networking (matches the GUI's checkbox contract).
+        # An explicit --proxy-active / --no-proxy-active flag pins the gate
+        # in either direction BEFORE the proxy resolves — the copied
+        # command of a GUI with the proxy OFF pastes --no-proxy-active so
+        # a ``proxy_active: true`` in user_defaults.json cannot
+        # re-enable the stored address (audit P1).
+        if proxy_active is not None:
+            resolver.pin_proxy_active(proxy_active)
         resolved_proxy: str = resolver.resolve("proxy", proxy)
 
         # P1: silence-tuning floats. Explicit CLI flags (--threshold /
@@ -1408,6 +1450,25 @@ def main(
         if fh is not None:
             logger.removeHandler(fh)
             fh.close()
+        # Restore every piece of logging state this invocation rewrote
+        # (see the snapshot at entry). Closes the JSON handler this run
+        # installed (so it can't keep writing into our stdout after the
+        # process hands off to another invocation), re-roots the root
+        # logger's handler list, and resets ``console.stderr`` /
+        # ``logger.propagate`` / ``_JSON_LOG_MODE``. The snapshot is
+        # taken before the ``try`` block, so it always exists here.
+        _root_handlers, _root_level, _propagate, _logger_handlers, _stderr = _logging_snapshot
+        for _h in list(logger.handlers):
+            logger.removeHandler(_h)
+            if _h not in _logger_handlers:
+                _h.close()
+        for _h in _logger_handlers:
+            logger.addHandler(_h)
+        logger.propagate = _propagate
+        _root_logger.handlers[:] = _root_handlers
+        _root_logger.setLevel(_root_level)
+        console.stderr = _stderr
+        _JSON_LOG_MODE = False
 
 
 if __name__ == "__main__":

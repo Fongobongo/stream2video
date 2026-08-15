@@ -4,6 +4,21 @@
 
 ### Added
 
+- **`--proxy-active` / `--no-proxy-active` flags** — pin the proxy gate explicitly, overriding any `proxy_active: true` stored in `user_defaults.json` / config YAML. Copied GUI commands now emit `--no-proxy-active` when the GUI's proxy checkbox is off, so a paste can no longer silently re-enable a stored proxy.
+- **Parity contract tests** (`tests/test_parity.py`) — for every preset, bool toggle and default override, the GUI's run config and the copied command's CLI resolution are compared field-by-field on the resulting `PipelineConfig`.
+- **GUI validation gate** — Start and Copy CLI command now reject invalid Advanced-field content (garbage text, empty entries, out-of-range numbers, bad combo values) with an error dialog naming the fields, matching the CLI resolver's strictness instead of silently substituting the previous value.
+
+### Fixed
+
+- **Resource preset now actually applies in the GUI** — selecting `low_memory` / `low_cpu` / `maximum_performance` updates the widgets it manages immediately (checkboxes, x264 preset, thread count, RAM limit, batch chunk) and persists; previously the preset was applied to the run snapshot and then overwritten by the widget snapshot in the same function, while the copied command's `--preset` ran differently. `balanced` remains the identity preset.
+- **Copied CLI commands pin toggles in both directions** — bool flags are emitted whenever the GUI value diverges from what the CLI would otherwise resolve (user_defaults / preset baseline): `--gapless-concat`, `--per-video-dir`, `--completion-sound`, `--x264-low-memory` and friends now appear when the GUI flips them against stored defaults.
+- **Proxy checkbox ON with an empty address pins direct connection** — the copied command emits `--proxy ''` so a stale address in user defaults cannot sneak back in.
+- **JSON log mode no longer leaks between in-process CLI invocations** — `--log-format json` state (`_JSON_LOG_MODE`, `console.stderr`, logger handlers, `propagate`) is snapshotted at entry and restored in `finally`; the eager `--doctor --log-format json` path resets the flag before exiting. A JSON run followed by a rich run in the same process (embeds, tests) now behaves correctly.
+- **`validate_pipeline_config` reports wrong-typed values** — a string on a numeric key, a bool on an int slot, a non-bool on a toggle, or an int on a float slot is now a validation error instead of being silently skipped and crashing later.
+
+
+### Added
+
 - **`--doctor` flag** — print an environment report (Python version, ffmpeg/ffprobe path and version, available encoders, RAM, config file location) and exit. Useful for filing bug reports or checking that everything is wired up before a long run. Works without an input file.
 - **`--dry-run` / `-n` flag** — run only silence detection and print a "what would be cut" summary (number of segments, total length removed, expected output duration) without encoding. Lets you tune `threshold` / `min_silence` / `margin` against a real video in seconds instead of waiting for a full encode.
 - **`--log-format json` flag** — emit every log line as a JSON object (one per line), for log aggregators like ELK / Splunk / Loki. The default `rich` format is unchanged.
