@@ -246,6 +246,73 @@ class TestLoadConfigAutoCaseInsensitive:
             load_config(cfg)
 
 
+class TestLoadConfigAutoOrIntQuotedNumbers:
+    """A QUOTED number (``encoder_threads: "8"``) on an auto_or_int key
+    parses to str in YAML, passes ``float()`` in load_config, and used to
+    leak ``8.0`` into the config — the resolver's ``auto_or_int`` path
+    then rejected the run with "must be 'auto' or an integer" for a value
+    that IS an integer. ``batch_chunk_size: "40"`` never had this problem
+    because its CONFIG_DEFAULTS entry is an int. Regression: quoted numbers
+    must be coerced back to int, same as the unquoted / GUI / flag paths.
+    """
+
+    def test_quoted_numbers_load_as_int(self, tmp_path: Path):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text('encoder_threads: "8"\nmemory_limit_mb: "4096"\nthreshold: "-25"\n')
+        loaded = load_config(cfg)
+        assert loaded["encoder_threads"] == 8
+        assert isinstance(loaded["encoder_threads"], int)
+        assert loaded["memory_limit_mb"] == 4096
+        assert isinstance(loaded["memory_limit_mb"], int)
+        # float-typed keys must NOT be coerced to int — quoted or not,
+        # a float-typed slot keeps its float (``-25.0``, not ``-25``).
+        assert loaded["threshold"] == -25.0
+        assert isinstance(loaded["threshold"], float)
+
+    def test_quoted_number_reaches_cut_and_concat_as_int(self, tmp_path: Path):
+        from typer.testing import CliRunner
+
+        from stream2video.cli import app
+        from stream2video.download import DownloadResult
+
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"source")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text('encoder_threads: "8"\nmemory_limit_mb: "4096"\n', encoding="utf-8")
+        received: dict = {}
+
+        with (
+            patch(
+                "stream2video.pipeline_controller.download",
+                return_value=DownloadResult(src, is_downloaded=False),
+            ),
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=[]),
+            patch(
+                "stream2video.pipeline_controller.cut_and_concat",
+                side_effect=_make_fake_cut_and_concat(received),
+            ),
+            patch("stream2video.concat.get_video_duration", return_value=10.0),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    str(src),
+                    "-o",
+                    str(tmp_path / "out"),
+                    "-c",
+                    str(cfg),
+                    "--no-per-video-dir",
+                ],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert received["encoder_threads"] == 8
+        assert isinstance(received["encoder_threads"], int)
+        assert received["memory_limit_mb"] == 4096
+        assert isinstance(received["memory_limit_mb"], int)
+
+
 class TestCliAutoCaseInsensitive:
     """--encoder-threads AUTO / --memory-limit-mb Auto must reach the
     pipeline as the canonical lowercase "auto" (the CLI half of the same

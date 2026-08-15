@@ -1272,8 +1272,17 @@ def main(
                     # margin in the config, runs --dry-run, reads the
                     # stats, and iterates without spending CPU on a
                     # throwaway encode. See tests/test_cli_dry_run.py.
-                    assert result.silence_segments is not None
-                    assert result.keep_segments is not None
+                    if result.silence_segments is None or result.keep_segments is None:
+                        # Defensive: both segment lists are part of the
+                        # dry-run contract. Checked explicitly rather than
+                        # via ``assert`` — asserts vanish under
+                        # ``python -O`` and the summary would then be fed
+                        # None (mirrors the output_path guard below).
+                        console.print(
+                            "[red]Dry-run summary unavailable:[/red] "
+                            "the controller returned no segment lists"
+                        )
+                        raise typer.Exit(1)
                     console.print()
                     console.print(
                         fmt_dry_run_summary(

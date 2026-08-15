@@ -178,3 +178,46 @@ class TestDryRun:
         # Silence-phase pre-flight ran; concat-phase pre-flight did NOT.
         assert "silence detection" in calls, f"silence pre-flight missing: {calls}"
         assert "concat phase" not in calls, f"concat pre-flight ran despite --dry-run: {calls}"
+
+    def test_dry_run_guard_rejects_missing_segment_lists(self, tmp_path: Path) -> None:
+        """The dry-run summary path must FAIL LOUDLY when the controller
+        violates the dry-run contract (no segment lists) — the old
+        ``assert`` here vanished under ``python -O`` and ``fmt_dry_run_summary``
+        was fed None. The guard is an explicit if-check + typer.Exit(1)."""
+        from stream2video.pipeline_controller import PipelineResult
+
+        src = tmp_path / "video.mp4"
+        _make_video_file(src, size_mb=1.0)
+        out_dir = tmp_path / "out"
+
+        broken = PipelineResult(
+            output_path=None,
+            video_path=src,
+            src_size_bytes=1024,
+            src_duration=10.0,
+            dst_size_bytes=0,
+            keep_duration=8.0,
+            pipeline_seconds=1.0,
+            silence_segments=None,
+            keep_segments=None,
+        )
+
+        runner = CliRunner()
+        with (
+            patch.object(cli_mod, "_check_ffmpeg", lambda: None),
+            # cli.py binds PipelineController at import time — patch the
+            # cli module's binding, not pipeline_controller's.
+            patch.object(
+                cli_mod,
+                "PipelineController",
+                return_value=MagicMock(run=MagicMock(return_value=broken)),
+            ),
+        ):
+            result = runner.invoke(
+                cli_mod.app,
+                [str(src), "-o", str(out_dir), "--dry-run"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 1, f"expected exit 1, got {result.exit_code}: {result.stdout}"
+        assert "Dry-run summary unavailable" in result.stdout

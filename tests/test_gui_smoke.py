@@ -5,7 +5,21 @@ calling ``mainloop()`` — they verify that the widgets are created, the
 config dict has the expected keys, and the pure helpers are wired
 correctly. They don't drive a real event loop; they use
 ``update_idletasks()`` to flush pending Tk events so widget state
-sliders / combos are queryable.
+sliders / combos is queryable.
+
+Fixture scope follows the mutation contract in ``conftest``:
+
+  * READ-ONLY tests (widget existence, combo values, callable wiring)
+    share the module-scoped ``gui_module`` fixture so the slow Tk init
+    is amortised;
+  * tests that MUTATE instance state (``_ui_status``,
+    ``_ui_progress_plan`` / ``_phase_bounds``, ``_log``,
+    ``_set_running``, progress bar / cancel event dispatch) use the
+    function-scoped ``gui`` fixture — a fresh instance per test. The
+    "initial state" assertions in ``TestGuiPipelineState`` are only
+    meaningful on an instance no other test has touched; sharing one
+    module-scoped instance silently passed only because no test in the
+    module ever set ``running=True``.
 
 The tests are SKIPPED when:
   * The [gui] extra isn't installed (Pillow / customtkinter missing).
@@ -28,23 +42,15 @@ pytest.importorskip("customtkinter", reason="gui.py requires customtkinter ([gui
 from stream2video.config import CONFIG_DEFAULTS, VALID_ENCODERS, VALID_METHODS, VALID_QUALITIES
 
 
-@pytest.fixture(scope="module")
-def gui(gui_module):
-    """Alias for the shared module-scoped ``gui_module`` fixture from
-    conftest — smoke tests only query widget state, they don't mutate
-    it, so the slow Tk init is amortised across the whole module."""
-    return gui_module
-
-
 class TestGuiInstantiation:
-    def test_app_instance_has_settings(self, gui):
-        assert hasattr(gui, "settings")
-        assert isinstance(gui.settings, dict)
+    def test_app_instance_has_settings(self, gui_module):
+        assert hasattr(gui_module, "settings")
+        assert isinstance(gui_module.settings, dict)
         # CONFIG_DEFAULTS keys are all present.
         for key in CONFIG_DEFAULTS:
-            assert key in gui.settings, f"missing key {key!r} in gui.settings"
+            assert key in gui_module.settings, f"missing key {key!r} in gui.settings"
 
-    def test_required_widgets_exist(self, gui):
+    def test_required_widgets_exist(self, gui_module):
         # Verify the widget attributes the pipeline worker and helpers
         # reference at runtime. A rename in _build_ui that missed one
         # of these would crash on first interaction.
@@ -74,29 +80,29 @@ class TestGuiInstantiation:
             "btn_proxy",
             "chk_proxy",
         ):
-            assert hasattr(gui, attr), f"GUI missing widget attribute {attr!r}"
+            assert hasattr(gui_module, attr), f"GUI missing widget attribute {attr!r}"
 
-    def test_combo_values_match_valid_lists(self, gui):
+    def test_combo_values_match_valid_lists(self, gui_module):
         # The combo boxes should have been populated with the canonical
         # VALID_* lists at construction time. A regression where the
         # combo is empty or has wrong values would leave the user unable
         # to pick the encoder they want.
         assert (
-            gui.combo_method.cget("values") == tuple(VALID_METHODS)
-            or list(gui.combo_method.cget("values")) == VALID_METHODS
+            gui_module.combo_method.cget("values") == tuple(VALID_METHODS)
+            or list(gui_module.combo_method.cget("values")) == VALID_METHODS
         )
-        assert list(gui.combo_encoder.cget("values")) == VALID_ENCODERS
-        assert list(gui.combo_video_quality.cget("values")) == VALID_QUALITIES
+        assert list(gui_module.combo_encoder.cget("values")) == VALID_ENCODERS
+        assert list(gui_module.combo_video_quality.cget("values")) == VALID_QUALITIES
 
 
 class TestGuiPureHelpersWired:
-    def test_build_cli_command_callable(self, gui):
+    def test_build_cli_command_callable(self, gui_module):
         # The "Copy CLI command" button calls _copy_cli_command which
         # delegates to gui_helpers.build_cli_command. The button binding
         # is set at _build_ui time; if the helper import broke, the
         # button would crash on click. Verify the method exists and
         # is callable.
-        assert callable(gui._copy_cli_command)
+        assert callable(gui_module._copy_cli_command)
 
     def test_ui_status_doesnt_crash_with_force(self, gui):
         # ``_ui_status`` is called frequently from worker threads via
@@ -104,18 +110,21 @@ class TestGuiPureHelpersWired:
         # (it goes through ``should_update_status`` from gui_helpers,
         # then ``_set_static_status`` wraps the text via
         # ``_wrap_status_lines`` before configuring the label).
+        # MUTATES (status label + throttle timestamp) — function-scoped.
         gui._ui_status("test status", force=True)
 
     def test_ui_progress_plan_positions_ticks(self, gui):
         # The pipeline broadcasts per-run phase boundaries; the GUI must
         # accept them without raising (tick placement is main-thread via
         # _tk_after, so just verify the state + indicator wiring).
+        # MUTATES (``_phase_bounds`` + tick placement) — function-scoped.
         gui._ui_progress_plan((0.05, 0.40, 0.94, 1.0))
         assert gui._phase_bounds == (0.05, 0.40, 0.94, 1.0)
 
     def test_log_queue_accepts_messages(self, gui):
         # The pipeline worker and many helpers call self._log(str);
         # verify the queue accepts a message without raising.
+        # MUTATES (log queue) — function-scoped.
         before = gui.log_queue.qsize()
         gui._log("smoke test message")
         after = gui.log_queue.qsize()
@@ -124,6 +133,8 @@ class TestGuiPureHelpersWired:
 
 class TestGuiPipelineState:
     def test_initial_running_state_is_false(self, gui):
+        # Function-scoped instance: no earlier test in the module can
+        # have flipped ``running``, so "initial" is a true claim here.
         assert gui.running is False
 
     def test_cancel_event_initially_clear(self, gui):
@@ -133,6 +144,7 @@ class TestGuiPipelineState:
         # _set_running flips the boolean and enables/disables widgets.
         # Verify it doesn't raise; we don't assert the widget state
         # because ctk's state mgmt is platform-dependent.
+        # MUTATES (running flag + button states) — function-scoped.
         gui._set_running(False)
         assert gui.running is False
 
@@ -157,6 +169,10 @@ class TestToolkitCallbackDispatch:
     close during decode) requires pytest-qt and is deferred — these
     smoke checks are the cheap regression net for "the GUI's callback
     plumbing wasn't broken by a refactor".
+
+    All tests here MUTATE the instance (status label, log queue,
+    progress bar value, cancel event), so they use the function-scoped
+    ``gui`` fixture per the module contract.
     """
 
     def test_tk_after_dispatches_to_main_thread(self, gui):

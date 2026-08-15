@@ -127,10 +127,17 @@ def load_config(config_file: Path | None, console: Any) -> dict:
                 # must not leak a float into the int-typed PipelineConfig
                 # slots downstream. Float-typed keys (threshold, margin)
                 # keep their float even when integral (``-30.0``).
+                # The auto_or_int keys (encoder_threads / memory_limit_mb)
+                # have a str default ("auto"), so the CONFIG_DEFAULTS-typed
+                # branch below can't catch them — yet a QUOTED number
+                # (``encoder_threads: "8"``) parses to a str, passes
+                # float(), and would leak 8.0 into the config, which the
+                # resolver's auto_or_int path then rejects as "not an
+                # integer" — same class of bug the "auto" case fix closed.
                 if value.is_integer():
                     if isinstance(original, int):
                         config[key] = original
-                    elif isinstance(CONFIG_DEFAULTS.get(key), int):
+                    elif key in AUTO_OR_INT_KEYS or isinstance(CONFIG_DEFAULTS.get(key), int):
                         config[key] = int(value)
                     else:
                         config[key] = value
