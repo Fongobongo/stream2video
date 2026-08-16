@@ -442,6 +442,55 @@ class TestOutputLock:
         assert lp.path.exists()
         lp.path.unlink()
 
+    def test_lock_reclaimed_when_pid_reused_with_other_create_time(self, tmp_path: Path):
+        """Audit round 22 P9: a REUSED pid must not keep a stale lock
+        alive forever — the lock records the owner's process creation
+        time, and a new process at the same pid started at a different
+        moment is provably not the owner, so the lock is reclaimed."""
+        pytest.importorskip("psutil")
+        out = tmp_path / "x.mp4"
+        lock = lock_path_for(out)
+        # Own pid (alive!) but a creation time that no process can match:
+        # epoch 0 is millennia away from the real start time.
+        lock.write_text(f"pid={os.getpid()} started=0.0 output=x.mp4\n", encoding="utf-8")
+        lp = acquire_output_lock(out)
+        assert lp.path.exists()
+        lp.path.unlink()
+
+    def test_live_lock_with_matching_create_time_refused(self, tmp_path: Path):
+        """Audit round 22 P9: a lock owned by the REAL current process
+        (matching pid AND creation time) is refused like a normal live
+        lock — create-time identity must not weaken the liveness check."""
+        psutil = pytest.importorskip("psutil")
+        out = tmp_path / "x.mp4"
+        lock = lock_path_for(out)
+        create_time = psutil.Process().create_time()
+        lock.write_text(f"pid={os.getpid()} started={create_time} output=x.mp4\n", encoding="utf-8")
+        with pytest.raises(ConcatLockError):
+            acquire_output_lock(out)
+
+    def test_partial_write_loops_until_complete(self, tmp_path: Path):
+        """Audit round 22 P6: a POSIX partial write (the fd accepts one
+        byte at a time) must not truncate the ownership record — the
+        acquire loops until the full payload landed and verifies the
+        token/pid round-trip."""
+        import stream2video.concat.output_lock as ol
+
+        out = tmp_path / "x.mp4"
+        lock = lock_path_for(out)
+        real_write = os.write
+
+        def one_byte(fd, data):
+            return real_write(fd, data[:1])
+
+        with patch.object(ol.os, "write", side_effect=one_byte):
+            lp = acquire_output_lock(out)
+        text = lock.read_text(encoding="utf-8")
+        assert text.startswith("token=")
+        assert f"pid={os.getpid()}" in text
+        release_output_lock(lp)
+        assert not lock.exists()
+
     def test_lock_released_on_pipeline_error(self, tmp_path: Path):
         """#6: a pipeline that raises still releases the lock."""
         video = tmp_path / "src.mp4"
@@ -463,6 +512,57 @@ class TestOutputLock:
         ):
             cut_and_concat(video, [], output)
         assert not lock_path_for(output).exists(), "lock leaked after pipeline error"
+
+
+# ── audit round 22 P1 ── encoder smoke test: transient spawn OSError ─
+class TestEncoderSmokeTransientSpawn:
+    def test_transient_winerror_206_reported_unavailable(self):
+        """An exhausted WinError 206 OSError from run_with_retry must
+        degrade to 'encoder unavailable' exactly like FileNotFoundError —
+        not crash ``--doctor`` or escape into generic pipeline error."""
+        from stream2video.concat import encoders as enc
+
+        def _exhausted(*_a, **_k):
+            raise OSError(206, "filename or extension too long", "ffmpeg.exe", 206)
+
+        try:
+            enc._encoder_check_cache.pop("libx264", None)
+            with patch.object(enc, "run_with_retry", side_effect=_exhausted):
+                assert enc.check_encoder("libx264") is False
+            # Cached False — the second call short-circuits.
+            assert enc.check_encoder("libx264") is False
+        finally:
+            enc._encoder_check_cache.pop("libx264", None)
+
+    def test_transient_file_not_found_still_unavailable(self):
+        from stream2video.concat import encoders as enc
+
+        def _fnf(*_a, **_k):
+            raise FileNotFoundError(2, "no such file")
+
+        try:
+            enc._encoder_check_cache.pop("libx264", None)
+            with patch.object(enc, "run_with_retry", side_effect=_fnf):
+                assert enc.check_encoder("libx264") is False
+        finally:
+            enc._encoder_check_cache.pop("libx264", None)
+
+    def test_nontransient_oserror_reraised(self):
+        """Non-transient OSErrors must NOT be masked as 'unavailable'."""
+        from stream2video.concat import encoders as enc
+
+        def _boom(*_a, **_k):
+            raise PermissionError(13, "access denied")
+
+        try:
+            enc._encoder_check_cache.pop("libx264", None)
+            with (
+                patch.object(enc, "run_with_retry", side_effect=_boom),
+                pytest.raises(PermissionError),
+            ):
+                enc.check_encoder("libx264")
+        finally:
+            enc._encoder_check_cache.pop("libx264", None)
 
 
 # ── #7 ── pre-first-progress timeout (opt-in) ──────────────────────────

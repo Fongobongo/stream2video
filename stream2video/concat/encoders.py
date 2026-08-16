@@ -20,7 +20,7 @@ from stream2video.config import (
     VALID_SOFTWARE_FALLBACKS,
     VALID_X264_PRESETS,
 )
-from stream2video.tools import ffmpeg_path, run_with_retry
+from stream2video.tools import _is_transient_spawn_error, ffmpeg_path, run_with_retry
 from stream2video.utils import no_window_kwargs
 
 logger = logging.getLogger(__name__)
@@ -391,14 +391,17 @@ def check_encoder(name: str) -> bool:
         with _encoder_check_lock:
             _encoder_check_cache[name] = False
         return False
-    except FileNotFoundError:
-        # ffmpeg binary missing/blocked at spawn time (winget shim
-        # target, AV filter driver, PATH break). ``run_with_retry``
-        # re-raises after its retries. Report "unavailable" instead
-        # of crashing -- the caller (``--doctor``, encoder tester)
-        # is a diagnostics surface that must degrade gracefully
-        # (``--doctor`` without ffmpeg crashed with an
-        # unhandled FileNotFoundError).
+    except OSError as e:
+        # Transient spawn failure: ffmpeg binary missing/blocked at
+        # spawn time (winget shim target, AV filter driver, PATH break,
+        # or the exhausted WinError 206 incident — audit round 22 P1).
+        # ``run_with_retry`` re-raises after its retries; report
+        # "unavailable" instead of crashing — the caller (``--doctor``,
+        # encoder tester) is a diagnostics surface that must degrade
+        # gracefully. Non-transient OSErrors (timeout plumbing bugs,
+        # real I/O failures) are NOT masked: they re-raise.
+        if not _is_transient_spawn_error(e):
+            raise
         logger.warning(f"{name} smoke test failed to spawn ffmpeg (missing or blocked)")
         with _encoder_check_lock:
             _encoder_check_cache[name] = False

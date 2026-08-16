@@ -513,6 +513,92 @@ class TestJsonLogStateIsolation:
         assert "Traceback" not in result.output
         run.assert_not_called()
 
+    def test_scan_option_value_last_wins(self):
+        """Audit round 22 P5: repeated options resolve to their LAST
+        occurrence, exactly like Click/Typer scalar options — the doctor
+        argv scan must agree with the non-doctor run of the same argv."""
+        import stream2video.cli as cli
+
+        argv = [
+            "a",
+            "--log-format",
+            "rich",
+            "--log-format",
+            "json",
+            "--log-level",
+            "DEBUG",
+            "--log-level=ERROR",
+        ]
+        assert cli._scan_option_value(argv, "--log-format") == "json"
+        assert cli._scan_option_value(argv, "--log-level") == "ERROR"
+        assert cli._scan_option_value(argv, "--config", "-c") is None
+
+    def test_doctor_repeated_log_format_last_wins(self, isolated_defaults, monkeypatch):
+        """Same contract end-to-end: ``--doctor --log-format rich
+        --log-format json`` runs the diagnostics in JSON mode."""
+        monkeypatch.setattr(
+            "sys.argv",
+            [
+                "stream2video",
+                "--doctor",
+                "--log-format",
+                "rich",
+                "--log-format",
+                "json",
+            ],
+        )
+        seen: list[bool] = []
+
+        def _capture(cfg):
+            seen.append(cli_mod._JSON_LOG_MODE)
+            return True
+
+        runner = CliRunner()
+        with patch("stream2video.cli._run_doctor", side_effect=_capture):
+            result = runner.invoke(
+                cli_mod.app,
+                ["--doctor", "--log-format", "rich", "--log-format", "json"],
+            )
+        assert result.exit_code == 0
+        assert seen == [True]
+        assert cli_mod._JSON_LOG_MODE is False
+
+    def test_doctor_restores_stream_encoding(self, isolated_defaults, monkeypatch):
+        """Audit round 22 P4: _run_doctor must put the ORIGINAL
+        stdout/stderr encoding and error policy back after its UTF-8
+        reconfigure — an embedded host keeps using the streams, and the
+        doctor's encoding must not leak into every later write."""
+        import sys
+
+        import stream2video.cli as cli
+
+        class _FakeStream:
+            def __init__(self, encoding, errors):
+                self.encoding = encoding
+                self.errors = errors
+
+            def reconfigure(self, **kw):
+                for k, v in kw.items():
+                    setattr(self, k, v)
+
+        fake_out = _FakeStream("cp1251", "strict")
+        fake_err = _FakeStream("cp1251", "strict")
+        monkeypatch.setattr(sys, "stdout", fake_out)
+        monkeypatch.setattr(sys, "stderr", fake_err)
+        seen: dict[str, object] = {}
+
+        def _capture(cfg):
+            seen["enc"] = sys.stdout.encoding
+            return True
+
+        with patch("stream2video.cli._doctor_impl", side_effect=_capture):
+            assert cli._run_doctor(None) is True
+        # During the diagnostics the streams WERE utf-8 ...
+        assert seen == {"enc": "utf-8"}
+        # ... and afterwards the original encoding + error policy are back.
+        assert fake_out.encoding == "cp1251" and fake_out.errors == "strict"
+        assert fake_err.encoding == "cp1251" and fake_err.errors == "strict"
+
 
 class TestEarlyExitLoggingRestore:
     """The logging-state restore must run on EVERY exit, including the

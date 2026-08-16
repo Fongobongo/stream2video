@@ -91,18 +91,26 @@ def normalize_log_format(value: str) -> str | None:
 
 
 def _scan_option_value(argv: list[str], *option_names: str) -> str | None:
-    """Return the value of the first of ``option_names`` found in argv.
+    """Return the value of the LAST of ``option_names`` found in argv.
 
     Covers both ``--opt X`` / ``-c X`` and ``--opt=X`` / ``-c=X``
     spellings; a value that looks like another flag is not consumed.
+
+    Last-wins (audit round 22 P5): Click/Typer scalar options resolve
+    repeated flags to their LAST occurrence, so ``--doctor --log-format
+    rich --log-format json`` must behave exactly like the non-doctor
+    run and pick ``json`` — first-wins silently ran the diagnostics
+    with the wrong format while a normal run of the same argv used the
+    other one.
     """
+    found: str | None = None
     for i, arg in enumerate(argv):
         for opt in option_names:
             if arg == opt and i + 1 < len(argv) and not argv[i + 1].startswith("-"):
-                return argv[i + 1]
+                found = argv[i + 1]
             if arg.startswith(f"{opt}="):
-                return arg.split("=", 1)[1]
-    return None
+                found = arg.split("=", 1)[1]
+    return found
 
 
 def _validate_log_format(value: str) -> str:
@@ -206,6 +214,44 @@ def _doctor_callback(ctx: typer.Context, param: Any, value: bool) -> bool:
 def _run_doctor(config_file: Path | None = None) -> bool:
     """Print environment diagnostics; return True iff all critical checks pass.
 
+    The heavy lifting lives in :func:`_doctor_impl`; this wrapper only
+    snapshots and restores the stdout/stderr encoding (audit round 22
+    P4): redirected output on Windows decodes via the OEM/ANSI codepage
+    which can't encode the ✓/✗/— glyphs, so the impl reconfigures the
+    streams to UTF-8 — and this wrapper MUST put the original encoding
+    and error policy back afterwards, otherwise every write by the
+    embedded host process keeps the doctor's encoding forever. ``--doctor``
+    in standalone mode exits immediately, which is why the leak was
+    invisible until an embedded host ran it.
+    """
+    _stream_snapshots: list[tuple[Any, str | None, Any]] = []
+    for _stream in (sys.stdout, sys.stderr):
+        _reconfigure = getattr(_stream, "reconfigure", None)
+        if _reconfigure is None:
+            continue  # e.g. pytest's captured stream
+        try:
+            _stream_snapshots.append(
+                (_stream, _stream.encoding, getattr(_stream, "errors", "strict"))
+            )
+            _reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+    try:
+        return _doctor_impl(config_file)
+    finally:
+        for _stream, _encoding, _errors in _stream_snapshots:
+            _reconfigure = getattr(_stream, "reconfigure", None)
+            if _reconfigure is None:
+                continue
+            try:
+                _reconfigure(encoding=_encoding, errors=_errors)
+            except (ValueError, OSError):
+                pass
+
+
+def _doctor_impl(config_file: Path | None = None) -> bool:
+    """Print environment diagnostics; return True iff all critical checks pass.
+
     Reports system information (Python, ffmpeg, encoders, RAM, config)
     in a compact OK/fail list. Callers exit 0 when all critical checks
     pass, 1 otherwise. Non-critical items (psutil, YAML config file) only
@@ -228,19 +274,8 @@ def _run_doctor(config_file: Path | None = None) -> bool:
         tbl.add_row(status_glyph, rich_label)
         checks.append((status, plain_label))
 
-    # Redirected stdout on Windows decodes via the OEM/ANSI codepage
-    # (cp1251/cp866), which can't encode the ✓/✗/— glyphs below. Rich
-    # only enables its legacy Windows console API when the stream is a
-    # real console; for pipes/files, reconfigure stdout/stderr to UTF-8
-    # so ``--doctor > report.txt`` doesn't die with UnicodeEncodeError.
-    for _stream in (sys.stdout, sys.stderr):
-        _reconfigure = getattr(_stream, "reconfigure", None)
-        if _reconfigure is None:
-            continue  # e.g. pytest's captured stream
-        try:
-            _reconfigure(encoding="utf-8", errors="replace")
-        except (ValueError, OSError):
-            pass
+    # stdout/stderr were already reconfigured to UTF-8 (and are restored
+    # afterwards) by the ``_run_doctor`` wrapper.
 
     # Python version
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"

@@ -452,7 +452,7 @@ def _createprocess_probe(exe: str) -> str:
                 wintypes.LPVOID,
                 wintypes.DWORD,
                 wintypes.DWORD,
-                ctypes.POINTER(wintypes.DWORD),
+                ctypes.POINTER(ctypes.c_size_t),
             ]
             kernel32.DeleteProcThreadAttributeList.argtypes = [wintypes.LPVOID]
             kernel32.UpdateProcThreadAttribute.restype = wintypes.BOOL
@@ -557,30 +557,47 @@ def _createprocess_probe(exe: str) -> str:
             ]
 
         attribute_list: Any = None
+        attribute_list_initialized = False
+        attribute_list_ok = False
         try:
-            attr_list_size = wintypes.DWORD(0)
+            # SIZE_T, not DWORD (audit round 22 P1): the size query
+            # writes a POINTER-SIZED value — a DWORD target would be
+            # truncated to 32 bits on x64 (or overflow adjacent
+            # memory), producing an undersized attribute-list buffer.
+            attr_list_size = ctypes.c_size_t(0)
             kernel32.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(attr_list_size))
             attribute_list = ctypes.create_string_buffer(attr_list_size.value)
             job_handle_value = ctypes.c_void_p(job)
             if not kernel32.InitializeProcThreadAttributeList(
                 attribute_list, 1, 0, ctypes.byref(attr_list_size)
-            ) or not kernel32.UpdateProcThreadAttribute(
-                attribute_list,
-                0,
-                PROC_THREAD_ATTRIBUTE_JOB_LIST,
-                ctypes.byref(job_handle_value),
-                ctypes.sizeof(wintypes.HANDLE),
-                None,
-                None,
             ):
                 attribute_list = None
+            else:
+                # The list is now INITIALIZED and owns kernel-side
+                # state — it MUST receive the paired Delete no matter
+                # what follows, so the flag is set before the update
+                # attempt (audit round 22 P3: zeroing the reference on
+                # a rejected update used to skip the mandatory
+                # DeleteProcThreadAttributeList).
+                attribute_list_initialized = True
+                attribute_list_ok = bool(
+                    kernel32.UpdateProcThreadAttribute(
+                        attribute_list,
+                        0,
+                        PROC_THREAD_ATTRIBUTE_JOB_LIST,
+                        ctypes.byref(job_handle_value),
+                        ctypes.sizeof(wintypes.HANDLE),
+                        None,
+                        None,
+                    )
+                )
         except Exception:
             # Attribute-list setup is the same best-effort plumbing as
             # the job itself: a broken list must not become "probe
             # raised ..." — it degrades to the static skip below.
             attribute_list = None
-        if not job_ok or attribute_list is None:
-            if attribute_list is not None:
+        if not job_ok or not attribute_list_ok:
+            if attribute_list_initialized:
                 try:
                     kernel32.DeleteProcThreadAttributeList(attribute_list)
                 except Exception:

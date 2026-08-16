@@ -277,6 +277,34 @@ class TestValidatePipelineConfig:
         assert any("segment_encode_timeout" in e and "out of range" in e for e in errors)
         assert any("batch_chunk_size" in e and "out of range" in e for e in errors)
 
+    def test_stall_warning_below_kill_accepted(self):
+        """The warning may fire before the kill — the sane pair."""
+        assert (
+            validate_pipeline_config(
+                _valid_config(stall_warning_timeout=5, stall_kill_timeout=3600)
+            )
+            == []
+        )
+
+    def test_stall_warning_not_below_kill_rejected(self):
+        """Audit round 22 P7: stall_warning_timeout >= stall_kill_timeout
+        is contradictory — the warning would fire after (or never before)
+        the kill — and must be rejected as a cross-field error, not just
+        range-checked per key."""
+        cfg = _valid_config(stall_warning_timeout=1800, stall_kill_timeout=10)
+        errors = validate_pipeline_config(cfg)
+        assert any(
+            "stall_warning_timeout must be lower than stall_kill_timeout" in e for e in errors
+        )
+
+    def test_stall_warning_equal_kill_rejected(self):
+        errors = validate_pipeline_config(
+            _valid_config(stall_warning_timeout=300, stall_kill_timeout=300)
+        )
+        assert any(
+            "stall_warning_timeout must be lower than stall_kill_timeout" in e for e in errors
+        )
+
     @pytest.mark.parametrize(
         "key",
         [

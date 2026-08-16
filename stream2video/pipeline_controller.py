@@ -1413,4 +1413,24 @@ def validate_pipeline_config(cfg: PipelineConfig) -> list[str]:
         value = getattr(cfg, key)
         if not isinstance(value, bool):
             errors.append(f"{key} {value!r} must be true or false.")
+    # Cross-field constraint (audit round 22 P7): the stall WARNING must
+    # fire before the stall KILL — with stall_warning_timeout >=
+    # stall_kill_timeout the warning is unreachable (the process is
+    # already dead when it would have fired), so such a pair is
+    # contradictory and must be rejected on every surface (CLI, YAML,
+    # GUI) — not just range-checked independently. Skipped when either
+    # value failed its own type/range check above (those errors already
+    # say what's wrong).
+    if (
+        isinstance(cfg.stall_warning_timeout, int | float)
+        and isinstance(cfg.stall_kill_timeout, int | float)
+        and not isinstance(cfg.stall_warning_timeout, bool)
+        and not isinstance(cfg.stall_kill_timeout, bool)
+        and cfg.stall_warning_timeout >= cfg.stall_kill_timeout
+    ):
+        errors.append(
+            "stall_warning_timeout must be lower than stall_kill_timeout "
+            f"(warning at {cfg.stall_warning_timeout}s would never fire before "
+            f"the kill at {cfg.stall_kill_timeout}s)."
+        )
     return errors

@@ -416,6 +416,9 @@ class TestCreateProcessProbe:
         result = self._probe_with_fake(_RefusingUpdateKernel32)
         assert "CreateProcessW probe skipped (job object unavailable)" in result
         assert "CreateProcessW" not in calls
+        # The list WAS initialized before the rejected update — the
+        # mandatory paired Delete must still run (audit round 22 P3).
+        assert "DeleteProcThreadAttributeList" in calls
         closes = [c for c in calls if isinstance(c, tuple) and c[0] == "CloseHandle"]
         assert len(closes) == 1  # the job handle
 
@@ -483,6 +486,11 @@ class TestCreateProcessProbe:
         assert k32.CloseHandle.argtypes is not None
         assert k32.InitializeProcThreadAttributeList.restype is wintypes.BOOL
         assert k32.InitializeProcThreadAttributeList.argtypes is not None
+        # SIZE_T, not DWORD (audit round 22 P1): the size query writes a
+        # pointer-sized value — on x64 a DWORD target would be truncated.
+        assert k32.InitializeProcThreadAttributeList.argtypes[-1] == _ctypes_mod.POINTER(
+            _ctypes_mod.c_size_t
+        )
         assert k32.UpdateProcThreadAttribute.restype is wintypes.BOOL
         assert k32.UpdateProcThreadAttribute.argtypes is not None
         assert k32.DeleteProcThreadAttributeList.argtypes is not None

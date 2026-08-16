@@ -242,6 +242,24 @@ class LifecycleMixin:
 
     def _save_user_defaults(self) -> None:
         """Snapshot the current tunable GUI values to user_defaults.json."""
+        # Validation gate (audit round 22 P8): the same Advanced-widget
+        # check that blocks Start / Copy CLI must block "Save current as
+        # defaults" too — otherwise invalid visible text (e.g.
+        # ``download_timeout=abc``) parses to the last ``current`` value
+        # and the dialog reports success while the OLD number is written
+        # to disk, silently diverging from what the user sees.
+        adv_errors = self._advanced_widget_errors()
+        if adv_errors:
+            for err in adv_errors.values():
+                self._log(f"[ERROR] Invalid setting: {err}")
+            messagebox.showerror(
+                "Invalid settings",
+                "Cannot save user defaults — some Advanced settings "
+                "are invalid:\n\n" + "\n".join(adv_errors.values()) + "\n\n"
+                "Fix them and try again. Nothing was written.",
+                parent=cast(ctk.CTk, self),
+            )
+            return
         try:
             self._sync_slider_entries()
         except Exception:

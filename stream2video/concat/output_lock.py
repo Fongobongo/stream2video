@@ -95,6 +95,16 @@ def _lock_token_from_text(text: str) -> str | None:
     return None
 
 
+def _lock_create_time_from_text(text: str) -> float | None:
+    for token in text.split():
+        if token.startswith("started="):
+            try:
+                return float(token.split("=", 1)[1])
+            except ValueError:
+                return None
+    return None
+
+
 def _lock_is_fresh(lock_path: Path, now: float | None = None) -> bool:
     """True when the lock file's mtime is inside the acquire grace window.
 
@@ -111,15 +121,33 @@ def _lock_is_fresh(lock_path: Path, now: float | None = None) -> bool:
     return mtime >= (time.time() if now is None else now) - _ACQUIRE_GRACE_SECONDS
 
 
-def _pid_is_alive(pid: int) -> bool:
-    """Best-effort liveness probe (no psutil dependency here)."""
+def _owner_is_alive(pid: int, create_time: float | None) -> bool:
+    """Best-effort liveness probe (no hard psutil dependency).
+
+    With the process creation time recorded in the lock (audit round 22
+    P9), PID reuse cannot keep a stale lock "alive" forever: a NEW
+    process that happened to inherit the dead owner's PID was started
+    at a different moment, so the lock is provably abandoned and gets
+    reclaimed. Without the timestamp (no psutil at acquire time, legacy
+    lock files) fall back to plain pid liveness — and REFUSE (treat as
+    alive) rather than risk stealing a live lock when even that probe
+    fails: the user gets the manual-cleanup message.
+    """
     try:
         import psutil
 
+        proc = psutil.Process(pid)
+        if create_time is not None:
+            return abs(proc.create_time() - create_time) < 1.0
         return psutil.pid_exists(pid)
+    except psutil.NoSuchProcess:
+        return False
+    except (psutil.AccessDenied, psutil.ZombieProcess):
+        # Process exists but cannot be inspected — assume alive.
+        return True
     except Exception:
-        # No psutil or an API hiccup — refuse rather than risk stealing
-        # a live lock: the user gets the manual-cleanup message.
+        # psutil API hiccup — refuse rather than risk stealing a live
+        # lock: the user gets the manual-cleanup message.
         return True
 
 
@@ -149,6 +177,18 @@ def acquire_output_lock(output_path: Path) -> LockHandle:
     """
     token = secrets.token_hex(16)
     lock_path = lock_path_for(output_path)
+    # Record OUR process creation time so a later reclaim can tell "the
+    # same process still runs" from "some other process reused the pid"
+    # (audit round 22 P9). psutil is optional: without it the lock is
+    # written without the timestamp and liveness falls back to plain
+    # pid checks.
+    create_time: float | None = None
+    try:
+        import psutil
+
+        create_time = psutil.Process().create_time()
+    except Exception:
+        create_time = None
     for _ in range(_RETRY_MAX_TRIES):
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -166,7 +206,7 @@ def acquire_output_lock(output_path: Path) -> LockHandle:
                 # Old lock that never gained a pid line: the previous
                 # run crashed in the create→write gap. Fall through to
                 # the reclaim path below.
-            elif _pid_is_alive(pid):
+            elif _owner_is_alive(pid, _lock_create_time_from_text(text)):
                 # Refuse to clobber another run's output. The error
                 # message points at the lock so the user can delete it
                 # manually after confirming the other run is really gone.
@@ -194,12 +234,36 @@ def acquire_output_lock(output_path: Path) -> LockHandle:
             f"If that run crashed, delete the .lock file and retry."
         ) from None
     try:
-        os.write(
-            fd,
-            f"token={token} pid={os.getpid()} output={output_path}\n".encode("utf-8", "replace"),
-        )
+        owner_fields = f"pid={os.getpid()}"
+        if create_time is not None:
+            owner_fields += f" started={create_time}"
+        payload = f"token={token} {owner_fields} output={output_path}\n".encode("utf-8", "replace")
+        # POSIX allows PARTIAL writes; a truncated ownership record
+        # would make release skip our own lock and could let a live
+        # lock be reclaimed as stale (audit round 22 P6). Loop until
+        # every byte has landed.
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("output lock write stalled")
+            view = view[written:]
     finally:
         os.close(fd)
+    # Verify the record round-trips: a lock whose own token/pid cannot
+    # be parsed back is a correctness failure, not a diagnostic nicety
+    # — refuse to run with an unverifiable lock rather than risk a
+    # double-write race or a release that never fires.
+    written_text = _lock_text_from_content(lock_path)
+    if _lock_token_from_text(written_text) != token or _lock_pid_from_text(written_text) is None:
+        try:
+            lock_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise ConcatLockError(
+            f"Output lock {lock_path} could not be verified after writing "
+            "(token/pid missing) — refusing to run with an unverifiable lock"
+        ) from None
     logger.debug(f"Acquired output lock {lock_path}")
     return LockHandle(path=lock_path, token=token)
 
