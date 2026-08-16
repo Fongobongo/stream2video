@@ -523,7 +523,14 @@ class TestEncoderSmokeTransientSpawn:
         from stream2video.concat import encoders as enc
 
         def _exhausted(*_a, **_k):
-            raise OSError(206, "filename or extension too long", "ffmpeg.exe", 206)
+            # winerror must be set explicitly: the OSError constructor's
+            # positional winerror argument is IGNORED on POSIX (where a
+            # real subprocess OSError never carries winerror either), so
+            # the 4-arg form yields winerror=None on Linux and the
+            # transient filter would not recognize the code.
+            exc = OSError(206, "filename or extension too long", "ffmpeg.exe")
+            exc.winerror = 206
+            raise exc
 
         try:
             enc._encoder_check_cache.pop("libx264", None)
