@@ -18,13 +18,13 @@ if not defined PYTHON (where python >nul 2>&1 && set "PYTHON=python")
 if not defined PYTHON (
     echo ==^> Downloading portable Python...
     if not exist "%PORT_DIR%" mkdir "%PORT_DIR%"
-    :: Pinned version (3.13.2) so the bootstrap is reproducible — the
+    :: Pinned version (3.13.15) so the bootstrap is reproducible — the
     :: URL below is the ONLY external artifact this script fetches, and
     :: it is fetched over TLS from python.org. The installer's SHA-256
     :: is printed for manual verification (see python.org/downloads for
     :: the published digest); pinning + TLS + printed digest is the
     :: practical ceiling for a .cmd bootstrap without a second download.
-    curl -sL -o "%TEMP%\python-installer.exe" https://www.python.org/ftp/python/3.13.2/python-3.13.2-amd64.exe
+    curl -sL -o "%TEMP%\python-installer.exe" https://www.python.org/ftp/python/3.13.15/python-3.13.15-amd64.exe
     certutil -hashfile "%TEMP%\python-installer.exe" SHA256
     start /wait "" "%TEMP%\python-installer.exe" /quiet TargetDir="%PORT_DIR%\python" InstallAllUsers=0 PrependPath=0 Include_test=0
     if exist "%PORT_DIR%\python\python.exe" (
@@ -58,6 +58,23 @@ if %errorlevel% equ 0 (
 if not exist "%PORT_DIR%\venv\" (
     echo ==^> Creating virtual environment...
     "%PYTHON%" -m venv "%PORT_DIR%\venv"
+) else (
+    :: The venv pins the interpreter it was created from; if the base
+    :: Python changed (portable pin bump, e.g. 3.13.2 -> 3.13.15, or a
+    :: different system python now on PATH) the stale venv must be
+    :: recreated, not silently reused (audit: venv/version drift).
+    "%PYTHON%" -c "import sys;print('.'.join(map(str,sys.version_info[:3])))" > "%TEMP%\s2v_basever.txt"
+    set /p BASEVER=<"%TEMP%\s2v_basever.txt"
+    "%PORT_DIR%\venv\Scripts\python.exe" -c "import sys;print('.'.join(map(str,sys.version_info[:3])))" > "%TEMP%\s2v_venvver.txt"
+    set /p VENVVER=<"%TEMP%\s2v_venvver.txt"
+    :: !BASEVER!/!VENVVER! (delayed expansion) — %BASEVER% would expand
+    :: at block-parse time (empty, set /p hasn't run yet) and the
+    :: version drift would never be detected (same trap as FFMPEG_DIR).
+    if not "!BASEVER!"=="!VENVVER!" (
+        echo ==^> Interpreter changed (venv !VENVVER! vs base !BASEVER!); recreating...
+        rd /s /q "%PORT_DIR%\venv"
+        "%PYTHON%" -m venv "%PORT_DIR%\venv"
+    )
 )
 set "PYTHON=%PORT_DIR%\venv\Scripts\python.exe"
 
