@@ -189,6 +189,100 @@ class PipelineConfig:
     dry_run: bool = False
 
 
+def build_pipeline_config(
+    *,
+    input_raw: str,
+    output_dir: Path,
+    method: str,
+    encoder: str,
+    video_quality: str,
+    audio_quality: str,
+    download_quality: str,
+    software_fallback: str,
+    x264_preset: str,
+    encoder_threads: str | int,
+    output_fps: str,
+    output_format: str,
+    force: bool,
+    delete_after: bool,
+    per_video_dir: bool,
+    threshold: float,
+    min_silence: float,
+    margin: float,
+    memory_limit_mb: str | int,
+    memory_reserve_mb: int,
+    x264_low_memory: bool,
+    use_crf: bool,
+    gapless_concat: bool,
+    low_process_priority: bool,
+    rlimit_as_mb: int,
+    download_timeout: int,
+    connect_timeout: int,
+    no_progress_timeout: int,
+    proxy: str,
+    segment_encode_timeout: int,
+    final_concat_timeout: int,
+    silence_timeout: int,
+    stall_kill_timeout: int,
+    stall_warning_timeout: int,
+    waveform_timeout: int,
+    batch_chunk_size: int,
+    min_part_bytes: int,
+    dry_run: bool = False,
+) -> PipelineConfig:
+    """The single construction site for :class:`PipelineConfig` (audit
+    round 12: the CLI assembled it inline and the GUI worker had its own
+    copy — a new field had to be added twice, and the two sites could
+    drift on the default for a missing key.
+
+    Both hosts now call this factory: the CLI passes its already-resolved
+    values; the GUI's ``build_pipeline_config_from_snapshot`` does the
+    per-key ``config.get(key, CONFIG_DEFAULTS[key])`` fallbacks (its
+    config dict comes from a hand-editable settings.json) and forwards
+    the typed result. Adding a tunable is one signature change here.
+    """
+    return PipelineConfig(
+        input_raw=input_raw,
+        output_dir=output_dir,
+        method=method,
+        encoder=encoder,
+        video_quality=video_quality,
+        audio_quality=audio_quality,
+        download_quality=download_quality,
+        software_fallback=software_fallback,
+        x264_preset=x264_preset,
+        encoder_threads=encoder_threads,
+        output_fps=output_fps,
+        output_format=output_format,
+        force=force,
+        delete_after=delete_after,
+        per_video_dir=per_video_dir,
+        threshold=threshold,
+        min_silence=min_silence,
+        margin=margin,
+        memory_limit_mb=memory_limit_mb,
+        memory_reserve_mb=memory_reserve_mb,
+        x264_low_memory=x264_low_memory,
+        use_crf=use_crf,
+        gapless_concat=gapless_concat,
+        low_process_priority=low_process_priority,
+        rlimit_as_mb=rlimit_as_mb,
+        download_timeout=download_timeout,
+        connect_timeout=connect_timeout,
+        no_progress_timeout=no_progress_timeout,
+        proxy=proxy,
+        segment_encode_timeout=segment_encode_timeout,
+        final_concat_timeout=final_concat_timeout,
+        silence_timeout=silence_timeout,
+        stall_kill_timeout=stall_kill_timeout,
+        stall_warning_timeout=stall_warning_timeout,
+        waveform_timeout=waveform_timeout,
+        batch_chunk_size=batch_chunk_size,
+        min_part_bytes=min_part_bytes,
+        dry_run=dry_run,
+    )
+
+
 @dataclass(frozen=True)
 class PipelineCallbacks:
     """Callback bundle the controller uses to report progress / status.

@@ -220,6 +220,45 @@ class TestLoadConfigBoolValidation:
         assert any("socks5://***:***@host:1080" in r.getMessage() for r in caplog.records)
 
 
+class TestLoadConfigUnknownKeys:
+    """Unknown YAML keys must be rejected, not silently ignored (audit
+    round 12): ``config.update(file_config)`` used to merge the whole
+    file and only known keys were validated, so a typo (``threshhold``)
+    or a non-tunable (``log_format`` — CLI-flag only) loaded without
+    warning and never had any effect. The rejection names the bad key
+    and suggests the nearest valid ones."""
+
+    def test_typo_key_rejected_with_suggestion(self, tmp_path: Path, capsys):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("threshhold: -25\n")
+        with pytest.raises(typer.Exit):
+            load_config(cfg)
+        out = capsys.readouterr().out
+        assert "threshhold" in out
+        assert "threshold" in out  # nearest-match suggestion
+
+    def test_nonexistent_key_rejected(self, tmp_path: Path):
+        # ``log_format`` looks plausible but is a CLI flag only — it must
+        # be surfaced loudly instead of silently no-op'ing.
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("log_format: json\n")
+        with pytest.raises(typer.Exit):
+            load_config(cfg)
+
+    def test_multiple_unknown_keys_all_rejected(self, tmp_path: Path):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("threshhold: -25\nencoder_thredz: 4\nvalid_key: 1\n")
+        with pytest.raises(typer.Exit):
+            load_config(cfg)
+
+    def test_known_keys_still_load(self, tmp_path: Path):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("threshold: -25\nforce: true\n")
+        loaded = load_config(cfg)
+        assert loaded["threshold"] == -25.0
+        assert loaded["force"] is True
+
+
 class TestLoadConfigAutoCaseInsensitive:
     """YAML ``auto`` must accept any casing, matching the CLI flag and
     the GUI's Advanced entries — three surfaces, one rule. Regression:

@@ -68,6 +68,22 @@ class TestUserDefaultsKeys:
         for k in ("threshold", "min_silence", "margin"):
             assert k in USER_DEFAULTS_KEYS
 
+    def test_key_sets_stay_coherent(self):
+        # The two lists deliberately overlap (both persist user
+        # tunables), but the relationship is exact: every key in
+        # user_defaults.json is either a slider tunable (threshold /
+        # min_silence / margin — persisted separately, so not in
+        # SAVE_SETTINGS_KEYS) or a settings.json key. A new tunable
+        # added to ONE list and forgotten in the other now fails here
+        # instead of silently dropping from one persistence surface
+        # (audit round 12 dedup guard).
+        slider_keys = {"threshold", "min_silence", "margin"}
+        assert (
+            set(USER_DEFAULTS_KEYS)
+            == (set(SAVE_SETTINGS_KEYS) - {"input_path", "output_dir", "window_geometry"})
+            | slider_keys
+        )
+
 
 class TestBuildSaveSettingsSnapshot:
     def test_returns_dict_with_canonical_keys(self):

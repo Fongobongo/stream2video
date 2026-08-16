@@ -17,6 +17,14 @@
 - **`validate_pipeline_config` reports wrong-typed values** — a string on a numeric key, a bool on an int slot, a non-bool on a toggle, or an int on a float slot is now a validation error instead of being silently skipped and crashing later.
 - **Quoted numbers in YAML for `encoder_threads` / `memory_limit_mb` now load correctly** — a config written as `encoder_threads: "8"` (quotes) previously slipped through validation as a float and was then rejected at startup with "must be 'auto' or an integer" for a value that IS an integer. Quoted numbers are now coerced to `int` like their unquoted / GUI / CLI-flag twins.
 - **`--dry-run` summary survives `python -O`** — the dry-run contract check was an `assert`, which vanishes in optimized mode and fed `None` into the summary formatter; it is now an explicit guard with a clear error message and exit code 1.
+- **Logging state no longer leaks on early CLI exit** — the restore (`try/finally`) now starts immediately after the logging snapshot, so a missing-ffmpeg or invalid `--log-level` exit also puts back the handlers, `propagate`, `console.stderr`, `_JSON_LOG_MODE` and the console-handler level (previously the try began after those checks and an early failure leaked the freshly installed logging state into a host process; the console-handler level was never restored even on the happy path).
+- **Unknown YAML keys are rejected instead of silently ignored** — a typo (`threshhold`) or a non-tunable key (`log_format`, which is a CLI flag only) previously loaded without warning and never had any effect. `load_config` now rejects any key that is not a known setting and suggests the nearest valid names.
+
+### Changed
+
+- **`--log-format` accepts any casing on every path** — `JSON` / `Json` now behave identically to `json` for both normal runs and the eager `--doctor` path, which used to do a case-sensitive comparison (doctor with `--log-format JSON` printed Rich while a normal run emitted JSON). Both surfaces share one spelling rule via `normalize_log_format`.
+- **`PipelineConfig` has a single construction site** — the CLI and the GUI worker both build the pipeline config through the new shared `build_pipeline_config` factory (`pipeline_controller.py`); the GUI wrapper keeps its per-key default fallbacks for hand-edited settings. A new tunable is now added in one place instead of two.
+- **YAML bool-key validation derives from `PARAM_SPECS`** — the bool keys `load_config` strictly validates are no longer a second hand-maintained list; they come from the `kind == "bool"` entries in the shared parameter table the resolver already uses.
 
 
 ### Added

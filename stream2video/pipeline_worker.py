@@ -182,13 +182,21 @@ def build_pipeline_config_from_snapshot(
     the returned dataclass is frozen so the worker can't mutate it
     mid-run.
 
-    Delay-imports ``PipelineController`` so the GUI module load never
-    pulls the pipeline (and its ffmpeg-dependent helpers) ahead of
-    schedule — the GUI imports stay shallow.
-    """
-    from stream2video.pipeline_controller import PipelineConfig
+    The actual construction is delegated to the shared
+    :func:`~stream2video.pipeline_controller.build_pipeline_config`
+    factory — the CLI assembles its ``PipelineConfig`` through the same
+    entry point, so a new tunable is added in one place (audit round 12
+    dedup); this wrapper only adds the per-key default fallbacks the
+    GUI needs (its config dict comes from a hand-editable settings.json
+    and may legitimately miss newer keys).
 
-    return PipelineConfig(
+    Delay-imports the factory so the GUI module load never pulls the
+    pipeline (and its ffmpeg-dependent helpers) ahead of schedule — the
+    GUI imports stay shallow.
+    """
+    from stream2video.pipeline_controller import build_pipeline_config
+
+    return build_pipeline_config(
         input_raw=params.input_raw,
         output_dir=params.output_dir,
         method=params.method,

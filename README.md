@@ -154,7 +154,7 @@ stream2video video.mp4 --method cut_then_encode --video-quality high
 
 ## Configuration
 
-Parameters can be set via YAML config file:
+Parameters can be set via YAML config file (every key below is validated; an unknown key — e.g. a typo like `threshhold` — is rejected with a suggestion instead of being silently ignored):
 
 ```yaml
 threshold: -25
@@ -195,7 +195,6 @@ margin: 0.15
 | `per_video_dir` | bool | `true` | When true, all artifacts (downloaded source, WAV, JSON, log, compressed, temp dirs) are collected into `{output_dir}/{stem}_{hash}/` instead of living in the base `output_dir`. Local source files are never moved/copied — they stay where you put them. |
 | `proxy` | string | `` (off) | Proxy server for downloads, e.g. `http://127.0.0.1:8080` or `socks5://user:pass@host:1080`. Empty = no proxy. Passed to yt-dlp only while `proxy_active` is true. Also settable via `--proxy`. |
 | `proxy_active` | bool | `false` | When true, the address in `proxy` is actually used for downloads (`yt-dlp --proxy ...`). When false, the address is kept (so a temporarily-disabled proxy isn't lost) but no proxy is applied. The GUI has a checkbox and a "Set proxy" dialog; the CLI's `--proxy` flag turns this on automatically. Pinnable from the CLI via `--proxy-active` / `--no-proxy-active` (a stored `true` can be overridden without editing the file). |
-| `log_format` | `rich`/`json` | `rich` | Console log format. `rich` (default, human-readable markup) or `json` (one JSON object per line, for log aggregation). Also settable via `--log-format`. |
 
 ## Project directory
 

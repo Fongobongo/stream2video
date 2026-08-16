@@ -58,9 +58,7 @@ from stream2video.pipeline_controller import (
     PipelineDownloadError,
     PipelineSilenceError,
     PipelineUnexpectedError,
-)
-from stream2video.pipeline_controller import (
-    PipelineConfig as _PipelineConfig,
+    build_pipeline_config,
 )
 
 # Module-level flag toggled by --log-format json. When True the human-
@@ -68,6 +66,27 @@ from stream2video.pipeline_controller import (
 # stream stays line-per-JSON-record (piping to ``jq`` or an aggregator
 # like ELK is unaffected by decorative output).
 _JSON_LOG_MODE: bool = False
+
+# The two console log formats --log-format accepts. The ONLY spelling
+# rule for them lives in :func:`normalize_log_format` (case-insensitive)
+# so the main() validator and the eager --doctor argv scan can never
+# disagree about what "json" is spelled like (audit round 12, P2: the
+# doctor scan used a case-sensitive ``== "json"`` while main()
+# lowercased, so ``--log-format JSON`` behaved differently on the two
+# paths).
+_VALID_LOG_FORMATS = ("rich", "json")
+
+
+def normalize_log_format(value: str) -> str | None:
+    """Return the canonical lowercase log format for ``value`` (case-
+    insensitive, whitespace-tolerant), or ``None`` when unrecognized.
+
+    Shared by the ``--log-format`` validator in :func:`main` and the
+    eager ``--doctor`` argv scan in :func:`_doctor_callback` — one value
+    has one spelling rule on every surface.
+    """
+    v = value.strip().lower()
+    return v if v in _VALID_LOG_FORMATS else None
 
 
 def load_config(config_file: Path | None) -> dict:
@@ -115,12 +134,22 @@ def _doctor_callback(ctx: typer.Context, param: Any, value: bool) -> bool:
         # ``--log-format json`` is also non-eager, so it hasn't populated
         # _JSON_LOG_MODE yet when --doctor fires. Scan argv again (same
         # rationale as --config above) so the doctor's "line-per-object"
-        # contract actually fires.
+        # contract actually fires. Spelling check goes through the shared
+        # :func:`normalize_log_format` — the same case-insensitive rule
+        # main()'s validator applies, so ``JSON`` behaves identically on
+        # both paths (audit P2).
         for i, arg in enumerate(argv):
-            if arg == "--log-format" and i + 1 < len(argv) and argv[i + 1] == "json":
+            if (
+                arg == "--log-format"
+                and i + 1 < len(argv)
+                and normalize_log_format(argv[i + 1]) == "json"
+            ):
                 _JSON_LOG_MODE = True
                 break
-            if arg.startswith("--log-format=") and arg.split("=", 1)[1] == "json":
+            if (
+                arg.startswith("--log-format=")
+                and normalize_log_format(arg.split("=", 1)[1]) == "json"
+            ):
                 _JSON_LOG_MODE = True
                 break
         # The eager callback exits BEFORE main() — its ``finally``
@@ -705,12 +734,14 @@ def main(
 
     # Validate log_format BEFORE any logging happens so an unknown format
     # exits cleanly instead of producing half-Rich/half-JSON output.
-    valid_formats = ("rich", "json")
-    log_format_lower = log_format.lower()
-    if log_format_lower not in valid_formats:
+    # Spelling rule: the shared normalize_log_format (case-insensitive) —
+    # the eager --doctor path uses the exact same function, so one value
+    # has one rule on every surface.
+    log_format_lower = normalize_log_format(log_format)
+    if log_format_lower is None:
         console.print(
             f"[red]Invalid log format:[/red] {log_format!r} "
-            f"(use {' or '.join(repr(f) for f in valid_formats)})"
+            f"(use {' or '.join(repr(f) for f in _VALID_LOG_FORMATS)})"
         )
         raise typer.Exit(1)
 
@@ -735,96 +766,118 @@ def main(
         logger.propagate,
         list(logger.handlers),
         console.stderr,
+        # The console handler's level is rewritten by ``--log-level``
+        # below; without snapshotting it, a run that ends early (or a
+        # second in-process run) would inherit the previous run's
+        # console level (audit P1: the level was never restored, not
+        # even on the happy path).
+        _console_handler.level,
     )
-    if log_format_lower == "json":
-        # JSON structured logging — replace the Rich console handler with
-        # a JSON formatter writing to stdout so the caller can pipe the
-        # log stream into a renderer (``| jq .``, ELK, Splunk). The file
-        # handler still writes human-readable text to stream2video.log;
-        # only stdout switches format. The human-readable banner and
-        # progress bars are suppressed in JSON mode (they'd pollute the
-        # JSON stream).
-        from stream2video.json_logging import install_json_handler
 
-        _json_handler = install_json_handler(logger, level=log_level.upper())
-        # install_json_handler attached the handler to the app ``logger``.
-        # basicConfig below re-roots the same handler for the root logger.
-        # ``logger.propagate`` defaults to True, so without the line below
-        # every app record fires the handler TWICE (once directly, once
-        # via propagation to the same handler at the root) and stdout
-        # JSON is duplicated line-by-line — breaking ``| jq .`` pipes.
-        logger.propagate = False
-        logging.basicConfig(
-            level=logging.DEBUG,
-            handlers=[_json_handler],
-            force=True,  # replace any handler the caller attached
-        )
-        # Keep the stdout stream line-per-JSON-record: point the shared
-        # Rich console at stderr and disable the live progress bars.
-        # Progress updates are still emitted as JSON log records by the
-        # callbacks, so no information is lost — but no Rich frames,
-        # banners, or summaries may leak into stdout, or a downstream
-        # ``| jq .`` breaks on the first non-JSON line.
-        console.stderr = True
-        _JSON_LOG_MODE = True
-    else:
-        _JSON_LOG_MODE = False
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format="%(message)s",
-            handlers=[_console_handler],
-        )
-
-    # Verify ffmpeg is available
-    _check_ffmpeg()
-
-    # Set log level (apply to console handler, not the logger itself, so the
-    # file handler still receives DEBUG regardless of the user's choice).
-    valid_levels = ("DEBUG", "INFO", "WARNING", "ERROR")
-    level = log_level.upper()
-    if level not in valid_levels:
-        console.print(
-            f"[red]Invalid log level:[/red] {log_level!r} (use DEBUG, INFO, WARNING, or ERROR)"
-        )
-        raise typer.Exit(1)
-    _console_handler.setLevel(level)
-
-    # ``signal.getsignal`` / ``signal.signal`` can only be called from the
-    # interpreter's main thread; a host embedding ``cli.main`` in a worker
-    # thread would otherwise crash here with ``ValueError``. When that
-    # happens, fall back to ``None`` so the ``finally``-block restore path
-    # uses ``SIG_DFL`` (and even that restore will be guarded below).
-    try:
-        prev_handler: Any = signal.getsignal(signal.SIGINT)
-    except (ValueError, OSError) as e:
-        logger.warning(f"Could not read current SIGINT handler: {e}")
-        prev_handler = None
-    # SIGINT drives the pipeline controller's cancel_event (the event half
-    # of the pair); the callback half exists for embedding hosts that
-    # want to poll it.
-    cancel_event, _cancel_cb = _make_sigint_cancel()
-    # When a host calls ``main()`` twice in the same process, the second
-    # invocation would otherwise read *our own* handler back via
-    # ``getsignal`` and then restore a stale cancel-event closure on exit.
-    # Marking the installed handler's owner lets the ``finally`` block
-    # detect that case and restore ``SIG_DFL`` instead, which is the only
-    # well-defined "previous" state a bare script had before the CLI ran.
-    # Identity check against the module-level reference in
-    # cli_helpers, not a name+module heuristic — a refactor that renamed
-    # the closure would break the old check silently.
-    import stream2video.cli_helpers as _ch
-
-    _ours = prev_handler is not None and prev_handler is getattr(
-        _ch, "_installed_sigint_handler", None
-    )
-    if _ours:
-        # A previous in-process main() call never restored. Treat the
-        # pre-CLI state as SIG_DFL rather than restoring our own stale
-        # closure (which would keep the old cancel event alive forever).
-        prev_handler = signal.SIG_DFL
-
+    # The ``try`` starts IMMEDIATELY after the snapshot: every piece of
+    # logging state this invocation rewrites (handlers, propagate,
+    # console.stderr, _JSON_LOG_MODE, the console level) must be
+    # restored on EVERY exit — including the early ones. Previously the
+    # try began after ``_check_ffmpeg()`` / the ``--log-level``
+    # validation, so a missing-ffmpeg or bad-log-level exit leaked the
+    # freshly installed handlers + JSON mode into the host process
+    # (audit P1).
     fh = None
+    prev_handler: Any = None
+    # False until the current SIGINT handler has been captured. A
+    # failure BEFORE that point must not "restore" SIG_DFL — that would
+    # clobber a host's signal handler the CLI never touched.
+    _sigint_captured = False
     try:
+        if log_format_lower == "json":
+            # JSON structured logging — replace the Rich console handler
+            # with a JSON formatter writing to stdout so the caller can
+            # pipe the log stream into a renderer (``| jq .``, ELK,
+            # Splunk). The file handler still writes human-readable text
+            # to stream2video.log; only stdout switches format. The
+            # human-readable banner and progress bars are suppressed in
+            # JSON mode (they'd pollute the JSON stream).
+            from stream2video.json_logging import install_json_handler
+
+            _json_handler = install_json_handler(logger, level=log_level.upper())
+            # install_json_handler attached the handler to the app ``logger``.
+            # basicConfig below re-roots the same handler for the root logger.
+            # ``logger.propagate`` defaults to True, so without the line below
+            # every app record fires the handler TWICE (once directly, once
+            # via propagation to the same handler at the root) and stdout
+            # JSON is duplicated line-by-line — breaking ``| jq .`` pipes.
+            logger.propagate = False
+            logging.basicConfig(
+                level=logging.DEBUG,
+                handlers=[_json_handler],
+                force=True,  # replace any handler the caller attached
+            )
+            # Keep the stdout stream line-per-JSON-record: point the shared
+            # Rich console at stderr and disable the live progress bars.
+            # Progress updates are still emitted as JSON log records by the
+            # callbacks, so no information is lost — but no Rich frames,
+            # banners, or summaries may leak into stdout, or a downstream
+            # ``| jq .`` breaks on the first non-JSON line.
+            console.stderr = True
+            _JSON_LOG_MODE = True
+        else:
+            _JSON_LOG_MODE = False
+            logging.basicConfig(
+                level=logging.DEBUG,
+                format="%(message)s",
+                handlers=[_console_handler],
+            )
+
+        # Verify ffmpeg is available
+        _check_ffmpeg()
+
+        # Set log level (apply to console handler, not the logger itself, so the
+        # file handler still receives DEBUG regardless of the user's choice).
+        valid_levels = ("DEBUG", "INFO", "WARNING", "ERROR")
+        level = log_level.upper()
+        if level not in valid_levels:
+            console.print(
+                f"[red]Invalid log level:[/red] {log_level!r} (use DEBUG, INFO, WARNING, or ERROR)"
+            )
+            raise typer.Exit(1)
+        _console_handler.setLevel(level)
+
+        # ``signal.getsignal`` / ``signal.signal`` can only be called from the
+        # interpreter's main thread; a host embedding ``cli.main`` in a worker
+        # thread would otherwise crash here with ``ValueError``. When that
+        # happens, fall back to ``None`` so the ``finally``-block restore path
+        # uses ``SIG_DFL`` (and even that restore will be guarded below).
+        try:
+            prev_handler = signal.getsignal(signal.SIGINT)
+        except (ValueError, OSError) as e:
+            logger.warning(f"Could not read current SIGINT handler: {e}")
+            prev_handler = None
+        _sigint_captured = True
+
+        # SIGINT drives the pipeline controller's cancel_event (the event half
+        # of the pair); the callback half exists for embedding hosts that
+        # want to poll it.
+        cancel_event, _cancel_cb = _make_sigint_cancel()
+        # When a host calls ``main()`` twice in the same process, the second
+        # invocation would otherwise read *our own* handler back via
+        # ``getsignal`` and then restore a stale cancel-event closure on exit.
+        # Marking the installed handler's owner lets the ``finally`` block
+        # detect that case and restore ``SIG_DFL`` instead, which is the only
+        # well-defined "previous" state a bare script had before the CLI ran.
+        # Identity check against the module-level reference in
+        # cli_helpers, not a name+module heuristic — a refactor that renamed
+        # the closure would break the old check silently.
+        import stream2video.cli_helpers as _ch
+
+        _ours = prev_handler is not None and prev_handler is getattr(
+            _ch, "_installed_sigint_handler", None
+        )
+        if _ours:
+            # A previous in-process main() call never restored. Treat the
+            # pre-CLI state as SIG_DFL rather than restoring our own stale
+            # closure (which would keep the old cancel event alive forever).
+            prev_handler = signal.SIG_DFL
+
         # Load configuration. ``load_config`` strictly validates BOTH numeric
         # ranges (CONFIG_RANGES) AND enum keys (method/encoder/...), so a
         # bad YAML value for any of these cannot sneak through here.
@@ -985,7 +1038,7 @@ def main(
         # second validation pass is needed here (the GUI worker runs the
         # same validator because its config arrives from hand-editable
         # JSON, not from these two chokepoints).
-        _pcfg = _PipelineConfig(
+        _pcfg = build_pipeline_config(
             input_raw=input_video,
             output_dir=output_dir,
             method=method,
@@ -1452,17 +1505,20 @@ def main(
         # our own handler from a previous in-process run — restoring that
         # closure would keep the old cancel event alive forever, and the
         # handler would trip over a disposed context on the next SIGINT.
-        restore_to: Any = signal.SIG_DFL if prev_handler is None else prev_handler
-        if restore_to is not None:
-            try:
-                signal.signal(signal.SIGINT, restore_to)
-            except (OSError, ValueError, TypeError) as e:
-                # signal.signal raises ValueError when called from a
-                # non-main thread; some platforms raise OSError. Log
-                # rather than silently swallow so a host that runs the
-                # CLI in a worker thread can diagnose why SIGINT wasn't
-                # restored.
-                logger.warning(f"Could not restore SIGINT handler: {e}")
+        # Guard: when the failure happened BEFORE the SIGINT capture (no
+        # handler installed by this run), don't touch the host's handler.
+        if _sigint_captured:
+            restore_to: Any = signal.SIG_DFL if prev_handler is None else prev_handler
+            if restore_to is not None:
+                try:
+                    signal.signal(signal.SIGINT, restore_to)
+                except (OSError, ValueError, TypeError) as e:
+                    # signal.signal raises ValueError when called from a
+                    # non-main thread; some platforms raise OSError. Log
+                    # rather than silently swallow so a host that runs the
+                    # CLI in a worker thread can diagnose why SIGINT wasn't
+                    # restored.
+                    logger.warning(f"Could not restore SIGINT handler: {e}")
         if fh is not None:
             logger.removeHandler(fh)
             fh.close()
@@ -1471,9 +1527,19 @@ def main(
         # installed (so it can't keep writing into our stdout after the
         # process hands off to another invocation), re-roots the root
         # logger's handler list, and resets ``console.stderr`` /
-        # ``logger.propagate`` / ``_JSON_LOG_MODE``. The snapshot is
-        # taken before the ``try`` block, so it always exists here.
-        _root_handlers, _root_level, _propagate, _logger_handlers, _stderr = _logging_snapshot
+        # ``logger.propagate`` / ``_JSON_LOG_MODE`` / the console handler
+        # level. The snapshot is taken before the ``try`` block, so it
+        # always exists here — even for the early exits (missing ffmpeg,
+        # bad --log-level) that the try now covers (audit P1).
+        (
+            _root_handlers,
+            _root_level,
+            _propagate,
+            _logger_handlers,
+            _stderr,
+            _console_level,
+        ) = _logging_snapshot
+        _console_handler.setLevel(_console_level)
         for _h in list(logger.handlers):
             logger.removeHandler(_h)
             if _h not in _logger_handlers:

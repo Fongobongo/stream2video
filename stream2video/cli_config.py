@@ -6,6 +6,7 @@ parameter (instead of importing it) so ``patch("stream2video.cli.console")``
 works the same as before.
 """
 
+import difflib
 import logging
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,7 @@ from stream2video.config import (
     effective_defaults,
 )
 from stream2video.gui_helpers import mask_proxy
+from stream2video.param_specs import PARAM_SPECS
 
 logger = logging.getLogger("stream2video")
 
@@ -75,6 +77,21 @@ def load_config(config_file: Path | None, console: Any) -> dict:
             except Exception as e:
                 console.print(f"[red]Error loading config file:[/red] {e}")
                 raise typer.Exit(1) from None
+
+    # Reject unknown keys (audit round 12). Previously the whole YAML was
+    # merged via ``config.update(file_config)`` and only KNOWN keys were
+    # validated, so a typo (``threshhold: -25``) or a key that doesn't
+    # exist as a tunable (``log_format: json`` — log format is CLI-flag
+    # only) loaded silently and never had any effect: the user kept
+    # tuning a knob that wasn't connected. Each bad key is reported with
+    # its nearest valid names so the typo is one edit away.
+    unknown = sorted(set(file_config) - set(CONFIG_DEFAULTS))
+    if unknown:
+        for key in unknown:
+            near = difflib.get_close_matches(key, list(CONFIG_DEFAULTS), n=3)
+            hint = f" (did you mean {' or '.join(repr(k) for k in near)}?)" if near else ""
+            console.print(f"[red]Unknown config key:[/red] {key!r}{hint}")
+        raise typer.Exit(1)
 
     # Validate numeric ranges. Preserve the input's int/float type —
     # ``float(config[key])`` silently converts every integer-keyed
@@ -156,17 +173,12 @@ def load_config(config_file: Path | None, console: Any) -> dict:
     # integers, not bools. Reject any non-bool value the user explicitly
     # wrote in the YAML so downstream ``bool(value)`` matches intent. Keys
     # the user didn't write keep their bool default from CONFIG_DEFAULTS.
-    bool_keys = (
-        "force",
-        "delete_after",
-        "per_video_dir",
-        "completion_sound",
-        "x264_low_memory",
-        "use_crf",
-        "gapless_concat",
-        "low_process_priority",
-        "proxy_active",
-    )
+    #
+    # The key set is derived from ``PARAM_SPECS`` (kind == "bool") — the
+    # same table the resolver uses, so adding a new bool tunable there
+    # picks it up here automatically (audit round 12: this was a second
+    # hand-maintained list that could drift).
+    bool_keys = tuple(name for name, spec in PARAM_SPECS.items() if spec["kind"] == "bool")
     for key in bool_keys:
         if key in file_config:
             bool_val = file_config[key]

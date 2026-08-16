@@ -27,6 +27,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
 import stream2video.cli as cli_mod
@@ -449,6 +450,106 @@ class TestJsonLogStateIsolation:
         ):
             runner.invoke(cli_mod.app, ["--doctor", "--log-format", "json"], catch_exceptions=False)
         assert cli_mod._JSON_LOG_MODE is False
+
+    def test_doctor_log_format_is_case_insensitive(self, isolated_defaults, monkeypatch):
+        """``--log-format JSON`` (uppercase) must enable JSON mode on the
+        eager doctor path exactly like lowercase ``json`` does on the
+        normal run path (audit P2): the main() validator lowercases before
+        matching, so the eager argv scan must too."""
+        monkeypatch.setattr("sys.argv", ["stream2video", "--doctor", "--log-format", "JSON"])
+        seen: list[bool] = []
+
+        def _capture(cfg):
+            seen.append(cli_mod._JSON_LOG_MODE)
+            return True
+
+        runner = CliRunner()
+        with patch("stream2video.cli._run_doctor", side_effect=_capture):
+            result = runner.invoke(cli_mod.app, ["--doctor", "--log-format", "JSON"])
+        assert result.exit_code == 0
+        # The diagnostics ran WITH json mode active (both spellings agree).
+        assert seen == [True]
+        # ...and the eager path reset it before returning.
+        assert cli_mod._JSON_LOG_MODE is False
+
+
+class TestEarlyExitLoggingRestore:
+    """The logging-state restore must run on EVERY exit, including the
+    early ones (missing ffmpeg, bad --log-level). Previously the
+    ``try/finally`` began after those checks, so an early failure leaked
+    the freshly installed handlers / JSON mode / console.stderr into the
+    host process (audit round 12, P1)."""
+
+    def _leaked_json_handlers(self):
+        import logging as _logging
+
+        from stream2video.json_logging import _JsonFormatter
+
+        return [
+            h
+            for h in (*cli_mod.logger.handlers, *_logging.getLogger().handlers)
+            if isinstance(getattr(h, "formatter", None), _JsonFormatter)
+        ]
+
+    def test_missing_ffmpeg_exits_without_leak(self, isolated_defaults, tmp_path):
+        from stream2video.cli import console, logger
+
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"x")
+        runner = CliRunner()
+        # Fail at the ffmpeg check — BEFORE the try block used to begin.
+        with patch.object(cli_mod, "_check_ffmpeg", side_effect=typer.Exit(1)):
+            result = runner.invoke(
+                cli_mod.app, [str(src), "-o", str(tmp_path / "o"), "--log-format", "json"]
+            )
+        assert result.exit_code == 1
+        assert cli_mod._JSON_LOG_MODE is False, "JSON mode leaked past an early exit"
+        assert console.stderr is False, "console.stderr leaked past an early exit"
+        assert not self._leaked_json_handlers(), "JSON handler leaked past an early exit"
+        assert logger.propagate is True
+
+    def test_bad_log_level_exits_without_leak(self, isolated_defaults, tmp_path):
+        from stream2video.cli import console, logger
+        from stream2video.cli_helpers import _console_handler
+
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"x")
+        runner = CliRunner()
+        level_before = _console_handler.level
+        with patch.object(cli_mod, "_check_ffmpeg", lambda: None):
+            result = runner.invoke(
+                cli_mod.app,
+                [str(src), "-o", str(tmp_path / "o"), "--log-level", "bogus"],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 1
+        assert "Invalid log level" in result.output
+        assert cli_mod._JSON_LOG_MODE is False
+        assert console.stderr is False
+        assert not self._leaked_json_handlers()
+        assert logger.propagate is True
+        # The console handler level is snapshotted + restored, so a bad
+        # --log-level run can't leave a shifted level for the next run.
+        assert _console_handler.level == level_before
+
+    def test_console_level_restored_after_successful_set(self, isolated_defaults, tmp_path):
+        """A run that DID apply --log-level must put the handler level
+        back, so a following run in the same process starts clean."""
+        from stream2video.cli_helpers import _console_handler
+
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"x")
+        runner = CliRunner()
+        level_before = _console_handler.level
+        with (
+            patch.object(cli_mod, "_check_ffmpeg", lambda: None),
+            patch("stream2video.pipeline_controller.download", side_effect=OSError("stop")),
+        ):
+            runner.invoke(
+                cli_mod.app,
+                [str(src), "-o", str(tmp_path / "o"), "--log-level", "WARNING"],
+            )
+        assert _console_handler.level == level_before
 
 
 class TestValidatePipelineConfigTypes:
