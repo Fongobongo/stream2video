@@ -59,14 +59,17 @@ class LoggingSessionState:
         self.file_handler: logging.FileHandler | None = None
 
 
-# Global serialization for logging_session: two OVERLAPPING sessions in
-# different threads (a host embedding the CLI in a worker thread while
-# another thread also runs one) would each snapshot the other's already-
-# mutated state and restore in the wrong order — one session could close
-# the other's handler, return a temporary handler as the "host" handler,
-# or leave JSON mode installed after a rich run (audit round 16 P2).
-# CLI runs are short-lived, so serializing them is cheap and makes the
-# restore order deterministic.
+# Global serialization for logging_session: logging state is process-
+# global, so two OVERLAPPING sessions in different threads (a host
+# embedding the CLI in a worker thread while another thread also runs
+# one) would each snapshot the other's already-mutated state and
+# restore in the wrong order — one session could close the other's
+# handler or leave JSON mode installed after a rich run (audit round 16
+# P2). The lock is acquired NON-blocking (audit round 19 P2): the CLI
+# holds its logging session for the WHOLE run — download/detect/encode
+# can take hours — so a blocking lock would hang a second embedded CLI
+# call for hours with no feedback. A second concurrent session is
+# rejected up-front with an explicit error instead.
 _LOGGING_SESSION_LOCK = threading.RLock()
 
 
@@ -78,11 +81,15 @@ def logging_session(
 ) -> Iterator[LoggingSessionState]:
     """Configure CLI logging for one run and restore everything on exit.
 
-    The whole session — snapshot, install, yield, restore — runs under
-    the module-level ``_LOGGING_SESSION_LOCK``, so overlapping calls from
-    different threads serialize instead of interleaving their global
-    logging-state mutations (the snapshot/restore of the second session
-    then sees the pristine state of the first).
+    Only ONE logging session may be live at a time — logging state is
+    process-global, so overlapping sessions from different threads
+    cannot be made safe (the snapshot/restore of the second session
+    would see the first one's half-installed state). A second
+    concurrent session is REJECTED with ``RuntimeError`` instead of
+    blocking: the CLI holds its session for the whole run, which can
+    last hours (audit round 19 P2 — the previous blocking lock could
+    silently hang an embedded worker pool for the duration of an
+    unrelated encode).
 
     On enter: snapshot the root logger's handlers/level, the app logger's
     handlers + ``propagate``, ``console.stderr``, the console handler's
@@ -103,8 +110,14 @@ def logging_session(
     can't mis-place its own boundary — setup and restore live in one
     construct (audit round 13 follow-up).
     """
-    with _LOGGING_SESSION_LOCK:
+    if not _LOGGING_SESSION_LOCK.acquire(timeout=0):
+        raise RuntimeError(
+            "another embedded CLI session is active; logging sessions cannot overlap"
+        )
+    try:
         yield from _logging_session_unlocked(log_format_lower, log_level, set_json_mode)
+    finally:
+        _LOGGING_SESSION_LOCK.release()
 
 
 def _logging_session_unlocked(

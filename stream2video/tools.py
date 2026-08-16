@@ -25,6 +25,7 @@ message as before.
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import re
@@ -199,10 +200,33 @@ def _re_resolve_cmd0(cmd: list) -> tuple[list, str]:
     return cmd, ""
 
 
+def _is_transient_spawn_error(exc: OSError) -> bool:
+    """True for the failure codes the retry layer exists for.
+
+    Audit round 19 P1: CreateProcessW error 206
+    (ERROR_FILENAME_EXCED_RANGE — the exact incident the retry +
+    CREATE_NO_WINDOW-dropping logic was built for, CPython bug #37380)
+    surfaces in Python as a BARE ``OSError``, not ``FileNotFoundError``,
+    so ``except FileNotFoundError`` never retried it. Retry only:
+      * ``errno == ENOENT`` (POSIX and hand-built Windows exceptions);
+      * Windows ``winerror`` 2 (file not found), 3 (path not found) and
+        206 (filename exceeded range) — the transient set the probe and
+        the retry workaround exist for.
+    Every other OSError (access denied, invalid argument, ...) is
+    permanent and must surface immediately.
+    """
+    if exc.errno == errno.ENOENT:
+        return True
+    winerror = getattr(exc, "winerror", None)
+    if winerror is not None:
+        return winerror in (2, 3, 206)
+    return False
+
+
 def _spawn_with_retry(
     kind: str, cmd: list[str], kwargs: dict[str, Any]
 ) -> subprocess.Popen[Any] | subprocess.CompletedProcess[Any]:
-    """Internal: spawn via Popen or run with retry on transient FNF.
+    """Internal: spawn via Popen or run with retry on transient spawn errors.
 
     Each failed attempt logs the full exception detail (``winerror``,
     ``filename``) plus a low-level ``CreateProcessW`` probe of the resolved
@@ -210,10 +234,10 @@ def _spawn_with_retry(
     mapped to Win32 (e.g. ``2`` = file not found, ``3`` = path not found,
     ``5`` = access denied), which is what separates "shim vanished" from
     "filter driver blocked the image" — both surface as the same opaque
-    ``FileNotFoundError`` from ``subprocess``.
+    ``OSError`` from ``subprocess``.
     """
     fn = subprocess.Popen if kind == "popen" else subprocess.run
-    last_exc: FileNotFoundError | None = None
+    last_exc: OSError | None = None
     # On the first attempt try exactly what the caller asked. On retries,
     # disable STARTF_USESTDHANDLES: the pipeline's parent's stdhandles can
     # be in an inconsistent state (CPython bug #37380: when the parent's
@@ -235,7 +259,7 @@ def _spawn_with_retry(
             # load that triggered the retry in the first place. On POSIX
             # ``creationflags`` is Windows-only
             # plumbing: passing a non-zero value raises ValueError
-            # instead of FileNotFoundError, which would hide the retry
+            # instead of OSError, which would hide the retry
             # path entirely.
             orig_flags = int(kwargs.get("creationflags", 0))
             if os.name == "nt":
@@ -247,18 +271,20 @@ def _spawn_with_retry(
                 "CreateProcess error 206 when parent's console code page "
                 "was changed after spawning with CREATE_NO_WINDOW)"
                 if os.name == "nt"
-                else "retrying spawn after transient FileNotFoundError"
+                else "retrying spawn after transient spawn error"
             )
         try:
             return fn(cmd, **try_kwargs)
-        except FileNotFoundError as exc:
+        except OSError as exc:
+            if not _is_transient_spawn_error(exc):
+                # Permanent failure (access denied, invalid argument, ...):
+                # retrying cannot help and would only mask the real error
+                # behind the last-attempt message (audit round 19 P1).
+                raise
             last_exc = exc
             probe = _createprocess_probe(cmd[0])
-            # ``winerror`` exists on Windows OSError instances; typeshed
-            # models it platform-gated, so Linux CI needs the ignore (it is
-            # unused on Windows — see the mypy override in pyproject).
             logger.warning(
-                "spawn attempt %d/%d failed (FileNotFoundError: errno=%r "
+                "spawn attempt %d/%d failed (OSError: errno=%r "
                 "filename=%r winerror=%r); CreateProcess probe: %s",
                 attempt + 1,
                 1 + _SPAWN_RETRY_ATTEMPTS,
@@ -453,8 +479,11 @@ def _createprocess_probe(exe: str) -> str:
                     job_ok = bool(kernel32.AssignProcessToJobObject(job, pi.hProcess))
         except Exception:
             # Job setup is best-effort plumbing; a broken job must not
-            # turn the probe itself into "probe raised ...".
-            job = None
+            # turn the probe itself into "probe raised ...". Only the
+            # kill guarantee is lost — the created handle is KEPT so the
+            # finally below still closes it (audit round 19 P2: zeroing
+            # ``job`` here leaked a kernel handle in the emergency
+            # branch).
             job_ok = False
         # From here the probe OWNS the child's process/thread handles
         # (and the job handle, if one was created). Every exit path —
@@ -469,36 +498,29 @@ def _createprocess_probe(exe: str) -> str:
         # not skip the remaining closes); the ``except`` terminates the
         # child best-effort if we never confirmed its exit.
         try:
-            # Wait for the child to exit so we don't leak a live ffmpeg
-            # on the user's machine just for a diagnostic — and so AV
-            # software sees a complete spawn+exit, not an orphan.
-            wait = kernel32.WaitForSingleObject(pi.hProcess, 2000)
-            if wait == 0x00000000:  # WAIT_OBJECT_0 — clean exit
-                return f"CreateProcessW OK (exists={exists}); spawn succeeded"
-            # Anything but WAIT_OBJECT_0 — WAIT_TIMEOUT (0x102: hung
-            # spawn on a broken shim / AV scan), WAIT_FAILED (0xFFFFFFFF:
-            # the wait call itself failed), WAIT_ABANDONED — is NOT a
-            # clean exit (audit round 16 P2: WAIT_FAILED used to be
-            # reported as "spawn succeeded" and the child was left
-            # running with nobody holding its handle — the probe runs in
-            # the emergency retry branch, so an orphan would stack a
-            # second hung process on top of the original spawn failure).
-            # Terminate best-effort, verify the kill, re-wait, and
-            # report what actually happened instead of assuming success.
+            # The child was created CREATE_SUSPENDED, so it CANNOT exit
+            # on its own — the old 2s "natural exit" wait was provably
+            # futile and added up to 8s of dead time across four retry
+            # attempts (audit round 19 P2). The diagnostic fact is
+            # already established by the successful CreateProcessW:
+            # Windows created the process object. Reap immediately —
+            # terminate best-effort, verify with a bounded post-kill
+            # wait (fast after a successful TerminateProcess), and let
+            # the job object's kill-on-close guarantee the rest.
             try:
                 terminated = bool(kernel32.TerminateProcess(pi.hProcess, 1))
             except Exception:
                 terminated = False
             # TerminateProcess is asynchronous at the kernel level;
-            # wait for the signal so the handle close below can't race a
-            # still-running zombie. The second wait has a generous bound —
-            # after a successful TerminateProcess the process is already
-            # dead to the scheduler, so this returns almost immediately.
-            wait2 = kernel32.WaitForSingleObject(pi.hProcess, 10000)
-            if wait2 == 0x00000000:
+            # wait for the signal so the handle close below can't race
+            # a still-running zombie. After a successful TerminateProcess
+            # the process is already dead to the scheduler, so this
+            # returns almost immediately in practice.
+            wait = kernel32.WaitForSingleObject(pi.hProcess, 10000)
+            if wait == 0x00000000:
                 return (
-                    f"CreateProcessW OK (exists={exists}); hung child terminated "
-                    f"(TerminateProcess={terminated}); wait={wait:#x}"
+                    f"CreateProcessW OK (exists={exists}); spawn ok, suspended "
+                    f"child terminated (TerminateProcess={terminated})"
                 )
             # Child still alive after the kill attempt (terminate failed
             # or was rejected). With a job object this can no longer
@@ -509,12 +531,12 @@ def _createprocess_probe(exe: str) -> str:
             if job_ok:
                 return (
                     f"CreateProcessW OK (exists={exists}); child still alive after "
-                    f"terminate (wait={wait:#x}, post-kill wait={wait2:#x}, "
+                    f"terminate (post-kill wait={wait:#x}, "
                     f"TerminateProcess={terminated}); reaped by job KILL_ON_JOB_CLOSE"
                 )
             return (
                 f"CreateProcessW OK (exists={exists}); child still alive after "
-                f"terminate (wait={wait:#x}, post-kill wait={wait2:#x}, "
+                f"terminate (post-kill wait={wait:#x}, "
                 f"TerminateProcess={terminated})"
             )
         except Exception as e:  # pragma: no cover - probe must never kill the caller

@@ -178,46 +178,42 @@ class TestCreateProcessProbe:
             result = _createprocess_probe("ffmpeg.exe")
         return result, calls
 
-    def test_prompt_exit_no_terminate(self):
+    def test_suspended_child_always_terminated(self):
+        """Audit round 19 P2: the child is spawned CREATE_SUSPENDED, so
+        it can never exit on its own — the old 2s "natural exit" wait
+        was provably futile. The probe must terminate immediately and
+        verify with the single bounded post-kill wait."""
         result, calls = self._probe([self.WAIT_OBJECT_0])
         assert "CreateProcessW OK" in result
-        assert all(c != ("TerminateProcess", 1) for c in calls)
-        assert ("WaitForSingleObject", 2000) in calls
-        assert calls.count("CloseHandle") == 2
-
-    def test_timeout_terminates_before_handles_closed(self):
-        result, calls = self._probe([self.WAIT_TIMEOUT, self.WAIT_OBJECT_0])
-        assert "CreateProcessW OK" in result
-        assert ("WaitForSingleObject", 2000) in calls
+        assert "spawn ok, suspended child terminated" in result
         assert ("TerminateProcess", 1) in calls
-        # The second wait gives the terminated child time to signal
-        # before the handle close.
+        # One bounded post-kill wait only — no dead 2s first wait.
         assert ("WaitForSingleObject", 10000) in calls
+        assert ("WaitForSingleObject", 2000) not in calls
         assert calls.count("CloseHandle") == 2
 
-    def test_wait_failed_terminates_and_does_not_report_success(self):
-        """Audit round 16 P2: WAIT_FAILED (0xFFFFFFFF — the wait call
-        itself failed, e.g. a broken shim) used to fall through to
-        "spawn succeeded" and close the handles with the child still
-        running. Now ANY non-WAIT_OBJECT_0 outcome terminates the child
-        best-effort and reports what really happened."""
-        result, calls = self._probe([0xFFFFFFFF, self.WAIT_OBJECT_0])
+    def test_post_kill_wait_timeout_reports_child_still_alive(self):
+        """The kill attempt can fail to settle the child (the post-kill
+        wait times out). The probe must report the child as still alive
+        instead of silently claiming success."""
+        result, calls = self._probe([self.WAIT_TIMEOUT])
         assert "CreateProcessW OK" in result
-        assert "spawn succeeded" not in result
-        assert "hung child terminated" in result
-        assert ("TerminateProcess", 1) in calls
-        assert ("WaitForSingleObject", 10000) in calls
-        assert calls.count("CloseHandle") == 2
-
-    def test_second_wait_timeout_reports_child_still_alive(self):
-        """The kill attempt itself can fail to settle the child (the
-        second wait times out again). The probe must report the child as
-        still alive instead of silently claiming success."""
-        result, calls = self._probe([self.WAIT_TIMEOUT, self.WAIT_TIMEOUT])
-        assert "CreateProcessW OK" in result
-        assert "spawn succeeded" not in result
+        assert "spawn ok" not in result
         assert "child still alive after terminate" in result
         assert ("TerminateProcess", 1) in calls
+        assert ("WaitForSingleObject", 10000) in calls
+        assert calls.count("CloseHandle") == 2
+
+    def test_wait_failed_reports_child_still_alive(self):
+        """WAIT_FAILED (0xFFFFFFFF — the wait call itself failed, e.g. a
+        broken shim) must never read as success (audit round 16 P2): the
+        kill is reported as unverified and the child as possibly alive."""
+        result, calls = self._probe([0xFFFFFFFF])
+        assert "CreateProcessW OK" in result
+        assert "spawn ok" not in result
+        assert "child still alive after terminate" in result
+        assert ("TerminateProcess", 1) in calls
+        assert ("WaitForSingleObject", 10000) in calls
         assert calls.count("CloseHandle") == 2
 
     def test_terminate_rejected_reports_false_in_message(self):
@@ -247,7 +243,7 @@ class TestCreateProcessProbe:
 
         result = self._probe_with_fake(_RefusingTerminateKernel32)
         assert "CreateProcessW OK" in result
-        assert "spawn succeeded" not in result
+        assert "spawn ok" not in result
         assert "child still alive after terminate" in result
         assert "TerminateProcess=False" in result
         assert calls.count("CloseHandle") == 2
@@ -303,7 +299,7 @@ class TestCreateProcessProbe:
         code just for a diagnostic."""
         result, calls = self._probe_with_job([self.WAIT_OBJECT_0])
         assert "CreateProcessW OK" in result
-        assert "spawn succeeded" in result
+        assert "spawn ok, suspended child terminated" in result
         # CREATE_SUSPENDED (0x4) — the probe must not run the binary.
         assert ("CreateProcessW", 0x00000004) in calls
         # JobObjectExtendedLimitInformation (9) with the kill flag set.
@@ -317,12 +313,55 @@ class TestCreateProcessProbe:
         """With the job in place, "child still alive after terminate"
         must state that the job reaps it on handle close — a diagnostic
         that can no longer coincide with an actual leak."""
-        result, calls = self._probe_with_job(
-            [self.WAIT_TIMEOUT, self.WAIT_TIMEOUT], terminate_result=False
-        )
+        result, calls = self._probe_with_job([self.WAIT_TIMEOUT], terminate_result=False)
         assert "child still alive after terminate" in result
         assert "reaped by job KILL_ON_JOB_CLOSE" in result
         assert ("SetInformationJobObject", 9, 0x2000) in calls
+        closes = [c for c in calls if isinstance(c, tuple) and c[0] == "CloseHandle"]
+        assert len(closes) == 3
+
+    def test_job_handle_kept_when_assign_raises(self):
+        """Audit round 19 P2: an exception during job setup (here: the
+        AssignProcessToJobObject call itself) must NOT lose the already-
+        created job handle — the finally still closes all three handles,
+        and the probe reports normally instead of "probe raised ..."."""
+        calls: list[tuple | str] = []
+
+        class _ExplodingAssignKernel32:
+            def __init__(self, name, use_last_error=False):
+                pass
+
+            def CreateProcessW(self, *a, **k):
+                calls.append("CreateProcessW")
+                return True
+
+            def WaitForSingleObject(self, handle, timeout):
+                calls.append(("WaitForSingleObject", timeout))
+                return 0x00000000  # WAIT_OBJECT_0
+
+            def TerminateProcess(self, handle, code):
+                calls.append(("TerminateProcess", code))
+                return True
+
+            def CreateJobObjectW(self, *a, **k):
+                calls.append("CreateJobObjectW")
+                return 123
+
+            def SetInformationJobObject(self, job, cls, info, size):
+                calls.append("SetInformationJobObject")
+                return True
+
+            def AssignProcessToJobObject(self, job, proc):
+                calls.append("AssignProcessToJobObject")
+                raise OSError("assign exploded")
+
+            def CloseHandle(self, handle):
+                calls.append(("CloseHandle", handle))
+
+        result = self._probe_with_fake(_ExplodingAssignKernel32)
+        assert "spawn ok, suspended child terminated" in result
+        assert "probe raised" not in result
+        # job + process + thread — the job handle survived the exception.
         closes = [c for c in calls if isinstance(c, tuple) and c[0] == "CloseHandle"]
         assert len(closes) == 3
 
@@ -389,7 +428,7 @@ class TestCreateProcessProbe:
                     raise OSError("close exploded")
 
         result = self._probe_with_fake(_ExplodingCloseKernel32)
-        assert "spawn succeeded" in result
+        assert "spawn ok, suspended child terminated" in result
         # Both CloseHandle attempts happened — the first raised, the
         # second (thread handle) still ran.
         assert calls.count("CloseHandle") == 2
@@ -432,7 +471,7 @@ class TestCreateProcessProbe:
 
         result = self._probe_with_fake(_ExplodingWaitKernel32)
         assert result == "probe raised RuntimeError: wait exploded"
-        assert ("WaitForSingleObject", 2000) in calls
+        assert ("WaitForSingleObject", 10000) in calls
         # Best-effort kill attempted even though we never confirmed exit.
         assert ("TerminateProcess", 1) in calls
         assert calls.count("CloseHandle") == 2
@@ -466,7 +505,7 @@ class TestCreateProcessProbe:
 
         result = self._probe_with_fake(_ExplodingTerminateKernel32)
         assert "CreateProcessW OK" in result
-        assert "spawn succeeded" not in result
+        assert "spawn ok" not in result
         assert "TerminateProcess=False" in result
         assert calls.count("CloseHandle") == 2
 
@@ -699,3 +738,67 @@ class TestSpawnWithRetryBehaviour:
         assert len(probes) == 2
         assert reset_cache.call_count == 2
         assert reset_enc.call_count == 2
+
+    def test_winerror_206_retried_with_creationflags_dropped(self):
+        """Audit round 19 P1: CreateProcessW error 206
+        (ERROR_FILENAME_EXCED_RANGE) surfaces as a BARE OSError, not
+        FileNotFoundError — the exact incident the retry layer + the
+        CREATE_NO_WINDOW-dropping workaround were built for (CPython
+        bug #37380). It must be retried, with only the CREATE_NO_WINDOW
+        bit dropped on the follow-up attempt."""
+
+        class _Win206Error(OSError):
+            def __init__(self):
+                super().__init__(206, "filename too long", "C:/x/ffmpeg.exe")
+                self.winerror = 206
+
+        calls: list = []
+
+        def side_effect(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            if len(calls) == 1:
+                raise _Win206Error()
+            return "ok"
+
+        result, probes, reset_cache, _ = self._spawn(
+            "run",
+            ["ffmpeg", "-version"],
+            {"creationflags": 0x08000000 | 0x40000000},
+            side_effect,
+            os_name="nt",
+        )
+        assert result == "ok"
+        assert len(calls) == 2
+        # The 206 retry drops ONLY CREATE_NO_WINDOW — the priority class
+        # bit survives.
+        assert calls[1][1]["creationflags"] == 0x40000000
+        assert calls[1][0][0] == "C:/resolved/ffmpeg.exe"
+        assert len(probes) == 1
+        assert reset_cache.call_count == 1
+
+    def test_non_transient_oserror_raised_immediately(self):
+        """Audit round 19 P1: any OSError that is NOT one of the
+        transient codes (ENOENT / winerror 2/3/206) must surface
+        immediately — no retry, no probe, no cache resets — so a real
+        error (access denied, invalid argument) is never masked behind
+        the last-attempt message."""
+        calls: list = []
+
+        def side_effect(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            raise PermissionError(13, "access denied", cmd[0])
+
+        record: dict = {}
+        with pytest.raises(PermissionError):
+            self._spawn(
+                "run",
+                ["ffmpeg", "-version"],
+                {},
+                side_effect,
+                os_name="nt",
+                record=record,
+            )
+        assert len(calls) == 1
+        assert record["probe_calls"] == []
+        assert record["reset_cache"].call_count == 0
+        assert record["reset_enc"].call_count == 0
