@@ -279,3 +279,49 @@ class TestFfprobeDurationOkFailClosed:
 
         result = CompletedProcess(args=[], returncode=0, stdout="4.0\n", stderr="")
         assert self._probe(tmp_path, result) is False
+
+
+class TestMakePhaseProgress:
+    """_make_phase_progress — the single shared progress funnel (audit
+    round 14 P3: the wrapper used to be built twice in _run_locked and
+    the video path threw the first instance away). Pins the mapping and
+    the monotonic clamp on the one instance both paths now share."""
+
+    def test_legacy_callback_passthrough_when_no_on_phase(self):
+        from stream2video.concat.api import _make_phase_progress
+
+        seen: list[float] = []
+        cb = _make_phase_progress(seen.append, None)
+        assert cb is not None
+        cb(0.4)
+        cb(0.95)
+        assert seen == [0.4, 0.95]
+
+    def test_phase_mapping_splits_90_10(self):
+        from stream2video.concat.api import _make_phase_progress
+
+        phases: list[tuple[str, float]] = []
+        cb = _make_phase_progress(None, lambda phase, frac: phases.append((phase, frac)))
+        cb(0.45)  # cutting: 0.45 / 0.9
+        cb(0.99)  # concatenating: (0.99 - 0.9) / 0.1
+        cb(1.0)  # capped to concatenating 1.0
+        assert phases == [
+            ("cutting", 0.5),
+            ("concatenating", pytest.approx(0.9)),
+            ("concatenating", 1.0),
+        ]
+
+    def test_monotonic_clamp_drops_backwards_reports(self):
+        from stream2video.concat.api import _make_phase_progress
+
+        seen: list[float] = []
+        cb = _make_phase_progress(seen.append, None)
+        cb(0.9)
+        cb(0.8955)  # ffmpeg out_time_us dip near the tail
+        cb(0.95)
+        assert seen == [0.9, 0.95]
+
+    def test_none_when_no_callbacks(self):
+        from stream2video.concat.api import _make_phase_progress
+
+        assert _make_phase_progress(None, None) is None

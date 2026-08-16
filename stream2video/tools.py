@@ -360,8 +360,25 @@ def _createprocess_probe(exe: str) -> str:
         if ok:
             # Wait for the child to exit so we don't leak a live ffmpeg
             # on the user's machine just for a diagnostic — and so AV
-            # software sees a complete spawn+exit, not an orphan.
-            kernel32.WaitForSingleObject(pi.hProcess, 2000)
+            # software sees a complete spawn+exit, not an orphan. If the
+            # child hasn't exited within the window (a hung spawn on a
+            # broken shim / AV scan), TERMINATE it explicitly before
+            # closing the handles — the old code closed them
+            # unconditionally, so a slow ``ffmpeg -version`` kept running
+            # with nobody holding its handle (audit round 14 P2; the
+            # probe runs in the emergency retry branch, so an orphan
+            # would stack a second hung process on top of the original
+            # spawn failure).
+            wait = kernel32.WaitForSingleObject(pi.hProcess, 2000)
+            if wait == 0x00000102:  # WAIT_TIMEOUT
+                kernel32.TerminateProcess(pi.hProcess, 1)
+                # TerminateProcess is asynchronous at the kernel level;
+                # wait for the signal so the handle close below can't
+                # race a still-running zombie. The second wait has a
+                # generous bound — after TerminateProcess the process is
+                # already dead to the scheduler, so this returns almost
+                # immediately in practice.
+                kernel32.WaitForSingleObject(pi.hProcess, 10000)
             kernel32.CloseHandle(pi.hProcess)
             kernel32.CloseHandle(pi.hThread)
             return f"CreateProcessW OK (exists={exists}); spawn succeeded"

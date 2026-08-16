@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from unittest.mock import patch
 
@@ -128,3 +129,65 @@ class TestResetToolCache:
             second = _ffmpeg_major_minor()
         assert first == (9, 0)
         assert second == (6, 1)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="CreateProcessW is Windows-only")
+class TestCreateProcessProbe:
+    """_createprocess_probe — the diagnostic CreateProcessW probe must
+    never leave an orphaned ffmpeg behind (audit round 14 P2): a child
+    that doesn't exit within the wait window is terminated explicitly
+    BEFORE the handles are closed, so the emergency retry branch can't
+    stack a second hung process on top of the original spawn failure."""
+
+    WAIT_OBJECT_0 = 0x00000000
+    WAIT_TIMEOUT = 0x00000102
+
+    def _probe(self, wait_results: list[int]):
+        calls: list[tuple | str] = []
+
+        class _FakeKernel32:
+            def __init__(self, name, use_last_error=False):
+                pass
+
+            def CreateProcessW(self, *a, **k):
+                calls.append("CreateProcessW")
+                return True
+
+            def WaitForSingleObject(self, handle, timeout):
+                calls.append(("WaitForSingleObject", timeout))
+                return wait_results.pop(0)
+
+            def TerminateProcess(self, handle, code):
+                calls.append(("TerminateProcess", code))
+                return True
+
+            def CloseHandle(self, handle):
+                calls.append("CloseHandle")
+
+        import ctypes as _ctypes_mod
+
+        from stream2video.tools import _createprocess_probe
+
+        # patch.object instead of a dotted patch target:
+        # ``ctypes`` is a C-extension module whose attributes can't be
+        # resolved through an import-path patch.
+        with patch.object(_ctypes_mod, "WinDLL", _FakeKernel32):
+            result = _createprocess_probe("ffmpeg.exe")
+        return result, calls
+
+    def test_prompt_exit_no_terminate(self):
+        result, calls = self._probe([self.WAIT_OBJECT_0])
+        assert "CreateProcessW OK" in result
+        assert all(c != ("TerminateProcess", 1) for c in calls)
+        assert ("WaitForSingleObject", 2000) in calls
+        assert calls.count("CloseHandle") == 2
+
+    def test_timeout_terminates_before_handles_closed(self):
+        result, calls = self._probe([self.WAIT_TIMEOUT, self.WAIT_OBJECT_0])
+        assert "CreateProcessW OK" in result
+        assert ("WaitForSingleObject", 2000) in calls
+        assert ("TerminateProcess", 1) in calls
+        # The second wait gives the terminated child time to signal
+        # before the handle close.
+        assert ("WaitForSingleObject", 10000) in calls
+        assert calls.count("CloseHandle") == 2

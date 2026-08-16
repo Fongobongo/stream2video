@@ -142,6 +142,17 @@ def logging_session(
             # via propagation to the same handler at the root) and stdout
             # JSON is duplicated line-by-line — breaking ``| jq .`` pipes.
             logger.propagate = False
+            # The app logger must carry ONLY the JSON handler for the run's
+            # duration: a host that pre-attached its OWN handler to
+            # ``stream2video`` (embedded host, GUI embeds, test capture)
+            # would otherwise keep firing it for every CLI record — and, via
+            # propagation, leak the JSON lines into the host's log stream
+            # (audit round 14 P2: the session isolated root handlers but not
+            # app-level ones; ``--log-level`` and the JSON-only contract
+            # silently didn't apply to the host handler). Assignment doesn't
+            # close() the dropped handlers — the ``finally`` below restores
+            # the snapshot list verbatim.
+            logger.handlers = [_json_handler]
             # Replace the root handler list directly (NOT
             # ``basicConfig(force=True)``): the rich branch does the same,
             # and ``force=True`` would close() any handler the host
@@ -183,6 +194,17 @@ def logging_session(
             # command inside it (audit round 13 "не ломать host").
             _root_logger.setLevel(logging.DEBUG)
             _root_logger.handlers = [_console_handler]
+            # Detach any handlers a host pre-attached to the app ``logger``
+            # for the run's duration: with them in place every CLI record
+            # would fire the host handler AND the root Rich handler via
+            # propagation — duplicated lines, and ``--log-level`` couldn't
+            # gate the host handler (audit round 14 P2, same class as the
+            # JSON branch above). Assignment doesn't close() them; the
+            # snapshot's ``logger.handlers`` list is restored verbatim on
+            # exit. The CLI's own per-run file handler is attached to
+            # ``logger`` AFTER this point (once the output dir resolves),
+            # so this clearing never touches it.
+            logger.handlers = []
         yield state
     finally:
         if state.file_handler is not None:

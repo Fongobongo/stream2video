@@ -267,6 +267,50 @@ class TestLoadConfigUnknownKeys:
         assert loaded["threshold"] == -25.0
         assert loaded["force"] is True
 
+    def test_non_string_key_rejected_with_clear_message(self, tmp_path: Path, capsys):
+        """Audit round 14 P3: YAML allows ``1: value`` — such a key used
+        to reach ``sorted()``/``difflib`` and raise an internal TypeError
+        instead of a user-facing message."""
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("1: stray\nthreshold: -25\n")
+        with pytest.raises(typer.Exit):
+            load_config(cfg)
+        out = capsys.readouterr().out
+        assert "Config keys must be strings" in out
+
+    def test_mixed_int_str_keys_rejected_before_sorted_crash(self, tmp_path: Path):
+        """A mix of int and str keys must fail with the key-type message,
+        not a TypeError from ``sorted()`` on a mixed-type set."""
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("threshold: -25\n2: stray\n")
+        with pytest.raises(typer.Exit):
+            load_config(cfg)
+
+    def test_output_dir_valid_string_passes(self, tmp_path: Path):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("output_dir: ./out\n")
+        loaded = load_config(cfg)
+        assert loaded["output_dir"] == "./out"
+
+    def test_output_dir_non_string_rejected(self, tmp_path: Path, capsys):
+        """Audit round 14 P2: ``output_dir: [bad, path]`` used to sail
+        past every validator and crash with an internal TypeError at
+        ``Path(...)`` — it must fail here with a clear message."""
+        for bad in ("[a, b]", "42", "true"):
+            cfg = tmp_path / "cfg.yaml"
+            cfg.write_text(f"output_dir: {bad}\n")
+            with pytest.raises(typer.Exit):
+                load_config(cfg)
+            out = capsys.readouterr().out
+            assert "Invalid output_dir" in out
+
+    def test_output_dir_empty_string_rejected(self, tmp_path: Path, capsys):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text('output_dir: ""\n')
+        with pytest.raises(typer.Exit):
+            load_config(cfg)
+        assert "Invalid output_dir" in capsys.readouterr().out
+
 
 class TestLoadConfigIntKeysRejectFractional:
     """Audit round 13 P3: an INT-typed key with a FRACTIONAL value must be

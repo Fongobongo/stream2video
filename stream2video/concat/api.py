@@ -24,6 +24,61 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _make_phase_progress(
+    progress_callback: Callable[[float], None] | None,
+    on_phase: Callable[[str, float], None] | None,
+) -> Callable[[float], None] | None:
+    """Build the single progress funnel every inner method reports through.
+
+    When the caller provided ``on_phase``, split 0..0.9 → cutting and
+    0.9..1.0 → concatenating and dispatch to ``on_phase`` instead of the
+    legacy 0..1 ``progress_callback`` (tests/CLI without ``on_phase``
+    keep the legacy path). Then apply the high-water-mark clamp:
+    ffmpeg's ``out_time_us`` is not strictly monotonic — near the tail of
+    an encode the muxer finalises packets and the progress stream can
+    emit a value slightly LOWER than the previous one (observed on the
+    ubuntu runner: 0.8976 → 0.9 → 0.8955). Both the audio-only extract
+    and every video method funnel their reports through the returned
+    callback, so clamping here once is the single place that guarantees
+    the user-facing bar never runs backwards — per-segment callbacks,
+    chunk callbacks and the final concat all benefit without each
+    reinventing its own latch.
+
+    Call EXACTLY ONCE per run, before the audio/video fork: the
+    audio-only path and the video path must report through the same
+    wrapper instance, or the monotonic latch and the 90/10 phase mapping
+    reset mid-run. The previous code built the wrapper twice and the
+    video path threw the first instance away (audit round 14 P3).
+    """
+    inner_progress = progress_callback
+    if on_phase is not None:
+
+        def _wrap(f: float) -> None:
+            f = max(0.0, min(1.0, f))
+            if f < 0.9:
+                on_phase("cutting", f / 0.9)
+            elif f < 1.0:
+                on_phase("concatenating", (f - 0.9) / 0.1)
+            else:
+                on_phase("concatenating", 1.0)
+
+        inner_progress = _wrap
+
+    if inner_progress is not None:
+        _hwm = {"v": 0.0}
+        _base = inner_progress
+
+        def _mono(f: float) -> None:
+            if f < _hwm["v"]:
+                return
+            _hwm["v"] = f
+            _base(f)
+
+        inner_progress = _mono
+
+    return inner_progress
+
+
 def cut_and_concat(
     video_path: Path,
     silence_segments: "list[SilenceSegment]",
@@ -190,44 +245,10 @@ def _run_locked(
         f"Keeping {len(keep_segments)} segments, removing {len(silence_segments)} silence segments"
     )
 
-    # Wrap progress so inner methods can report atomically via on_phase.
-    # When the caller provided on_phase, split 0..0.9 → cutting and 0.9..1.0 →
-    # concatenating and dispatch to on_phase instead of the legacy 0..1
-    # progress_callback. Keep legacy path for tests/CLI without on_phase.
-    inner_progress = progress_callback
-    if on_phase is not None:
-
-        def _wrap(f: float) -> None:
-            f = max(0.0, min(1.0, f))
-            if f < 0.9:
-                on_phase("cutting", f / 0.9)
-            elif f < 1.0:
-                on_phase("concatenating", (f - 0.9) / 0.1)
-            else:
-                on_phase("concatenating", 1.0)
-
-        inner_progress = _wrap
-
-    # High-water-mark clamp. ffmpeg's ``out_time_us`` is not strictly
-    # monotonic: near the tail of an encode the muxer finalises packets
-    # and the progress stream can emit a value slightly LOWER than the
-    # previous one (observed on the ubuntu runner: 0.8976 → 0.9 → 0.8955).
-    # Both the audio-only extract and every video method funnel their
-    # reports through ``inner_progress``, so clamping here once is the
-    # single place that guarantees the user-facing bar never runs
-    # backwards — per-segment callbacks, chunk callbacks and the final
-    # concat all benefit without each reinventing its own latch.
-    if inner_progress is not None:
-        _hwm = {"v": 0.0}
-        _base = inner_progress
-
-        def _mono(f: float) -> None:
-            if f < _hwm["v"]:
-                return
-            _hwm["v"] = f
-            _base(f)
-
-        inner_progress = _mono
+    # One shared progress funnel for BOTH the audio-only and the video
+    # paths, built before the fork (see _make_phase_progress): the
+    # monotonic latch and the 90/10 phase mapping must survive across it.
+    inner_progress = _make_phase_progress(progress_callback, on_phase)
 
     # Audio-only output path: short-circuit the video pipeline entirely.
     # The segment/batch/cut_then_encode paths are video-oriented (they
@@ -339,45 +360,6 @@ def _run_locked(
         source_bitrate=source_bitrate,
         source_has_audio=source_has_audio,
     )
-
-    # Wrap progress so inner methods can report atomically via on_phase.
-    # When the caller provided on_phase, split 0..0.9 → cutting and 0.9..1.0 →
-    # concatenating and dispatch to on_phase instead of the legacy 0..1
-    # progress_callback. Keep legacy path for tests/CLI without on_phase.
-    inner_progress = progress_callback
-    if on_phase is not None:
-
-        def _wrap(f: float) -> None:
-            f = max(0.0, min(1.0, f))
-            if f < 0.9:
-                on_phase("cutting", f / 0.9)
-            elif f < 1.0:
-                on_phase("concatenating", (f - 0.9) / 0.1)
-            else:
-                on_phase("concatenating", 1.0)
-
-        inner_progress = _wrap
-
-    # High-water-mark clamp. ffmpeg's ``out_time_us`` is not strictly
-    # monotonic: near the tail of an encode the muxer finalises packets
-    # and the progress stream can emit a value slightly LOWER than the
-    # previous one (observed on the ubuntu runner: 0.8976 → 0.9 → 0.8955).
-    # Every inner method funnels its reports through ``inner_progress``,
-    # so clamping here once is the single place that guarantees the
-    # user-facing bar never runs backwards — per-segment callbacks,
-    # chunk callbacks and the final concat all benefit without each
-    # reinventing its own latch.
-    if inner_progress is not None:
-        _hwm = {"v": 0.0}
-        _base = inner_progress
-
-        def _mono(f: float) -> None:
-            if f < _hwm["v"]:
-                return
-            _hwm["v"] = f
-            _base(f)
-
-        inner_progress = _mono
 
     # The output lock is held by the caller (cut_and_concat); this helper
     # runs entirely under it, so by this point the loser run already

@@ -119,6 +119,20 @@ def load_config(config_file: Path | None, console: Any) -> dict:
                 console.print(f"[red]Error loading config file:[/red] {e}")
                 raise typer.Exit(1) from None
 
+    # Reject non-string keys BEFORE the unknown-key check below: YAML
+    # accepts ``1: value``, and such a key reaches ``sorted()`` /
+    # ``difflib.get_close_matches`` there — a mixed str/int key set
+    # crashes on ``sorted()``, a lone int key crashes inside
+    # ``get_close_matches``. Both surface as an internal TypeError instead
+    # of a user-facing message (audit round 14 P3).
+    non_str_keys = [k for k in file_config if not isinstance(k, str)]
+    if non_str_keys:
+        console.print(
+            "[red]Error:[/red] Config keys must be strings "
+            f"(found {len(non_str_keys)} non-string key(s))"
+        )
+        raise typer.Exit(1)
+
     # Reject unknown keys (audit round 12). Previously the whole YAML was
     # merged via ``config.update(file_config)`` and only KNOWN keys were
     # validated, so a typo (``threshhold: -25``) or a key that doesn't
@@ -148,6 +162,21 @@ def load_config(config_file: Path | None, console: Any) -> dict:
             hint = f" (did you mean {' or '.join(repr(k) for k in near)}?)" if near else ""
             console.print(f"[red]Unknown config key:[/red] {key!r}{hint}")
         raise typer.Exit(1)
+
+    # ``output_dir`` has no numeric/bool/enum validator (its
+    # CONFIG_DEFAULTS entry is the empty string), so a YAML
+    # ``output_dir: [bad, path]`` sailed through every check above and
+    # crashed later with an internal TypeError at ``Path(config.get(
+    # "output_dir"))`` in the CLI (audit round 14 P2). Validate it as a
+    # non-empty string here; only keys the user EXPLICITLY wrote are
+    # checked — the untouched default stays "".
+    if "output_dir" in file_config:
+        _out_dir = file_config["output_dir"]
+        if not isinstance(_out_dir, str) or not _out_dir.strip():
+            console.print(
+                f"[red]Invalid output_dir:[/red] {_out_dir!r} must be a non-empty string path"
+            )
+            raise typer.Exit(1)
 
     # Validate numeric ranges. Preserve the input's int/float type —
     # ``float(config[key])`` silently converts every integer-keyed

@@ -594,6 +594,74 @@ class TestEarlyExitLoggingRestore:
         root.handlers = saved_handlers
         root.setLevel(saved_level)
 
+    def test_rich_session_detaches_host_app_logger_handlers(self, isolated_defaults):
+        """Audit round 14 P2: a host that pre-attached its OWN handler to
+        the ``stream2video`` logger (not the root) must not have it fire
+        during a rich CLI run — every record would double-log (host
+        handler + root Rich handler via propagation) and bypass
+        ``--log-level``. The session must detach it for the run's
+        duration and restore it verbatim (not closed) on exit."""
+        import logging
+
+        from stream2video.cli import logger
+        from stream2video.cli_helpers import _console_handler, logging_session
+
+        host = logging.StreamHandler()
+        root = logging.getLogger()
+        saved_handlers = list(root.handlers)
+        saved_level = root.level
+        # NOTE: assert membership/closure, not exact list equality —
+        # earlier tests in the same pytest process leave caplog's
+        # LogCaptureHandlers attached to the app logger, so the restored
+        # list legitimately contains them too.
+        app_before = list(logger.handlers)
+        logger.addHandler(host)
+        try:
+            with logging_session("rich", "INFO"):
+                assert logger.handlers == []
+                assert root.handlers == [_console_handler]
+            assert host in logger.handlers
+            assert not host.stream.closed
+            assert set(app_before) <= set(logger.handlers)
+        finally:
+            logger.removeHandler(host)
+            host.close()
+            root.handlers = saved_handlers
+            root.setLevel(saved_level)
+
+    def test_json_session_replaces_host_app_logger_handlers(self, isolated_defaults):
+        """Audit round 14 P2 (JSON branch): during a ``--log-format json``
+        run the app logger must carry ONLY the JSON handler — a host
+        handler on ``stream2video`` would otherwise dump JSON records into
+        the host's own log stream and double-fire every record. On exit
+        the host handler comes back intact (not closed)."""
+        import logging
+
+        from stream2video.cli import logger
+        from stream2video.cli_helpers import logging_session
+        from stream2video.json_logging import _JsonFormatter
+
+        host = logging.StreamHandler()
+        root = logging.getLogger()
+        saved_handlers = list(root.handlers)
+        saved_level = root.level
+        app_before = list(logger.handlers)
+        logger.addHandler(host)
+        try:
+            with logging_session("json", "INFO"):
+                assert len(logger.handlers) == 1
+                assert host not in logger.handlers
+                assert isinstance(logger.handlers[0].formatter, _JsonFormatter)
+                assert logger.propagate is False
+            assert host in logger.handlers
+            assert not host.stream.closed
+            assert set(app_before) <= set(logger.handlers)
+        finally:
+            logger.removeHandler(host)
+            host.close()
+            root.handlers = saved_handlers
+            root.setLevel(saved_level)
+
     def test_install_failure_midway_restores_state(self, isolated_defaults, tmp_path):
         """An exception raised INSIDE the session's install section —
         after it has already mutated logging state — must still restore
