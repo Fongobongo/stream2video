@@ -188,14 +188,26 @@ _SPAWN_RETRY_DELAY_S = 1.5
 
 
 def _re_resolve_cmd0(cmd: list) -> tuple[list, str]:
-    """If ``cmd[0]`` looks like our resolved ffmpeg/ffprobe, re-resolve it.
+    """If ``cmd[0]`` is EXACTLY our resolved ffmpeg/ffprobe, re-resolve it.
 
     Returns ``(new_cmd, tool_name_or_empty)``.
+
+    Audit round 20 P3: the old ``"ffmpeg" in exe0`` substring check
+    silently swapped ANY executable whose basename merely CONTAINED
+    ``ffmpeg``/``ffprobe`` — ``C:\\tools\\ffmpeg-wrapper.exe``,
+    ``/opt/custom-ffmpeg-build`` or ``my_ffmpeg_helper`` would have its
+    own binary replaced by the system one while keeping the wrapper's
+    arguments. Only the PLAIN basename (``ffmpeg`` / ``ffmpeg.exe`` /
+    ``ffprobe`` / ``ffprobe.exe`` — no directory, no prefix, no
+    suffix) matches: a custom-named wrapper or patched build is retried
+    with its own ``cmd0``, preserving "repeat the same operation".
     """
-    exe0 = str(cmd[0]).lower() if cmd else ""
-    if "ffprobe" in exe0:
+    if not cmd:
+        return cmd, ""
+    base = Path(str(cmd[0])).name.lower()
+    if base in ("ffprobe", "ffprobe.exe"):
         return [ffprobe_path(), *cmd[1:]], "ffprobe"
-    if "ffmpeg" in exe0:
+    if base in ("ffmpeg", "ffmpeg.exe"):
         return [ffmpeg_path(), *cmd[1:]], "ffmpeg"
     return cmd, ""
 
@@ -394,39 +406,18 @@ def _createprocess_probe(exe: str) -> str:
 
         pi = PROCESS_INFORMATION()
         buf = ctypes.create_unicode_buffer(f'"{exe}" -version')
-        ok = kernel32.CreateProcessW(
-            None,
-            buf,
-            None,
-            None,
-            False,
-            # CREATE_SUSPENDED (0x4): the probe never lets the child
-            # execute code (audit round 18 P2). The retry branch already
-            # failed to spawn this binary; letting it actually run just
-            # for a diagnostic could execute arbitrary shim/AV-filter
-            # code, and the emergency branch must not be able to stack a
-            # second live process on top of the original failure. A
-            # suspended process cannot run anything — it is reaped with
-            # TerminateProcess and/or the job object below.
-            0x00000004,
-            None,
-            None,
-            ctypes.byref(si),
-            ctypes.byref(pi),
-        )
-        if not ok:
-            err = ctypes.get_last_error()  # type: ignore[attr-defined]
-            return (
-                f"CreateProcessW failed: winerror={err} "
-                f"({ctypes.FormatError(err).strip()}); exists={exists}"  # type: ignore[attr-defined]
-            )
-        # Job object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: closing the
-        # job handle below is a GUARANTEED reaper — the kernel kills the
-        # process even if TerminateProcess is rejected/raises, so the
-        # "child still alive" diagnostic can no longer coincide with an
-        # actual leak. Best-effort: if the job can't be created/assigned
-        # (ancient Windows, exotic driver), fall back to the terminate +
-        # bounded re-wait path alone.
+        # Job object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: closing
+        # the job handle below is a GUARANTEED reaper — the kernel kills
+        # the process even if TerminateProcess is rejected/raises, so
+        # the "child still alive" diagnostic can no longer coincide with
+        # an actual leak. The job is created and configured BEFORE
+        # CreateProcessW (audit round 20 P4): if it cannot be set up,
+        # the probe does NOT create an active (suspended) process at
+        # all. A suspended process that survived a failed
+        # TerminateProcess without a job would be a live kernel process
+        # with no reaper, repeated once per retry attempt — instead the
+        # probe degrades to a static file-existence diagnostic that
+        # cannot spawn anything.
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
         JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
 
@@ -470,13 +461,14 @@ def _createprocess_probe(exe: str) -> str:
             if job:
                 info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
                 info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-                if kernel32.SetInformationJobObject(
-                    job,
-                    JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
-                    ctypes.byref(info),
-                    ctypes.sizeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION),
-                ):
-                    job_ok = bool(kernel32.AssignProcessToJobObject(job, pi.hProcess))
+                job_ok = bool(
+                    kernel32.SetInformationJobObject(
+                        job,
+                        JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+                        ctypes.byref(info),
+                        ctypes.sizeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION),
+                    )
+                )
         except Exception:
             # Job setup is best-effort plumbing; a broken job must not
             # turn the probe itself into "probe raised ...". Only the
@@ -485,19 +477,76 @@ def _createprocess_probe(exe: str) -> str:
             # ``job`` here leaked a kernel handle in the emergency
             # branch).
             job_ok = False
+        if not job_ok:
+            if job:
+                _safe_close_handle(kernel32, job)
+            return f"CreateProcessW probe skipped (job object unavailable); exists={exists}"
         # From here the probe OWNS the child's process/thread handles
-        # (and the job handle, if one was created). Every exit path —
-        # success, wait timeout, an exception raised by the
-        # wait/terminate/formatting calls — must close all handles AND
-        # must not leave the child running (audit round 14 P2: a hung
-        # child was orphaned; audit round 15 P2: an exception after
-        # CreateProcessW skipped the cleanup entirely; audit round 18
-        # P2: the job object guarantees the kill even when
-        # TerminateProcess fails). The ``finally`` closes every handle
-        # INDEPENDENTLY (audit round 18 P3: a raising CloseHandle must
-        # not skip the remaining closes); the ``except`` terminates the
-        # child best-effort if we never confirmed its exit.
+        # and the job handle. Every exit path — success, wait timeout,
+        # an exception raised by the wait/terminate/formatting calls —
+        # must close all handles AND must not leave the child running
+        # (audit round 14 P2: a hung child was orphaned; audit round 15
+        # P2: an exception after CreateProcessW skipped the cleanup
+        # entirely; audit round 18 P2: the job object guarantees the
+        # kill even when TerminateProcess fails). The ``finally`` closes
+        # every handle INDEPENDENTLY (audit round 18 P3: a raising
+        # CloseHandle must not skip the remaining closes); the
+        # ``except`` terminates the child best-effort if we never
+        # confirmed its exit.
         try:
+            ok = kernel32.CreateProcessW(
+                None,
+                buf,
+                None,
+                None,
+                False,
+                # CREATE_SUSPENDED (0x4): the probe never lets the child
+                # execute code (audit round 18 P2). The retry branch
+                # already failed to spawn this binary; letting it
+                # actually run just for a diagnostic could execute
+                # arbitrary shim/AV-filter code, and the emergency
+                # branch must not be able to stack a second live process
+                # on top of the original failure. A suspended process
+                # cannot run anything — it is reaped with TerminateProcess
+                # and/or the job object below.
+                0x00000004,
+                None,
+                None,
+                ctypes.byref(si),
+                ctypes.byref(pi),
+            )
+            if not ok:
+                err = ctypes.get_last_error()  # type: ignore[attr-defined]
+                return (
+                    f"CreateProcessW failed: winerror={err} "
+                    f"({ctypes.FormatError(err).strip()}); exists={exists}"  # type: ignore[attr-defined]
+                )
+            # The child is INSIDE the job from here on — even if every
+            # kill path below fails, closing the job handle reaps it.
+            try:
+                assigned = bool(kernel32.AssignProcessToJobObject(job, pi.hProcess))
+            except Exception:
+                assigned = False
+            if not assigned:
+                # Spawned but OUTSIDE the job (assign failed): the
+                # suspended child has no reaper. Kill it NOW, verify
+                # with the bounded post-kill wait, and report the
+                # degraded path explicitly.
+                try:
+                    terminated = bool(kernel32.TerminateProcess(pi.hProcess, 1))
+                except Exception:
+                    terminated = False
+                wait = kernel32.WaitForSingleObject(pi.hProcess, 10000)
+                if wait == 0x00000000:
+                    return (
+                        f"CreateProcessW OK (exists={exists}); job assign failed, "
+                        f"child terminated (TerminateProcess={terminated})"
+                    )
+                return (
+                    f"CreateProcessW OK (exists={exists}); job assign failed, child "
+                    f"still alive (post-kill wait={wait:#x}, "
+                    f"TerminateProcess={terminated})"
+                )
             # The child was created CREATE_SUSPENDED, so it CANNOT exit
             # on its own — the old 2s "natural exit" wait was provably
             # futile and added up to 8s of dead time across four retry
@@ -523,21 +572,14 @@ def _createprocess_probe(exe: str) -> str:
                     f"child terminated (TerminateProcess={terminated})"
                 )
             # Child still alive after the kill attempt (terminate failed
-            # or was rejected). With a job object this can no longer
-            # mean a leak: closing the job handle in the finally reaps
-            # the process via JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE. Without
-            # one (job setup degraded) the child may genuinely survive —
-            # report that loudly so a caller can act on it.
-            if job_ok:
-                return (
-                    f"CreateProcessW OK (exists={exists}); child still alive after "
-                    f"terminate (post-kill wait={wait:#x}, "
-                    f"TerminateProcess={terminated}); reaped by job KILL_ON_JOB_CLOSE"
-                )
+            # or was rejected). The job exists (guaranteed before the
+            # spawn), so this cannot mean a leak: closing the job handle
+            # in the finally reaps the process via
+            # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.
             return (
                 f"CreateProcessW OK (exists={exists}); child still alive after "
                 f"terminate (post-kill wait={wait:#x}, "
-                f"TerminateProcess={terminated})"
+                f"TerminateProcess={terminated}); reaped by job KILL_ON_JOB_CLOSE"
             )
         except Exception as e:  # pragma: no cover - probe must never kill the caller
             # We never confirmed the child exited (wait/terminate

@@ -890,6 +890,51 @@ class TestLoggingSessionThreadSerialization:
             root.handlers = saved_handlers
             root.setLevel(saved_level)
 
+    def test_nested_session_in_same_thread_rejected_keeps_json_mode(self, isolated_defaults):
+        """Audit round 20 P1: the lock is a plain Lock, not an RLock, so a
+        REENTRANT second session in the same thread (json outer -> rich
+        inner) is rejected instead of silently nesting. An inner Rich
+        session would otherwise flip the presentation flag back to False
+        while the outer JSON session is still live — and the outer's
+        Rich banner/progress could then leak into JSON stdout for
+        jq/ELK consumers."""
+        import logging
+
+        import stream2video.cli as cli_mod
+        from stream2video.cli_helpers import LoggingSessionBusyError, logging_session
+
+        def _set_json_mode(value: bool) -> None:
+            cli_mod._JSON_LOG_MODE = value
+
+        root = logging.getLogger()
+        saved_handlers = list(root.handlers)
+        saved_level = root.level
+        app_before = list(cli_mod.logger.handlers)
+        try:
+            with logging_session("json", "INFO", _set_json_mode):
+                assert cli_mod._JSON_LOG_MODE is True
+                with (
+                    pytest.raises(
+                        LoggingSessionBusyError,
+                        match="another embedded CLI session is active",
+                    ),
+                    logging_session("rich", "INFO", _set_json_mode),
+                ):
+                    pass  # must never run
+                # The rejected inner session must not have touched the
+                # outer session's JSON presentation state.
+                assert cli_mod._JSON_LOG_MODE is True
+
+            # The outer session restored everything on exit, as usual.
+            assert cli_mod._JSON_LOG_MODE is False
+            assert root.handlers == saved_handlers
+            root.setLevel(saved_level)
+            assert set(app_before) <= set(cli_mod.logger.handlers)
+        finally:
+            cli_mod.logger.handlers = app_before
+            root.handlers = saved_handlers
+            root.setLevel(saved_level)
+
     def test_lock_released_after_exception_inside_session(self, isolated_defaults):
         import logging
         import threading
@@ -942,3 +987,19 @@ class TestLoggingSessionThreadSerialization:
             host_root.close()
             root.handlers = saved_handlers
             root.setLevel(saved_level)
+
+    def test_cli_busy_session_exits_cleanly(self, isolated_defaults):
+        """Audit round 20 P2: a second CLI invocation while another
+        session is live exits with a short user-facing message and code
+        1 — the LoggingSessionBusyError is caught around the session
+        enter, not leaked as an unhandled traceback through Typer."""
+        import stream2video.cli_helpers as helpers
+        from stream2video.cli import app
+
+        runner = CliRunner()
+        with helpers._LOGGING_SESSION_LOCK:
+            result = runner.invoke(app, ["some-video.mp4"])
+            assert result.exit_code == 1
+            assert "another embedded CLI session is active" in result.output
+            assert "Traceback" not in result.output
+            assert "LoggingSessionBusyError" not in result.output

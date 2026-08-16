@@ -22,6 +22,7 @@ from rich.progress import (
 
 from stream2video.cli_config import load_config as _load_config_impl
 from stream2video.cli_helpers import (
+    LoggingSessionBusyError,
     _check_ffmpeg,
     _console_handler,
     _make_file_handler,
@@ -784,7 +785,25 @@ def main(
     # failure BEFORE that point must not "restore" SIG_DFL — that would
     # clobber a host's signal handler the CLI never touched.
     _sigint_captured = False
-    with logging_session(log_format_lower, level, _set_json_mode) as _log_state:
+    # The session's __enter__ rejects a second concurrent session with
+    # LoggingSessionBusyError BEFORE touching any CLI state. That
+    # rejection is an EXPECTED outcome (a host already running one
+    # embedded CLI), not an internal failure — print a short message and
+    # exit 1 instead of leaking an unhandled traceback through Typer
+    # (audit round 20 P2). Enter/exit are driven manually so the guard
+    # can sit between them without re-indenting the whole body below:
+    # the body keeps its original indentation under the inner ``try``,
+    # and the outer ``finally`` below drives the session's ``__exit__``.
+    logging_session_cm = logging_session(log_format_lower, level, _set_json_mode)
+    try:
+        _log_state = logging_session_cm.__enter__()
+    except LoggingSessionBusyError:
+        console.print(
+            "[red]Error:[/red] another embedded CLI session is active; "
+            "logging sessions cannot overlap"
+        )
+        raise typer.Exit(1) from None
+    try:
         try:
             # Verify ffmpeg is available
             _check_ffmpeg()
@@ -1500,6 +1519,14 @@ def main(
             # run rewrote (root handlers, propagate, console.stderr, the
             # JSON-mode flag, the console level) are restored by the logging
             # session's ``__exit__`` — on this path AND on every early one.
+    finally:
+        # Mirror of ``with logging_session(...)``: exit is driven
+        # manually (see the enter above) so the LoggingSessionBusyError
+        # guard could sit between the two. ``sys.exc_info()`` carries
+        # the body's current exception (if any) into __exit__, which
+        # restores the snapshot on EVERY path — success, typer.Exit, or
+        # exception — and returns None, so the exception propagates.
+        logging_session_cm.__exit__(*sys.exc_info())
 
 
 if __name__ == "__main__":

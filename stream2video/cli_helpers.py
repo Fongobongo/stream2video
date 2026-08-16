@@ -70,7 +70,26 @@ class LoggingSessionState:
 # can take hours — so a blocking lock would hang a second embedded CLI
 # call for hours with no feedback. A second concurrent session is
 # rejected up-front with an explicit error instead.
-_LOGGING_SESSION_LOCK = threading.RLock()
+#
+# The lock is a plain ``threading.Lock``, NOT an ``RLock`` (audit round
+# 20 P1): reentrant acquisition would let the SAME thread nest a second
+# session inside a live one — the nested enter would snapshot the
+# outer's already-mutated state and could flip ``_JSON_LOG_MODE`` back
+# to False while the outer session is still in JSON, letting Rich
+# banner/progress leak into JSON stdout. A plain Lock rejects even the
+# owner on the second acquisition.
+_LOGGING_SESSION_LOCK = threading.Lock()
+
+
+class LoggingSessionBusyError(RuntimeError):
+    """Raised when :func:`logging_session` is entered while another
+    session is already live (in this thread or another).
+
+    Separate from internal ``RuntimeError``s so the CLI can turn an
+    EXPECTED concurrency rejection into a short user-facing message
+    with exit code 1 instead of an unhandled traceback (audit round 20
+    P2).
+    """
 
 
 @contextlib.contextmanager
@@ -84,12 +103,14 @@ def logging_session(
     Only ONE logging session may be live at a time — logging state is
     process-global, so overlapping sessions from different threads
     cannot be made safe (the snapshot/restore of the second session
-    would see the first one's half-installed state). A second
-    concurrent session is REJECTED with ``RuntimeError`` instead of
-    blocking: the CLI holds its session for the whole run, which can
-    last hours (audit round 19 P2 — the previous blocking lock could
-    silently hang an embedded worker pool for the duration of an
-    unrelated encode).
+    would see the first one's half-installed state), and reentrant
+    nesting in the SAME thread is just as unsafe (the nested snapshot
+    would capture the outer's half-installed state; audit round 20 P1).
+    A second concurrent session is REJECTED with
+    :class:`LoggingSessionBusyError` instead of blocking: the CLI holds
+    its session for the whole run, which can last hours (audit round 19
+    P2 — the previous blocking lock could silently hang an embedded
+    worker pool for the duration of an unrelated encode).
 
     On enter: snapshot the root logger's handlers/level, the app logger's
     handlers + ``propagate``, ``console.stderr``, the console handler's
@@ -111,7 +132,7 @@ def logging_session(
     construct (audit round 13 follow-up).
     """
     if not _LOGGING_SESSION_LOCK.acquire(timeout=0):
-        raise RuntimeError(
+        raise LoggingSessionBusyError(
             "another embedded CLI session is active; logging sessions cannot overlap"
         )
     try:
