@@ -59,6 +59,17 @@ class LoggingSessionState:
         self.file_handler: logging.FileHandler | None = None
 
 
+# Global serialization for logging_session: two OVERLAPPING sessions in
+# different threads (a host embedding the CLI in a worker thread while
+# another thread also runs one) would each snapshot the other's already-
+# mutated state and restore in the wrong order — one session could close
+# the other's handler, return a temporary handler as the "host" handler,
+# or leave JSON mode installed after a rich run (audit round 16 P2).
+# CLI runs are short-lived, so serializing them is cheap and makes the
+# restore order deterministic.
+_LOGGING_SESSION_LOCK = threading.RLock()
+
+
 @contextlib.contextmanager
 def logging_session(
     log_format_lower: str,
@@ -66,6 +77,12 @@ def logging_session(
     set_json_mode: Callable[[bool], None] | None = None,
 ) -> Iterator[LoggingSessionState]:
     """Configure CLI logging for one run and restore everything on exit.
+
+    The whole session — snapshot, install, yield, restore — runs under
+    the module-level ``_LOGGING_SESSION_LOCK``, so overlapping calls from
+    different threads serialize instead of interleaving their global
+    logging-state mutations (the snapshot/restore of the second session
+    then sees the pristine state of the first).
 
     On enter: snapshot the root logger's handlers/level, the app logger's
     handlers + ``propagate``, ``console.stderr``, the console handler's
@@ -85,6 +102,20 @@ def logging_session(
     statement (missing ffmpeg, bad ``--log-level``). A context manager
     can't mis-place its own boundary — setup and restore live in one
     construct (audit round 13 follow-up).
+    """
+    with _LOGGING_SESSION_LOCK:
+        yield from _logging_session_unlocked(log_format_lower, log_level, set_json_mode)
+
+
+def _logging_session_unlocked(
+    log_format_lower: str,
+    log_level: str,
+    set_json_mode: Callable[[bool], None] | None = None,
+) -> Iterator[LoggingSessionState]:
+    """Unserialized body of :func:`logging_session`.
+
+    Only ever runs while the caller holds ``_LOGGING_SESSION_LOCK``, so
+    its snapshot/restore can't race another session's mutations.
     """
     state = LoggingSessionState()
     # The JSON-mode flag lives where the presentation code reads it

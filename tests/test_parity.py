@@ -816,3 +816,128 @@ class TestValidateAdvancedWidgets:
         assert "encoder_threads" in validate_advanced_widgets(raw)
         parsed = parse_advanced_widgets(raw, current={"encoder_threads": "auto"})
         assert parsed["encoder_threads"] == "auto"  # the fallback value
+
+
+class TestLoggingSessionThreadSerialization:
+    """Audit round 16 P2: logging_session mutates GLOBAL logging state,
+    so two overlapping sessions in different threads used to corrupt each
+    other (the second session's snapshot captured the first one's
+    installed handlers; restore ran in the wrong order and could close a
+    handler the other session still needed). The whole session now runs
+    under a module-level RLock, so sessions serialize and the restore
+    order is deterministic."""
+
+    def test_overlapping_sessions_from_two_threads_serialize(self, isolated_defaults):
+        import logging
+        import threading
+        import time
+
+        from stream2video.cli import logger
+        from stream2video.cli_helpers import logging_session
+
+        host_root = logging.StreamHandler()
+        host_app = logging.StreamHandler()
+        root = logging.getLogger()
+        saved_handlers = list(root.handlers)
+        saved_level = root.level
+        app_before = list(logger.handlers)
+        root.handlers = [host_root]
+        logger.addHandler(host_app)
+        try:
+            start = threading.Event()
+            order: list[str] = []
+
+            def worker(fmt: str) -> None:
+                start.wait()
+                with logging_session(fmt, "INFO"):
+                    # Sleep INSIDE the session: without the lock the two
+                    # sessions would overlap (both "enter" events would
+                    # land before either "exit"). With the lock the
+                    # events must strictly alternate enter/exit.
+                    order.append(f"enter-{fmt}")
+                    time.sleep(0.05)
+                    order.append(f"exit-{fmt}")
+
+            t1 = threading.Thread(target=worker, args=("rich",))
+            t2 = threading.Thread(target=worker, args=("json",))
+            t1.start()
+            t2.start()
+            start.set()
+            t1.join(timeout=30)
+            t2.join(timeout=30)
+            assert not t1.is_alive() and not t2.is_alive()
+
+            # Sessions serialized: enter/exit pairs, never interleaved.
+            assert len(order) == 4
+            pairs = list(zip(order[0::2], order[1::2], strict=True))
+            assert all(a.startswith("enter-") and b.startswith("exit-") for a, b in pairs)
+
+            # Both sessions finished: the host's handlers come back
+            # intact (the second session's snapshot saw the pristine
+            # state, so nothing was dropped or closed).
+            assert root.handlers == [host_root]
+            assert host_app in logger.handlers
+            assert not host_root.stream.closed
+            assert not host_app.stream.closed
+            # The app logger ends up carrying every handler it started
+            # with (caplog's handlers from earlier tests included).
+            assert set(app_before) <= set(logger.handlers)
+        finally:
+            logger.removeHandler(host_app)
+            host_app.close()
+            host_root.close()
+            root.handlers = saved_handlers
+            root.setLevel(saved_level)
+
+    def test_exception_in_one_thread_does_not_block_the_other(self, isolated_defaults):
+        import logging
+        import threading
+
+        from stream2video.cli import logger
+        from stream2video.cli_helpers import logging_session
+
+        host_root = logging.StreamHandler()
+        host_app = logging.StreamHandler()
+        root = logging.getLogger()
+        saved_handlers = list(root.handlers)
+        saved_level = root.level
+        app_before = list(logger.handlers)
+        root.handlers = [host_root]
+        logger.addHandler(host_app)
+        try:
+            start = threading.Event()
+
+            def failing_worker() -> None:
+                start.wait()
+                with (
+                    pytest.raises(RuntimeError, match="boom"),
+                    logging_session("json", "INFO"),
+                ):
+                    raise RuntimeError("boom")
+
+            def ok_worker() -> None:
+                start.wait()
+                with logging_session("rich", "INFO"):
+                    pass
+
+            t1 = threading.Thread(target=failing_worker)
+            t2 = threading.Thread(target=ok_worker)
+            t1.start()
+            t2.start()
+            start.set()
+            t1.join(timeout=30)
+            t2.join(timeout=30)
+            assert not t1.is_alive() and not t2.is_alive()
+
+            # The exception path releases the lock (finally ran), so the
+            # second session could proceed and restore everything.
+            assert root.handlers == [host_root]
+            assert host_root not in logger.handlers
+            assert host_app in logger.handlers
+            assert set(app_before) <= set(logger.handlers)
+        finally:
+            logger.removeHandler(host_app)
+            host_app.close()
+            host_root.close()
+            root.handlers = saved_handlers
+            root.setLevel(saved_level)

@@ -61,7 +61,11 @@ def save_settings(config: dict[str, Any]) -> None:
     tmp = os.fsdecode(tmp_str)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
+            # allow_nan=False: JSON NaN/Infinity tokens are accepted by
+            # ``json.load``, so persisting one would re-create the
+            # poisoned startup state the loaders now drop (audit round
+            # 16 P1). Fail the write loudly instead.
+            json.dump(config, f, indent=2, ensure_ascii=False, allow_nan=False)
         os.replace(tmp, str(path))
     except Exception:
         import contextlib

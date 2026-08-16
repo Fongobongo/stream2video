@@ -195,6 +195,63 @@ class TestCreateProcessProbe:
         assert ("WaitForSingleObject", 10000) in calls
         assert calls.count("CloseHandle") == 2
 
+    def test_wait_failed_terminates_and_does_not_report_success(self):
+        """Audit round 16 P2: WAIT_FAILED (0xFFFFFFFF — the wait call
+        itself failed, e.g. a broken shim) used to fall through to
+        "spawn succeeded" and close the handles with the child still
+        running. Now ANY non-WAIT_OBJECT_0 outcome terminates the child
+        best-effort and reports what really happened."""
+        result, calls = self._probe([0xFFFFFFFF, self.WAIT_OBJECT_0])
+        assert "CreateProcessW OK" in result
+        assert "spawn succeeded" not in result
+        assert "hung child terminated" in result
+        assert ("TerminateProcess", 1) in calls
+        assert ("WaitForSingleObject", 10000) in calls
+        assert calls.count("CloseHandle") == 2
+
+    def test_second_wait_timeout_reports_child_still_alive(self):
+        """The kill attempt itself can fail to settle the child (the
+        second wait times out again). The probe must report the child as
+        still alive instead of silently claiming success."""
+        result, calls = self._probe([self.WAIT_TIMEOUT, self.WAIT_TIMEOUT])
+        assert "CreateProcessW OK" in result
+        assert "spawn succeeded" not in result
+        assert "child still alive after terminate" in result
+        assert ("TerminateProcess", 1) in calls
+        assert calls.count("CloseHandle") == 2
+
+    def test_terminate_rejected_reports_false_in_message(self):
+        """If TerminateProcess itself returns False (rejected — access
+        denied, already-dead race), the message must say so instead of
+        implying the child was killed."""
+        calls: list[tuple | str] = []
+
+        class _RefusingTerminateKernel32:
+            def __init__(self, name, use_last_error=False):
+                pass
+
+            def CreateProcessW(self, *a, **k):
+                calls.append("CreateProcessW")
+                return True
+
+            def WaitForSingleObject(self, handle, timeout):
+                calls.append(("WaitForSingleObject", timeout))
+                return 0x00000102  # WAIT_TIMEOUT every time
+
+            def TerminateProcess(self, handle, code):
+                calls.append(("TerminateProcess", code))
+                return False
+
+            def CloseHandle(self, handle):
+                calls.append("CloseHandle")
+
+        result = self._probe_with_fake(_RefusingTerminateKernel32)
+        assert "CreateProcessW OK" in result
+        assert "spawn succeeded" not in result
+        assert "child still alive after terminate" in result
+        assert "TerminateProcess=False" in result
+        assert calls.count("CloseHandle") == 2
+
     def _probe_with_fake(self, fake_kernel32_factory):
         import ctypes as _ctypes_mod
 
@@ -239,9 +296,11 @@ class TestCreateProcessProbe:
         assert calls.count("CloseHandle") == 2
 
     def test_exception_on_terminate_still_closes_handles(self):
-        """If even the kill call raises, the probe must still report and
-        still close both handles — the finally must not be skipped by a
-        raise from inside the except block."""
+        """Audit round 16 P2: a RAISING TerminateProcess (not just a
+        False return) inside the terminate-and-verify branch is kill
+        data, not a probe failure — the message must report
+        TerminateProcess=False and both handles must still be closed
+        (the finally must not be skipped by the raise)."""
         calls: list[tuple | str] = []
 
         class _ExplodingTerminateKernel32:
@@ -264,7 +323,9 @@ class TestCreateProcessProbe:
                 calls.append("CloseHandle")
 
         result = self._probe_with_fake(_ExplodingTerminateKernel32)
-        assert result == "probe raised OSError: kill exploded"
+        assert "CreateProcessW OK" in result
+        assert "spawn succeeded" not in result
+        assert "TerminateProcess=False" in result
         assert calls.count("CloseHandle") == 2
 
 
@@ -280,12 +341,6 @@ class TestNoDirectSpawnOutsideRetryLayer:
     ALLOWED_DIRECT_SPAWN_MODULES: ClassVar[frozenset[str]] = frozenset(
         {
             "tools.py",  # the retry layer itself (subprocess_kwargs_lowest + run_with_retry etc.)
-            # concat/runner.py — the low-level ffmpeg exec phase. Unlike the
-            # probe/bitrate/waveform paths, a missing ffmpeg here must FAIL
-            # the pipeline (not silently retry), and the spawns are managed
-            # by the scoped supervisor (cancel/on-close kill, timeout, output
-            # registration) which popen_with_retry does not provide.
-            "runner.py",
             # POSIX players afplay/paplay/aplay/ffplay — never the WinGet shim path.
             "completion_sound.py",
             "gui_platform.py",  # open / xdg-open URL launcher
@@ -309,3 +364,174 @@ class TestNoDirectSpawnOutsideRetryLayer:
             f"direct {call!r} outside retry layer: {offenders} — "
             "route through tools.run_with_retry / popen_with_retry"
         )
+
+
+class TestSpawnWithRetryBehaviour:
+    """Audit round 16 P3: the static inventory above only proves *where*
+    subprocess is called, not *how* the retry layer behaves. These tests
+    pin the runtime contract of _spawn_with_retry: retry count, re-
+    resolution of cmd[0] through ffmpeg_path/ffprobe_path, creationflags
+    handling on retries (bit-cleared on nt, stripped on posix), encoder
+    cache resets, and re-raise of the last FileNotFoundError."""
+
+    def _spawn(self, kind, cmd, kwargs, fn_side_effect, os_name=None, record=None):
+        from contextlib import ExitStack
+
+        import stream2video.tools as tools_mod
+        from stream2video.tools import _spawn_with_retry
+
+        probe_calls: list[str] = []
+        with ExitStack() as stack:
+            fn_name = "Popen" if kind == "popen" else "run"
+            stack.enter_context(
+                patch.object(tools_mod.subprocess, fn_name, side_effect=fn_side_effect)
+            )
+            stack.enter_context(
+                patch.object(
+                    tools_mod,
+                    "_createprocess_probe",
+                    side_effect=lambda exe: probe_calls.append(exe) or "probe n/a (test)",
+                )
+            )
+            stack.enter_context(patch.object(tools_mod.time, "sleep"))
+            stack.enter_context(
+                patch.object(tools_mod, "ffmpeg_path", return_value="C:/resolved/ffmpeg.exe")
+            )
+            stack.enter_context(
+                patch.object(tools_mod, "ffprobe_path", return_value="C:/resolved/ffprobe.exe")
+            )
+            reset_cache = stack.enter_context(patch.object(tools_mod, "reset_tool_cache"))
+            reset_enc = stack.enter_context(
+                patch("stream2video.concat.encoders.reset_encoder_check_cache")
+            )
+            if os_name is not None:
+                stack.enter_context(patch.object(tools_mod.os, "name", os_name))
+            if record is not None:
+                # Populated BEFORE the call so callers can inspect the
+                # mocks even when _spawn_with_retry re-raises.
+                record["probe_calls"] = probe_calls
+                record["reset_cache"] = reset_cache
+                record["reset_enc"] = reset_enc
+            result = _spawn_with_retry(kind, list(cmd), dict(kwargs))
+        return result, probe_calls, reset_cache, reset_enc
+
+    @staticmethod
+    def _failing_until(calls: list, fail_count: int, success):
+        def fake(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            if len(calls) <= fail_count:
+                raise FileNotFoundError(2, "no such file", cmd[0])
+            return success
+
+        return fake
+
+    def test_run_retries_then_succeeds(self):
+        calls: list = []
+        result, probes, reset_cache, reset_enc = self._spawn(
+            "run",
+            ["ffmpeg", "-version"],
+            {"creationflags": 0x08000000 | 0x40000000},
+            self._failing_until(calls, 2, "ok"),
+            os_name="nt",
+        )
+        assert result == "ok"
+        assert len(calls) == 3
+        # First attempt: the caller's kwargs pass through untouched.
+        assert calls[0][0][0] == "ffmpeg"
+        assert calls[0][1]["creationflags"] == 0x08000000 | 0x40000000
+        # Retries: cmd[0] re-resolved; ONLY the CREATE_NO_WINDOW bit
+        # dropped — the priority class bit survives (audit round 15 P1).
+        for call in calls[1:]:
+            assert call[0][0] == "C:/resolved/ffmpeg.exe"
+            assert call[1]["creationflags"] == 0x40000000
+        # Probe ran for each failure, with the cmd[0] of that attempt.
+        assert probes == ["ffmpeg", "C:/resolved/ffmpeg.exe"]
+        assert reset_cache.call_count == 2
+        assert reset_enc.call_count == 2
+
+    def test_popen_retries_then_succeeds(self):
+        calls: list = []
+        sentinel = object()
+        result, probes, reset_cache, reset_enc = self._spawn(
+            "popen",
+            ["ffmpeg", "-i", "in.mp4"],
+            {},
+            self._failing_until(calls, 1, sentinel),
+            os_name="nt",
+        )
+        assert result is sentinel
+        assert len(calls) == 2
+        assert calls[1][0][0] == "C:/resolved/ffmpeg.exe"
+        assert len(probes) == 1
+        assert reset_cache.call_count == 1
+        assert reset_enc.call_count == 1
+
+    @pytest.mark.parametrize("kind", ["run", "popen"])
+    def test_exhausts_attempts_raises_last_fnf(self, kind):
+        calls: list = []
+
+        def forever_failing(cmd, **kwargs):
+            calls.append((cmd, kwargs))
+            raise FileNotFoundError(2, "no such file", cmd[0])
+
+        with pytest.raises(FileNotFoundError) as excinfo:
+            record: dict = {}
+            self._spawn(
+                kind, ["ffmpeg", "-version"], {}, forever_failing, os_name="nt", record=record
+            )
+        assert len(calls) == 4  # 1 initial + _SPAWN_RETRY_ATTEMPTS=3
+        # The re-raised exception carries the re-resolved filename of the
+        # LAST attempt, not the original bare "ffmpeg".
+        assert excinfo.value.filename == "C:/resolved/ffmpeg.exe"
+        # Probe ran for every failure INCLUDING the last one (it fires
+        # before the exhaustion break); cache resets only for the three
+        # failures that had a next attempt.
+        assert len(record["probe_calls"]) == 4
+        assert record["reset_cache"].call_count == 3
+        assert record["reset_enc"].call_count == 3
+
+    def test_posix_retry_strips_creationflags(self):
+        calls: list = []
+        result, _, _, _ = self._spawn(
+            "run",
+            ["ffmpeg", "-version"],
+            {"creationflags": 0x08000000},
+            self._failing_until(calls, 1, "ok"),
+            os_name="posix",
+        )
+        assert result == "ok"
+        assert len(calls) == 2
+        assert calls[0][1]["creationflags"] == 0x08000000
+        # creationflags is Windows-only plumbing: on posix it must be
+        # removed entirely, not zeroed (a non-zero value raises
+        # ValueError in subprocess, hiding the retry path).
+        assert "creationflags" not in calls[1][1]
+
+    def test_non_tool_cmd_not_re_resolved(self):
+        calls: list = []
+        result, _, _, _ = self._spawn(
+            "run",
+            ["python", "-c", "print(1)"],
+            {},
+            self._failing_until(calls, 1, "ok"),
+            os_name="nt",
+        )
+        assert result == "ok"
+        assert len(calls) == 2
+        # Only ffmpeg/ffprobe commands get re-resolved; a plain command
+        # retries with the same cmd[0].
+        assert calls[0][0][0] == "python"
+        assert calls[1][0][0] == "python"
+
+    def test_ffprobe_cmd_re_resolved_via_ffprobe_path(self):
+        calls: list = []
+        result, probes, _, _ = self._spawn(
+            "run",
+            ["ffprobe", "-version"],
+            {},
+            self._failing_until(calls, 1, "ok"),
+            os_name="nt",
+        )
+        assert result == "ok"
+        assert calls[1][0][0] == "C:/resolved/ffprobe.exe"
+        assert probes == ["ffprobe"]

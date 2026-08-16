@@ -379,23 +379,43 @@ def _createprocess_probe(exe: str) -> str:
         try:
             # Wait for the child to exit so we don't leak a live ffmpeg
             # on the user's machine just for a diagnostic — and so AV
-            # software sees a complete spawn+exit, not an orphan. If the
-            # child hasn't exited within the window (a hung spawn on a
-            # broken shim / AV scan), TERMINATE it explicitly before
-            # closing the handles (the probe runs in the emergency retry
-            # branch, so an orphan would stack a second hung process on
-            # top of the original spawn failure).
+            # software sees a complete spawn+exit, not an orphan.
             wait = kernel32.WaitForSingleObject(pi.hProcess, 2000)
-            if wait == 0x00000102:  # WAIT_TIMEOUT
-                kernel32.TerminateProcess(pi.hProcess, 1)
-                # TerminateProcess is asynchronous at the kernel level;
-                # wait for the signal so the handle close below can't
-                # race a still-running zombie. The second wait has a
-                # generous bound — after TerminateProcess the process is
-                # already dead to the scheduler, so this returns almost
-                # immediately in practice.
-                kernel32.WaitForSingleObject(pi.hProcess, 10000)
-            return f"CreateProcessW OK (exists={exists}); spawn succeeded"
+            if wait == 0x00000000:  # WAIT_OBJECT_0 — clean exit
+                return f"CreateProcessW OK (exists={exists}); spawn succeeded"
+            # Anything but WAIT_OBJECT_0 — WAIT_TIMEOUT (0x102: hung
+            # spawn on a broken shim / AV scan), WAIT_FAILED (0xFFFFFFFF:
+            # the wait call itself failed), WAIT_ABANDONED — is NOT a
+            # clean exit (audit round 16 P2: WAIT_FAILED used to be
+            # reported as "spawn succeeded" and the child was left
+            # running with nobody holding its handle — the probe runs in
+            # the emergency retry branch, so an orphan would stack a
+            # second hung process on top of the original spawn failure).
+            # Terminate best-effort, verify the kill, re-wait, and
+            # report what actually happened instead of assuming success.
+            try:
+                terminated = bool(kernel32.TerminateProcess(pi.hProcess, 1))
+            except Exception:
+                terminated = False
+            # TerminateProcess is asynchronous at the kernel level;
+            # wait for the signal so the handle close below can't race a
+            # still-running zombie. The second wait has a generous bound —
+            # after a successful TerminateProcess the process is already
+            # dead to the scheduler, so this returns almost immediately.
+            wait2 = kernel32.WaitForSingleObject(pi.hProcess, 10000)
+            if wait2 == 0x00000000:
+                return (
+                    f"CreateProcessW OK (exists={exists}); hung child terminated "
+                    f"(TerminateProcess={terminated}); wait={wait:#x}"
+                )
+            # Child still alive after the kill attempt (terminate failed
+            # or was rejected): reflect the real outcome — the old code
+            # reported success here and closed the handles anyway.
+            return (
+                f"CreateProcessW OK (exists={exists}); child still alive after "
+                f"terminate (wait={wait:#x}, post-kill wait={wait2:#x}, "
+                f"TerminateProcess={terminated})"
+            )
         except Exception as e:  # pragma: no cover - probe must never kill the caller
             # We never confirmed the child exited (wait/terminate
             # raised): kill it best-effort so a diagnostic failure can't

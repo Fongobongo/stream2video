@@ -54,6 +54,19 @@ class TestSaveSettings:
         loaded = json.loads(_settings_at.read_text(encoding="utf-8"))
         assert loaded["threshold"] == -25.0
 
+    def test_non_finite_raises_and_keeps_previous_file(self, _settings_at: Path):
+        # Audit round 16 P1: the GUI's _save_settings must never write
+        # NaN/Infinity into settings.json (they'd reappear in the next
+        # run's sliders as "no value"). json.dump(allow_nan=False) raises
+        # ValueError, which gui_lifecycle._save_settings catches and
+        # downgrades to a WARN — and the previous file must stay intact.
+        save_settings({"threshold": -30.0})
+        original_text = _settings_at.read_text(encoding="utf-8")
+        with pytest.raises(ValueError):
+            save_settings({"threshold": float("inf")})
+        assert _settings_at.read_text(encoding="utf-8") == original_text
+        assert list(_settings_at.parent.glob("*.tmp")) == []
+
 
 class TestLoadSettings:
     def test_missing_file_returns_empty_dict(self, _settings_at: Path):
@@ -130,6 +143,20 @@ class TestLoadSettings:
     def test_non_object_json_returns_empty(self, _settings_at: Path):
         _settings_at.write_text("[1, 2, 3]", encoding="utf-8")
         assert load_settings() == {}
+
+    def test_non_finite_literals_dropped(self, _settings_at: Path):
+        # Audit round 16 P1: settings.json written by an older build
+        # (plain json.dump) can contain NaN/Infinity/-Infinity tokens;
+        # load_settings must drop those keys, not pass them to the GUI.
+        _settings_at.write_text(
+            '{"threshold": NaN, "min_silence": Infinity, "margin": -Infinity, "method": "segment"}',
+            encoding="utf-8",
+        )
+        loaded = load_settings()
+        assert "threshold" not in loaded
+        assert "min_silence" not in loaded
+        assert "margin" not in loaded
+        assert loaded == {"method": "segment"}
 
 
 class TestGuiSessionKeys:

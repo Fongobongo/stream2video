@@ -2,6 +2,7 @@
 
 import json
 import logging
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -526,6 +527,15 @@ def coerce_typed_value(key: str, value: Any) -> Any:
     if isinstance(default, int | float):
         if isinstance(value, bool) or not isinstance(value, int | float):
             return None
+        # ``json.load`` accepts the non-standard NaN / Infinity tokens,
+        # so a hand-edited settings.json / user_defaults.json can smuggle
+        # a non-finite float past every surface fixed in audit round 15
+        # P1 (CLI flag, YAML, slider parser, pipeline validator) and
+        # poison the GUI's startup state — where 'Save current as
+        # defaults' could then re-persist it (audit round 16 P1). Drop
+        # non-finite values here so the loaders can never return them.
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
         # YAML/JSON numbers have no int/float distinction the way
         # Python does — ``2048.0`` parses as float. For an INT-typed
         # default, coerce integral floats back to int so a
@@ -539,6 +549,18 @@ def coerce_typed_value(key: str, value: Any) -> Any:
             if not value.is_integer():
                 return None
             return int(value)
+        # Float-typed defaults are also range-checked here against the
+        # SAME CONFIG_RANGES the CLI YAML path and
+        # ``validate_pipeline_config`` enforce — an out-of-range but
+        # finite value (``threshold: -70``) in settings.json used to
+        # load silently and only fail mid-run at validation.
+        if isinstance(default, float):
+            lo_f: float = -math.inf
+            hi_f: float = math.inf
+            if key in CONFIG_RANGES:
+                lo_f, hi_f = CONFIG_RANGES[key]
+            if not lo_f <= value <= hi_f:
+                return None
         return value
     if isinstance(default, str):
         if not isinstance(value, str):
@@ -637,7 +659,12 @@ def save_user_defaults(values: dict[str, Any]) -> None:
     tmp = Path(tmp_str)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, ensure_ascii=False)
+            # allow_nan=False: a NaN reaching the writer (a hand-edited
+            # value that slipped past loading, or a programmatic caller)
+            # must fail the save loudly instead of persisting a token
+            # that ``json.load`` will happily read back — re-creating
+            # the poisoned startup state (audit round 16 P1).
+            json.dump(payload, f, indent=2, ensure_ascii=False, allow_nan=False)
         os.replace(tmp, path)
     except Exception:
         with contextlib.suppress(OSError):

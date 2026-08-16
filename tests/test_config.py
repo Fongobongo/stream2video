@@ -117,6 +117,32 @@ class TestCoerceTypedValue:
     def test_float_key_rejects_none(self):
         assert coerce_typed_value("threshold", None) is None
 
+    def test_float_key_rejects_non_finite(self):
+        # Audit round 16 P1: NaN/Infinity written by an older build (or
+        # hand-edited) must be DROPPED, not passed through — json.dump
+        # accepts them silently, but they poison downstream math
+        # (threshold < -60 style comparisons, min/max) and crash the
+        # json.dump(allow_nan=False) save path with an ugly traceback
+        # instead of a graceful WARN + defaults fallback.
+        assert coerce_typed_value("threshold", float("nan")) is None
+        assert coerce_typed_value("threshold", float("inf")) is None
+        assert coerce_typed_value("threshold", float("-inf")) is None
+
+    def test_float_key_out_of_range_dropped(self):
+        # Range guard now also applies to float-typed defaults, so a
+        # hand-edited out-of-range value can't poison comparisons.
+        assert coerce_typed_value("threshold", 0.0) is None
+        assert coerce_typed_value("threshold", -100.0) is None
+        assert coerce_typed_value("margin", 10.0) is None
+        assert coerce_typed_value("min_silence", 0.0) is None
+
+    def test_int_key_rejects_non_finite(self):
+        # int-typed keys: NaN already failed is_integer() pre-fix, but
+        # the isfinite guard now rejects it earlier — pin the contract
+        # so the order of checks can't silently change behaviour.
+        assert coerce_typed_value("segment_encode_timeout", float("nan")) is None
+        assert coerce_typed_value("segment_encode_timeout", float("inf")) is None
+
     def test_str_key_accepts_str(self):
         assert coerce_typed_value("output_dir", "/tmp/foo") == "/tmp/foo"
 
@@ -214,6 +240,23 @@ class TestLoadUserDefaults:
         result = load_user_defaults()
         assert "threshold" not in result
 
+    def test_non_finite_literals_dropped(self, tmp_path, monkeypatch):
+        # Audit round 16 P1: a JSON file written by an older build with
+        # plain json.dump() can contain NaN/Infinity/-Infinity tokens
+        # (json.loads accepts them). The load path must drop those keys,
+        # not let them reach the pipeline.
+        fake = tmp_path / "user_defaults.json"
+        fake.write_text(
+            '{"threshold": NaN, "min_silence": Infinity, "margin": -Infinity, '
+            '"per_video_dir": true}'
+        )
+        monkeypatch.setattr("stream2video.config.user_defaults_path", lambda: fake)
+        result = load_user_defaults()
+        assert "threshold" not in result
+        assert "min_silence" not in result
+        assert "margin" not in result
+        assert result == {"per_video_dir": True}
+
     def test_corrupt_json_returns_empty(self, tmp_path, monkeypatch):
         fake = tmp_path / "user_defaults.json"
         fake.write_text("{not valid json")
@@ -281,6 +324,19 @@ class TestSaveUserDefaults:
         save_user_defaults(original)
         loaded = load_user_defaults()
         assert loaded == original
+
+    def test_non_finite_raises_and_keeps_previous_file(self, tmp_path, monkeypatch):
+        # Audit round 16 P1: a NaN/Infinity in the payload must raise
+        # ValueError (json.dump(allow_nan=False)) so the GUI's WARN path
+        # fires — and the previous file must remain byte-for-byte intact
+        # (no partial/tmp-file side effects on the failed save).
+        fake = tmp_path / "user_defaults.json"
+        monkeypatch.setattr("stream2video.config.user_defaults_path", lambda: fake)
+        save_user_defaults({"threshold": -42.0})
+        original_text = fake.read_text()
+        with pytest.raises(ValueError):
+            save_user_defaults({"threshold": float("nan")})
+        assert fake.read_text() == original_text
 
 
 class TestPipelinePhaseTimeouts:

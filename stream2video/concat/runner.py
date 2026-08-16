@@ -483,7 +483,7 @@ def _run_subprocess_cmd(
     Minimal sibling of ``_run_ffmpeg`` for commands that don't emit a
     -progress stream (e.g. the stream-copy "cut" phase in
     ``_run_cut_then_encode``). Unlike the historical bare
-    ``subprocess.run(check=True, capture_output=True)`` this:
+    ``subprocess.run`` call with ``check=True, capture_output=True``, this:
 
       * registers the process in the scoped supervisor so Cancel-GUI /
         on-close kill reaches the running ffmpeg (P0 audit v0.3 §3);
