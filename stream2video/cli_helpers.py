@@ -114,43 +114,53 @@ def logging_session(
         # the level was never restored, not even on the happy path).
         _console_handler.level,
     )
-    if log_format_lower == "json":
-        # JSON structured logging — replace the Rich console handler
-        # with a JSON formatter writing to stdout so the caller can
-        # pipe the log stream into a renderer (``| jq .``, ELK,
-        # Splunk). The file handler still writes human-readable text
-        # to stream2video.log; only stdout switches format. The
-        # human-readable banner and progress bars are suppressed in
-        # JSON mode (they'd pollute the JSON stream).
-        _json_handler = install_json_handler(logger, level=log_level.upper())
-        # install_json_handler attached the handler to the app ``logger``.
-        # basicConfig below re-roots the same handler for the root logger.
-        # ``logger.propagate`` defaults to True, so without the line below
-        # every app record fires the handler TWICE (once directly, once
-        # via propagation to the same handler at the root) and stdout
-        # JSON is duplicated line-by-line — breaking ``| jq .`` pipes.
-        logger.propagate = False
-        logging.basicConfig(
-            level=logging.DEBUG,
-            handlers=[_json_handler],
-            force=True,  # replace any handler the caller attached
-        )
-        # Keep the stdout stream line-per-JSON-record: point the shared
-        # Rich console at stderr and disable the live progress bars.
-        # Progress updates are still emitted as JSON log records by the
-        # callbacks, so no information is lost — but no Rich frames,
-        # banners, or summaries may leak into stdout, or a downstream
-        # ``| jq .`` breaks on the first non-JSON line.
-        console.stderr = True
-        set_json_mode(True)
-    else:
-        set_json_mode(False)
-        logging.basicConfig(
-            level=logging.DEBUG,
-            format="%(message)s",
-            handlers=[_console_handler],
-        )
+    # The ``try`` starts IMMEDIATELY after the snapshot: every mutating
+    # statement in the two install branches below must be covered by the
+    # ``finally``'s restore. A failure mid-install (a handler constructor
+    # raising after it has already flipped ``propagate`` / attached
+    # handlers) must not leak a half-applied logging state. Nothing above
+    # the snapshot mutates state, so this boundary is the only correct
+    # one — the audit's experiment proved the inverse: an exception
+    # inside the (then-untouched) install section left the partial state
+    # unrestored (audit round 13 feedback; the hand-written version had
+    # the same hole until it was moved, this one must not regress).
     try:
+        if log_format_lower == "json":
+            # JSON structured logging — replace the Rich console handler
+            # with a JSON formatter writing to stdout so the caller can
+            # pipe the log stream into a renderer (``| jq .``, ELK,
+            # Splunk). The file handler still writes human-readable text
+            # to stream2video.log; only stdout switches format. The
+            # human-readable banner and progress bars are suppressed in
+            # JSON mode (they'd pollute the JSON stream).
+            _json_handler = install_json_handler(logger, level=log_level.upper())
+            # install_json_handler attached the handler to the app ``logger``.
+            # basicConfig below re-roots the same handler for the root logger.
+            # ``logger.propagate`` defaults to True, so without the line below
+            # every app record fires the handler TWICE (once directly, once
+            # via propagation to the same handler at the root) and stdout
+            # JSON is duplicated line-by-line — breaking ``| jq .`` pipes.
+            logger.propagate = False
+            logging.basicConfig(
+                level=logging.DEBUG,
+                handlers=[_json_handler],
+                force=True,  # replace any handler the caller attached
+            )
+            # Keep the stdout stream line-per-JSON-record: point the shared
+            # Rich console at stderr and disable the live progress bars.
+            # Progress updates are still emitted as JSON log records by the
+            # callbacks, so no information is lost — but no Rich frames,
+            # banners, or summaries may leak into stdout, or a downstream
+            # ``| jq .`` breaks on the first non-JSON line.
+            console.stderr = True
+            set_json_mode(True)
+        else:
+            set_json_mode(False)
+            logging.basicConfig(
+                level=logging.DEBUG,
+                format="%(message)s",
+                handlers=[_console_handler],
+            )
         yield state
     finally:
         if state.file_handler is not None:

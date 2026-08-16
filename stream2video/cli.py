@@ -730,8 +730,6 @@ def main(
     2. Detect silence segments
     3. Cut and concatenate video
     """
-    global _JSON_LOG_MODE
-
     # Validate log_format BEFORE any logging happens so an unknown format
     # exits cleanly instead of producing half-Rich/half-JSON output.
     # Spelling rule: the shared normalize_log_format (case-insensitive) —

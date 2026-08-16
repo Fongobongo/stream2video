@@ -532,6 +532,70 @@ class TestEarlyExitLoggingRestore:
         # --log-level run can't leave a shifted level for the next run.
         assert _console_handler.level == level_before
 
+    def test_install_failure_midway_restores_state(self, isolated_defaults, tmp_path):
+        """An exception raised INSIDE the session's install section —
+        after it has already mutated logging state — must still restore
+        everything. The audit's experiment: a fake ``install_json_handler``
+        that flips ``logger.propagate`` (and attaches a handler) before
+        raising. Pre-fix, the try began *after* the install branches,
+        so the ``finally`` never ran and the partial state leaked —
+        exactly the "try boundary not where the mutations are" bug class.
+        """
+        import logging
+
+        from stream2video.cli import console, logger
+
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"x")
+        runner = CliRunner()
+        propagate_before = logger.propagate
+
+        def _boom(log, level="INFO"):
+            # Mutate state, THEN raise — mimicking a handler install that
+            # succeeds halfway (propagate flipped, handler attached) and
+            # dies before returning.
+            log.propagate = False
+            log.addHandler(logging.StreamHandler())
+            raise RuntimeError("install boom")
+
+        with (
+            patch("stream2video.cli_helpers.install_json_handler", _boom),
+            pytest.raises(RuntimeError, match="install boom"),
+        ):
+            runner.invoke(
+                cli_mod.app,
+                [str(src), "-o", str(tmp_path / "o"), "--log-format", "json"],
+                catch_exceptions=False,
+            )
+        assert logger.propagate is propagate_before
+        assert console.stderr is False
+        assert cli_mod._JSON_LOG_MODE is False
+
+    def test_session_enter_restores_state_on_install_failure(self, isolated_defaults):
+        """Direct unit-level pin of the same boundary: ``__enter__`` itself
+        must restore the snapshot when an install step raises after mutating
+        state — the exception surfaces from ``.enter()`` with state intact,
+        no CLI plumbing in the picture."""
+        import logging
+
+        from stream2video.cli import console, logger
+        from stream2video.cli_helpers import logging_session
+
+        def _boom(log, level="INFO"):
+            log.propagate = False
+            log.addHandler(logging.StreamHandler())
+            raise RuntimeError("enter boom")
+
+        propagate_before = logger.propagate
+        stderr_before = console.stderr
+        with (
+            patch("stream2video.cli_helpers.install_json_handler", _boom),
+            pytest.raises(RuntimeError, match="enter boom"),
+        ):
+            logging_session("json", "INFO").__enter__()
+        assert logger.propagate is propagate_before
+        assert console.stderr is stderr_before
+
     def test_console_level_restored_after_successful_set(self, isolated_defaults, tmp_path):
         """A run that DID apply --log-level must put the handler level
         back, so a following run in the same process starts clean."""
