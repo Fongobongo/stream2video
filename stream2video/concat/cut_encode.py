@@ -228,6 +228,18 @@ def _run_cut_then_encode(
                         "aac",
                         *_c._audio_bitrate_opts(options.audio_quality),
                         *_c._audio_opts(options.audio_quality),
+                        # Exact-duration audio normalisation — see the
+                        # matching comment in ``segment.py``: without
+                        # ``apad,atrim=0:dur`` each cut part's audio
+                        # overshoots ``-t`` by the AAC priming/last-frame
+                        # (~21 ms), and the phase-2 ``-c copy`` join then
+                        # re-estimates the video rate from the stretched
+                        # duration (ffprobe reports 359/12 for a 30/1
+                        # source on ffmpeg 9.0.1). The batch path's tests
+                        # pass on ffmpeg 9 precisely because it pads/trims
+                        # audio to the window; this path mirrors that.
+                        "-af",
+                        f"apad,atrim=0:{dur}",
                     ]
                 )
             # FPS conversion: when ``options.output_fps != 'source'`` the

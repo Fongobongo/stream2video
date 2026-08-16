@@ -296,14 +296,32 @@ class TestSourceArtifactKey:
             assert artifact_stem(video) == artifact_stem(video)
 
     def test_same_file_key_stable_across_casing_on_windows(self):
+        """Case-insensitive FS: two casings of one file share a key.
+
+        Windows-only by construction: on a case-SENSITIVE filesystem
+        (Linux CI) ``CLIP.MP4`` and ``clip.mp4`` are different names,
+        and ``os.path.normcase`` — the production normaliser — is the
+        identity function there, so the production code correctly
+        treats them as distinct sources (different hashes). The old
+        guard ``str(upper).lower() == str(video).lower()`` was a
+        tautology (lowering erases exactly the difference under test),
+        so the assertion ran on Linux and compared two legitimately
+        different keys.
+        """
+        import sys
+
+        if sys.platform != "win32":
+            pytest.skip("case-insensitive filesystem behaviour is Windows-only")
         with TemporaryDirectory() as tmp:
             video = Path(tmp) / "clip.mp4"
             video.write_text("x")
             upper = Path(tmp) / "CLIP.MP4"
-            # Same file viewed via a different-cased name must not fork
-            # the key (the FS is case-insensitive on Windows).
-            if upper.exists() or str(upper).lower() == str(video).lower():
-                assert source_path_key(upper) == source_path_key(video)
+            # On NTFS the differently-cased name resolves to the SAME
+            # file (upper.exists() must be True for the test to mean
+            # anything — guard against a case-sensitive volume).
+            if not upper.exists():
+                pytest.skip("volume is case-sensitive; nothing to assert")
+            assert source_path_key(upper) == source_path_key(video)
 
 
 class TestSameStemIndependence:

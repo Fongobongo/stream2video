@@ -113,37 +113,46 @@ class TestCancelMonitor:
         assert "creationflags" not in kw
 
     def test_rlimit_as_actually_caps_addr_space_on_posix(self):
-        """Smoke test: spawn a child with rlimit_as_mb=2 (2 MiB cap)
-        and have it try to allocate 4 MiB. malloc should return NULL
-        (or raise MemoryError in pure-python) and the child should
-        exit cleanly — the kernel refused the allocation before it
-        could swap."""
+        """Smoke test: a child spawned under an RLIMIT_AS cap cannot
+        allocate beyond it.
+
+        The cap must be large enough for the interpreter itself to
+        finish starting (the sibling ``cap_is_high`` test pins 512 MiB
+        as startup-safe on CI), so the failure of the *probe*
+        allocation below is unambiguous: it dies for exceeding the cap,
+        not for being unable to load python. Under the 512 MiB cap a
+        2 GiB allocation cannot succeed (RLIMIT_AS is enforced at
+        mmap() time — no overcommit latitude), so the child either
+        raises MemoryError (exit 0) or dies from a fault in the
+        allocator while servicing the refused request (signal → a
+        negative returncode). Both prove the kernel enforced the cap.
+        The ONE failure outcome is exit code 1: the allocation went
+        through, i.e. the cap was not set.
+
+        (The historical 2 MiB cap was below CPython's own startup
+        address space — on the ubuntu runner the child SIGSEGV'd during
+        interpreter init on 3.13.15, which the old assertion could not
+        distinguish from a real enforcement failure.)
+        """
         if sys.platform == "win32":
             pytest.skip("POSIX-only")
-        # 2 MiB cap. Preexec sets RLIMIT_AS. Pure-Python bytearray
-        # allocation will either raise MemoryError (catchable) or
-        # cause a hard death (segfault on MemoryError in some builds);
-        # the child uses try/except to convert to exit code 0 on
-        # MemoryError (success), 1 on the bytearray actually succeeding
-        # (which would mean the cap isn't enforced).
         proc = subprocess.Popen(
             [
                 sys.executable,
                 "-c",
                 "try:\n"
-                "    bytearray(4 * 1024 * 1024)\n"
+                "    bytearray(2 * 1024 * 1024 * 1024)\n"
                 "    import sys; sys.exit(1)\n"
                 "except MemoryError:\n"
                 "    import sys; sys.exit(0)\n",
             ],
-            **subprocess_kwargs(low_priority=False, rlimit_as_mb=2),
+            **subprocess_kwargs(low_priority=False, rlimit_as_mb=512),
         )
         proc.wait()
-        # rc 0 = MemoryError caught (cap enforced).
-        # rc 1 = allocation succeeded (cap NOT enforced -> bug or rlimit not honoured).
-        assert proc.returncode == 0, (
+        assert proc.returncode == 0 or proc.returncode < 0, (
             f"RLIMIT_AS cap not enforced; rc={proc.returncode} "
-            "(expected 0 = MemoryError caught on a 4MiB allocation)"
+            "(expected 0 = MemoryError caught, or a signal death, on a "
+            "2GiB allocation under a 512MiB cap)"
         )
 
     @pytest.mark.skipif(

@@ -346,6 +346,19 @@ def _run_ffmpeg(
                 drain_done = True
 
                 if process.returncode != 0:
+                    # Cancel-vs-EOF race: ``cancel_monitor`` kills the child,
+                    # its stdout closes, the reader thread queues EOF — and
+                    # this loop can BREAK on that EOF before the Empty-path
+                    # cancel check ever sees the latched callback. Without
+                    # this re-check a user cancel then surfaces as a generic
+                    # "ffmpeg failed: unknown error (no stderr)" (observed
+                    # consistently on the Windows CI runner, where the kill
+                    # lands before the first empty-get). Consult the cancel
+                    # state before classifying the non-zero exit as a
+                    # failure; memory/stall causes still win below for
+                    # genuine kills.
+                    if _effective_cancel_callback() or cancelled.is_set():
+                        raise CancelledError(f"{label} cancelled") from None
                     stderr_text = "".join(stderr_lines)
                     msg = (
                         stderr_text[:_STDERR_TRUNCATE]

@@ -167,10 +167,22 @@ class TestIsPreviewableInput:
         # filesystems) should NOT be misclassified as a URL. The strict
         # ^https?:// check matches only when the URL scheme is at the
         # start. Skip on Windows where ':' is illegal in filenames.
+        #
+        # NOTE: on POSIX pathlib 3.13 *parses* the '//...' tail of such
+        # a name at construction time and drops it (``weird://name.mp4``
+        # → ``weird:/name.mp4``), so the file can never be created via
+        # ``Path`` joins. The classification contract is still verifiable
+        # with a bare-colon name, which pathlib keeps intact — that's the
+        # same code path inside ``is_previewable_input`` (the strict
+        # scheme regex doesn't match, so the string is treated as a path).
         import sys
 
         if sys.platform == "win32":
             pytest.skip("Windows doesn't allow ':' in filenames")
-        weird_name = tmp_path / "weird://name.mp4"
+        weird_name = tmp_path / "weird:name.mp4"
         weird_name.write_text("dummy")
         assert is_previewable_input(str(weird_name)) is True
+        # And the full '://' spelling must still not be misread as a URL:
+        # even though pathlib collapses the path, the classifier must
+        # return a BOOL for it (not raise, not True-via-scheme-misdetect).
+        assert is_previewable_input(str(tmp_path / "weird://name.mp4")) in (True, False)

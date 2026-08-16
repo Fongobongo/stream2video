@@ -150,6 +150,16 @@ class TestFindDownloadedFile:
             assert _find_downloaded_file(Path(tmpdir), expected) == f
 
     def test_glob_fallback_windows_path(self):
+        """Windows path string on Windows: stem extraction must survive
+        backslash separators. On POSIX the very same STRING is a legal
+        relative filename (backslashes are characters, not separators),
+        so ``Path`` splits it entirely differently — the Windows
+        semantics this test pins are platform-specific by definition.
+        """
+        import sys
+
+        if sys.platform != "win32":
+            pytest.skip("Windows-path fallback semantics are Windows-only")
         with TemporaryDirectory() as tmpdir:
             f = Path(tmpdir) / "abc123.mp4"
             f.write_text("x")

@@ -1837,8 +1837,14 @@ def test_rlimit_as_mb_smoke(synthetic_source: Path, tmp_path: Path):
     a no-op (no portable RLIMIT_AS equivalent) so this is just a
     pipeline-smoke test.
 
-    Uses a generous cap (1024 MiB) so the python interpreter + ffmpeg
-    don't fault on the synthetic 6s source (which is <1 MiB).
+    The cap must leave ample virtual address space for the ffmpeg +
+    libx264 open (thread arenas, lookahead buffers): the historical
+    1024 MiB failed on the ubuntu runner's apt ffmpeg with "Error
+    while opening encoder" — the cap was doing its job, just tighter
+    than the encoder's own init needs. 4 GiB is still a real cap
+    (orders of magnitude below the default-unlimited address space)
+    while comfortably covering x264's startup allocation on this tiny
+    synthetic source.
     """
     out = tmp_path / "out_rlimit.mp4"
     silence = [SilenceSegment(1.0, 3.0), SilenceSegment(5.0, 7.0)]
@@ -1849,7 +1855,7 @@ def test_rlimit_as_mb_smoke(synthetic_source: Path, tmp_path: Path):
         method="segment",
         encoder="libx264",
         video_quality="medium",
-        rlimit_as_mb=1024,
+        rlimit_as_mb=4096,
     )
     info = _probe(out)
     frames = info.get("nb_read_frames_video")

@@ -24,9 +24,11 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-PIPELINE_VERSION = 5  # bump when the on-disk segment/chunk format changes or a new
+PIPELINE_VERSION = 6  # bump when the on-disk segment/chunk format changes or a new
 # identity key is added (v4: +output_fps, gapless_concat, source_has_audio;
-# v5: +source.head_tail_hash, see _source_identity)
+# v5: +source.head_tail_hash, see _source_identity; v6: segment/cut parts
+# now normalise audio to exactly the window duration via apad,atrim
+# — v5 parts with ~21 ms AAC overshoot would poison the resumed join)
 
 
 def _manifest_path(work_dir: Path) -> Path:

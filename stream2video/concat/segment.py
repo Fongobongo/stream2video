@@ -213,6 +213,23 @@ def _run_segment_concat(
                             "aac",
                             *_c._audio_bitrate_opts(options.audio_quality),
                             *_c._audio_opts(options.audio_quality),
+                            # Trim/pad the audio to EXACTLY ``dur``. Without
+                            # it the AAC encoder's ~21 ms frame/priming
+                            # overshoot leaves each segment's audio slightly
+                            # LONGER than its video (2.0053s vs 2.0000s).
+                            # The final concat-demuxer ``-c copy`` join then
+                            # re-estimates the video rate from the stretched
+                            # total duration and ffprobe reports a wrong
+                            # r_frame_rate (359/12 for a 30/1 source on
+                            # ffmpeg 9.0.1 — verified locally). ``apad``
+                            # fills a short audio tail with silence, and the
+                            # trailing ``atrim`` clamps both directions to
+                            # exactly ``dur`` — the same normalisation the
+                            # batch path has always applied (batch's
+                            # ``atrim=0:{e-s}``) and the reason its tests
+                            # pass on ffmpeg 9.
+                            "-af",
+                            f"apad,atrim=0:{dur:.6f}",
                         ]
                         if options.source_has_audio
                         else []
