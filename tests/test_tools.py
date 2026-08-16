@@ -164,9 +164,18 @@ class TestCreateProcessProbe:
                 calls.append("CreateProcessW")
                 return True
 
-            def AssignProcessToJobObject(self, job, proc):
-                calls.append("AssignProcessToJobObject")
+            def InitializeProcThreadAttributeList(self, attr_list, count, flags, size_ptr):
+                calls.append(("InitializeProcThreadAttributeList", attr_list is None))
+                if attr_list is None:
+                    size_ptr._obj.value = 64
                 return True
+
+            def UpdateProcThreadAttribute(self, attr_list, flags, attr, value, size, prev, retsize):
+                calls.append(("UpdateProcThreadAttribute", attr))
+                return True
+
+            def DeleteProcThreadAttributeList(self, attr_list):
+                calls.append("DeleteProcThreadAttributeList")
 
             def WaitForSingleObject(self, handle, timeout):
                 calls.append(("WaitForSingleObject", timeout))
@@ -277,9 +286,18 @@ class TestCreateProcessProbe:
                 calls.append(("SetInformationJobObject", cls, flags))
                 return True
 
-            def AssignProcessToJobObject(self, job, proc):
-                calls.append("AssignProcessToJobObject")
+            def InitializeProcThreadAttributeList(self, attr_list, count, flags, size_ptr):
+                calls.append(("InitializeProcThreadAttributeList", attr_list is None))
+                if attr_list is None:
+                    size_ptr._obj.value = 64
                 return True
+
+            def UpdateProcThreadAttribute(self, attr_list, flags, attr, value, size, prev, retsize):
+                calls.append(("UpdateProcThreadAttribute", attr))
+                return True
+
+            def DeleteProcThreadAttributeList(self, attr_list):
+                calls.append("DeleteProcThreadAttributeList")
 
             def CloseHandle(self, handle):
                 calls.append(("CloseHandle", handle))
@@ -296,11 +314,17 @@ class TestCreateProcessProbe:
         result, calls = self._probe_with_job([self.WAIT_OBJECT_0])
         assert "CreateProcessW OK" in result
         assert "spawn ok, suspended child terminated" in result
-        # CREATE_SUSPENDED (0x4) — the probe must not run the binary.
-        assert ("CreateProcessW", 0x00000004) in calls
+        # CREATE_SUSPENDED (0x4) | EXTENDED_STARTUPINFO_PRESENT (0x80000)
+        # — the probe must not run the binary, and the extended startup
+        # block carries the job-list attribute (audit round 21 P2).
+        assert ("CreateProcessW", 0x00080004) in calls
         # JobObjectExtendedLimitInformation (9) with the kill flag set.
         assert ("SetInformationJobObject", 9, 0x2000) in calls
-        assert "AssignProcessToJobObject" in calls
+        # The child is born INSIDE the job: the job list attribute is
+        # wired through the attribute list before the spawn.
+        assert ("UpdateProcThreadAttribute", 0x0002000D) in calls
+        assert ("InitializeProcThreadAttributeList", True) in calls
+        assert "DeleteProcThreadAttributeList" in calls
         # job + process + thread — all three handles closed.
         closes = [c for c in calls if isinstance(c, tuple) and c[0] == "CloseHandle"]
         assert len(closes) == 3
@@ -316,14 +340,15 @@ class TestCreateProcessProbe:
         closes = [c for c in calls if isinstance(c, tuple) and c[0] == "CloseHandle"]
         assert len(closes) == 3
 
-    def test_job_assign_failure_terminates_child(self):
-        """Audit round 20 P4: if AssignProcessToJobObject fails/raises
-        AFTER the spawn, the suspended child is OUTSIDE the job and has
-        no reaper — the probe must kill it NOW and verify with the
-        bounded wait, reporting the degraded path explicitly."""
+    def test_probe_attribute_list_failure_skips_spawn(self):
+        """Audit round 21 P2: if the PROC_THREAD_ATTRIBUTE_JOB_LIST
+        attribute list cannot be built, the probe must NOT spawn — a
+        child created outside the job would have no reaper. It degrades
+        to the same static skip as a missing job object, and the job
+        handle is still closed."""
         calls: list[tuple | str] = []
 
-        class _RefusingAssignKernel32:
+        class _RefusingAttrListKernel32:
             def __init__(self, name, use_last_error=False):
                 pass
 
@@ -335,40 +360,32 @@ class TestCreateProcessProbe:
                 calls.append(("SetInformationJobObject", cls))
                 return True
 
-            def CreateProcessW(self, *a, **k):
-                calls.append("CreateProcessW")
-                return True
+            def InitializeProcThreadAttributeList(self, attr_list, count, flags, size_ptr):
+                calls.append(("InitializeProcThreadAttributeList", attr_list is None))
+                if attr_list is None:
+                    size_ptr._obj.value = 64
+                return False  # list refused
 
-            def AssignProcessToJobObject(self, job, proc):
-                calls.append("AssignProcessToJobObject")
-                return False
-
-            def WaitForSingleObject(self, handle, timeout):
-                calls.append(("WaitForSingleObject", timeout))
-                return 0x00000000  # WAIT_OBJECT_0
-
-            def TerminateProcess(self, handle, code):
-                calls.append(("TerminateProcess", code))
-                return True
+            def DeleteProcThreadAttributeList(self, attr_list):
+                calls.append("DeleteProcThreadAttributeList")
 
             def CloseHandle(self, handle):
                 calls.append(("CloseHandle", handle))
 
-        result = self._probe_with_fake(_RefusingAssignKernel32)
-        assert "job assign failed, child terminated" in result
-        assert "TerminateProcess=True" in result
-        assert "probe raised" not in result
-        # job + process + thread — all three handles closed.
+        result = self._probe_with_fake(_RefusingAttrListKernel32)
+        assert "CreateProcessW probe skipped (job object unavailable)" in result
+        assert "CreateProcessW" not in calls
+        assert "UpdateProcThreadAttribute" not in calls
+        assert "TerminateProcess" not in calls
         closes = [c for c in calls if isinstance(c, tuple) and c[0] == "CloseHandle"]
-        assert len(closes) == 3
+        assert len(closes) == 1  # the job handle
 
-    def test_job_assign_failure_child_still_alive_reported(self):
-        """Worst-case assign failure: the child could not be killed
-        either. The message must say so LOUDLY (no job reaper claim —
-        "reaped by job" must NOT appear) so a caller can act."""
+    def test_probe_attribute_list_update_failure_skips_spawn(self):
+        """Same skip guarantee when the attribute list initializes but
+        the JOB_LIST attribute itself is rejected."""
         calls: list[tuple | str] = []
 
-        class _RefusingAssignAndKillKernel32:
+        class _RefusingUpdateKernel32:
             def __init__(self, name, use_last_error=False):
                 pass
 
@@ -380,76 +397,147 @@ class TestCreateProcessProbe:
                 calls.append(("SetInformationJobObject", cls))
                 return True
 
-            def CreateProcessW(self, *a, **k):
-                calls.append("CreateProcessW")
+            def InitializeProcThreadAttributeList(self, attr_list, count, flags, size_ptr):
+                calls.append(("InitializeProcThreadAttributeList", attr_list is None))
+                if attr_list is None:
+                    size_ptr._obj.value = 64
                 return True
 
-            def AssignProcessToJobObject(self, job, proc):
-                calls.append("AssignProcessToJobObject")
-                return False
+            def UpdateProcThreadAttribute(self, attr_list, flags, attr, value, size, prev, retsize):
+                calls.append(("UpdateProcThreadAttribute", attr))
+                return False  # job list rejected
 
-            def WaitForSingleObject(self, handle, timeout):
-                calls.append(("WaitForSingleObject", timeout))
-                return 0x00000102  # WAIT_TIMEOUT
-
-            def TerminateProcess(self, handle, code):
-                calls.append(("TerminateProcess", code))
-                return False
+            def DeleteProcThreadAttributeList(self, attr_list):
+                calls.append("DeleteProcThreadAttributeList")
 
             def CloseHandle(self, handle):
                 calls.append(("CloseHandle", handle))
 
-        result = self._probe_with_fake(_RefusingAssignAndKillKernel32)
-        assert "job assign failed, child still alive" in result
-        assert "post-kill wait=0x102" in result
-        assert "TerminateProcess=False" in result
-        assert "reaped by job" not in result
+        result = self._probe_with_fake(_RefusingUpdateKernel32)
+        assert "CreateProcessW probe skipped (job object unavailable)" in result
+        assert "CreateProcessW" not in calls
         closes = [c for c in calls if isinstance(c, tuple) and c[0] == "CloseHandle"]
-        assert len(closes) == 3
+        assert len(closes) == 1  # the job handle
 
-    def test_job_assign_exception_treated_as_failure(self):
-        """A RAISING AssignProcessToJobObject is the same degraded path
-        as a False return: kill now, verify, report (audit round 20 P4).
-        The job handle must still be closed (audit round 19 P2)."""
+    def test_probe_signatures_declared(self):
+        """Audit round 21 P1: without restype declarations ctypes
+        defaults to c_int, so CreateJobObjectW's HANDLE (pointer-sized
+        on x64) would be TRUNCATED to 32 bits — SetInformationJobObject
+        and CloseHandle would then receive a garbage handle, the
+        kill-on-close guarantee would silently disappear, and the handle
+        would never be freed. The probe must pin the signature of every
+        WinAPI it calls."""
+        import ctypes as _ctypes_mod
+        import ctypes.wintypes as wintypes
+
+        from stream2video.tools import _createprocess_probe
+
+        instances: list[object] = []
+
+        class _Pinnable:
+            """Method stand-in that can hold ctypes signature attributes
+            — real WinDLL functions can, plain bound methods cannot."""
+
+            def __init__(self, fn):
+                self._fn = fn
+
+            def __call__(self, *a, **k):
+                return self._fn(*a, **k)
+
+        def _mk(fn):
+            return _Pinnable(fn)
+
+        def _size_query(attr_list, count, flags, size_ptr):
+            if attr_list is None:
+                size_ptr._obj.value = 64
+            return True
+
+        class _SignaturesKernel32:
+            def __init__(self, name, use_last_error=False):
+                instances.append(self)
+
+            CreateJobObjectW = _mk(lambda *a, **k: 123)
+            SetInformationJobObject = _mk(lambda *a, **k: True)
+            InitializeProcThreadAttributeList = _mk(_size_query)
+            UpdateProcThreadAttribute = _mk(lambda *a, **k: True)
+            DeleteProcThreadAttributeList = _mk(lambda *a, **k: None)
+            CreateProcessW = _mk(lambda *a, **k: True)
+            WaitForSingleObject = _mk(lambda *a, **k: 0x00000000)
+            TerminateProcess = _mk(lambda *a, **k: True)
+            CloseHandle = _mk(lambda *a, **k: None)
+
+        with patch.object(_ctypes_mod, "WinDLL", _SignaturesKernel32):
+            _createprocess_probe("ffmpeg.exe")
+        k32 = instances[-1]
+        assert k32.CreateJobObjectW.restype is wintypes.HANDLE
+        assert k32.CreateJobObjectW.argtypes is not None
+        assert k32.SetInformationJobObject.restype is wintypes.BOOL
+        assert k32.SetInformationJobObject.argtypes is not None
+        assert k32.CreateProcessW.restype is wintypes.BOOL
+        assert k32.CreateProcessW.argtypes is not None
+        assert k32.TerminateProcess.restype is wintypes.BOOL
+        assert k32.TerminateProcess.argtypes is not None
+        assert k32.WaitForSingleObject.restype is wintypes.DWORD
+        assert k32.WaitForSingleObject.argtypes is not None
+        assert k32.CloseHandle.restype is wintypes.BOOL
+        assert k32.CloseHandle.argtypes is not None
+        assert k32.InitializeProcThreadAttributeList.restype is wintypes.BOOL
+        assert k32.InitializeProcThreadAttributeList.argtypes is not None
+        assert k32.UpdateProcThreadAttribute.restype is wintypes.BOOL
+        assert k32.UpdateProcThreadAttribute.argtypes is not None
+        assert k32.DeleteProcThreadAttributeList.argtypes is not None
+
+    def test_large_job_handle_survives_at_full_width(self):
+        """Audit round 21 P1: on 64-bit Python a HANDLE above 0xFFFFFFFF
+        must reach SetInformationJobObject / CloseHandle UNCUT — the
+        c_int truncation would turn it into a small garbage value.
+        (Signature pinning is covered by test_probe_signatures_declared;
+        this pins the end-to-end flow.)"""
         calls: list[tuple | str] = []
+        BIG_HANDLE = 0x1_0000_0123
 
-        class _ExplodingAssignKernel32:
+        class _BigHandleKernel32:
             def __init__(self, name, use_last_error=False):
                 pass
+
+            def CreateJobObjectW(self, *a, **k):
+                calls.append("CreateJobObjectW")
+                return BIG_HANDLE
+
+            def SetInformationJobObject(self, job, cls, info, size):
+                calls.append(("SetInformationJobObject", job))
+                return True
+
+            def InitializeProcThreadAttributeList(self, attr_list, count, flags, size_ptr):
+                if attr_list is None:
+                    size_ptr._obj.value = 64
+                return True
+
+            def UpdateProcThreadAttribute(self, attr_list, flags, attr, value, size, prev, retsize):
+                calls.append(("UpdateProcThreadAttribute", attr))
+                return True
+
+            def DeleteProcThreadAttributeList(self, attr_list):
+                calls.append("DeleteProcThreadAttributeList")
 
             def CreateProcessW(self, *a, **k):
                 calls.append("CreateProcessW")
                 return True
 
             def WaitForSingleObject(self, handle, timeout):
-                calls.append(("WaitForSingleObject", timeout))
                 return 0x00000000  # WAIT_OBJECT_0
 
             def TerminateProcess(self, handle, code):
                 calls.append(("TerminateProcess", code))
                 return True
 
-            def CreateJobObjectW(self, *a, **k):
-                calls.append("CreateJobObjectW")
-                return 123
-
-            def SetInformationJobObject(self, job, cls, info, size):
-                calls.append("SetInformationJobObject")
-                return True
-
-            def AssignProcessToJobObject(self, job, proc):
-                calls.append("AssignProcessToJobObject")
-                raise OSError("assign exploded")
-
             def CloseHandle(self, handle):
                 calls.append(("CloseHandle", handle))
 
-        result = self._probe_with_fake(_ExplodingAssignKernel32)
-        assert "job assign failed, child terminated" in result
-        assert "probe raised" not in result
-        # job + process + thread — the job handle survived the exception.
-        closes = [c for c in calls if isinstance(c, tuple) and c[0] == "CloseHandle"]
-        assert len(closes) == 3
+        result = self._probe_with_fake(_BigHandleKernel32)
+        assert "CreateProcessW OK" in result
+        assert ("SetInformationJobObject", BIG_HANDLE) in calls
+        assert ("CloseHandle", BIG_HANDLE) in calls
 
     def test_probe_skipped_when_job_unavailable(self):
         """Audit round 20 P4: without a configured job object the probe
@@ -527,9 +615,18 @@ class TestCreateProcessProbe:
                 calls.append("CreateProcessW")
                 return True
 
-            def AssignProcessToJobObject(self, job, proc):
-                calls.append("AssignProcessToJobObject")
+            def InitializeProcThreadAttributeList(self, attr_list, count, flags, size_ptr):
+                calls.append(("InitializeProcThreadAttributeList", attr_list is None))
+                if attr_list is None:
+                    size_ptr._obj.value = 64
                 return True
+
+            def UpdateProcThreadAttribute(self, attr_list, flags, attr, value, size, prev, retsize):
+                calls.append(("UpdateProcThreadAttribute", attr))
+                return True
+
+            def DeleteProcThreadAttributeList(self, attr_list):
+                calls.append("DeleteProcThreadAttributeList")
 
             def WaitForSingleObject(self, handle, timeout):
                 return 0x00000000  # WAIT_OBJECT_0
@@ -582,9 +679,18 @@ class TestCreateProcessProbe:
                 calls.append("CreateProcessW")
                 return True
 
-            def AssignProcessToJobObject(self, job, proc):
-                calls.append("AssignProcessToJobObject")
+            def InitializeProcThreadAttributeList(self, attr_list, count, flags, size_ptr):
+                calls.append(("InitializeProcThreadAttributeList", attr_list is None))
+                if attr_list is None:
+                    size_ptr._obj.value = 64
                 return True
+
+            def UpdateProcThreadAttribute(self, attr_list, flags, attr, value, size, prev, retsize):
+                calls.append(("UpdateProcThreadAttribute", attr))
+                return True
+
+            def DeleteProcThreadAttributeList(self, attr_list):
+                calls.append("DeleteProcThreadAttributeList")
 
             def WaitForSingleObject(self, handle, timeout):
                 calls.append(("WaitForSingleObject", timeout))
@@ -628,9 +734,18 @@ class TestCreateProcessProbe:
                 calls.append("CreateProcessW")
                 return True
 
-            def AssignProcessToJobObject(self, job, proc):
-                calls.append("AssignProcessToJobObject")
+            def InitializeProcThreadAttributeList(self, attr_list, count, flags, size_ptr):
+                calls.append(("InitializeProcThreadAttributeList", attr_list is None))
+                if attr_list is None:
+                    size_ptr._obj.value = 64
                 return True
+
+            def UpdateProcThreadAttribute(self, attr_list, flags, attr, value, size, prev, retsize):
+                calls.append(("UpdateProcThreadAttribute", attr))
+                return True
+
+            def DeleteProcThreadAttributeList(self, attr_list):
+                calls.append("DeleteProcThreadAttributeList")
 
             def WaitForSingleObject(self, handle, timeout):
                 calls.append(("WaitForSingleObject", timeout))

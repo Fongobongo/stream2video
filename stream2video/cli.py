@@ -90,6 +90,53 @@ def normalize_log_format(value: str) -> str | None:
     return v if v in _VALID_LOG_FORMATS else None
 
 
+def _scan_option_value(argv: list[str], *option_names: str) -> str | None:
+    """Return the value of the first of ``option_names`` found in argv.
+
+    Covers both ``--opt X`` / ``-c X`` and ``--opt=X`` / ``-c=X``
+    spellings; a value that looks like another flag is not consumed.
+    """
+    for i, arg in enumerate(argv):
+        for opt in option_names:
+            if arg == opt and i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+                return argv[i + 1]
+            if arg.startswith(f"{opt}="):
+                return arg.split("=", 1)[1]
+    return None
+
+
+def _validate_log_format(value: str) -> str:
+    """Validate ``--log-format`` through the ONE shared spelling rule;
+    on failure prints the user-facing error and raises ``typer.Exit(1)``.
+
+    Shared by :func:`main` and the eager :func:`_doctor_callback` so one
+    flag has one validation on every surface (audit round 21 P2:
+    ``--doctor`` used to skip validation entirely — ``--doctor
+    --log-format garbage`` ran the diagnostics instead of rejecting the
+    flag).
+    """
+    lowered = normalize_log_format(value)
+    if lowered is None:
+        console.print(
+            f"[red]Invalid log format:[/red] {value!r} "
+            f"(use {' or '.join(repr(f) for f in _VALID_LOG_FORMATS)})"
+        )
+        raise typer.Exit(1)
+    return lowered
+
+
+def _validate_log_level(value: str) -> str:
+    """Validate ``--log-level`` identically on both surfaces; on failure
+    prints the user-facing error and raises ``typer.Exit(1)``."""
+    upper = value.upper()
+    if upper not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+        console.print(
+            f"[red]Invalid log level:[/red] {value!r} (use DEBUG, INFO, WARNING, or ERROR)"
+        )
+        raise typer.Exit(1)
+    return upper
+
+
 def load_config(config_file: Path | None) -> dict:
     """Thin wrapper: ``cli_config.load_config`` + the module-level ``console``.
 
@@ -109,61 +156,49 @@ def _doctor_callback(ctx: typer.Context, param: Any, value: bool) -> bool:
     if value:
         global _JSON_LOG_MODE
         # ``--doctor`` is eager: it may fire before the *non-eager*
-        # ``--config`` option has been parsed, so ``ctx.params`` does not
-        # reliably contain ``config_file``. Scan argv directly — cheap,
-        # order-agnostic, and covers both ``--config X`` / ``-c X`` and
-        # the ``--config=X`` / ``-c=X`` spellings.
-        cfg: Path | None = None
+        # options have been parsed, so ``ctx.params`` does not reliably
+        # contain ``config_file`` / ``log_format`` / ``log_level``. Scan
+        # argv directly — cheap, order-agnostic, and covers both the
+        # ``--opt X`` / ``-c X`` and the ``--opt=X`` / ``-c=X``
+        # spellings.
         argv = sys.argv[1:]
         # ``--`` ends option parsing (everything after is positional):
         # never treat a post-``--`` token as a flag value.
         argv = argv[: argv.index("--")] if "--" in argv else argv
-        for i, arg in enumerate(argv):
-            if arg in ("--config", "-c"):
-                # The value must actually be the next token AND not look
-                # like another flag (``-c --doctor`` would otherwise
-                # become Path("--doctor")).
-                if i + 1 < len(argv) and not argv[i + 1].startswith("-"):
-                    cfg = Path(argv[i + 1])
-                break
-            if arg.startswith("--config="):
-                cfg = Path(arg.split("=", 1)[1])
-                break
-            if arg.startswith("-c="):
-                cfg = Path(arg.split("=", 1)[1])
-                break
-        # ``--log-format json`` is also non-eager, so it hasn't populated
-        # _JSON_LOG_MODE yet when --doctor fires. Scan argv again (same
-        # rationale as --config above) so the doctor's "line-per-object"
-        # contract actually fires. Spelling check goes through the shared
-        # :func:`normalize_log_format` — the same case-insensitive rule
-        # main()'s validator applies, so ``JSON`` behaves identically on
-        # both paths (audit P2).
-        for i, arg in enumerate(argv):
-            if (
-                arg == "--log-format"
-                and i + 1 < len(argv)
-                and normalize_log_format(argv[i + 1]) == "json"
-            ):
-                _JSON_LOG_MODE = True
-                break
-            if (
-                arg.startswith("--log-format=")
-                and normalize_log_format(arg.split("=", 1)[1]) == "json"
-            ):
-                _JSON_LOG_MODE = True
-                break
-        # The eager callback exits BEFORE main() — its ``finally``
-        # logging restore never runs, so any state mutated above (the
-        # ``--log-format json`` scan sets _JSON_LOG_MODE) must be reset
-        # before returning or it leaks into the next main() call in the
-        # same process (audit P1/P2). try/finally wraps _run_doctor so
-        # an exception inside the diagnostics still resets the flag
-        # before propagating.
+        cfg_raw = _scan_option_value(argv, "--config", "-c")
+        cfg = Path(cfg_raw) if cfg_raw is not None else None
+        # Validate --log-format/--log-level with the SAME shared
+        # validators main() uses (audit round 21 P2: the eager path used
+        # to skip validation entirely, so `--doctor --log-format garbage`
+        # ran the diagnostics instead of rejecting the flag). Defaults
+        # match main()'s own option defaults.
+        log_format_raw = _scan_option_value(argv, "--log-format")
+        log_format_lower = (
+            _validate_log_format(log_format_raw) if log_format_raw is not None else "rich"
+        )
+        log_level_raw = _scan_option_value(argv, "--log-level")
+        log_level = _validate_log_level(log_level_raw) if log_level_raw is not None else "INFO"
+
+        def _set_json_mode(value: bool) -> None:
+            global _JSON_LOG_MODE
+            _JSON_LOG_MODE = value
+
+        # Doctor runs under the SAME logging session guard as main()
+        # (audit round 21 P1): the session owns _JSON_LOG_MODE (enter
+        # sets it for json, exit resets it — the eager path used to
+        # poke the global directly and could stomp an ACTIVE main() run's
+        # json mode mid-flight), and the non-blocking lock REJECTS a
+        # doctor that fires while another CLI session is live instead of
+        # corrupting its state.
         try:
-            ok = _run_doctor(cfg)
-        finally:
-            _JSON_LOG_MODE = False
+            with logging_session(log_format_lower, log_level, _set_json_mode):
+                ok = _run_doctor(cfg)
+        except LoggingSessionBusyError:
+            console.print(
+                "[red]Error:[/red] another embedded CLI session is active; "
+                "logging sessions cannot overlap"
+            )
+            raise typer.Exit(1) from None
         raise typer.Exit(0 if ok else 1)
     return value
 
@@ -737,16 +772,10 @@ def main(
     """
     # Validate log_format BEFORE any logging happens so an unknown format
     # exits cleanly instead of producing half-Rich/half-JSON output.
-    # Spelling rule: the shared normalize_log_format (case-insensitive) —
-    # the eager --doctor path uses the exact same function, so one value
-    # has one rule on every surface.
-    log_format_lower = normalize_log_format(log_format)
-    if log_format_lower is None:
-        console.print(
-            f"[red]Invalid log format:[/red] {log_format!r} "
-            f"(use {' or '.join(repr(f) for f in _VALID_LOG_FORMATS)})"
-        )
-        raise typer.Exit(1)
+    # The validator is the SAME one the eager --doctor callback uses, so
+    # one value has one rule (and one error message) on every surface
+    # (audit round 21 P2).
+    log_format_lower = _validate_log_format(log_format)
 
     # Validate log_level BEFORE the logging session is entered. The JSON
     # branch of the session hands the level straight to
@@ -754,14 +783,10 @@ def main(
     # level would raise a ``ValueError`` there before the user-facing
     # check ever runs — and the rich and json paths would surface two
     # different failures for the same flag (audit round 13 P2). Validate
-    # once, on one path, and hand the session the canonical UPPER spelling.
-    valid_levels = ("DEBUG", "INFO", "WARNING", "ERROR")
-    level = log_level.upper()
-    if level not in valid_levels:
-        console.print(
-            f"[red]Invalid log level:[/red] {log_level!r} (use DEBUG, INFO, WARNING, or ERROR)"
-        )
-        raise typer.Exit(1)
+    # once, on one path, and hand the session the canonical UPPER
+    # spelling. Shared with the eager --doctor callback (audit round 21
+    # P2).
+    level = _validate_log_level(log_level)
 
     # CLI logging is owned by a per-run session context manager
     # (``cli_helpers.logging_session``): ``__enter__`` takes the snapshot

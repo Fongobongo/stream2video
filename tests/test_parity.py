@@ -472,6 +472,47 @@ class TestJsonLogStateIsolation:
         # ...and the eager path reset it before returning.
         assert cli_mod._JSON_LOG_MODE is False
 
+    def test_doctor_invalid_log_format_rejected(self, isolated_defaults, monkeypatch):
+        """Audit round 21 P2: the eager doctor path must validate
+        ``--log-format`` with the SAME shared validator as main() —
+        ``--doctor --log-format garbage`` is rejected, not silently
+        ignored."""
+        monkeypatch.setattr("sys.argv", ["stream2video", "--doctor", "--log-format", "garbage"])
+        runner = CliRunner()
+        with patch("stream2video.cli._run_doctor", return_value=True) as run:
+            result = runner.invoke(cli_mod.app, ["--doctor", "--log-format", "garbage"])
+        assert result.exit_code == 1
+        assert "Invalid log format" in result.output
+        run.assert_not_called()
+
+    def test_doctor_invalid_log_level_rejected(self, isolated_defaults, monkeypatch):
+        """Same shared-validator guarantee for ``--log-level``."""
+        monkeypatch.setattr("sys.argv", ["stream2video", "--doctor", "--log-level", "BANANA"])
+        runner = CliRunner()
+        with patch("stream2video.cli._run_doctor", return_value=True) as run:
+            result = runner.invoke(cli_mod.app, ["--doctor", "--log-level", "BANANA"])
+        assert result.exit_code == 1
+        assert "Invalid log level" in result.output
+        run.assert_not_called()
+
+    def test_doctor_rejected_when_session_busy(self, isolated_defaults, monkeypatch):
+        """Audit round 21 P1: a concurrent ``--doctor`` must NOT bypass
+        the logging lock and stomp the json mode of an active CLI run —
+        it is rejected with the same short busy message as main()."""
+        import stream2video.cli_helpers as helpers
+
+        monkeypatch.setattr("sys.argv", ["stream2video", "--doctor"])
+        runner = CliRunner()
+        with (
+            helpers._LOGGING_SESSION_LOCK,
+            patch("stream2video.cli._run_doctor", return_value=True) as run,
+        ):
+            result = runner.invoke(cli_mod.app, ["--doctor"])
+        assert result.exit_code == 1
+        assert "another embedded CLI session is active" in result.output
+        assert "Traceback" not in result.output
+        run.assert_not_called()
+
 
 class TestEarlyExitLoggingRestore:
     """The logging-state restore must run on EVERY exit, including the

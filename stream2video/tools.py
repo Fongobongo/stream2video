@@ -406,6 +406,67 @@ def _createprocess_probe(exe: str) -> str:
 
         pi = PROCESS_INFORMATION()
         buf = ctypes.create_unicode_buffer(f'"{exe}" -version')
+        # Declare WinAPI signatures BEFORE any call (audit round 21 P1):
+        # without restype declarations ctypes defaults to c_int for
+        # unknown functions, so CreateJobObjectW's HANDLE (pointer-sized
+        # on x64) would be TRUNCATED to 32 bits — SetInformationJobObject
+        # and CloseHandle would then receive a garbage handle, the
+        # kill-on-close guarantee would silently disappear, and the
+        # handle would never be freed. The declarations are harmless on
+        # 32-bit Python and mandatory on x64. The try/except only
+        # protects kernel32 stand-ins that cannot hold ctypes signature
+        # attributes (plain-method test doubles); the real WinDLL
+        # functions always support restype/argtypes, so the pinning is
+        # guaranteed in production.
+        try:
+            kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+            kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+            kernel32.SetInformationJobObject.restype = wintypes.BOOL
+            kernel32.SetInformationJobObject.argtypes = [
+                wintypes.HANDLE,
+                wintypes.INT,
+                wintypes.LPVOID,
+                wintypes.DWORD,
+            ]
+            kernel32.CreateProcessW.restype = wintypes.BOOL
+            kernel32.CreateProcessW.argtypes = [
+                wintypes.LPCWSTR,
+                wintypes.LPWSTR,
+                wintypes.LPVOID,
+                wintypes.LPVOID,
+                wintypes.BOOL,
+                wintypes.DWORD,
+                wintypes.LPVOID,
+                wintypes.LPCWSTR,
+                ctypes.POINTER(STARTUPINFOW),
+                ctypes.POINTER(PROCESS_INFORMATION),
+            ]
+            kernel32.TerminateProcess.restype = wintypes.BOOL
+            kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+            kernel32.WaitForSingleObject.restype = wintypes.DWORD
+            kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            kernel32.CloseHandle.restype = wintypes.BOOL
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            kernel32.InitializeProcThreadAttributeList.restype = wintypes.BOOL
+            kernel32.InitializeProcThreadAttributeList.argtypes = [
+                wintypes.LPVOID,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                ctypes.POINTER(wintypes.DWORD),
+            ]
+            kernel32.DeleteProcThreadAttributeList.argtypes = [wintypes.LPVOID]
+            kernel32.UpdateProcThreadAttribute.restype = wintypes.BOOL
+            kernel32.UpdateProcThreadAttribute.argtypes = [
+                wintypes.LPVOID,
+                wintypes.DWORD,
+                wintypes.DWORD,
+                wintypes.LPVOID,
+                ctypes.c_size_t,
+                wintypes.LPVOID,
+                wintypes.LPVOID,
+            ]
+        except (AttributeError, TypeError):
+            pass
         # Job object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: closing
         # the job handle below is a GUARANTEED reaper — the kernel kills
         # the process even if TerminateProcess is rejected/raises, so
@@ -477,10 +538,59 @@ def _createprocess_probe(exe: str) -> str:
             # ``job`` here leaked a kernel handle in the emergency
             # branch).
             job_ok = False
-        if not job_ok:
+        # STARTUPINFOEX + PROC_THREAD_ATTRIBUTE_JOB_LIST (audit round 21
+        # P2): the child is created INSIDE the job ATOMICALLY — there is
+        # no post-spawn AssignProcessToJobObject window in which a
+        # suspended child could survive outside the job with no reaper
+        # (a failed assign previously left exactly that: a live kernel
+        # process with no accessible handle, one per retry attempt).
+        # The attribute list is built BEFORE CreateProcessW, and if it
+        # cannot be built the probe skips — same contract as a missing
+        # job object.
+        PROC_THREAD_ATTRIBUTE_JOB_LIST = 0x0002000D
+        EXTENDED_STARTUPINFO_PRESENT = 0x00080000
+
+        class STARTUPINFOEXW(ctypes.Structure):
+            _fields_: ClassVar[list[tuple[str, Any]]] = [
+                ("StartupInfo", STARTUPINFOW),
+                ("lpAttributeList", wintypes.LPVOID),
+            ]
+
+        attribute_list: Any = None
+        try:
+            attr_list_size = wintypes.DWORD(0)
+            kernel32.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(attr_list_size))
+            attribute_list = ctypes.create_string_buffer(attr_list_size.value)
+            job_handle_value = ctypes.c_void_p(job)
+            if not kernel32.InitializeProcThreadAttributeList(
+                attribute_list, 1, 0, ctypes.byref(attr_list_size)
+            ) or not kernel32.UpdateProcThreadAttribute(
+                attribute_list,
+                0,
+                PROC_THREAD_ATTRIBUTE_JOB_LIST,
+                ctypes.byref(job_handle_value),
+                ctypes.sizeof(wintypes.HANDLE),
+                None,
+                None,
+            ):
+                attribute_list = None
+        except Exception:
+            # Attribute-list setup is the same best-effort plumbing as
+            # the job itself: a broken list must not become "probe
+            # raised ..." — it degrades to the static skip below.
+            attribute_list = None
+        if not job_ok or attribute_list is None:
+            if attribute_list is not None:
+                try:
+                    kernel32.DeleteProcThreadAttributeList(attribute_list)
+                except Exception:
+                    pass
             if job:
                 _safe_close_handle(kernel32, job)
             return f"CreateProcessW probe skipped (job object unavailable); exists={exists}"
+        si_ex = STARTUPINFOEXW()
+        si_ex.StartupInfo.cb = ctypes.sizeof(STARTUPINFOEXW)
+        si_ex.lpAttributeList = ctypes.cast(attribute_list, ctypes.c_void_p)
         # From here the probe OWNS the child's process/thread handles
         # and the job handle. Every exit path — success, wait timeout,
         # an exception raised by the wait/terminate/formatting calls —
@@ -500,19 +610,18 @@ def _createprocess_probe(exe: str) -> str:
                 None,
                 None,
                 False,
-                # CREATE_SUSPENDED (0x4): the probe never lets the child
-                # execute code (audit round 18 P2). The retry branch
-                # already failed to spawn this binary; letting it
-                # actually run just for a diagnostic could execute
-                # arbitrary shim/AV-filter code, and the emergency
-                # branch must not be able to stack a second live process
-                # on top of the original failure. A suspended process
-                # cannot run anything — it is reaped with TerminateProcess
-                # and/or the job object below.
-                0x00000004,
+                # CREATE_SUSPENDED (0x4) | EXTENDED_STARTUPINFO_PRESENT
+                # (0x80000): the probe never lets the child execute code
+                # (audit round 18 P2), and the extended startup block
+                # carries the job-list attribute so the child is BORN
+                # inside the job — the retry branch already failed to
+                # spawn this binary; letting it actually run just for a
+                # diagnostic could execute arbitrary shim/AV-filter
+                # code.
+                0x00000004 | EXTENDED_STARTUPINFO_PRESENT,
                 None,
                 None,
-                ctypes.byref(si),
+                ctypes.byref(si_ex),
                 ctypes.byref(pi),
             )
             if not ok:
@@ -521,32 +630,9 @@ def _createprocess_probe(exe: str) -> str:
                     f"CreateProcessW failed: winerror={err} "
                     f"({ctypes.FormatError(err).strip()}); exists={exists}"  # type: ignore[attr-defined]
                 )
-            # The child is INSIDE the job from here on — even if every
-            # kill path below fails, closing the job handle reaps it.
-            try:
-                assigned = bool(kernel32.AssignProcessToJobObject(job, pi.hProcess))
-            except Exception:
-                assigned = False
-            if not assigned:
-                # Spawned but OUTSIDE the job (assign failed): the
-                # suspended child has no reaper. Kill it NOW, verify
-                # with the bounded post-kill wait, and report the
-                # degraded path explicitly.
-                try:
-                    terminated = bool(kernel32.TerminateProcess(pi.hProcess, 1))
-                except Exception:
-                    terminated = False
-                wait = kernel32.WaitForSingleObject(pi.hProcess, 10000)
-                if wait == 0x00000000:
-                    return (
-                        f"CreateProcessW OK (exists={exists}); job assign failed, "
-                        f"child terminated (TerminateProcess={terminated})"
-                    )
-                return (
-                    f"CreateProcessW OK (exists={exists}); job assign failed, child "
-                    f"still alive (post-kill wait={wait:#x}, "
-                    f"TerminateProcess={terminated})"
-                )
+            # The child is INSIDE the job from the moment of creation —
+            # even if every kill path below fails, closing the job
+            # handle reaps it.
             # The child was created CREATE_SUSPENDED, so it CANNOT exit
             # on its own — the old 2s "natural exit" wait was provably
             # futile and added up to 8s of dead time across four retry
@@ -572,10 +658,10 @@ def _createprocess_probe(exe: str) -> str:
                     f"child terminated (TerminateProcess={terminated})"
                 )
             # Child still alive after the kill attempt (terminate failed
-            # or was rejected). The job exists (guaranteed before the
-            # spawn), so this cannot mean a leak: closing the job handle
-            # in the finally reaps the process via
-            # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.
+            # or was rejected). The job exists AND the child was created
+            # inside it (guaranteed before the spawn), so this cannot
+            # mean a leak: closing the job handle in the finally reaps
+            # the process via JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE.
             return (
                 f"CreateProcessW OK (exists={exists}); child still alive after "
                 f"terminate (post-kill wait={wait:#x}, "
@@ -596,6 +682,11 @@ def _createprocess_probe(exe: str) -> str:
             # not skip the remaining closes. The job handle closes last
             # when it holds the kill guarantee — but ordering among the
             # three is otherwise irrelevant.
+            if attribute_list is not None:
+                try:
+                    kernel32.DeleteProcThreadAttributeList(attribute_list)
+                except Exception:
+                    pass
             if job:
                 _safe_close_handle(kernel32, job)
             _safe_close_handle(kernel32, pi.hProcess)
