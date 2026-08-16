@@ -621,7 +621,12 @@ def _createprocess_probe(exe: str) -> str:
                 0x00000004 | EXTENDED_STARTUPINFO_PRESENT,
                 None,
                 None,
-                ctypes.byref(si_ex),
+                # STARTUPINFOEXW is STARTUPINFOW plus the attribute-list
+                # pointer, but ctypes' argtypes check rejects byref() of
+                # the derived structure against LP_STARTUPINFOW — cast
+                # the pointer so the extended block is passed as-is
+                # (the layout is identical by construction).
+                ctypes.cast(ctypes.byref(si_ex), ctypes.POINTER(STARTUPINFOW)),
                 ctypes.byref(pi),
             )
             if not ok:
