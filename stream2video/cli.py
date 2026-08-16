@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 import shutil
 import signal
 import subprocess
@@ -31,6 +30,7 @@ from stream2video.cli_helpers import (
     app,
     console,
     logger,
+    logging_session,
 )
 from stream2video.cli_resolver import is_from_cli, make_resolver
 from stream2video.completion_sound import play_completion_sound
@@ -745,812 +745,740 @@ def main(
         )
         raise typer.Exit(1)
 
-    # Configure root logging ONCE at entry.
-    # Previously ``logging.basicConfig`` ran at import time, which
-    # hijacked the root logger of any host application that imported
-    # stream2video.cli (tests, GUI embeds, downstream tools). Doing it
-    # here keeps the CLI's user-facing logging behaviour (Rich stderr
-    # handler + DEBUG-level root) for ``stream2video`` invocations
-    # while leaving importers' logging untouched.
-    # Snapshot every piece of logging state this invocation rewrites so
-    # the ``finally`` block can restore it: a host calling main() twice
-    # in one process (embeds, tests with CliRunner) used to leak the
-    # first run's JSON mode into the second — ``console.stderr`` stayed
-    # True, the JSON handler stayed attached, ``_JSON_LOG_MODE`` stayed
-    # True and the "rich" run printed to stderr through a JSON handler
-    # (audit P1/P2).
-    _root_logger = logging.getLogger()
-    _logging_snapshot = (
-        list(_root_logger.handlers),
-        _root_logger.level,
-        logger.propagate,
-        list(logger.handlers),
-        console.stderr,
-        # The console handler's level is rewritten by ``--log-level``
-        # below; without snapshotting it, a run that ends early (or a
-        # second in-process run) would inherit the previous run's
-        # console level (audit P1: the level was never restored, not
-        # even on the happy path).
-        _console_handler.level,
-    )
+    # CLI logging is owned by a per-run session context manager
+    # (``cli_helpers.logging_session``): ``__enter__`` takes the snapshot
+    # and installs the JSON stdout handler or the Rich console handler;
+    # ``__exit__`` closes the run's file handler (whatever object
+    # ``_log_state.file_handler`` points at) and restores the snapshot on
+    # EVERY exit — success, ``typer.Exit``, or exception. The previous
+    # hand-written snapshot + ``try/finally`` lived in this function and
+    # leaked logging state whenever the try boundary drifted past a
+    # mutating statement (missing ffmpeg, bad ``--log-level`` — the
+    # audit's P1). The session makes that mistake structurally impossible:
+    # setup and restore are one construct, not two code sites to keep in
+    # sync (audit round 13 follow-up).
 
-    # The ``try`` starts IMMEDIATELY after the snapshot: every piece of
-    # logging state this invocation rewrites (handlers, propagate,
-    # console.stderr, _JSON_LOG_MODE, the console level) must be
-    # restored on EVERY exit — including the early ones. Previously the
-    # try began after ``_check_ffmpeg()`` / the ``--log-level``
-    # validation, so a missing-ffmpeg or bad-log-level exit leaked the
-    # freshly installed handlers + JSON mode into the host process
-    # (audit P1).
-    fh = None
+    def _set_json_mode(value: bool) -> None:
+        global _JSON_LOG_MODE
+        _JSON_LOG_MODE = value
+
     prev_handler: Any = None
     # False until the current SIGINT handler has been captured. A
     # failure BEFORE that point must not "restore" SIG_DFL — that would
     # clobber a host's signal handler the CLI never touched.
     _sigint_captured = False
-    try:
-        if log_format_lower == "json":
-            # JSON structured logging — replace the Rich console handler
-            # with a JSON formatter writing to stdout so the caller can
-            # pipe the log stream into a renderer (``| jq .``, ELK,
-            # Splunk). The file handler still writes human-readable text
-            # to stream2video.log; only stdout switches format. The
-            # human-readable banner and progress bars are suppressed in
-            # JSON mode (they'd pollute the JSON stream).
-            from stream2video.json_logging import install_json_handler
-
-            _json_handler = install_json_handler(logger, level=log_level.upper())
-            # install_json_handler attached the handler to the app ``logger``.
-            # basicConfig below re-roots the same handler for the root logger.
-            # ``logger.propagate`` defaults to True, so without the line below
-            # every app record fires the handler TWICE (once directly, once
-            # via propagation to the same handler at the root) and stdout
-            # JSON is duplicated line-by-line — breaking ``| jq .`` pipes.
-            logger.propagate = False
-            logging.basicConfig(
-                level=logging.DEBUG,
-                handlers=[_json_handler],
-                force=True,  # replace any handler the caller attached
-            )
-            # Keep the stdout stream line-per-JSON-record: point the shared
-            # Rich console at stderr and disable the live progress bars.
-            # Progress updates are still emitted as JSON log records by the
-            # callbacks, so no information is lost — but no Rich frames,
-            # banners, or summaries may leak into stdout, or a downstream
-            # ``| jq .`` breaks on the first non-JSON line.
-            console.stderr = True
-            _JSON_LOG_MODE = True
-        else:
-            _JSON_LOG_MODE = False
-            logging.basicConfig(
-                level=logging.DEBUG,
-                format="%(message)s",
-                handlers=[_console_handler],
-            )
-
-        # Verify ffmpeg is available
-        _check_ffmpeg()
-
-        # Set log level (apply to console handler, not the logger itself, so the
-        # file handler still receives DEBUG regardless of the user's choice).
-        valid_levels = ("DEBUG", "INFO", "WARNING", "ERROR")
-        level = log_level.upper()
-        if level not in valid_levels:
-            console.print(
-                f"[red]Invalid log level:[/red] {log_level!r} (use DEBUG, INFO, WARNING, or ERROR)"
-            )
-            raise typer.Exit(1)
-        _console_handler.setLevel(level)
-
-        # ``signal.getsignal`` / ``signal.signal`` can only be called from the
-        # interpreter's main thread; a host embedding ``cli.main`` in a worker
-        # thread would otherwise crash here with ``ValueError``. When that
-        # happens, fall back to ``None`` so the ``finally``-block restore path
-        # uses ``SIG_DFL`` (and even that restore will be guarded below).
+    with logging_session(log_format_lower, log_level, _set_json_mode) as _log_state:
         try:
-            prev_handler = signal.getsignal(signal.SIGINT)
-        except (ValueError, OSError) as e:
-            logger.warning(f"Could not read current SIGINT handler: {e}")
-            prev_handler = None
-        _sigint_captured = True
+            # Verify ffmpeg is available
+            _check_ffmpeg()
 
-        # SIGINT drives the pipeline controller's cancel_event (the event half
-        # of the pair); the callback half exists for embedding hosts that
-        # want to poll it.
-        cancel_event, _cancel_cb = _make_sigint_cancel()
-        # When a host calls ``main()`` twice in the same process, the second
-        # invocation would otherwise read *our own* handler back via
-        # ``getsignal`` and then restore a stale cancel-event closure on exit.
-        # Marking the installed handler's owner lets the ``finally`` block
-        # detect that case and restore ``SIG_DFL`` instead, which is the only
-        # well-defined "previous" state a bare script had before the CLI ran.
-        # Identity check against the module-level reference in
-        # cli_helpers, not a name+module heuristic — a refactor that renamed
-        # the closure would break the old check silently.
-        import stream2video.cli_helpers as _ch
-
-        _ours = prev_handler is not None and prev_handler is getattr(
-            _ch, "_installed_sigint_handler", None
-        )
-        if _ours:
-            # A previous in-process main() call never restored. Treat the
-            # pre-CLI state as SIG_DFL rather than restoring our own stale
-            # closure (which would keep the old cancel event alive forever).
-            prev_handler = signal.SIG_DFL
-
-        # Load configuration. ``load_config`` strictly validates BOTH numeric
-        # ranges (CONFIG_RANGES) AND enum keys (method/encoder/...), so a
-        # bad YAML value for any of these cannot sneak through here.
-        config = load_config(config_file)
-
-        # Resolve the effective output directory: an explicit -o/--output
-        # wins; otherwise honour the config file's ``output_dir`` key
-        # (parity with the GUI worker, which reads the same key from
-        # settings.json), else the historical ``./processed_videos``
-        # default. The typer option's default stays as the fallback for
-        # hosts that call main() with an explicit value.
-        if not is_from_cli(ctx, "output_dir"):
-            output_dir = Path(config.get("output_dir") or "./processed_videos")
-
-        # Ensure the output directory exists — deliberately AFTER config
-        # load and resolution, so an invalid config aborts before any
-        # directory is created and the config's ``output_dir`` is
-        # honoured (the mkdir used to run on the typer default before
-        # the YAML was even read, both ignoring the key and littering a
-        # stray ./processed_videos on a config error). A failure here
-        # (permission, read-only drive, path too long) is a clear
-        # startup error, not a mid-pipeline crash.
-        try:
-            output_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            console.print(f"[red]Cannot create output directory:[/red] {output_dir} ({e})")
-            raise typer.Exit(1) from None
-        log_file = output_dir / "stream2video.log"
-
-        if not _JSON_LOG_MODE:
-            console.print("\n[bold cyan]stream2video[/bold cyan] - Compress by removing silence")
-            console.print(f"Logs saved to: {log_file}\n")
-
-        fh = _make_file_handler(log_file)
-        logger.addHandler(fh)
-
-        # Apply the resource preset. The preset bundles tunables
-        # (x264_low_memory, memory_limit_mb, batch_chunk_size,
-        # low_process_priority) into a named profile; each subsequent
-        # resolver call below reads the merged config AND checks
-        # ``ParameterSource.COMMANDLINE``, so an explicit --flag wins
-        # over the preset's override. The preset itself is resolved via
-        # a throwaway resolver — CLI --preset wins, otherwise the YAML
-        # key ``preset`` (if present) is used, else DEFAULT_PRESET.
-        # The MAIN resolver is created AFTER ``apply_preset()``: a
-        # resolver bound to the pre-preset config would keep resolving
-        # every flag below from the unmerged defaults, so e.g.
-        # ``--preset low_memory`` would silently fail to enable
-        # x264_low_memory / batch_chunk_size=20 / low_process_priority.
-        resolved_preset = make_resolver(ctx, config, console).resolve("preset", preset)
-        # ``apply_preset`` raises ValueError for an unknown preset, and
-        # the resolver already rejected any value outside PRESET_NAMES —
-        # no separate validity check needed here.
-        config = apply_preset(config, resolved_preset)
-        resolver = make_resolver(ctx, config, console)
-
-        # Resolve each CLI flag against the config via the generic resolver.
-        # A flag that the user passed explicitly (ParameterSource.COMMANDLINE)
-        # wins; one that the user left at its default falls back to the
-        # config value (which came from YAML if provided, else CONFIG_DEFAULTS,
-        # with preset overrides already applied above).
-        method = resolver.resolve("method", method)
-        encoder = resolver.resolve("encoder", encoder)
-        video_quality = resolver.resolve("video_quality", video_quality)
-        download_quality = resolver.resolve("download_quality", download_quality)
-        audio_quality = resolver.resolve("audio_quality", audio_quality)
-        software_fallback = resolver.resolve("software_fallback", software_fallback)
-        x264_preset = resolver.resolve("x264_preset", x264_preset)
-        output_fps = resolver.resolve("output_fps", output_fps)
-        output_format = resolver.resolve("output_format", output_format)
-
-        # The output filename extension is derived by the controller from
-        # ``output_format`` (``OUTPUT_FORMAT_SPECS``), so the CLI no
-        # longer computes its own suffix here (audit #11) — the old
-        # ``artifact_stem(video_path) + "_" + output_suffix`` naming now
-        # lives in exactly one place.
-
-        # Bool and int parameters with a single call site each. The
-        # resolver reads the CLI flag value, the YAML config value, and
-        # the preset-merged CONFIG_DEFAULTS, applying CLI > config >
-        # default precedence.
-        resolved_x264_low_memory: bool = resolver.resolve("x264_low_memory", x264_low_memory)
-        resolved_use_crf: bool = resolver.resolve("use_crf", use_crf)
-        resolved_gapless_concat: bool = resolver.resolve("gapless_concat", gapless_concat)
-        resolved_low_process_priority: bool = resolver.resolve(
-            "low_process_priority", low_process_priority
-        )
-        resolved_encoder_threads: str | int = resolver.resolve("encoder_threads", encoder_threads)
-        resolved_memory_limit_mb: str | int = resolver.resolve("memory_limit_mb", memory_limit_mb)
-        resolved_memory_reserve_mb: int = resolver.resolve("memory_reserve_mb", memory_reserve_mb)
-        resolved_rlimit_as_mb: int = resolver.resolve("rlimit_as_mb", rlimit_as_mb)
-
-        force = resolver.resolve("force", force)
-        delete_after = resolver.resolve("delete_after", delete_after)
-        per_video_dir_resolved = resolver.resolve("per_video_dir", per_video_dir)
-        # Push the resolved value back into config so downstream code that
-        # reads config["per_video_dir"] (e.g. paths.apply_per_video_dir)
-        # sees the same value as the CLI path.
-        config["per_video_dir"] = per_video_dir_resolved
-
-        # batch_chunk_size is a preset-tunable, so honour the preset
-        # override unless the user passed --batch-chunk-size explicitly.
-        batch_chunk_size = resolver.resolve("batch_chunk_size", batch_chunk_size)
-
-        # P1: pipeline timeouts + network tunables. These were the
-        # 9 yaml keys silently ignored before — the CLI used to rely on
-        # typer defaults populated from CONFIG_DEFAULTS at import time,
-        # so a user ``silence_timeout: 60`` in config.yaml had no effect.
-        resolved_download_timeout: int = resolver.resolve("download_timeout", download_timeout)
-        resolved_connect_timeout: int = resolver.resolve("connect_timeout", connect_timeout)
-        resolved_no_progress_timeout: int = resolver.resolve(
-            "no_progress_timeout", no_progress_timeout
-        )
-        resolved_silence_timeout: int = resolver.resolve("silence_timeout", silence_timeout)
-        resolved_segment_encode_timeout: int = resolver.resolve(
-            "segment_encode_timeout", segment_encode_timeout
-        )
-        resolved_final_concat_timeout: int = resolver.resolve(
-            "final_concat_timeout", final_concat_timeout
-        )
-        resolved_stall_kill_timeout: int = resolver.resolve(
-            "stall_kill_timeout", stall_kill_timeout
-        )
-        resolved_stall_warning_timeout: int = resolver.resolve(
-            "stall_warning_timeout", stall_warning_timeout
-        )
-        resolved_waveform_timeout: int = resolver.resolve("waveform_timeout", waveform_timeout)
-        resolved_completion_sound: bool = resolver.resolve("completion_sound", completion_sound)
-        resolved_min_part_bytes: int = resolver.resolve("min_part_bytes", min_part_bytes)
-
-        # P1: proxy — honour YAML + CLI. The resolver's ``proxy`` kind
-        # implements the "CLI --proxy implies proxy_active=True" contract:
-        # a user explicitly passing --proxy on the command line means the
-        # run goes through the proxy. YAML's ``proxy: url`` is inert unless
-        # paired with ``proxy_active: true`` so a config file doesn't
-        # silently change networking (matches the GUI's checkbox contract).
-        # An explicit --proxy-active / --no-proxy-active flag pins the gate
-        # in either direction BEFORE the proxy resolves — the copied
-        # command of a GUI with the proxy OFF pastes --no-proxy-active so
-        # a ``proxy_active: true`` in user_defaults.json cannot
-        # re-enable the stored address (audit P1).
-        if proxy_active is not None:
-            resolver.pin_proxy_active(proxy_active)
-        resolved_proxy: str = resolver.resolve("proxy", proxy)
-
-        # P1: silence-tuning floats. Explicit CLI flags (--threshold /
-        # --min-silence / --margin) win; otherwise the config value
-        # (YAML or defaults) is used — the copied GUI command no longer
-        # needs a side-car YAML to carry the slider values.
-        resolved_threshold: float = resolver.resolve("threshold", threshold)
-        resolved_min_silence: float = resolver.resolve("min_silence", min_silence)
-        resolved_margin: float = resolver.resolve("margin", margin)
-
-        # Assemble the immutable config snapshot the controller runs on.
-        # Every value above was already validated: the resolver rejects
-        # bad CLI flags (enum whitelists + CONFIG_RANGES bounds via
-        # PARAM_SPECS) and ``load_config`` rejected bad YAML, so no
-        # second validation pass is needed here (the GUI worker runs the
-        # same validator because its config arrives from hand-editable
-        # JSON, not from these two chokepoints).
-        _pcfg = build_pipeline_config(
-            input_raw=input_video,
-            output_dir=output_dir,
-            method=method,
-            encoder=encoder,
-            video_quality=video_quality,
-            audio_quality=audio_quality,
-            download_quality=download_quality,
-            software_fallback=software_fallback,
-            x264_preset=x264_preset,
-            encoder_threads=resolved_encoder_threads,
-            output_fps=output_fps,
-            output_format=output_format,
-            force=force,
-            delete_after=delete_after,
-            per_video_dir=per_video_dir_resolved,
-            threshold=resolved_threshold,
-            min_silence=resolved_min_silence,
-            margin=resolved_margin,
-            memory_limit_mb=resolved_memory_limit_mb,
-            memory_reserve_mb=resolved_memory_reserve_mb,
-            x264_low_memory=resolved_x264_low_memory,
-            use_crf=resolved_use_crf,
-            gapless_concat=resolved_gapless_concat,
-            low_process_priority=resolved_low_process_priority,
-            rlimit_as_mb=resolved_rlimit_as_mb,
-            download_timeout=resolved_download_timeout,
-            connect_timeout=resolved_connect_timeout,
-            no_progress_timeout=resolved_no_progress_timeout,
-            proxy=resolved_proxy,
-            segment_encode_timeout=resolved_segment_encode_timeout,
-            final_concat_timeout=resolved_final_concat_timeout,
-            silence_timeout=resolved_silence_timeout,
-            stall_kill_timeout=resolved_stall_kill_timeout,
-            min_part_bytes=resolved_min_part_bytes,
-            stall_warning_timeout=resolved_stall_warning_timeout,
-            waveform_timeout=resolved_waveform_timeout,
-            batch_chunk_size=batch_chunk_size,
-            dry_run=dry_run,
-        )
-
-        # P1: reify ``software_fallback="ask"``. The callback typer
-        # confirms with (``--force``-style defaults can't short-circuit
-        # because the sigint-cancel has already fired for Ctrl+C-era
-        # reproducibility) closes the gap between the CLI and the
-        # GUI's consent dialog.
-        def _make_fallback_consent() -> Callable[[], bool] | None:
-            if software_fallback != "ask":
-                return None
-
-            def _consent() -> bool:
-                try:
-                    return typer.confirm(
-                        f"Selected encoder {encoder!r} is unavailable or failed. "
-                        "Fall back to libx264 (CPU-heavy, ~3-5x slower)?",
-                        default=False,
-                    )
-                except Exception:
-                    # Non-interactive tty / EOF / headless: refuse the
-                    # fallback (``ask`` must not silently switch).
-                    return False
-
-            return _consent
-
-        progress_columns = [
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
-            TimeElapsedColumn(),
-            TimeRemainingColumn(),
-        ]
-
-        with Progress(*progress_columns, console=console, disable=_JSON_LOG_MODE) as progress:
-            # Step 1: Download video (indeterminate: yt-dlp does not report progress)
-            task1 = progress.add_task("[cyan]Downloading video...", total=None)
-
-            def _download_progress_cb(p: DownloadProgress) -> None:
-                """Update the Rich task with yt-dlp progress.
-
-                Called from the stdout drain thread — Rich's Progress.update
-                is thread-safe (it locks internally). Maps the downloaded /
-                total bytes to the task, and refreshes the description with
-                percent + speed + ETA. Falls back to the indeterminate bar
-                (no total) when yt-dlp reports NA for the total size.
-                """
-                if p.total_bytes:
-                    progress.update(
-                        task1,
-                        total=p.total_bytes,
-                        # clamp completed to total so the bar caps at 100%
-                        # even when the server under-reports Content-Length.
-                        completed=min(p.downloaded_bytes or 0.0, p.total_bytes),
-                    )
-                else:
-                    # Unknown total — show indeterminate bar (no total) so
-                    # it reads as "spinning" rather than as "0%". We still
-                    # surface the bytes received below so the description
-                    # advances meaningfully.
-                    progress.update(task1, total=None, completed=0.0)
-
-                # Delegate the description formatting to the shared
-                # helper so the CLI and GUI stay in sync. Previously the
-                # CLI rolled its own percent/speed/ETA string here; when
-                # the GUI's format diverged (different separator, different
-                # rounding) users saw inconsistent output between the two
-                # entry points. ``build_download_status`` is pure and
-                # unit-tested in tests/test_gui_helpers.py.
-                description = "[cyan]" + build_download_status(
-                    downloaded_bytes=p.downloaded_bytes,
-                    total_bytes=p.total_bytes,
-                    speed=p.speed,
-                    eta=p.eta,
-                    # clamp: a server under-reporting Content-Length can
-                    # yield downloaded>total, which otherwise renders a
-                    # >100% ("250.0%") progress label.
-                    pct=min(100.0, 100.0 * (p.downloaded_bytes or 0.0) / p.total_bytes)
-                    if p.total_bytes
-                    else None,
+            # Set log level (apply to console handler, not the logger itself, so the
+            # file handler still receives DEBUG regardless of the user's choice).
+            valid_levels = ("DEBUG", "INFO", "WARNING", "ERROR")
+            level = log_level.upper()
+            if level not in valid_levels:
+                console.print(
+                    f"[red]Invalid log level:[/red] {log_level!r} (use DEBUG, INFO, WARNING, or ERROR)"
                 )
-                progress.update(task1, description=description)
+                raise typer.Exit(1)
+            _console_handler.setLevel(level)
 
-            # Step 1.5: the controller resolves the per-video project dir
-            # internally (apply_per_video_dir); the ``on_output_resolved``
-            # hook fires right after so the CLI can mark the download task
-            # done, move the log file into the project dir, and announce it.
-            def _on_output_resolved(out_dir: Path, vpath: Path, is_dl: bool) -> None:
-                nonlocal fh, output_dir
-                if is_dl:
-                    progress.update(
-                        task1, total=1, completed=1, description="[green]+[/green] Video downloaded"
-                    )
-                else:
-                    progress.update(
-                        task1,
-                        total=1,
-                        completed=1,
-                        description="[green]+[/green] Local file (download skipped)",
-                    )
-                if out_dir == output_dir:
-                    return
-                if is_dl:
-                    logger.info(f"Moved source into project dir: {vpath}")
-                if fh is not None:
-                    # Safe swap: the old handler must stay
-                    # attached until the new one is proven constructible —
-                    # but on Windows the open FileHandler holds a lock that
-                    # blocks shutil.move (WinError 32), so the move happens
-                    # between close() and addHandler(). Order:
-                    #   1. Close+detach old handler (releases the lock).
-                    #   2. Move the log file to the project dir.
-                    #   3. Construct+attach the new handler. If ANY of
-                    #      these fails after step 1, the outer ``finally``
-                    #      on ``fh`` (which still points at old_fh) is
-                    #      idempotent (removeHandler+close on a closed
-                    #      handler is harmless); the log lands wherever
-                    #      step 2 left it and the run continues with the
-                    #      new handler only if step 3 succeeded.
-                    old_fh = fh
-                    new_log = out_dir / "stream2video.log"
+            # ``signal.getsignal`` / ``signal.signal`` can only be called from the
+            # interpreter's main thread; a host embedding ``cli.main`` in a worker
+            # thread would otherwise crash here with ``ValueError``. When that
+            # happens, fall back to ``None`` so the ``finally``-block restore path
+            # uses ``SIG_DFL`` (and even that restore will be guarded below).
+            try:
+                prev_handler = signal.getsignal(signal.SIGINT)
+            except (ValueError, OSError) as e:
+                logger.warning(f"Could not read current SIGINT handler: {e}")
+                prev_handler = None
+            _sigint_captured = True
+
+            # SIGINT drives the pipeline controller's cancel_event (the event half
+            # of the pair); the callback half exists for embedding hosts that
+            # want to poll it.
+            cancel_event, _cancel_cb = _make_sigint_cancel()
+            # When a host calls ``main()`` twice in the same process, the second
+            # invocation would otherwise read *our own* handler back via
+            # ``getsignal`` and then restore a stale cancel-event closure on exit.
+            # Marking the installed handler's owner lets the ``finally`` block
+            # detect that case and restore ``SIG_DFL`` instead, which is the only
+            # well-defined "previous" state a bare script had before the CLI ran.
+            # Identity check against the module-level reference in
+            # cli_helpers, not a name+module heuristic — a refactor that renamed
+            # the closure would break the old check silently.
+            import stream2video.cli_helpers as _ch
+
+            _ours = prev_handler is not None and prev_handler is getattr(
+                _ch, "_installed_sigint_handler", None
+            )
+            if _ours:
+                # A previous in-process main() call never restored. Treat the
+                # pre-CLI state as SIG_DFL rather than restoring our own stale
+                # closure (which would keep the old cancel event alive forever).
+                prev_handler = signal.SIG_DFL
+
+            # Load configuration. ``load_config`` strictly validates BOTH numeric
+            # ranges (CONFIG_RANGES) AND enum keys (method/encoder/...), so a
+            # bad YAML value for any of these cannot sneak through here.
+            config = load_config(config_file)
+
+            # Resolve the effective output directory: an explicit -o/--output
+            # wins; otherwise honour the config file's ``output_dir`` key
+            # (parity with the GUI worker, which reads the same key from
+            # settings.json), else the historical ``./processed_videos``
+            # default. The typer option's default stays as the fallback for
+            # hosts that call main() with an explicit value.
+            if not is_from_cli(ctx, "output_dir"):
+                output_dir = Path(config.get("output_dir") or "./processed_videos")
+
+            # Ensure the output directory exists — deliberately AFTER config
+            # load and resolution, so an invalid config aborts before any
+            # directory is created and the config's ``output_dir`` is
+            # honoured (the mkdir used to run on the typer default before
+            # the YAML was even read, both ignoring the key and littering a
+            # stray ./processed_videos on a config error). A failure here
+            # (permission, read-only drive, path too long) is a clear
+            # startup error, not a mid-pipeline crash.
+            try:
+                output_dir.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                console.print(f"[red]Cannot create output directory:[/red] {output_dir} ({e})")
+                raise typer.Exit(1) from None
+            log_file = output_dir / "stream2video.log"
+
+            if not _JSON_LOG_MODE:
+                console.print(
+                    "\n[bold cyan]stream2video[/bold cyan] - Compress by removing silence"
+                )
+                console.print(f"Logs saved to: {log_file}\n")
+
+            _log_state.file_handler = _make_file_handler(log_file)
+            logger.addHandler(_log_state.file_handler)
+
+            # Apply the resource preset. The preset bundles tunables
+            # (x264_low_memory, memory_limit_mb, batch_chunk_size,
+            # low_process_priority) into a named profile; each subsequent
+            # resolver call below reads the merged config AND checks
+            # ``ParameterSource.COMMANDLINE``, so an explicit --flag wins
+            # over the preset's override. The preset itself is resolved via
+            # a throwaway resolver — CLI --preset wins, otherwise the YAML
+            # key ``preset`` (if present) is used, else DEFAULT_PRESET.
+            # The MAIN resolver is created AFTER ``apply_preset()``: a
+            # resolver bound to the pre-preset config would keep resolving
+            # every flag below from the unmerged defaults, so e.g.
+            # ``--preset low_memory`` would silently fail to enable
+            # x264_low_memory / batch_chunk_size=20 / low_process_priority.
+            resolved_preset = make_resolver(ctx, config, console).resolve("preset", preset)
+            # ``apply_preset`` raises ValueError for an unknown preset, and
+            # the resolver already rejected any value outside PRESET_NAMES —
+            # no separate validity check needed here.
+            config = apply_preset(config, resolved_preset)
+            resolver = make_resolver(ctx, config, console)
+
+            # Resolve each CLI flag against the config via the generic resolver.
+            # A flag that the user passed explicitly (ParameterSource.COMMANDLINE)
+            # wins; one that the user left at its default falls back to the
+            # config value (which came from YAML if provided, else CONFIG_DEFAULTS,
+            # with preset overrides already applied above).
+            method = resolver.resolve("method", method)
+            encoder = resolver.resolve("encoder", encoder)
+            video_quality = resolver.resolve("video_quality", video_quality)
+            download_quality = resolver.resolve("download_quality", download_quality)
+            audio_quality = resolver.resolve("audio_quality", audio_quality)
+            software_fallback = resolver.resolve("software_fallback", software_fallback)
+            x264_preset = resolver.resolve("x264_preset", x264_preset)
+            output_fps = resolver.resolve("output_fps", output_fps)
+            output_format = resolver.resolve("output_format", output_format)
+
+            # The output filename extension is derived by the controller from
+            # ``output_format`` (``OUTPUT_FORMAT_SPECS``), so the CLI no
+            # longer computes its own suffix here (audit #11) — the old
+            # ``artifact_stem(video_path) + "_" + output_suffix`` naming now
+            # lives in exactly one place.
+
+            # Bool and int parameters with a single call site each. The
+            # resolver reads the CLI flag value, the YAML config value, and
+            # the preset-merged CONFIG_DEFAULTS, applying CLI > config >
+            # default precedence.
+            resolved_x264_low_memory: bool = resolver.resolve("x264_low_memory", x264_low_memory)
+            resolved_use_crf: bool = resolver.resolve("use_crf", use_crf)
+            resolved_gapless_concat: bool = resolver.resolve("gapless_concat", gapless_concat)
+            resolved_low_process_priority: bool = resolver.resolve(
+                "low_process_priority", low_process_priority
+            )
+            resolved_encoder_threads: str | int = resolver.resolve(
+                "encoder_threads", encoder_threads
+            )
+            resolved_memory_limit_mb: str | int = resolver.resolve(
+                "memory_limit_mb", memory_limit_mb
+            )
+            resolved_memory_reserve_mb: int = resolver.resolve(
+                "memory_reserve_mb", memory_reserve_mb
+            )
+            resolved_rlimit_as_mb: int = resolver.resolve("rlimit_as_mb", rlimit_as_mb)
+
+            force = resolver.resolve("force", force)
+            delete_after = resolver.resolve("delete_after", delete_after)
+            per_video_dir_resolved = resolver.resolve("per_video_dir", per_video_dir)
+            # Push the resolved value back into config so downstream code that
+            # reads config["per_video_dir"] (e.g. paths.apply_per_video_dir)
+            # sees the same value as the CLI path.
+            config["per_video_dir"] = per_video_dir_resolved
+
+            # batch_chunk_size is a preset-tunable, so honour the preset
+            # override unless the user passed --batch-chunk-size explicitly.
+            batch_chunk_size = resolver.resolve("batch_chunk_size", batch_chunk_size)
+
+            # P1: pipeline timeouts + network tunables. These were the
+            # 9 yaml keys silently ignored before — the CLI used to rely on
+            # typer defaults populated from CONFIG_DEFAULTS at import time,
+            # so a user ``silence_timeout: 60`` in config.yaml had no effect.
+            resolved_download_timeout: int = resolver.resolve("download_timeout", download_timeout)
+            resolved_connect_timeout: int = resolver.resolve("connect_timeout", connect_timeout)
+            resolved_no_progress_timeout: int = resolver.resolve(
+                "no_progress_timeout", no_progress_timeout
+            )
+            resolved_silence_timeout: int = resolver.resolve("silence_timeout", silence_timeout)
+            resolved_segment_encode_timeout: int = resolver.resolve(
+                "segment_encode_timeout", segment_encode_timeout
+            )
+            resolved_final_concat_timeout: int = resolver.resolve(
+                "final_concat_timeout", final_concat_timeout
+            )
+            resolved_stall_kill_timeout: int = resolver.resolve(
+                "stall_kill_timeout", stall_kill_timeout
+            )
+            resolved_stall_warning_timeout: int = resolver.resolve(
+                "stall_warning_timeout", stall_warning_timeout
+            )
+            resolved_waveform_timeout: int = resolver.resolve("waveform_timeout", waveform_timeout)
+            resolved_completion_sound: bool = resolver.resolve("completion_sound", completion_sound)
+            resolved_min_part_bytes: int = resolver.resolve("min_part_bytes", min_part_bytes)
+
+            # P1: proxy — honour YAML + CLI. The resolver's ``proxy`` kind
+            # implements the "CLI --proxy implies proxy_active=True" contract:
+            # a user explicitly passing --proxy on the command line means the
+            # run goes through the proxy. YAML's ``proxy: url`` is inert unless
+            # paired with ``proxy_active: true`` so a config file doesn't
+            # silently change networking (matches the GUI's checkbox contract).
+            # An explicit --proxy-active / --no-proxy-active flag pins the gate
+            # in either direction BEFORE the proxy resolves — the copied
+            # command of a GUI with the proxy OFF pastes --no-proxy-active so
+            # a ``proxy_active: true`` in user_defaults.json cannot
+            # re-enable the stored address (audit P1).
+            if proxy_active is not None:
+                resolver.pin_proxy_active(proxy_active)
+            resolved_proxy: str = resolver.resolve("proxy", proxy)
+
+            # P1: silence-tuning floats. Explicit CLI flags (--threshold /
+            # --min-silence / --margin) win; otherwise the config value
+            # (YAML or defaults) is used — the copied GUI command no longer
+            # needs a side-car YAML to carry the slider values.
+            resolved_threshold: float = resolver.resolve("threshold", threshold)
+            resolved_min_silence: float = resolver.resolve("min_silence", min_silence)
+            resolved_margin: float = resolver.resolve("margin", margin)
+
+            # Assemble the immutable config snapshot the controller runs on.
+            # Every value above was already validated: the resolver rejects
+            # bad CLI flags (enum whitelists + CONFIG_RANGES bounds via
+            # PARAM_SPECS) and ``load_config`` rejected bad YAML, so no
+            # second validation pass is needed here (the GUI worker runs the
+            # same validator because its config arrives from hand-editable
+            # JSON, not from these two chokepoints).
+            _pcfg = build_pipeline_config(
+                input_raw=input_video,
+                output_dir=output_dir,
+                method=method,
+                encoder=encoder,
+                video_quality=video_quality,
+                audio_quality=audio_quality,
+                download_quality=download_quality,
+                software_fallback=software_fallback,
+                x264_preset=x264_preset,
+                encoder_threads=resolved_encoder_threads,
+                output_fps=output_fps,
+                output_format=output_format,
+                force=force,
+                delete_after=delete_after,
+                per_video_dir=per_video_dir_resolved,
+                threshold=resolved_threshold,
+                min_silence=resolved_min_silence,
+                margin=resolved_margin,
+                memory_limit_mb=resolved_memory_limit_mb,
+                memory_reserve_mb=resolved_memory_reserve_mb,
+                x264_low_memory=resolved_x264_low_memory,
+                use_crf=resolved_use_crf,
+                gapless_concat=resolved_gapless_concat,
+                low_process_priority=resolved_low_process_priority,
+                rlimit_as_mb=resolved_rlimit_as_mb,
+                download_timeout=resolved_download_timeout,
+                connect_timeout=resolved_connect_timeout,
+                no_progress_timeout=resolved_no_progress_timeout,
+                proxy=resolved_proxy,
+                segment_encode_timeout=resolved_segment_encode_timeout,
+                final_concat_timeout=resolved_final_concat_timeout,
+                silence_timeout=resolved_silence_timeout,
+                stall_kill_timeout=resolved_stall_kill_timeout,
+                min_part_bytes=resolved_min_part_bytes,
+                stall_warning_timeout=resolved_stall_warning_timeout,
+                waveform_timeout=resolved_waveform_timeout,
+                batch_chunk_size=batch_chunk_size,
+                dry_run=dry_run,
+            )
+
+            # P1: reify ``software_fallback="ask"``. The callback typer
+            # confirms with (``--force``-style defaults can't short-circuit
+            # because the sigint-cancel has already fired for Ctrl+C-era
+            # reproducibility) closes the gap between the CLI and the
+            # GUI's consent dialog.
+            def _make_fallback_consent() -> Callable[[], bool] | None:
+                if software_fallback != "ask":
+                    return None
+
+                def _consent() -> bool:
                     try:
-                        logger.removeHandler(old_fh)
-                        old_fh.close()
-                        if new_log.exists():
-                            new_log.unlink()
-                        if log_file.exists():
-                            shutil.move(str(log_file), str(new_log))
-                        new_fh = _make_file_handler(new_log)
-                    except OSError as e:
-                        # The old handler is closed by now; re-attaching
-                        # IT would leave the logger feeding a dead stream
-                        # (every record dies in logging.handleError for the
-                        # rest of the run). Re-open whichever file exists:
-                        # the moved one wins when step 2 succeeded and the
-                        # failure happened at step 3, otherwise the original.
-                        fallback_log = new_log if new_log.exists() else log_file
-                        try:
-                            fh = _make_file_handler(fallback_log)
-                        except OSError:
-                            fh = None
-                        if fh is not None:
-                            logger.addHandler(fh)
-                        logger.warning(
-                            f"Could not move log file to project dir ({e}); "
-                            f"log continues on the original path where possible"
+                        return typer.confirm(
+                            f"Selected encoder {encoder!r} is unavailable or failed. "
+                            "Fall back to libx264 (CPU-heavy, ~3-5x slower)?",
+                            default=False,
+                        )
+                    except Exception:
+                        # Non-interactive tty / EOF / headless: refuse the
+                        # fallback (``ask`` must not silently switch).
+                        return False
+
+                return _consent
+
+            progress_columns = [
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TaskProgressColumn(),
+                TimeElapsedColumn(),
+                TimeRemainingColumn(),
+            ]
+
+            with Progress(*progress_columns, console=console, disable=_JSON_LOG_MODE) as progress:
+                # Step 1: Download video (indeterminate: yt-dlp does not report progress)
+                task1 = progress.add_task("[cyan]Downloading video...", total=None)
+
+                def _download_progress_cb(p: DownloadProgress) -> None:
+                    """Update the Rich task with yt-dlp progress.
+
+                    Called from the stdout drain thread — Rich's Progress.update
+                    is thread-safe (it locks internally). Maps the downloaded /
+                    total bytes to the task, and refreshes the description with
+                    percent + speed + ETA. Falls back to the indeterminate bar
+                    (no total) when yt-dlp reports NA for the total size.
+                    """
+                    if p.total_bytes:
+                        progress.update(
+                            task1,
+                            total=p.total_bytes,
+                            # clamp completed to total so the bar caps at 100%
+                            # even when the server under-reports Content-Length.
+                            completed=min(p.downloaded_bytes or 0.0, p.total_bytes),
                         )
                     else:
-                        logger.addHandler(new_fh)
-                        fh = new_fh
-                output_dir = out_dir
-                console.print(f"Project directory: [cyan]{output_dir}[/cyan]")
+                        # Unknown total — show indeterminate bar (no total) so
+                        # it reads as "spinning" rather than as "0%". We still
+                        # surface the bytes received below so the description
+                        # advances meaningfully.
+                        progress.update(task1, total=None, completed=0.0)
 
-            # Step 2: Detect silence (with cache support)
-            task2 = progress.add_task("[cyan]Detecting silence segments...", total=100)
-            task_cut: TaskID | None = None
-            task_concat: TaskID | None = None
+                    # Delegate the description formatting to the shared
+                    # helper so the CLI and GUI stay in sync. Previously the
+                    # CLI rolled its own percent/speed/ETA string here; when
+                    # the GUI's format diverged (different separator, different
+                    # rounding) users saw inconsistent output between the two
+                    # entry points. ``build_download_status`` is pure and
+                    # unit-tested in tests/test_gui_helpers.py.
+                    description = "[cyan]" + build_download_status(
+                        downloaded_bytes=p.downloaded_bytes,
+                        total_bytes=p.total_bytes,
+                        speed=p.speed,
+                        eta=p.eta,
+                        # clamp: a server under-reporting Content-Length can
+                        # yield downloaded>total, which otherwise renders a
+                        # >100% ("250.0%") progress label.
+                        pct=min(100.0, 100.0 * (p.downloaded_bytes or 0.0) / p.total_bytes)
+                        if p.total_bytes
+                        else None,
+                    )
+                    progress.update(task1, description=description)
 
-            def _console_log_line(msg: str) -> None:
-                # The controller's on_log stream (step banners, cache
-                # hits, disk/memory warnings, delete-after notices).
-                # Rendered raw (markup=False) so [WARN]/[ERROR] tags show
-                # literally, matching the GUI's log panel.
-                console.print(msg, markup=False)
-
-            def _on_phase_cli(name: str, f: float) -> None:
-                # Atomic named-phase dispatch from the controller: drive
-                # the per-phase Rich bars. Phase tasks are created lazily
-                # so the bar list grows in the same order as before
-                # (silence → cutting → concatenating).
-                nonlocal task_cut, task_concat
-                if name == "silence":
-                    progress.update(task2, completed=min(f * 100, 100))
-                    if f >= 1.0:
+                # Step 1.5: the controller resolves the per-video project dir
+                # internally (apply_per_video_dir); the ``on_output_resolved``
+                # hook fires right after so the CLI can mark the download task
+                # done, move the log file into the project dir, and announce it.
+                def _on_output_resolved(out_dir: Path, vpath: Path, is_dl: bool) -> None:
+                    nonlocal output_dir
+                    if is_dl:
                         progress.update(
-                            task2, description="[green]+[/green] Silence detection done"
+                            task1,
+                            total=1,
+                            completed=1,
+                            description="[green]+[/green] Video downloaded",
                         )
-                elif name == "cutting":
-                    if task_cut is None:
-                        task_cut = progress.add_task("[cyan]Cutting segments...", total=100)
-                    progress.update(task_cut, completed=min(f * 100, 100))
-                    if f >= 1.0:
-                        progress.update(task_cut, description="[green]+[/green] Cutting done")
-                else:  # concatenating
-                    if task_cut is None:
-                        task_cut = progress.add_task("[cyan]Cutting segments...", total=100)
-                    if task_concat is None:
+                    else:
+                        progress.update(
+                            task1,
+                            total=1,
+                            completed=1,
+                            description="[green]+[/green] Local file (download skipped)",
+                        )
+                    if out_dir == output_dir:
+                        return
+                    if is_dl:
+                        logger.info(f"Moved source into project dir: {vpath}")
+                    if _log_state.file_handler is not None:
+                        # Safe swap: the old handler must stay
+                        # attached until the new one is proven constructible —
+                        # but on Windows the open FileHandler holds a lock that
+                        # blocks shutil.move (WinError 32), so the move happens
+                        # between close() and addHandler(). Order:
+                        #   1. Close+detach old handler (releases the lock).
+                        #   2. Move the log file to the project dir.
+                        #   3. Construct+attach the new handler. If ANY of
+                        #      these fails after step 1, the logging
+                        #      session's teardown closes whichever handler
+                        #      ``_log_state.file_handler`` points at
+                        #      (removeHandler+close on a closed handler is
+                        #      harmless, so the path is idempotent); the log
+                        #      lands wherever step 2 left it and the run
+                        #      continues with the new handler only if step
+                        #      3 succeeded.
+                        old_fh = _log_state.file_handler
+                        new_log = out_dir / "stream2video.log"
+                        try:
+                            logger.removeHandler(old_fh)
+                            old_fh.close()
+                            if new_log.exists():
+                                new_log.unlink()
+                            if log_file.exists():
+                                shutil.move(str(log_file), str(new_log))
+                            new_fh = _make_file_handler(new_log)
+                        except OSError as e:
+                            # The old handler is closed by now; re-attaching
+                            # IT would leave the logger feeding a dead stream
+                            # (every record dies in logging.handleError for the
+                            # rest of the run). Re-open whichever file exists:
+                            # the moved one wins when step 2 succeeded and the
+                            # failure happened at step 3, otherwise the original.
+                            fallback_log = new_log if new_log.exists() else log_file
+                            try:
+                                _log_state.file_handler = _make_file_handler(fallback_log)
+                            except OSError:
+                                _log_state.file_handler = None
+                            if _log_state.file_handler is not None:
+                                logger.addHandler(_log_state.file_handler)
+                            logger.warning(
+                                f"Could not move log file to project dir ({e}); "
+                                f"log continues on the original path where possible"
+                            )
+                        else:
+                            logger.addHandler(new_fh)
+                            _log_state.file_handler = new_fh
+                    output_dir = out_dir
+                    console.print(f"Project directory: [cyan]{output_dir}[/cyan]")
+
+                # Step 2: Detect silence (with cache support)
+                task2 = progress.add_task("[cyan]Detecting silence segments...", total=100)
+                task_cut: TaskID | None = None
+                task_concat: TaskID | None = None
+
+                def _console_log_line(msg: str) -> None:
+                    # The controller's on_log stream (step banners, cache
+                    # hits, disk/memory warnings, delete-after notices).
+                    # Rendered raw (markup=False) so [WARN]/[ERROR] tags show
+                    # literally, matching the GUI's log panel.
+                    console.print(msg, markup=False)
+
+                def _on_phase_cli(name: str, f: float) -> None:
+                    # Atomic named-phase dispatch from the controller: drive
+                    # the per-phase Rich bars. Phase tasks are created lazily
+                    # so the bar list grows in the same order as before
+                    # (silence → cutting → concatenating).
+                    nonlocal task_cut, task_concat
+                    if name == "silence":
+                        progress.update(task2, completed=min(f * 100, 100))
+                        if f >= 1.0:
+                            progress.update(
+                                task2, description="[green]+[/green] Silence detection done"
+                            )
+                    elif name == "cutting":
+                        if task_cut is None:
+                            task_cut = progress.add_task("[cyan]Cutting segments...", total=100)
+                        progress.update(task_cut, completed=min(f * 100, 100))
+                        if f >= 1.0:
+                            progress.update(task_cut, description="[green]+[/green] Cutting done")
+                    else:  # concatenating
+                        if task_cut is None:
+                            task_cut = progress.add_task("[cyan]Cutting segments...", total=100)
+                        if task_concat is None:
+                            progress.update(
+                                task_cut, completed=100, description="[green]+[/green] Cutting done"
+                            )
+                            task_concat = progress.add_task("[cyan]Concatenating...", total=100)
+                        progress.update(task_concat, completed=min(f * 100, 100))
+                        if f >= 1.0:
+                            progress.update(
+                                task_concat, description="[green]+[/green] Concatenating done"
+                            )
+
+                # The CLI and GUI now orchestrate through the SAME
+                # PipelineController (audit #11); this block only renders
+                # (Rich bars, console lines) and provides the interactive
+                # libx264 consent. The controller owns download / project-dir
+                # resolution / silence cache+resume / concat / output
+                # validation / delete-after — the old hand-rolled phases
+                # here drifted from the GUI's (e.g. missing-output success),
+                # which is exactly what the audit flagged.
+                controller = PipelineController(
+                    cfg=_pcfg,
+                    cb=PipelineCallbacks(
+                        on_progress=lambda f: None,
+                        on_status=lambda text, *, force=False: None,
+                        on_log=_console_log_line,
+                        on_info=_console_log_line,
+                        on_overall=lambda elapsed, remaining, silent: None,
+                        on_total=lambda total: None,
+                        on_phase=_on_phase_cli,
+                        on_download_progress=_download_progress_cb,
+                        on_pipeline_complete=lambda summary: None,
+                    ),
+                    cancel_event=cancel_event,
+                    on_output_resolved=_on_output_resolved,
+                    on_fallback_consent=_make_fallback_consent(),
+                )
+
+                # CLI ↔ GUI parity: the GUI's worker plays an "attention"
+                # chime on cancel/failure and "success" on completion. Best-
+                # effort — playback failure returns a warning string instead
+                # of raising.
+                def _play_attention_sound() -> None:
+                    if not resolved_completion_sound:
+                        return
+                    try:
+                        _sound_warning = play_completion_sound(enabled=True, kind="attention")
+                        if _sound_warning:
+                            console.print(f"[yellow]{_sound_warning}[/yellow]")
+                    except Exception:
+                        logger.debug("play_completion_sound raised", exc_info=True)
+
+                try:
+                    result = controller.run()
+                    if _pcfg.dry_run:
+                        # --dry-run: the controller stopped after silence
+                        # detection. Show the "what would be cut" summary and
+                        # exit before the encode phase starts. This is the
+                        # tuning loop: a user adjusts threshold / min_silence /
+                        # margin in the config, runs --dry-run, reads the
+                        # stats, and iterates without spending CPU on a
+                        # throwaway encode. See tests/test_cli_dry_run.py.
+                        if result.silence_segments is None or result.keep_segments is None:
+                            # Defensive: both segment lists are part of the
+                            # dry-run contract. Checked explicitly rather than
+                            # via ``assert`` — asserts vanish under
+                            # ``python -O`` and the summary would then be fed
+                            # None (mirrors the output_path guard below).
+                            console.print(
+                                "[red]Dry-run summary unavailable:[/red] "
+                                "the controller returned no segment lists"
+                            )
+                            raise typer.Exit(1)
+                        console.print()
+                        console.print(
+                            fmt_dry_run_summary(
+                                src_duration=result.src_duration,
+                                src_size_bytes=result.src_size_bytes,
+                                silence_segments=result.silence_segments,
+                                keep_segments=result.keep_segments,
+                            )
+                        )
+                        raise typer.Exit(0)
+
+                    output_video = result.output_path
+                    if output_video is None:
+                        # Defensive: success without a resolved output path is
+                        # a controller bug; fail loudly instead of printing a
+                        # summary that dereferences None.
+                        raise typer.Exit(1)
+
+                    # Mark whichever task is live as done
+                    if task_concat is not None:
+                        progress.update(
+                            task_concat,
+                            completed=100,
+                            description="[green]+[/green] Concatenating done",
+                        )
+                    else:
+                        if task_cut is None:
+                            # on_phase never fired (e.g. single-segment or a
+                            # stub cut_and_concat in tests) — materialize the
+                            # bars so the summary still shows the full flow.
+                            task_cut = progress.add_task("[cyan]Cutting segments...", total=100)
                         progress.update(
                             task_cut, completed=100, description="[green]+[/green] Cutting done"
                         )
-                        task_concat = progress.add_task("[cyan]Concatenating...", total=100)
-                    progress.update(task_concat, completed=min(f * 100, 100))
-                    if f >= 1.0:
+                        # No concat phase (e.g. single segment) — still show it
+                        tc = progress.add_task("[cyan]Concatenating...", total=100)
                         progress.update(
-                            task_concat, description="[green]+[/green] Concatenating done"
+                            tc, completed=100, description="[green]+[/green] Concatenating done"
                         )
 
-            # The CLI and GUI now orchestrate through the SAME
-            # PipelineController (audit #11); this block only renders
-            # (Rich bars, console lines) and provides the interactive
-            # libx264 consent. The controller owns download / project-dir
-            # resolution / silence cache+resume / concat / output
-            # validation / delete-after — the old hand-rolled phases
-            # here drifted from the GUI's (e.g. missing-output success),
-            # which is exactly what the audit flagged.
-            controller = PipelineController(
-                cfg=_pcfg,
-                cb=PipelineCallbacks(
-                    on_progress=lambda f: None,
-                    on_status=lambda text, *, force=False: None,
-                    on_log=_console_log_line,
-                    on_info=_console_log_line,
-                    on_overall=lambda elapsed, remaining, silent: None,
-                    on_total=lambda total: None,
-                    on_phase=_on_phase_cli,
-                    on_download_progress=_download_progress_cb,
-                    on_pipeline_complete=lambda summary: None,
-                ),
-                cancel_event=cancel_event,
-                on_output_resolved=_on_output_resolved,
-                on_fallback_consent=_make_fallback_consent(),
-            )
+                except PipelineCancelled:
+                    console.print("[yellow]Pipeline cancelled.[/yellow]")
+                    _play_attention_sound()
+                    raise typer.Exit(130) from None
+                except PipelineDownloadError as e:
+                    cause = e.__cause__
+                    if isinstance(cause, URLValidationError):
+                        # Caught before the generic download handler so the
+                        # user gets a clear "this isn't a URL or local file"
+                        # message.
+                        console.print(f"[red]Invalid input:[/red] {e}")
+                        console.print(
+                            "  Expected an http(s):// URL or an existing local file path."
+                        )
+                        raise typer.Exit(2) from None
+                    if isinstance(cause, VideoNotAvailableError):
+                        console.print(f"[red]Video unavailable:[/red] {e}")
+                        console.print("  The video may be private, deleted, or region-restricted.")
+                        raise typer.Exit(1) from None
+                    if isinstance(cause, DownloadTimeoutError):
+                        console.print(f"[red]Download timed out:[/red] {e}")
+                        console.print("  Try again later or check your connection.")
+                        raise typer.Exit(1) from None
+                    if isinstance(cause, DiskSpaceError):
+                        console.print(f"[red]Disk space error:[/red] {e}")
+                        console.print("  Free up disk space and try again.")
+                        raise typer.Exit(1) from None
+                    if isinstance(cause, PermissionDeniedError):
+                        console.print(f"[red]Permission denied:[/red] {e}")
+                        console.print("  Check file permissions and try again.")
+                        raise typer.Exit(1) from None
+                    if isinstance(cause, FileBusyError):
+                        console.print(f"[red]File in use:[/red] {e}")
+                        console.print("  Close the program using the file and try again.")
+                        raise typer.Exit(1) from None
+                    console.print(f"[red]Download failed:[/red] {e}")
+                    logger.exception("Download error")
+                    _play_attention_sound()
+                    raise typer.Exit(1) from None
+                except PipelineSilenceError as e:
+                    console.print(f"[red]Silence detection failed:[/red] {e}")
+                    logger.exception("Silence detection error")
+                    _play_attention_sound()
+                    raise typer.Exit(1) from None
+                except PipelineConcatError as e:
+                    console.print(f"[red]Concatenation failed:[/red] {e}")
+                    logger.exception("Concatenation error")
+                    _play_attention_sound()
+                    raise typer.Exit(1) from None
+                except PipelineUnexpectedError as e:
+                    # The controller already logged the full traceback;
+                    # surface the user-facing message and preserve the cause.
+                    console.print(f"[red]Unexpected error:[/red] {e}")
+                    _play_attention_sound()
+                    raise typer.Exit(1) from e
 
-            # CLI ↔ GUI parity: the GUI's worker plays an "attention"
-            # chime on cancel/failure and "success" on completion. Best-
-            # effort — playback failure returns a warning string instead
-            # of raising.
-            def _play_attention_sound() -> None:
-                if not resolved_completion_sound:
-                    return
+            # Summary — show rich stats: input/output size + duration, percent
+            # saved, wall-clock time, and a ``X.Yx realtime`` throughput hint.
+            # The numbers help the user sanity-check a long encode at a glance
+            # (a 6h source -> 1h output at 8x realtime is ~7.5 min wall time,
+            # anything slower suggests something went wrong).
+            try:
+                from stream2video.concat import get_video_duration as _get_duration
+
+                src_size = result.src_size_bytes
+                dst_size = result.dst_size_bytes
+                src_dur_secs = result.src_duration  # None on ffprobe failure
+                # Wall-clock from the start of the controller run to the
+                # completion banner — covers download + silence + encode and
+                # matches what the user watched on the clock.
+                elapsed = result.pipeline_seconds
+                # Use output_video's duration as "keep_dur" — that's the
+                # actual encoded length, which beats an estimate computed
+                # from the input. ``None`` on an empty file is tolerated by
+                # fmt_completion_summary.
+                keep_dur_secs = _get_duration(output_video) if output_video.exists() else None
+                console.print(
+                    "\n"
+                    + fmt_completion_summary(
+                        src_duration=src_dur_secs,
+                        src_size_bytes=src_size,
+                        output_path=str(output_video),
+                        dst_size_bytes=dst_size,
+                        keep_duration=keep_dur_secs if keep_dur_secs is not None else 0.0,
+                        pipeline_seconds=elapsed,
+                    )
+                )
+            except Exception as e:
+                # Summary formatting should never crash the pipeline — fall
+                # back to the legacy one-line output (the "Output:" line below).
+                logger.debug(f"Could not build completion summary: {e}", exc_info=True)
+                console.print("\n[bold green]+ Compression complete![/bold green]")
+                console.print(f"Output: [cyan]{output_video}[/cyan]")
+
+            # Delete-after is handled by the controller inside its ``_finish``
+            # step (audit #11) — it owns the download + delete lifecycle, so
+            # this block must not exist here anymore.
+            logger.info(f"Successfully compressed video to {output_video}")
+
+            # Completion chime (CLI ↔ GUI parity): the GUI's worker plays
+            # ``completion_sound`` from the same config key. Best-effort —
+            # playback failure returns a warning string instead of raising.
+            if resolved_completion_sound:
                 try:
-                    _sound_warning = play_completion_sound(enabled=True, kind="attention")
+                    _sound_warning = play_completion_sound(enabled=True)
                     if _sound_warning:
                         console.print(f"[yellow]{_sound_warning}[/yellow]")
                 except Exception:
                     logger.debug("play_completion_sound raised", exc_info=True)
 
-            try:
-                result = controller.run()
-                if _pcfg.dry_run:
-                    # --dry-run: the controller stopped after silence
-                    # detection. Show the "what would be cut" summary and
-                    # exit before the encode phase starts. This is the
-                    # tuning loop: a user adjusts threshold / min_silence /
-                    # margin in the config, runs --dry-run, reads the
-                    # stats, and iterates without spending CPU on a
-                    # throwaway encode. See tests/test_cli_dry_run.py.
-                    if result.silence_segments is None or result.keep_segments is None:
-                        # Defensive: both segment lists are part of the
-                        # dry-run contract. Checked explicitly rather than
-                        # via ``assert`` — asserts vanish under
-                        # ``python -O`` and the summary would then be fed
-                        # None (mirrors the output_path guard below).
-                        console.print(
-                            "[red]Dry-run summary unavailable:[/red] "
-                            "the controller returned no segment lists"
-                        )
-                        raise typer.Exit(1)
-                    console.print()
-                    console.print(
-                        fmt_dry_run_summary(
-                            src_duration=result.src_duration,
-                            src_size_bytes=result.src_size_bytes,
-                            silence_segments=result.silence_segments,
-                            keep_segments=result.keep_segments,
-                        )
-                    )
-                    raise typer.Exit(0)
+        except typer.Exit:
+            raise
 
-                output_video = result.output_path
-                if output_video is None:
-                    # Defensive: success without a resolved output path is
-                    # a controller bug; fail loudly instead of printing a
-                    # summary that dereferences None.
-                    raise typer.Exit(1)
-
-                # Mark whichever task is live as done
-                if task_concat is not None:
-                    progress.update(
-                        task_concat,
-                        completed=100,
-                        description="[green]+[/green] Concatenating done",
-                    )
-                else:
-                    if task_cut is None:
-                        # on_phase never fired (e.g. single-segment or a
-                        # stub cut_and_concat in tests) — materialize the
-                        # bars so the summary still shows the full flow.
-                        task_cut = progress.add_task("[cyan]Cutting segments...", total=100)
-                    progress.update(
-                        task_cut, completed=100, description="[green]+[/green] Cutting done"
-                    )
-                    # No concat phase (e.g. single segment) — still show it
-                    tc = progress.add_task("[cyan]Concatenating...", total=100)
-                    progress.update(
-                        tc, completed=100, description="[green]+[/green] Concatenating done"
-                    )
-
-            except PipelineCancelled:
-                console.print("[yellow]Pipeline cancelled.[/yellow]")
-                _play_attention_sound()
-                raise typer.Exit(130) from None
-            except PipelineDownloadError as e:
-                cause = e.__cause__
-                if isinstance(cause, URLValidationError):
-                    # Caught before the generic download handler so the
-                    # user gets a clear "this isn't a URL or local file"
-                    # message.
-                    console.print(f"[red]Invalid input:[/red] {e}")
-                    console.print("  Expected an http(s):// URL or an existing local file path.")
-                    raise typer.Exit(2) from None
-                if isinstance(cause, VideoNotAvailableError):
-                    console.print(f"[red]Video unavailable:[/red] {e}")
-                    console.print("  The video may be private, deleted, or region-restricted.")
-                    raise typer.Exit(1) from None
-                if isinstance(cause, DownloadTimeoutError):
-                    console.print(f"[red]Download timed out:[/red] {e}")
-                    console.print("  Try again later or check your connection.")
-                    raise typer.Exit(1) from None
-                if isinstance(cause, DiskSpaceError):
-                    console.print(f"[red]Disk space error:[/red] {e}")
-                    console.print("  Free up disk space and try again.")
-                    raise typer.Exit(1) from None
-                if isinstance(cause, PermissionDeniedError):
-                    console.print(f"[red]Permission denied:[/red] {e}")
-                    console.print("  Check file permissions and try again.")
-                    raise typer.Exit(1) from None
-                if isinstance(cause, FileBusyError):
-                    console.print(f"[red]File in use:[/red] {e}")
-                    console.print("  Close the program using the file and try again.")
-                    raise typer.Exit(1) from None
-                console.print(f"[red]Download failed:[/red] {e}")
-                logger.exception("Download error")
-                _play_attention_sound()
-                raise typer.Exit(1) from None
-            except PipelineSilenceError as e:
-                console.print(f"[red]Silence detection failed:[/red] {e}")
-                logger.exception("Silence detection error")
-                _play_attention_sound()
-                raise typer.Exit(1) from None
-            except PipelineConcatError as e:
-                console.print(f"[red]Concatenation failed:[/red] {e}")
-                logger.exception("Concatenation error")
-                _play_attention_sound()
-                raise typer.Exit(1) from None
-            except PipelineUnexpectedError as e:
-                # The controller already logged the full traceback;
-                # surface the user-facing message and preserve the cause.
-                console.print(f"[red]Unexpected error:[/red] {e}")
-                _play_attention_sound()
-                raise typer.Exit(1) from e
-
-        # Summary — show rich stats: input/output size + duration, percent
-        # saved, wall-clock time, and a ``X.Yx realtime`` throughput hint.
-        # The numbers help the user sanity-check a long encode at a glance
-        # (a 6h source -> 1h output at 8x realtime is ~7.5 min wall time,
-        # anything slower suggests something went wrong).
-        try:
-            from stream2video.concat import get_video_duration as _get_duration
-
-            src_size = result.src_size_bytes
-            dst_size = result.dst_size_bytes
-            src_dur_secs = result.src_duration  # None on ffprobe failure
-            # Wall-clock from the start of the controller run to the
-            # completion banner — covers download + silence + encode and
-            # matches what the user watched on the clock.
-            elapsed = result.pipeline_seconds
-            # Use output_video's duration as "keep_dur" — that's the
-            # actual encoded length, which beats an estimate computed
-            # from the input. ``None`` on an empty file is tolerated by
-            # fmt_completion_summary.
-            keep_dur_secs = _get_duration(output_video) if output_video.exists() else None
-            console.print(
-                "\n"
-                + fmt_completion_summary(
-                    src_duration=src_dur_secs,
-                    src_size_bytes=src_size,
-                    output_path=str(output_video),
-                    dst_size_bytes=dst_size,
-                    keep_duration=keep_dur_secs if keep_dur_secs is not None else 0.0,
-                    pipeline_seconds=elapsed,
-                )
-            )
         except Exception as e:
-            # Summary formatting should never crash the pipeline — fall
-            # back to the legacy one-line output (the "Output:" line below).
-            logger.debug(f"Could not build completion summary: {e}", exc_info=True)
-            console.print("\n[bold green]+ Compression complete![/bold green]")
-            console.print(f"Output: [cyan]{output_video}[/cyan]")
+            console.print(f"[red]Unexpected error:[/red] {e}")
+            logger.exception("Unexpected error")
+            # Preserve the original exception so a developer running with
+            # `RICH_TRACEBACK=1` (or a debugger) sees the actual cause; the
+            # user-facing message above is the only thing they see by default.
+            raise typer.Exit(1) from e
 
-        # Delete-after is handled by the controller inside its ``_finish``
-        # step (audit #11) — it owns the download + delete lifecycle, so
-        # this block must not exist here anymore.
-        logger.info(f"Successfully compressed video to {output_video}")
-
-        # Completion chime (CLI ↔ GUI parity): the GUI's worker plays
-        # ``completion_sound`` from the same config key. Best-effort —
-        # playback failure returns a warning string instead of raising.
-        if resolved_completion_sound:
-            try:
-                _sound_warning = play_completion_sound(enabled=True)
-                if _sound_warning:
-                    console.print(f"[yellow]{_sound_warning}[/yellow]")
-            except Exception:
-                logger.debug("play_completion_sound raised", exc_info=True)
-
-    except typer.Exit:
-        raise
-
-    except Exception as e:
-        console.print(f"[red]Unexpected error:[/red] {e}")
-        logger.exception("Unexpected error")
-        # Preserve the original exception so a developer running with
-        # `RICH_TRACEBACK=1` (or a debugger) sees the actual cause; the
-        # user-facing message above is the only thing they see by default.
-        raise typer.Exit(1) from e
-
-    finally:
-        # ``signal.getsignal`` can return ``None`` on some interpreters
-        # when no handler has been installed; restoring ``None`` would
-        # raise TypeError, so treat ``None`` as "no explicit handler" and
-        # restore SIG_DFL for a clean state. SIG_IGN / SIG_DFL must be
-        # restored just like any other handler: skipping them would leave
-        # our temporary ``_handler`` installed, so a host that had SIGINT
-        # ignored would see it point at a stale cancel event afterwards.
-        # ``prev_handler`` was already de-own'd above when it pointed at
-        # our own handler from a previous in-process run — restoring that
-        # closure would keep the old cancel event alive forever, and the
-        # handler would trip over a disposed context on the next SIGINT.
-        # Guard: when the failure happened BEFORE the SIGINT capture (no
-        # handler installed by this run), don't touch the host's handler.
-        if _sigint_captured:
-            restore_to: Any = signal.SIG_DFL if prev_handler is None else prev_handler
-            if restore_to is not None:
-                try:
-                    signal.signal(signal.SIGINT, restore_to)
-                except (OSError, ValueError, TypeError) as e:
-                    # signal.signal raises ValueError when called from a
-                    # non-main thread; some platforms raise OSError. Log
-                    # rather than silently swallow so a host that runs the
-                    # CLI in a worker thread can diagnose why SIGINT wasn't
-                    # restored.
-                    logger.warning(f"Could not restore SIGINT handler: {e}")
-        if fh is not None:
-            logger.removeHandler(fh)
-            fh.close()
-        # Restore every piece of logging state this invocation rewrote
-        # (see the snapshot at entry). Closes the JSON handler this run
-        # installed (so it can't keep writing into our stdout after the
-        # process hands off to another invocation), re-roots the root
-        # logger's handler list, and resets ``console.stderr`` /
-        # ``logger.propagate`` / ``_JSON_LOG_MODE`` / the console handler
-        # level. The snapshot is taken before the ``try`` block, so it
-        # always exists here — even for the early exits (missing ffmpeg,
-        # bad --log-level) that the try now covers (audit P1).
-        (
-            _root_handlers,
-            _root_level,
-            _propagate,
-            _logger_handlers,
-            _stderr,
-            _console_level,
-        ) = _logging_snapshot
-        _console_handler.setLevel(_console_level)
-        for _h in list(logger.handlers):
-            logger.removeHandler(_h)
-            if _h not in _logger_handlers:
-                _h.close()
-        for _h in _logger_handlers:
-            logger.addHandler(_h)
-        logger.propagate = _propagate
-        _root_logger.handlers[:] = _root_handlers
-        _root_logger.setLevel(_root_level)
-        console.stderr = _stderr
-        _JSON_LOG_MODE = False
+        finally:
+            # ``signal.getsignal`` can return ``None`` on some interpreters
+            # when no handler has been installed; restoring ``None`` would
+            # raise TypeError, so treat ``None`` as "no explicit handler" and
+            # restore SIG_DFL for a clean state. SIG_IGN / SIG_DFL must be
+            # restored just like any other handler: skipping them would leave
+            # our temporary ``_handler`` installed, so a host that had SIGINT
+            # ignored would see it point at a stale cancel event afterwards.
+            # ``prev_handler`` was already de-own'd above when it pointed at
+            # our own handler from a previous in-process run — restoring that
+            # closure would keep the old cancel event alive forever, and the
+            # handler would trip over a disposed context on the next SIGINT.
+            # Guard: when the failure happened BEFORE the SIGINT capture (no
+            # handler installed by this run), don't touch the host's handler.
+            if _sigint_captured:
+                restore_to: Any = signal.SIG_DFL if prev_handler is None else prev_handler
+                if restore_to is not None:
+                    try:
+                        signal.signal(signal.SIGINT, restore_to)
+                    except (OSError, ValueError, TypeError) as e:
+                        # signal.signal raises ValueError when called from a
+                        # non-main thread; some platforms raise OSError. Log
+                        # rather than silently swallow so a host that runs the
+                        # CLI in a worker thread can diagnose why SIGINT wasn't
+                        # restored.
+                        logger.warning(f"Could not restore SIGINT handler: {e}")
+            # The per-run file handler and every piece of logging state the
+            # run rewrote (root handlers, propagate, console.stderr, the
+            # JSON-mode flag, the console level) are restored by the logging
+            # session's ``__exit__`` — on this path AND on every early one.
 
 
 if __name__ == "__main__":

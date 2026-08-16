@@ -154,7 +154,7 @@ stream2video video.mp4 --method cut_then_encode --video-quality high
 
 ## Configuration
 
-Parameters can be set via YAML config file (every key below is validated; an unknown key — e.g. a typo like `threshhold` — is rejected with a suggestion instead of being silently ignored):
+Parameters can be set via YAML config file (every key below is validated; an unknown key — e.g. a typo like `threshhold` — is rejected with a suggestion instead of being silently ignored). Note: `log_format` is not a config key; if your config has `log_format: json` from an older README, remove that line and use `--log-format json` on the command line instead:
 
 ```yaml
 threshold: -25

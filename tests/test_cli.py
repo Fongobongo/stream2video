@@ -237,13 +237,22 @@ class TestLoadConfigUnknownKeys:
         assert "threshhold" in out
         assert "threshold" in out  # nearest-match suggestion
 
-    def test_nonexistent_key_rejected(self, tmp_path: Path):
+    def test_cli_flag_only_key_gets_migration_message(self, tmp_path: Path, capsys):
         # ``log_format`` looks plausible but is a CLI flag only — it must
-        # be surfaced loudly instead of silently no-op'ing.
+        # be surfaced loudly instead of silently no-op'ing. It was also
+        # documented as a YAML setting before the audit, so the rejection
+        # message must tell the user how to migrate: remove the key, use
+        # the ``--log-format`` flag (audit round 13: the generic
+        # nearest-match hint suggested ``output_format`` — a Levenshtein
+        # neighbour that tunes the container, not logging).
         cfg = tmp_path / "cfg.yaml"
         cfg.write_text("log_format: json\n")
         with pytest.raises(typer.Exit):
             load_config(cfg)
+        out = capsys.readouterr().out
+        assert "log_format" in out
+        assert "--log-format" in out  # migration pointer, not a did-you-mean
+        assert "output_format" not in out
 
     def test_multiple_unknown_keys_all_rejected(self, tmp_path: Path):
         cfg = tmp_path / "cfg.yaml"

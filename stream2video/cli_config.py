@@ -26,6 +26,17 @@ from stream2video.param_specs import PARAM_SPECS
 
 logger = logging.getLogger("stream2video")
 
+# Keys that exist ONLY on the CLI as flags, not in CONFIG_DEFAULTS —
+# they can end up in a YAML file (the pre-audit README documented
+# ``log_format`` as a YAML setting) and get rejected as unknown. The
+# nearest-match suggestion is misleading for them: ``log_format`` is a
+# Levenshtein-neighbour of ``output_format``, which tunes the container
+# (mp4/mp3/...), not logging. Each entry maps the bogus YAML key to the
+# flag the user should migrate to instead.
+_CLI_ONLY_FLAGS: dict[str, str] = {
+    "log_format": "--log-format",
+}
+
 
 def load_config(config_file: Path | None, console: Any) -> dict:
     """Load and validate configuration file.
@@ -85,9 +96,24 @@ def load_config(config_file: Path | None, console: Any) -> dict:
     # only) loaded silently and never had any effect: the user kept
     # tuning a knob that wasn't connected. Each bad key is reported with
     # its nearest valid names so the typo is one edit away.
+    #
+    # Keys that exist ONLY as CLI flags get a dedicated message instead
+    # of the Levenshtein suggestion: ``log_format`` is close enough to
+    # ``output_format`` for difflib to offer it as a correction, which
+    # points users at an entirely different knob (container/codec vs
+    # log format). The right guidance is "remove the key, use the flag"
+    # (audit round 13 feedback on the breaking-change messaging).
     unknown = sorted(set(file_config) - set(CONFIG_DEFAULTS))
     if unknown:
         for key in unknown:
+            flag = _CLI_ONLY_FLAGS.get(key)
+            if flag:
+                console.print(
+                    f"[red]Unknown config key:[/red] {key!r} is a CLI flag "
+                    f"({flag}), not a config key — remove it from the YAML "
+                    f"file and pass {flag} on the command line"
+                )
+                continue
             near = difflib.get_close_matches(key, list(CONFIG_DEFAULTS), n=3)
             hint = f" (did you mean {' or '.join(repr(k) for k in near)}?)" if near else ""
             console.print(f"[red]Unknown config key:[/red] {key!r}{hint}")
