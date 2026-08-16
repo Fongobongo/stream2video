@@ -743,6 +743,21 @@ def main(
         )
         raise typer.Exit(1)
 
+    # Validate log_level BEFORE the logging session is entered. The JSON
+    # branch of the session hands the level straight to
+    # ``install_json_handler`` → logging's level-name lookup, so a bad
+    # level would raise a ``ValueError`` there before the user-facing
+    # check ever runs — and the rich and json paths would surface two
+    # different failures for the same flag (audit round 13 P2). Validate
+    # once, on one path, and hand the session the canonical UPPER spelling.
+    valid_levels = ("DEBUG", "INFO", "WARNING", "ERROR")
+    level = log_level.upper()
+    if level not in valid_levels:
+        console.print(
+            f"[red]Invalid log level:[/red] {log_level!r} (use DEBUG, INFO, WARNING, or ERROR)"
+        )
+        raise typer.Exit(1)
+
     # CLI logging is owned by a per-run session context manager
     # (``cli_helpers.logging_session``): ``__enter__`` takes the snapshot
     # and installs the JSON stdout handler or the Rich console handler;
@@ -765,20 +780,14 @@ def main(
     # failure BEFORE that point must not "restore" SIG_DFL — that would
     # clobber a host's signal handler the CLI never touched.
     _sigint_captured = False
-    with logging_session(log_format_lower, log_level, _set_json_mode) as _log_state:
+    with logging_session(log_format_lower, level, _set_json_mode) as _log_state:
         try:
             # Verify ffmpeg is available
             _check_ffmpeg()
 
-            # Set log level (apply to console handler, not the logger itself, so the
-            # file handler still receives DEBUG regardless of the user's choice).
-            valid_levels = ("DEBUG", "INFO", "WARNING", "ERROR")
-            level = log_level.upper()
-            if level not in valid_levels:
-                console.print(
-                    f"[red]Invalid log level:[/red] {log_level!r} (use DEBUG, INFO, WARNING, or ERROR)"
-                )
-                raise typer.Exit(1)
+            # Apply the (already-validated) log level to the console handler,
+            # not the logger itself, so the file handler still receives DEBUG
+            # regardless of the user's choice.
             _console_handler.setLevel(level)
 
             # ``signal.getsignal`` / ``signal.signal`` can only be called from the
@@ -868,11 +877,21 @@ def main(
             # every flag below from the unmerged defaults, so e.g.
             # ``--preset low_memory`` would silently fail to enable
             # x264_low_memory / batch_chunk_size=20 / low_process_priority.
+            #
+            # Precedence contract (README): explicit keys WIN per-key.
+            # ``load_config`` tags the keys it explicitly read from the
+            # YAML file; the preset is applied as a baseline, then each
+            # explicitly-written preset-managed key is layered back on top
+            # — so ``preset: low_memory`` + ``batch_chunk_size: 50`` in one
+            # file runs 50, while keys the user left unset pick up the
+            # preset's value (audit round 13 P1). An explicit --flag still
+            # beats both, enforced by the resolver below.
             resolved_preset = make_resolver(ctx, config, console).resolve("preset", preset)
             # ``apply_preset`` raises ValueError for an unknown preset, and
             # the resolver already rejected any value outside PRESET_NAMES —
             # no separate validity check needed here.
-            config = apply_preset(config, resolved_preset)
+            _explicit = getattr(config, "explicit_keys", None) or frozenset()
+            config = apply_preset(config, resolved_preset, explicit_keys=_explicit)
             resolver = make_resolver(ctx, config, console)
 
             # Resolve each CLI flag against the config via the generic resolver.

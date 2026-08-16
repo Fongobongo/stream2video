@@ -532,6 +532,68 @@ class TestEarlyExitLoggingRestore:
         # --log-level run can't leave a shifted level for the next run.
         assert _console_handler.level == level_before
 
+    def test_bad_log_level_same_error_json_and_rich(self, isolated_defaults, tmp_path):
+        """Audit round 13 P2: a bad ``--log-level`` must produce the SAME
+        user-facing error on both log-format paths. Before the fix the
+        JSON branch fed the level to ``install_json_handler`` before the
+        validation ran, so ``--log-format json`` raised a logging
+        ValueError while the rich path printed "Invalid log level"."""
+        from typer.testing import CliRunner
+
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"x")
+        runner = CliRunner()
+        with patch.object(cli_mod, "_check_ffmpeg", lambda: None):
+            for fmt in ("rich", "json"):
+                result = runner.invoke(
+                    cli_mod.app,
+                    [
+                        str(src),
+                        "-o",
+                        str(tmp_path / "o"),
+                        "--log-format",
+                        fmt,
+                        "--log-level",
+                        "bogus",
+                    ],
+                )
+                assert result.exit_code == 1, (fmt, result.output)
+                assert "Invalid log level" in result.output, (
+                    f"{fmt}: expected the user-facing message, got: {result.output!r}"
+                )
+                assert not isinstance(result.exception, ValueError), (
+                    f"{fmt}: logging raised instead of the validator"
+                )
+
+    def test_rich_session_attaches_console_handler_to_preconfigured_root(self, isolated_defaults):
+        """Audit round 13 P3: when the HOST already configured the root
+        logger, the rich session must still install the Rich console
+        handler (old basicConfig-without-force was a no-op there), and on
+        exit the host's handler list must come back INTACT — not closed,
+        not dropped (one CLI run inside an embedded host must not break
+        the host's logging)."""
+        import logging
+
+        from stream2video.cli_helpers import _console_handler, logging_session
+
+        host = logging.StreamHandler()
+        root = logging.getLogger()
+        saved_handlers = list(root.handlers)
+        saved_level = root.level
+        root.handlers = [host]
+        with logging_session("rich", "INFO") as state:
+            # Inside the session the Rich handler is the ONLY root
+            # handler — that is what ``--log-level`` acts on.
+            assert root.handlers == [_console_handler]
+            assert state.file_handler is None
+        # Session exit restores the host's list verbatim and does NOT
+        # close the host handler (closing it would break the host).
+        assert root.handlers == [host]
+        assert root.level == saved_level
+        assert not host.stream.closed
+        root.handlers = saved_handlers
+        root.setLevel(saved_level)
+
     def test_install_failure_midway_restores_state(self, isolated_defaults, tmp_path):
         """An exception raised INSIDE the session's install section —
         after it has already mutated logging state — must still restore

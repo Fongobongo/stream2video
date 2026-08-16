@@ -165,13 +165,18 @@ class Stream2VideoGUI(
         # reads ``btn_waveform`` — it already has a getattr guard).
         self._build_ui()
 
-        # A hand-edited settings.json may hold a preset whose managed
-        # values diverge from the widgets just built from that file —
-        # ``combo_preset.set()`` doesn't fire the combobox command, so
-        # sync the managed widgets to the preset here (no-op for
-        # balanced / already-consistent settings). See
-        # ``LifecycleMixin._sync_preset_on_load``.
-        self._sync_preset_on_load()
+        # The widgets were just populated from ``self.settings`` by
+        # ``_build_ui``, and the widget values ARE the run's source of
+        # truth (``_start_pipeline`` overlays the widget snapshot on the
+        # config). Therefore the loaded values win as-is — do NOT replay
+        # the preset over them at startup (audit round 13 P1: the old
+        # ``_sync_preset_on_load`` re-applied the preset whenever the
+        # stored values diverged from it, silently destroying a manual
+        # override the user had made after selecting the preset). The
+        # preset combo is display-only; selecting a preset pushes its
+        # tunables into the widgets once (``_on_preset_change``), and any
+        # later hand tweak to those widgets is the value that runs and
+        # persists.
 
         # Wire the log queue → textbox poller once ``txt_log`` exists.
         # ``theme`` selects the warn/error tag colours for the log text.

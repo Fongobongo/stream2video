@@ -213,7 +213,11 @@ PRESET_NAMES = tuple(PRESETS.keys())
 DEFAULT_PRESET = "balanced"
 
 
-def apply_preset(config: dict[str, Any], preset: str) -> dict[str, Any]:
+def apply_preset(
+    config: dict[str, Any],
+    preset: str,
+    explicit_keys: frozenset[str] | None = None,
+) -> dict[str, Any]:
     """Return a new config dict with the preset's tunables applied.
 
     Pure: doesn't mutate ``config``. Unknown ``preset`` raises
@@ -223,15 +227,26 @@ def apply_preset(config: dict[str, Any], preset: str) -> dict[str, Any]:
     everything else the user set is preserved verbatim (YAML values,
     GUI checkbox choices). ``balanced`` is the identity preset — the
     returned dict differs from ``config`` only in the ``preset`` key.
-    Callers that have explicit per-field overrides should apply them
-    after this function.
+
+    ``explicit_keys`` is the set of keys the user EXPLICITLY wrote (the
+    YAML file, per ``load_config``). The preset applies first as a
+    baseline, then each explicitly-written preset-managed key is
+    re-applied on top — "explicit keys win per-key" (audit round 13 P1:
+    ``preset: low_memory`` + ``batch_chunk_size: 50`` in one YAML file
+    used to run ``batch_chunk_size=20`` because the preset overlay ran
+    after the merge and won).
     """
     if preset not in PRESETS:
         raise ValueError(
             f"Unknown preset {preset!r} (use {' or '.join(repr(p) for p in PRESET_NAMES)})"
         )
     out = dict(config)
-    out.update(PRESETS[preset])
+    overrides = PRESETS[preset]
+    out.update(overrides)
+    if explicit_keys:
+        for key in overrides:
+            if key in explicit_keys:
+                out[key] = config[key]
     out["preset"] = preset
     return out
 

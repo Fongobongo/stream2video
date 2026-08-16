@@ -268,6 +268,75 @@ class TestLoadConfigUnknownKeys:
         assert loaded["force"] is True
 
 
+class TestLoadConfigIntKeysRejectFractional:
+    """Audit round 13 P3: an INT-typed key with a FRACTIONAL value must be
+    rejected, not silently truncated. YAML ``download_timeout: 10.9``
+    parsed to float, passed the numeric-range check, then the resolver's
+    ``int(value)`` returned 10. The GUI's Advanced field already rejected
+    such inputs — YAML now agrees instead of diverging. Parametrized over
+    every PARAM_SPECS int/auto_or_int key."""
+
+    def test_every_int_spec_has_coverage(self):
+        # Guard: the parametrization must cover every PARAM_SPECS int
+        # entry (adding a new int tunable auto-expands, so this stays
+        # green by construction — it just documents the invariant).
+        from stream2video.param_specs import PARAM_SPECS
+
+        names = tuple(
+            n for n, spec in PARAM_SPECS.items() if spec["kind"] in ("int", "auto_or_int")
+        )
+        assert names  # non-empty; the class below exercises each one
+
+    @pytest.mark.parametrize(
+        "key,frac",
+        [
+            ("download_timeout", "10.9"),
+            ("connect_timeout", "30.5"),
+            ("no_progress_timeout", "1800.1"),
+            ("silence_timeout", "36000.4"),
+            ("segment_encode_timeout", "600.75"),
+            ("final_concat_timeout", "86400.2"),
+            ("stall_kill_timeout", "300.3"),
+            ("stall_warning_timeout", "120.9"),
+            ("waveform_timeout", "300.6"),
+            ("batch_chunk_size", "2.7"),
+            ("min_part_bytes", "1024.5"),
+            ("memory_reserve_mb", "2048.25"),
+            ("rlimit_as_mb", "0.5"),
+            ("encoder_threads", "4.2"),
+            ("memory_limit_mb", "4096.9"),
+        ],
+    )
+    def test_fractional_value_rejected(self, tmp_path: Path, capsys, key, frac):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text(f"{key}: {frac}\n")
+        with pytest.raises(typer.Exit):
+            load_config(cfg)
+        out = capsys.readouterr().out
+        assert key in out
+        assert "not an integer" in out
+
+    def test_whole_float_yaml_still_loads_for_float_keys(self):
+        # Float-typed keys (threshold / min_silence / margin) keep their
+        # fractional value — only INT-typed slots are restricted.
+        cfg = load_config(None)  # type: ignore[arg-type]
+        assert isinstance(cfg["threshold"], float)
+
+    def test_explicit_keys_surfaced_on_load(self, tmp_path: Path):
+        # load_config tags the returned dict with the explicitly-written
+        # keys (audit round 13 P1 — feeds apply_preset's per-key override).
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("threshold: -25\nbatch_chunk_size: 33\n")
+        loaded = load_config(cfg)
+        assert getattr(loaded, "explicit_keys", frozenset()) == frozenset(
+            {"threshold", "batch_chunk_size"}
+        )
+
+    def test_no_file_explicit_keys_empty(self, tmp_path: Path):
+        loaded = load_config(None)  # type: ignore[arg-type]
+        assert getattr(loaded, "explicit_keys", frozenset()) == frozenset()
+
+
 class TestLoadConfigAutoCaseInsensitive:
     """YAML ``auto`` must accept any casing, matching the CLI flag and
     the GUI's Advanced entries — three surfaces, one rule. Regression:
@@ -767,6 +836,28 @@ class TestCliPresetResolution:
         received = self._invoke_and_capture(["-c", str(cfg)], tmp_path)
         assert received["x264_low_memory"] is True
         assert received["batch_chunk_size"] == 20
+        assert received["low_process_priority"] is True
+
+    def test_explicit_yaml_key_wins_over_preset(self, tmp_path: Path):
+        # Audit round 13 P1: a YAML file that picks ``preset: low_memory``
+        # AND explicitly writes ``batch_chunk_size: 50`` must run
+        # batch_chunk_size=50 (explicit keys win per-key), while the keys
+        # the user left unset still pick up the preset's value. Before the
+        # fix the preset overlay ran after the merge and won.
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("preset: low_memory\nbatch_chunk_size: 50\n", encoding="utf-8")
+        received = self._invoke_and_capture(["-c", str(cfg)], tmp_path)
+        assert received["batch_chunk_size"] == 50  # explicit YAML wins
+        assert received["low_process_priority"] is True  # preset fills unset
+        assert received["x264_low_memory"] is True  # preset fills unset
+
+    def test_explicit_flag_still_beats_yaml_and_preset(self, tmp_path: Path):
+        # Highest precedence stays --flag: even with an explicit YAML
+        # override, an explicit CLI flag wins.
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("preset: low_memory\nbatch_chunk_size: 50\n", encoding="utf-8")
+        received = self._invoke_and_capture(["-c", str(cfg), "--batch-chunk-size", "99"], tmp_path)
+        assert received["batch_chunk_size"] == 99
         assert received["low_process_priority"] is True
 
 

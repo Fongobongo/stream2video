@@ -414,57 +414,95 @@ class TestPresetSync:
             for key in preset:
                 assert gui.settings.get(key) == before.get(key), key
 
-    def test_sync_preset_on_load_noop_when_consistent(self, gui):
-        gui.combo_preset.set("balanced")
-        gui.settings["preset"] = "balanced"
-        before = dict(gui.settings)
-        gui._sync_preset_on_load()
-        _flush_events(gui, 100)
-        assert gui.settings == before
+    def test_startup_keeps_manual_preset_overrides(self, tmp_path, monkeypatch):
+        """Audit round 13 P1: select low_memory, manually untick
+        low_process_priority, restart — the override MUST survive. The
+        old ``_sync_preset_on_load`` replayed the preset whenever the
+        stored values diverged from it, destroying the saved hand
+        override on every startup."""
+        monkeypatch.setattr("stream2video.config._base_dir", lambda: tmp_path)
+        import json
 
-    def test_sync_preset_on_load_repairs_divergent_settings(self, gui):
-        """A hand-edited settings.json: preset=low_memory but the
-        managed values still at factory — the combo would show the
-        preset while the widgets lie. _sync_preset_on_load must push
-        the preset's values into settings AND the widgets."""
-        gui.settings.update(dict(CONFIG_DEFAULTS))
-        gui.settings["preset"] = "low_memory"
-        gui.combo_preset.set("low_memory")
-        # Widget state still at factory (what a divergent file loads).
-        gui.chk_x264_low_memory.deselect()
-        gui.chk_low_process_priority.deselect()
-        gui.entry_batch_chunk_size.delete(0, "end")
-        gui.entry_batch_chunk_size.insert(0, str(CONFIG_DEFAULTS["batch_chunk_size"]))
+        from stream2video.gui import Stream2VideoGUI
 
-        gui._sync_preset_on_load()
-        _flush_events(gui, 100)
+        (tmp_path / "gui_settings.json").write_text(
+            json.dumps(
+                {
+                    "preset": "low_memory",
+                    "x264_low_memory": True,  # preset value
+                    "batch_chunk_size": 20,  # preset value
+                    "low_process_priority": False,  # MANUAL override
+                }
+            ),
+            encoding="utf-8",
+        )
+        try:
+            app = Stream2VideoGUI()
+        except TclError as e:
+            pytest.skip(f"headless environment — TclError on init: {e}")
+        try:
+            app.update_idletasks()
+            _flush_events(app, 100)
+            # The override survives — widgets show the loaded values, not
+            # the preset's.
+            assert bool(app.chk_low_process_priority.get()) is False
+            assert bool(app.chk_x264_low_memory.get()) is True
+            assert app.entry_batch_chunk_size.get() == "20"
+            # The preset combo still displays the stored preset name.
+            assert app.combo_preset.get() == "low_memory"
+            assert app.settings["low_process_priority"] is False
+        finally:
+            try:
+                app.destroy()
+            except TclError:
+                pass
 
-        for key, value in PRESETS["low_memory"].items():
-            assert gui.settings[key] == value, key
-        assert bool(gui.chk_x264_low_memory.get()) is True
-        assert bool(gui.chk_low_process_priority.get()) is True
-        assert gui.entry_batch_chunk_size.get() == str(PRESETS["low_memory"]["batch_chunk_size"])
-        gui._restore_defaults()
-        _flush_events(gui, 200)
+    def test_startup_loads_stored_values_as_source_of_truth(self, tmp_path, monkeypatch):
+        """A hand-edited settings.json whose preset-managed values differ
+        from the stored preset loads verbatim: the loaded values are the
+        source of truth (widgets show them, the run uses them), and the
+        preset is NOT replayed over them. Copy CLI pins such divergences
+        against the preset baseline with explicit flags."""
+        monkeypatch.setattr("stream2video.config._base_dir", lambda: tmp_path)
+        import json
 
-    def test_sync_preset_on_load_noop_for_consistent_preset(self, gui):
-        """When the stored preset's values already match settings,
-        startup must NOT rewrite the widgets (the divergent-check
-        short-circuits)."""
-        gui.settings.update(dict(CONFIG_DEFAULTS))
-        gui.settings.update(PRESETS["low_memory"])
-        gui.settings["preset"] = "low_memory"
-        gui.chk_x264_low_memory.select()
-        gui.chk_low_process_priority.select()
-        before_widgets = {
-            "x264_low_memory": bool(gui.chk_x264_low_memory.get()),
-            "low_process_priority": bool(gui.chk_low_process_priority.get()),
-            "batch_chunk_size": gui.entry_batch_chunk_size.get(),
-        }
-        with patch.object(gui, "_on_preset_change") as mock_change:
-            gui._sync_preset_on_load()
-        mock_change.assert_not_called()
-        assert bool(gui.chk_x264_low_memory.get()) == before_widgets["x264_low_memory"]
+        from stream2video.gui import Stream2VideoGUI
+
+        (tmp_path / "gui_settings.json").write_text(
+            json.dumps(
+                {
+                    "preset": "low_memory",
+                    "x264_low_memory": False,  # factory, diverges from preset
+                    "batch_chunk_size": 40,  # factory, diverges from preset
+                    "low_process_priority": False,
+                }
+            ),
+            encoding="utf-8",
+        )
+        try:
+            app = Stream2VideoGUI()
+        except TclError as e:
+            pytest.skip(f"headless environment — TclError on init: {e}")
+        try:
+            app.update_idletasks()
+            _flush_events(app, 100)
+            assert bool(app.chk_x264_low_memory.get()) is False
+            assert bool(app.chk_low_process_priority.get()) is False
+            assert app.entry_batch_chunk_size.get() == "40"
+            assert app.combo_preset.get() == "low_memory"
+        finally:
+            try:
+                app.destroy()
+            except TclError:
+                pass
+
+    def test_no_startup_preset_replay_exists(self):
+        """``_sync_preset_on_load`` (the startup preset replay that
+        destroyed manual overrides) must stay gone — its removal is the
+        fix for audit round 13 P1."""
+        from stream2video.gui_lifecycle import LifecycleMixin
+
+        assert not hasattr(LifecycleMixin, "_sync_preset_on_load")
 
 
 class TestProxySecretHandling:

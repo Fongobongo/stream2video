@@ -118,21 +118,26 @@ class AdvancedSettingsMixin:
         then immediately overwritten by the widget snapshot — the preset
         was a no-op (audit P1). Now the preset's tunables are pushed into
         the widgets that manage them (and into ``self.settings``) at
-        selection time, so the widgets SHOW what the run will use; Start
-        re-applies the preset on its snapshot and the widget snapshot
-        matches it exactly. ``balanced`` changes nothing (identity
-        preset), so a user's explicit choices below survive a round-trip
-        through 'balanced'.
+        selection time, so the widgets SHOW what the run will use and the
+        widget snapshot is exactly what runs. ``balanced`` changes nothing
+        (identity preset), so a user's explicit choices survive a
+        round-trip through 'balanced'.
+
+        The preset is applied EXACTLY once, at selection: any later hand
+        tweak to a managed widget counts as the user's explicit override
+        and persists (``_save_settings`` writes the widget values). It is
+        deliberately NOT re-applied at startup — a previous startup sync
+        destroyed such saved overrides on restart (audit round 13 P1).
         """
         if preset not in PRESETS:
             return
         overrides = PRESETS[preset]
         self.settings.update(overrides)
         self.settings["preset"] = preset
-        # Programmatic callers (``_sync_preset_on_load`` at startup,
-        # ``_restore_defaults``) land here without firing the combobox
-        # command, so keep the combo in sync too. ``.set()`` on a
-        # readonly combo doesn't invoke ``command`` — no recursion.
+        # Programmatic callers (``_restore_defaults``) land here without
+        # firing the combobox command, so keep the combo in sync too.
+        # ``.set()`` on a readonly combo doesn't invoke ``command`` — no
+        # recursion.
         if self.combo_preset.get() != preset:
             self.combo_preset.set(preset)
         if not overrides:

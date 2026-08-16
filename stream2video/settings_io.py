@@ -24,7 +24,6 @@ from __future__ import annotations
 from typing import Any
 
 from stream2video.config import CONFIG_DEFAULTS as _CONFIG_DEFAULTS
-from stream2video.config import PRESETS as _PRESETS
 from stream2video.config import (
     USER_DEFAULT_KEYS,
     VALID_OUTPUT_FPS,
@@ -228,13 +227,6 @@ ADVANCED_WIDGET_SPECS: dict[str, dict[str, Any]] = {
         "tooltip": "Ceiling on the waveform-preview ffmpeg decode.",
     },
 }
-
-# Keys the resource presets may override. Used by the GUI to re-apply
-# explicit widget choices AFTER ``apply_preset`` (CLI semantics:
-# an explicit flag beats the preset — in the GUI the widgets are the
-# explicit surface). Derived from the PRESETS table so a new preset
-# key is picked up automatically.
-PRESET_TUNABLE_KEYS: tuple[str, ...] = tuple({k for preset in _PRESETS.values() for k in preset})
 
 # Widget attribute name for a key: ``combo_<key>`` / ``entry_<key>``.
 ADVANCED_WIDGET_NAMES: dict[str, str] = {

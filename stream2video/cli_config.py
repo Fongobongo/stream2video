@@ -38,6 +38,30 @@ _CLI_ONLY_FLAGS: dict[str, str] = {
 }
 
 
+class _LoadedConfig(dict):
+    """A plain ``dict`` that ALSO records which keys were EXPLICITLY
+    written in the YAML file.
+
+    ``apply_preset`` reads ``explicit_keys`` to honour the contract
+    "an explicit YAML key wins per-key over the preset" (audit round 13
+    P1). It's a ``dict`` subclass so every existing consumer (resolver,
+    tests that ``==``-compare it, ``dict(config)`` copies) keeps working
+    unchanged.
+    """
+
+    explicit_keys: frozenset[str] = frozenset()
+
+
+# Keys whose PARAM_SPECS type is an integer (plain int or the
+# auto-or-int special form). YAML may hand these a float; the numeric
+# validator rejects any non-integral float so ``PipelineConfig`` never
+# receives ``10.9`` on an int slot (audit round 13 P3 — previously the
+# resolver's unconditional ``int(value)`` silently truncated).
+_INT_SPEC_KEYS = frozenset(
+    name for name, spec in PARAM_SPECS.items() if spec["kind"] in ("int", "auto_or_int")
+)
+
+
 def load_config(config_file: Path | None, console: Any) -> dict:
     """Load and validate configuration file.
 
@@ -48,6 +72,12 @@ def load_config(config_file: Path | None, console: Any) -> dict:
     through its own ``_resolved_*`` check downstream, so an invalid
     YAML value is rejected here regardless of whether the matching
     CLI flag was passed.
+
+    The returned dict carries ``explicit_keys`` (via the
+    :class:`_LoadedConfig` subclass): the frozenset of keys actually
+    written in the YAML file. ``apply_preset`` consults it so an
+    explicit YAML entry wins per-key over the resource preset (audit
+    round 13 P1) while unset managed keys pick up the preset's value.
     """
     # Start from the EFFECTIVE defaults (CONFIG_DEFAULTS + any
     # user_defaults.json overrides), not a bare CONFIG_DEFAULTS.copy():
@@ -164,6 +194,19 @@ def load_config(config_file: Path | None, console: Any) -> dict:
                     )
                     raise typer.Exit(1)
 
+                # An int-typed key with a FRACTIONAL float silently
+                # truncated downstream: YAML parses ``download_timeout:
+                # 10.9`` as a float, passes float(); the resolver's int
+                # branch did ``int(value)`` → 10, and a GUI Advanced field
+                # rejected the same value. All three surfaces now agree
+                # on one rule: an int-typed slot takes a whole number or
+                # nothing (audit round 13 P1). Only EXPLICIT file keys are
+                # checked — untouched keys keep their (already-int)
+                # defaults, never a float.
+                if not value.is_integer() and key in _INT_SPEC_KEYS and key in file_config:
+                    console.print(f"[red]Invalid {key}:[/red] {original!r} is not an integer")
+                    raise typer.Exit(1)
+
                 # Only rewrite when the type changed meaningfully —
                 # YAML ``40`` parses as int and should stay int, and a
                 # YAML ``40.0`` on an INT-typed key (timeouts, sizes)
@@ -236,4 +279,6 @@ def load_config(config_file: Path | None, console: Any) -> dict:
     _config_log = dict(config)
     _config_log["proxy"] = mask_proxy(str(_config_log.get("proxy", "")))
     logger.debug(f"Final config: {_config_log}")
-    return config
+    result = _LoadedConfig(config)
+    result.explicit_keys = frozenset(file_config.keys())
+    return result

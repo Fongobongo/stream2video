@@ -138,6 +138,14 @@ class _Resolver:
         if kind == "int":
             if value is None or isinstance(value, bool):
                 self._fail(name, value, "(must be an integer)")
+            # A YAML / config-path float on an int slot must be a WHOLE
+            # number: ``int(10.9)`` would silently truncate to 10 (the
+            # audit's P1). ``load_config`` rejects a fractional value on
+            # an explicit YAML key, but hosts and tests can feed raw dicts
+            # (and a quoted ``"10.9"`` parses to a float via ``float``) —
+            # so the resolver is the second chokepoint that must agree.
+            if isinstance(value, float) and not value.is_integer():
+                self._fail(name, value, "(must be an integer)")
             try:
                 iv = int(value)  # type: ignore[arg-type]
             except (TypeError, ValueError) as e:

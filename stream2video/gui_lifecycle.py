@@ -17,8 +17,6 @@ from typing import Any, cast
 import customtkinter as ctk
 
 from stream2video.config import (
-    DEFAULT_PRESET,
-    PRESETS,
     effective_defaults,
     save_user_defaults,
     user_defaults_path,
@@ -133,30 +131,6 @@ class LifecycleMixin:
         loaded = _load_settings_from_disk()
         for key, value in loaded.items():
             self.settings[key] = value
-
-    def _sync_preset_on_load(self) -> None:
-        """Startup preset sync (audit round 10 follow-up).
-
-        A hand-edited settings.json may hold a ``preset`` whose managed
-        values diverge from the widgets just built from that same file:
-        ``combo_preset.set(...)`` during the build does NOT fire the
-        combobox ``command``, so the combo would display the preset
-        while the managed widgets keep showing the divergent values —
-        the run would then use the widget values while the GUI implies
-        the preset is active.
-
-        Sync the managed widgets to the preset here (CLI semantics: a
-        preset overrides the stored managed keys; only explicit flags
-        beat it). No-ops for ``balanced`` (identity) and when nothing
-        diverged, so a normal startup does no extra settings write.
-        """
-        preset = self.settings.get("preset", DEFAULT_PRESET)
-        overrides = PRESETS.get(preset)
-        if not overrides:
-            return
-        if all(self.settings.get(k) == v for k, v in overrides.items()):
-            return
-        self._on_preset_change(preset)
 
     def _restore_defaults(self) -> None:
         self.settings = effective_defaults()

@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Explicit YAML keys beat the resource preset (was inverted)** — README promised explicit keys win per-key; the implementation applied the preset's overlay AFTER the YAML merge, so `preset: low_memory` + `batch_chunk_size: 50` ran `batch_chunk_size=20`. `load_config` now tags the returned config with the explicitly-written keys and `apply_preset` applies the preset as a baseline, then layers those explicit YAML keys back on top. Explicit CLI flags still beat both.
+- **GUI no longer destroys manual preset overrides on restart** — the startup `_sync_preset_on_load` replayed the preset whenever the stored values diverged from it, silently overwriting a hand tweak the user made after selecting the preset (`low_memory` + untick "Low process priority" was reset on every launch). The loaded widget values are now the source of truth; the preset is applied exactly once, at selection. `Copy CLI command` continues to pin divergences against the preset baseline with explicit flags.
+- **Fractional YAML values on integer settings are rejected, not truncated** — `download_timeout: 10.9` / `batch_chunk_size: 2.7` slipped through validation and the resolver silently ran `int(10.9)` → 10, while the GUI's Advanced fields already rejected the same input. All `PARAM_SPECS` integer (and auto-or-int) keys now reject a non-integral float in both `load_config` and the resolver, so YAML, CLI flag, and GUI agree: whole numbers only.
+- **Invalid `--log-level` no longer behaves differently with `--log-format json`** — the logging session was entered before the level was validated, and the JSON branch fed the raw value into `install_json_handler`, so a bogus level raised a `logging.ValueError` instead of the friendly "Invalid log level" message (rich mode worked fine). The level is now validated once, before the session runs on either path.
+- **Rich-mode logging works when a host already configured the root logger** — the session's rich path used `logging.basicConfig(handlers=[...])` WITHOUT `force`, which is a no-op on a preconfigured root: the console handler never attached, CLI records leaked into the host's own handlers, and `--log-level` tweaked a handler that wasn't wired up (one flag, three behaviours). The session now explicitly installs its handler on the root for the run's duration and restores the host's exact handler list on exit — intact, never closed, so one embedded CLI run can't break the host's logging.
+
+
 ### Added
 
 - **`--proxy-active` / `--no-proxy-active` flags** — pin the proxy gate explicitly, overriding any `proxy_active: true` stored in `user_defaults.json` / config YAML. Copied GUI commands now emit `--no-proxy-active` when the GUI's proxy checkbox is off, so a paste can no longer silently re-enable a stored proxy.

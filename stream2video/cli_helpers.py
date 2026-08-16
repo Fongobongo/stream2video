@@ -134,18 +134,24 @@ def logging_session(
             # human-readable banner and progress bars are suppressed in
             # JSON mode (they'd pollute the JSON stream).
             _json_handler = install_json_handler(logger, level=log_level.upper())
-            # install_json_handler attached the handler to the app ``logger``.
-            # basicConfig below re-roots the same handler for the root logger.
+            # install_json_handler attached the handler to the app ``logger``;
+            # it is ALSO rooted on the root logger below so records from
+            # every logger (not just "stream2video") come out as JSON.
             # ``logger.propagate`` defaults to True, so without the line below
             # every app record fires the handler TWICE (once directly, once
             # via propagation to the same handler at the root) and stdout
             # JSON is duplicated line-by-line — breaking ``| jq .`` pipes.
             logger.propagate = False
-            logging.basicConfig(
-                level=logging.DEBUG,
-                handlers=[_json_handler],
-                force=True,  # replace any handler the caller attached
-            )
+            # Replace the root handler list directly (NOT
+            # ``basicConfig(force=True)``): the rich branch does the same,
+            # and ``force=True`` would close() any handler the host
+            # attached — but this session is contractually obligated to
+            # return the snapshot intact on exit (one CLI run inside an
+            # embedded host must not break the host's logging). The
+            # session guarantees exactly one handler on the root for the
+            # run's duration and restores the original list on exit.
+            _root_logger.setLevel(logging.DEBUG)
+            _root_logger.handlers = [_json_handler]
             # Keep the stdout stream line-per-JSON-record: point the shared
             # Rich console at stderr and disable the live progress bars.
             # Progress updates are still emitted as JSON log records by the
@@ -156,11 +162,27 @@ def logging_session(
             set_json_mode(True)
         else:
             set_json_mode(False)
-            logging.basicConfig(
-                level=logging.DEBUG,
-                format="%(message)s",
-                handlers=[_console_handler],
-            )
+            # Install the CLI's Rich console handler as the root handler for
+            # THIS run — the session's stated contract ("a handler is
+            # installed for the run's duration") and the only way
+            # ``--log-level`` can act on a handler that is actually wired up.
+            #
+            # Previously this ran ``logging.basicConfig(handlers=[...])``
+            # WITHOUT ``force``: when a host had already configured the root
+            # logger (embedded process, test capture), basicConfig was a
+            # no-op, the Rich handler was never attached, CLI records leaked
+            # to the host's root handlers, and ``--log-level`` adjusted a
+            # dead handler — one flag, three behaviours, contradicted by the
+            # docstring (audit round 13 P3).
+            #
+            # We REPLACE the root handler list directly rather than calling
+            # ``basicConfig(force=True)``: ``force=True`` closes() the
+            # pre-existing handlers, but this session's snapshot/restore is
+            # contractually obligated to return them *intact* on exit — the
+            # host's own logging must not be broken by running one CLI
+            # command inside it (audit round 13 "не ломать host").
+            _root_logger.setLevel(logging.DEBUG)
+            _root_logger.handlers = [_console_handler]
         yield state
     finally:
         if state.file_handler is not None:

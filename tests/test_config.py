@@ -530,3 +530,37 @@ class TestApplyPreset:
                 assert key in CONFIG_DEFAULTS, (
                     f"preset {name!r} overrides {key!r} but it's not in CONFIG_DEFAULTS"
                 )
+
+    # Audit round 13 P1: an EXPLICIT YAML key must win per-key over the
+    # preset. ``apply_preset`` accepts the explicit-key set, applies the
+    # preset as a baseline, then layers those keys back on top.
+    def test_explicit_key_wins_over_preset(self):
+        cfg = dict(CONFIG_DEFAULTS)
+        cfg["batch_chunk_size"] = 50
+        cfg["low_process_priority"] = False
+        # The file explicitly wrote batch_chunk_size; leave the other
+        # preset-managed keys unset so they pick up the preset's value.
+        out = apply_preset(cfg, "low_memory", explicit_keys=frozenset({"batch_chunk_size"}))
+        assert out["batch_chunk_size"] == 50  # explicit YAML wins
+        assert out["low_process_priority"] is True  # preset fills unset
+        assert out["x264_low_memory"] is True  # preset fills unset
+        assert out["preset"] == "low_memory"
+
+    def test_no_explicit_keys_uses_preset(self):
+        cfg = dict(CONFIG_DEFAULTS)
+        cfg["batch_chunk_size"] = 50  # present but NOT marked explicit
+        out = apply_preset(cfg, "low_memory", explicit_keys=frozenset())
+        assert out["batch_chunk_size"] == 20  # preset wins when not explicit
+
+    def test_explicit_key_none_is_identity(self):
+        cfg = dict(CONFIG_DEFAULTS)
+        out = apply_preset(cfg, "low_memory", explicit_keys=None)
+        assert out["batch_chunk_size"] == 20
+
+    def test_explicit_non_managed_key_is_ignored(self):
+        # An explicit key not in the preset's overrides doesn't change
+        # anything (there's nothing to re-layer).
+        cfg = dict(CONFIG_DEFAULTS)
+        out = apply_preset(cfg, "low_memory", explicit_keys=frozenset({"threshold"}))
+        assert out["batch_chunk_size"] == 20
+        assert out["threshold"] == CONFIG_DEFAULTS["threshold"]
