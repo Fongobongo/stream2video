@@ -252,6 +252,148 @@ class TestCreateProcessProbe:
         assert "TerminateProcess=False" in result
         assert calls.count("CloseHandle") == 2
 
+    def _probe_with_job(self, wait_results: list[int], terminate_result=True):
+        """Probe with a kernel32 fake that supports the job object
+        plumbing; records the suspend flag, the job limit flags and
+        every CloseHandle."""
+        calls: list[tuple | str] = []
+
+        class _JobKernel32:
+            def __init__(self, name, use_last_error=False):
+                pass
+
+            def CreateProcessW(self, *a, **k):
+                calls.append(("CreateProcessW", a[5]))
+                return True
+
+            def WaitForSingleObject(self, handle, timeout):
+                calls.append(("WaitForSingleObject", timeout))
+                return wait_results.pop(0)
+
+            def TerminateProcess(self, handle, code):
+                calls.append(("TerminateProcess", code))
+                return terminate_result
+
+            def CreateJobObjectW(self, *a, **k):
+                calls.append("CreateJobObjectW")
+                return 123
+
+            def SetInformationJobObject(self, job, cls, info, size):
+                # ``info`` arrives as the byref() CArgObject; the
+                # underlying structure is reachable through ``._obj``.
+                flags = info._obj.BasicLimitInformation.LimitFlags
+                calls.append(("SetInformationJobObject", cls, flags))
+                return True
+
+            def AssignProcessToJobObject(self, job, proc):
+                calls.append("AssignProcessToJobObject")
+                return True
+
+            def CloseHandle(self, handle):
+                calls.append(("CloseHandle", handle))
+
+        result = self._probe_with_fake(_JobKernel32)
+        return result, calls
+
+    def test_job_object_kills_on_job_close(self):
+        """Audit round 18 P2: the probe must own the child through a job
+        object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, so closing the
+        job handle reaps the process even if TerminateProcess fails —
+        and the child is spawned CREATE_SUSPENDED so it never executes
+        code just for a diagnostic."""
+        result, calls = self._probe_with_job([self.WAIT_OBJECT_0])
+        assert "CreateProcessW OK" in result
+        assert "spawn succeeded" in result
+        # CREATE_SUSPENDED (0x4) — the probe must not run the binary.
+        assert ("CreateProcessW", 0x00000004) in calls
+        # JobObjectExtendedLimitInformation (9) with the kill flag set.
+        assert ("SetInformationJobObject", 9, 0x2000) in calls
+        assert "AssignProcessToJobObject" in calls
+        # job + process + thread — all three handles closed.
+        closes = [c for c in calls if isinstance(c, tuple) and c[0] == "CloseHandle"]
+        assert len(closes) == 3
+
+    def test_job_reaps_child_alive_after_failed_terminate(self):
+        """With the job in place, "child still alive after terminate"
+        must state that the job reaps it on handle close — a diagnostic
+        that can no longer coincide with an actual leak."""
+        result, calls = self._probe_with_job(
+            [self.WAIT_TIMEOUT, self.WAIT_TIMEOUT], terminate_result=False
+        )
+        assert "child still alive after terminate" in result
+        assert "reaped by job KILL_ON_JOB_CLOSE" in result
+        assert ("SetInformationJobObject", 9, 0x2000) in calls
+        closes = [c for c in calls if isinstance(c, tuple) and c[0] == "CloseHandle"]
+        assert len(closes) == 3
+
+    def test_job_setup_failure_degrades_to_terminate_only(self):
+        """If the job can't be created (ancient Windows / driver), the
+        probe must degrade silently to terminate+re-wait — not turn into
+        "probe raised ..."."""
+        calls: list[tuple | str] = []
+
+        class _NoJobKernel32:
+            def __init__(self, name, use_last_error=False):
+                pass
+
+            def CreateProcessW(self, *a, **k):
+                calls.append("CreateProcessW")
+                return True
+
+            def WaitForSingleObject(self, handle, timeout):
+                calls.append(("WaitForSingleObject", timeout))
+                return 0x00000102  # WAIT_TIMEOUT every time
+
+            def TerminateProcess(self, handle, code):
+                calls.append(("TerminateProcess", code))
+                return True
+
+            def CreateJobObjectW(self, *a, **k):
+                return None  # no job support
+
+            def CloseHandle(self, handle):
+                calls.append(("CloseHandle", handle))
+
+        result = self._probe_with_fake(_NoJobKernel32)
+        assert "CreateProcessW OK" in result
+        assert "child still alive after terminate" in result
+        assert "reaped by job" not in result
+        # Degraded path closes only the two process handles.
+        closes = [c for c in calls if isinstance(c, tuple) and c[0] == "CloseHandle"]
+        assert len(closes) == 2
+
+    def test_close_failure_on_first_handle_still_closes_others(self):
+        """Audit round 18 P3: a raising CloseHandle on the first handle
+        must not skip the remaining closes — each handle is closed
+        independently."""
+        calls: list[str] = []
+
+        class _ExplodingCloseKernel32:
+            def __init__(self, name, use_last_error=False):
+                pass
+
+            def CreateProcessW(self, *a, **k):
+                calls.append("CreateProcessW")
+                return True
+
+            def WaitForSingleObject(self, handle, timeout):
+                return 0x00000000  # WAIT_OBJECT_0
+
+            def TerminateProcess(self, handle, code):
+                calls.append(("TerminateProcess", code))
+                return True
+
+            def CloseHandle(self, handle):
+                calls.append("CloseHandle")
+                if calls.count("CloseHandle") == 1:
+                    raise OSError("close exploded")
+
+        result = self._probe_with_fake(_ExplodingCloseKernel32)
+        assert "spawn succeeded" in result
+        # Both CloseHandle attempts happened — the first raised, the
+        # second (thread handle) still ran.
+        assert calls.count("CloseHandle") == 2
+
     def _probe_with_fake(self, fake_kernel32_factory):
         import ctypes as _ctypes_mod
 
@@ -535,3 +677,25 @@ class TestSpawnWithRetryBehaviour:
         assert result == "ok"
         assert calls[1][0][0] == "C:/resolved/ffprobe.exe"
         assert probes == ["ffprobe"]
+
+    def test_real_platform_fnf_retries_without_winerror(self):
+        """Audit round 18 P1: on POSIX ``FileNotFoundError`` has no
+        ``winerror`` attribute — the diagnostic log used to read it
+        directly, so the FIRST failure raised AttributeError instead of
+        retrying (and instead of re-raising the original FileNotFoundError).
+        This test runs UNPATCHED for ``os.name`` with a genuine
+        FileNotFoundError, so on Linux CI it exercises the real posix
+        path and on Windows the real nt path; either way the retry must
+        complete."""
+        calls: list = []
+        result, probes, reset_cache, reset_enc = self._spawn(
+            "run",
+            ["ffmpeg", "-version"],
+            {},
+            self._failing_until(calls, 2, "ok"),
+        )
+        assert result == "ok"
+        assert len(calls) == 3
+        assert len(probes) == 2
+        assert reset_cache.call_count == 2
+        assert reset_enc.call_count == 2

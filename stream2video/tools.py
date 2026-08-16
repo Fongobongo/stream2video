@@ -258,12 +258,17 @@ def _spawn_with_retry(
             # models it platform-gated, so Linux CI needs the ignore (it is
             # unused on Windows — see the mypy override in pyproject).
             logger.warning(
-                "spawn attempt %d/%d failed (FileNotFoundError: filename=%r "
-                "winerror=%s); CreateProcess probe: %s",
+                "spawn attempt %d/%d failed (FileNotFoundError: errno=%r "
+                "filename=%r winerror=%r); CreateProcess probe: %s",
                 attempt + 1,
                 1 + _SPAWN_RETRY_ATTEMPTS,
+                exc.errno,
                 exc.filename,
-                exc.winerror,  # type: ignore[attr-defined]
+                # ``winerror`` exists only on Windows OSError instances;
+                # reading it directly crashed the retry loop with an
+                # AttributeError on POSIX before the next attempt could
+                # run (audit round 18 P1).
+                getattr(exc, "winerror", None),
                 probe,
             )
             if attempt >= _SPAWN_RETRY_ATTEMPTS:
@@ -284,6 +289,19 @@ def _spawn_with_retry(
             time.sleep(_SPAWN_RETRY_DELAY_S)
     assert last_exc is not None
     raise last_exc
+
+
+def _safe_close_handle(kernel32: Any, handle: Any) -> None:
+    """Close a Win32 handle without letting one failure skip the rest.
+
+    The probe owns up to three handles (job, process, thread); a
+    raising ``CloseHandle`` (ctypes wrapper / mock error) must not
+    prevent the remaining closes (audit round 18 P3).
+    """
+    try:
+        kernel32.CloseHandle(handle)
+    except Exception:  # pragma: no cover - best-effort cleanup
+        pass
 
 
 def _createprocess_probe(exe: str) -> str:
@@ -356,7 +374,15 @@ def _createprocess_probe(exe: str) -> str:
             None,
             None,
             False,
-            0,
+            # CREATE_SUSPENDED (0x4): the probe never lets the child
+            # execute code (audit round 18 P2). The retry branch already
+            # failed to spawn this binary; letting it actually run just
+            # for a diagnostic could execute arbitrary shim/AV-filter
+            # code, and the emergency branch must not be able to stack a
+            # second live process on top of the original failure. A
+            # suspended process cannot run anything — it is reaped with
+            # TerminateProcess and/or the job object below.
+            0x00000004,
             None,
             None,
             ctypes.byref(si),
@@ -368,14 +394,80 @@ def _createprocess_probe(exe: str) -> str:
                 f"CreateProcessW failed: winerror={err} "
                 f"({ctypes.FormatError(err).strip()}); exists={exists}"  # type: ignore[attr-defined]
             )
-        # From here the probe OWNS the child's process/thread handles.
-        # Every exit path — success, wait timeout, an exception raised by
-        # the wait/terminate/formatting calls — must close both handles
-        # AND must not leave the child running (audit round 14 P2: a
-        # hung child was orphaned; audit round 15 P2: an exception after
-        # CreateProcessW skipped the cleanup entirely). The ``finally``
-        # closes the handles; the ``except`` terminates the child
-        # best-effort if we never confirmed its exit.
+        # Job object with JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: closing the
+        # job handle below is a GUARANTEED reaper — the kernel kills the
+        # process even if TerminateProcess is rejected/raises, so the
+        # "child still alive" diagnostic can no longer coincide with an
+        # actual leak. Best-effort: if the job can't be created/assigned
+        # (ancient Windows, exotic driver), fall back to the terminate +
+        # bounded re-wait path alone.
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+        JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS = 9
+
+        class IO_COUNTERS(ctypes.Structure):
+            _fields_: ClassVar[list[tuple[str, Any]]] = [
+                ("ReadOperationCount", ctypes.c_ulonglong),
+                ("WriteOperationCount", ctypes.c_ulonglong),
+                ("OtherOperationCount", ctypes.c_ulonglong),
+                ("ReadTransferCount", ctypes.c_ulonglong),
+                ("WriteTransferCount", ctypes.c_ulonglong),
+                ("OtherTransferCount", ctypes.c_ulonglong),
+            ]
+
+        class JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_: ClassVar[list[tuple[str, Any]]] = [
+                ("PerProcessUserTimeLimit", wintypes.LARGE_INTEGER),
+                ("PerJobUserTimeLimit", wintypes.LARGE_INTEGER),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class JOBOBJECT_EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
+            _fields_: ClassVar[list[tuple[str, Any]]] = [
+                ("BasicLimitInformation", JOBOBJECT_BASIC_LIMIT_INFORMATION),
+                ("IoInfo", IO_COUNTERS),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        job: Any = None
+        job_ok = False
+        try:
+            job = kernel32.CreateJobObjectW(None, None)
+            if job:
+                info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                if kernel32.SetInformationJobObject(
+                    job,
+                    JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+                    ctypes.byref(info),
+                    ctypes.sizeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION),
+                ):
+                    job_ok = bool(kernel32.AssignProcessToJobObject(job, pi.hProcess))
+        except Exception:
+            # Job setup is best-effort plumbing; a broken job must not
+            # turn the probe itself into "probe raised ...".
+            job = None
+            job_ok = False
+        # From here the probe OWNS the child's process/thread handles
+        # (and the job handle, if one was created). Every exit path —
+        # success, wait timeout, an exception raised by the
+        # wait/terminate/formatting calls — must close all handles AND
+        # must not leave the child running (audit round 14 P2: a hung
+        # child was orphaned; audit round 15 P2: an exception after
+        # CreateProcessW skipped the cleanup entirely; audit round 18
+        # P2: the job object guarantees the kill even when
+        # TerminateProcess fails). The ``finally`` closes every handle
+        # INDEPENDENTLY (audit round 18 P3: a raising CloseHandle must
+        # not skip the remaining closes); the ``except`` terminates the
+        # child best-effort if we never confirmed its exit.
         try:
             # Wait for the child to exit so we don't leak a live ffmpeg
             # on the user's machine just for a diagnostic — and so AV
@@ -409,8 +501,17 @@ def _createprocess_probe(exe: str) -> str:
                     f"(TerminateProcess={terminated}); wait={wait:#x}"
                 )
             # Child still alive after the kill attempt (terminate failed
-            # or was rejected): reflect the real outcome — the old code
-            # reported success here and closed the handles anyway.
+            # or was rejected). With a job object this can no longer
+            # mean a leak: closing the job handle in the finally reaps
+            # the process via JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE. Without
+            # one (job setup degraded) the child may genuinely survive —
+            # report that loudly so a caller can act on it.
+            if job_ok:
+                return (
+                    f"CreateProcessW OK (exists={exists}); child still alive after "
+                    f"terminate (wait={wait:#x}, post-kill wait={wait2:#x}, "
+                    f"TerminateProcess={terminated}); reaped by job KILL_ON_JOB_CLOSE"
+                )
             return (
                 f"CreateProcessW OK (exists={exists}); child still alive after "
                 f"terminate (wait={wait:#x}, post-kill wait={wait2:#x}, "
@@ -426,8 +527,15 @@ def _createprocess_probe(exe: str) -> str:
                 pass
             return f"probe raised {type(e).__name__}: {e}"
         finally:
-            kernel32.CloseHandle(pi.hProcess)
-            kernel32.CloseHandle(pi.hThread)
+            # Close every handle INDEPENDENTLY (audit round 18 P3): a
+            # CloseHandle that raises (ctypes wrapper / mock error) must
+            # not skip the remaining closes. The job handle closes last
+            # when it holds the kill guarantee — but ordering among the
+            # three is otherwise irrelevant.
+            if job:
+                _safe_close_handle(kernel32, job)
+            _safe_close_handle(kernel32, pi.hProcess)
+            _safe_close_handle(kernel32, pi.hThread)
     except Exception as e:  # pragma: no cover - probe must never kill the caller
         return f"probe raised {type(e).__name__}: {e}"
 

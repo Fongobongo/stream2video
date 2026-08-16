@@ -158,6 +158,25 @@ class TestLoadSettings:
         assert "margin" not in loaded
         assert loaded == {"method": "segment"}
 
+    def test_out_of_range_ints_dropped(self, _settings_at: Path):
+        # Audit round 18 P2: int-typed settings outside their
+        # CONFIG_RANGES bound must not load into the GUI (previously
+        # only float-typed defaults were range-checked on load).
+        _settings_at.write_text(
+            json.dumps(
+                {
+                    "batch_chunk_size": 999999,
+                    "stall_kill_timeout": 1,
+                    "segment_encode_timeout": 60,
+                }
+            ),
+            encoding="utf-8",
+        )
+        loaded = load_settings()
+        assert "batch_chunk_size" not in loaded
+        assert "stall_kill_timeout" not in loaded
+        assert loaded == {"segment_encode_timeout": 60}
+
 
 class TestGuiSessionKeys:
     def test_documented_keys(self):

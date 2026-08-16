@@ -257,6 +257,26 @@ class TestLoadUserDefaults:
         assert "margin" not in result
         assert result == {"per_video_dir": True}
 
+    def test_out_of_range_ints_dropped(self, tmp_path, monkeypatch):
+        # Audit round 18 P2: an int-typed setting outside its
+        # CONFIG_RANGES bound must not load (previously only float-
+        # typed defaults were range-checked here).
+        fake = tmp_path / "user_defaults.json"
+        fake.write_text(
+            json.dumps(
+                {
+                    "batch_chunk_size": 999999,
+                    "stall_kill_timeout": 1,
+                    "segment_encode_timeout": 60,
+                }
+            )
+        )
+        monkeypatch.setattr("stream2video.config.user_defaults_path", lambda: fake)
+        result = load_user_defaults()
+        assert "batch_chunk_size" not in result
+        assert "stall_kill_timeout" not in result
+        assert result == {"segment_encode_timeout": 60}
+
     def test_corrupt_json_returns_empty(self, tmp_path, monkeypatch):
         fake = tmp_path / "user_defaults.json"
         fake.write_text("{not valid json")
@@ -418,6 +438,9 @@ class TestPipelinePhaseTimeouts:
             assert coerce_typed_value(key, None) is None
 
     def test_phase_timeout_coerce_accepts_int(self):
+        # In-range ints load; the value must also satisfy the key's
+        # CONFIG_RANGES bound (audit round 18 P2) — 1234 used to be
+        # accepted for batch_chunk_size, whose range is 1..500.
         for key in (
             "segment_encode_timeout",
             "silence_timeout",
@@ -425,7 +448,24 @@ class TestPipelinePhaseTimeouts:
             "batch_chunk_size",
             "min_part_bytes",
         ):
-            assert coerce_typed_value(key, 1234) == 1234
+            assert coerce_typed_value(key, 120) == 120
+
+    def test_phase_timeout_coerce_rejects_out_of_range_int(self):
+        # Saved JSON defaults are now range-checked like every other
+        # surface: a hand-edited batch_chunk_size: 999999 or
+        # stall_kill_timeout: 1 must not reach the GUI/effective
+        # defaults, only to fail later at validate_pipeline_config.
+        for key, lo, hi in (
+            ("segment_encode_timeout", 1, 604800),
+            ("silence_timeout", 1, 604800),
+            ("waveform_timeout", 10, 3600),
+            ("batch_chunk_size", 1, 500),
+            ("min_part_bytes", 1, 10485760),
+        ):
+            assert coerce_typed_value(key, lo - 1) is None
+            assert coerce_typed_value(key, hi + 1) is None
+            assert coerce_typed_value(key, lo) == lo
+            assert coerce_typed_value(key, hi) == hi
 
     def test_atomic_write_no_leftover_tmp(self, tmp_path, monkeypatch):
         fake = tmp_path / "user_defaults.json"

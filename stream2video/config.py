@@ -548,19 +548,22 @@ def coerce_typed_value(key: str, value: Any) -> Any:
         if isinstance(default, int) and isinstance(value, float):
             if not value.is_integer():
                 return None
-            return int(value)
-        # Float-typed defaults are also range-checked here against the
-        # SAME CONFIG_RANGES the CLI YAML path and
-        # ``validate_pipeline_config`` enforce — an out-of-range but
-        # finite value (``threshold: -70``) in settings.json used to
-        # load silently and only fail mid-run at validation.
-        if isinstance(default, float):
-            lo_f: float = -math.inf
-            hi_f: float = math.inf
-            if key in CONFIG_RANGES:
-                lo_f, hi_f = CONFIG_RANGES[key]
-            if not lo_f <= value <= hi_f:
-                return None
+            value = int(value)
+        # Range-check EVERY numeric key against the same CONFIG_RANGES
+        # the CLI YAML path and ``validate_pipeline_config`` enforce
+        # (audit round 18 P2) — an out-of-range but finite value
+        # (``batch_chunk_size: 999999``, ``stall_kill_timeout: 1``) in
+        # settings.json / user_defaults.json used to load into the GUI
+        # and effective defaults, then only fail later at pipeline
+        # validation, leaving the saved defaults unusable without manual
+        # file surgery. Keys without a CONFIG_RANGES entry keep the
+        # unbounded contract.
+        lo_f: float = -math.inf
+        hi_f: float = math.inf
+        if key in CONFIG_RANGES:
+            lo_f, hi_f = CONFIG_RANGES[key]
+        if not lo_f <= value <= hi_f:
+            return None
         return value
     if isinstance(default, str):
         if not isinstance(value, str):
