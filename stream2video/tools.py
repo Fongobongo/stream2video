@@ -175,13 +175,16 @@ def _spawn_with_retry(
         except FileNotFoundError as exc:
             last_exc = exc
             probe = _createprocess_probe(cmd[0])
+            # ``winerror`` exists on Windows OSError instances; typeshed
+            # models it platform-gated, so Linux CI needs the ignore (it is
+            # unused on Windows — see the mypy override in pyproject).
             logger.warning(
                 "spawn attempt %d/%d failed (FileNotFoundError: filename=%r "
                 "winerror=%s); CreateProcess probe: %s",
                 attempt + 1,
                 1 + _SPAWN_RETRY_ATTEMPTS,
                 exc.filename,
-                exc.winerror,
+                exc.winerror,  # type: ignore[attr-defined]
                 probe,
             )
             if attempt >= _SPAWN_RETRY_ATTEMPTS:
@@ -214,7 +217,11 @@ def _createprocess_probe(exe: str) -> str:
     import ctypes
     from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    # WinDLL / get_last_error / FormatError are Windows-only ctypes
+    # helpers; typeshed exposes them on all platforms' type info but marks
+    # the attributes platform-gated, so Linux CI needs the ignores (unused
+    # on Windows — see the mypy override in pyproject).
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
     try:
         try:
             exists = Path(exe).is_file()
@@ -284,8 +291,11 @@ def _createprocess_probe(exe: str) -> str:
             kernel32.CloseHandle(pi.hProcess)
             kernel32.CloseHandle(pi.hThread)
             return f"CreateProcessW OK (exists={exists}); spawn succeeded"
-        err = ctypes.get_last_error()
-        return f"CreateProcessW failed: winerror={err} ({ctypes.FormatError(err).strip()}); exists={exists}"
+        err = ctypes.get_last_error()  # type: ignore[attr-defined]
+        return (
+            f"CreateProcessW failed: winerror={err} "
+            f"({ctypes.FormatError(err).strip()}); exists={exists}"  # type: ignore[attr-defined]
+        )
     except Exception as e:  # pragma: no cover - probe must never kill the caller
         return f"probe raised {type(e).__name__}: {e}"
 

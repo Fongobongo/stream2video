@@ -88,9 +88,13 @@ def ensure_completion_chime(path: Path | None = None, *, kind: str = "success") 
 def _play_with_winsound(chime: Path) -> str | None:
     import winsound
 
-    winsound.PlaySound(
+    # ``winsound`` is Windows-only: its stubs (including the SND_*
+    # constants) are not part of the POSIX typeshed, so CI's Linux mypy
+    # pass can't see these attributes even though the call only ever runs
+    # on Windows (guarded by ``sys.platform == "win32"`` below).
+    winsound.PlaySound(  # type: ignore[attr-defined]
         str(chime),
-        winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
+        winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT,  # type: ignore[attr-defined]
     )
     return None
 

@@ -147,3 +147,11 @@ module = [
     "stream2video.gui_waveform_window",
 ]
 disable_error_code = ["attr-defined", "misc", "has-type"]
+
+# Platform-gated Windows-only code (winsound.PlaySound, ctypes.WinDLL,
+# OSError.winerror): marked with ``# type: ignore[attr-defined]`` for CI's
+# Linux run, but those ignores are unused on Windows — disable the
+# unused-ignore warning on just these modules so both platforms pass.
+[[tool.mypy.overrides]]
+module = ["stream2video.completion_sound", "stream2video.tools"]
+warn_unused_ignores = false
