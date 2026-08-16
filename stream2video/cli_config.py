@@ -8,6 +8,7 @@ works the same as before.
 
 import difflib
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,22 @@ from stream2video.gui_helpers import mask_proxy
 from stream2video.param_specs import PARAM_SPECS
 
 logger = logging.getLogger("stream2video")
+
+# Keys the CLI YAML contract accepts: every PARAM_SPECS tunable (the
+# pipeline-parameter table shared with the resolver and the GUI's
+# copied-command builder) plus ``output_dir``, which the CLI reads
+# directly. NOT ``CONFIG_DEFAULTS`` as a whole — the remaining members
+# (``theme``, ``recent_projects``) are GUI-only / per-session keys the
+# CLI never applies, so accepting them in a YAML file reproduces the
+# ``log_format`` defect: a setting that looks accepted but isn't
+# connected (audit round 15 P2).
+CLI_CONFIG_KEYS: frozenset[str] = frozenset(PARAM_SPECS) | frozenset({"output_dir"})
+
+# CONFIG_DEFAULTS members that exist but are GUI-only / session state.
+# They get a dedicated message instead of the generic nearest-match
+# hint so the user learns the key is not part of the CLI contract at
+# all (not "did you mean X").
+_GUI_ONLY_CONFIG_KEYS: frozenset[str] = frozenset({"theme", "recent_projects"})
 
 # Keys that exist ONLY on the CLI as flags, not in CONFIG_DEFAULTS —
 # they can end up in a YAML file (the pre-audit README documented
@@ -147,7 +164,7 @@ def load_config(config_file: Path | None, console: Any) -> dict:
     # points users at an entirely different knob (container/codec vs
     # log format). The right guidance is "remove the key, use the flag"
     # (audit round 13 feedback on the breaking-change messaging).
-    unknown = sorted(set(file_config) - set(CONFIG_DEFAULTS))
+    unknown = sorted(set(file_config) - CLI_CONFIG_KEYS)
     if unknown:
         for key in unknown:
             flag = _CLI_ONLY_FLAGS.get(key)
@@ -158,7 +175,13 @@ def load_config(config_file: Path | None, console: Any) -> dict:
                     f"file and pass {flag} on the command line"
                 )
                 continue
-            near = difflib.get_close_matches(key, list(CONFIG_DEFAULTS), n=3)
+            if key in _GUI_ONLY_CONFIG_KEYS:
+                console.print(
+                    f"[red]Unknown config key:[/red] {key!r} is GUI-only — "
+                    f"the CLI never applies it, remove it from the YAML file"
+                )
+                continue
+            near = difflib.get_close_matches(key, list(CLI_CONFIG_KEYS), n=3)
             hint = f" (did you mean {' or '.join(repr(k) for k in near)}?)" if near else ""
             console.print(f"[red]Unknown config key:[/red] {key!r}{hint}")
         raise typer.Exit(1)
@@ -216,6 +239,17 @@ def load_config(config_file: Path | None, console: Any) -> dict:
                 continue
             try:
                 value = float(original)
+
+                # NaN / ±Infinity must not pass: ``min <= value <= max``
+                # is False for nan (every comparison is False), so a YAML
+                # ``threshold: .nan`` or ``download_timeout: 1e999`` used
+                # to sail through range validation and poison every
+                # downstream numeric consumer (ffmpeg args, cache config,
+                # segment / progress math) with an opaque failure far from
+                # the input (audit round 15 P1).
+                if not math.isfinite(value):
+                    console.print(f"[red]Invalid {key}:[/red] {original!r} is not a finite number")
+                    raise typer.Exit(1)
 
                 if not min_val <= value <= max_val:
                     console.print(

@@ -119,7 +119,12 @@ def _ffmpeg_major_minor() -> tuple[int, int] | None:
     instead of silently).
     """
     try:
-        proc = subprocess.run(
+        # The version probe runs through the retry layer too (audit round
+        # 15 P2): the flag-fork decision below is made ONCE per process
+        # and cached, so a transient FileNotFoundError from a WinGet shim
+        # replacement / AV filter must not silently force the legacy
+        # ``-filter_complex_script`` spelling for the whole process.
+        proc = run_with_retry(
             [ffmpeg_path(), "-version"],
             capture_output=True,
             text=True,
@@ -357,18 +362,29 @@ def _createprocess_probe(exe: str) -> str:
             ctypes.byref(si),
             ctypes.byref(pi),
         )
-        if ok:
+        if not ok:
+            err = ctypes.get_last_error()  # type: ignore[attr-defined]
+            return (
+                f"CreateProcessW failed: winerror={err} "
+                f"({ctypes.FormatError(err).strip()}); exists={exists}"  # type: ignore[attr-defined]
+            )
+        # From here the probe OWNS the child's process/thread handles.
+        # Every exit path — success, wait timeout, an exception raised by
+        # the wait/terminate/formatting calls — must close both handles
+        # AND must not leave the child running (audit round 14 P2: a
+        # hung child was orphaned; audit round 15 P2: an exception after
+        # CreateProcessW skipped the cleanup entirely). The ``finally``
+        # closes the handles; the ``except`` terminates the child
+        # best-effort if we never confirmed its exit.
+        try:
             # Wait for the child to exit so we don't leak a live ffmpeg
             # on the user's machine just for a diagnostic — and so AV
             # software sees a complete spawn+exit, not an orphan. If the
             # child hasn't exited within the window (a hung spawn on a
             # broken shim / AV scan), TERMINATE it explicitly before
-            # closing the handles — the old code closed them
-            # unconditionally, so a slow ``ffmpeg -version`` kept running
-            # with nobody holding its handle (audit round 14 P2; the
-            # probe runs in the emergency retry branch, so an orphan
-            # would stack a second hung process on top of the original
-            # spawn failure).
+            # closing the handles (the probe runs in the emergency retry
+            # branch, so an orphan would stack a second hung process on
+            # top of the original spawn failure).
             wait = kernel32.WaitForSingleObject(pi.hProcess, 2000)
             if wait == 0x00000102:  # WAIT_TIMEOUT
                 kernel32.TerminateProcess(pi.hProcess, 1)
@@ -379,14 +395,19 @@ def _createprocess_probe(exe: str) -> str:
                 # already dead to the scheduler, so this returns almost
                 # immediately in practice.
                 kernel32.WaitForSingleObject(pi.hProcess, 10000)
+            return f"CreateProcessW OK (exists={exists}); spawn succeeded"
+        except Exception as e:  # pragma: no cover - probe must never kill the caller
+            # We never confirmed the child exited (wait/terminate
+            # raised): kill it best-effort so a diagnostic failure can't
+            # leave a live ffmpeg behind, then report the exception.
+            try:
+                kernel32.TerminateProcess(pi.hProcess, 1)
+            except Exception:
+                pass
+            return f"probe raised {type(e).__name__}: {e}"
+        finally:
             kernel32.CloseHandle(pi.hProcess)
             kernel32.CloseHandle(pi.hThread)
-            return f"CreateProcessW OK (exists={exists}); spawn succeeded"
-        err = ctypes.get_last_error()  # type: ignore[attr-defined]
-        return (
-            f"CreateProcessW failed: winerror={err} "
-            f"({ctypes.FormatError(err).strip()}); exists={exists}"  # type: ignore[attr-defined]
-        )
     except Exception as e:  # pragma: no cover - probe must never kill the caller
         return f"probe raised {type(e).__name__}: {e}"
 

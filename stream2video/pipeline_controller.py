@@ -1379,6 +1379,13 @@ def validate_pipeline_config(cfg: PipelineConfig) -> list[str]:
         if isinstance(value, bool) or not isinstance(value, int | float):
             errors.append(f"{key} {value!r} must be a number.")
             continue
+        # NaN / ±Infinity: ``lo <= value <= hi`` is False for nan (all
+        # comparisons False), so a non-finite float used to pass the
+        # range check and poison the pipeline's numeric model (audit
+        # round 15 P1 — direct API hosts, stale settings.json).
+        if isinstance(value, float) and not math.isfinite(value):
+            errors.append(f"{key} {value!r} must be a finite number.")
+            continue
         if not lo <= value <= hi:
             errors.append(f"{key} {value} out of range [{lo}, {hi}].")
     # Float-typed slots must stay float: an int leaked into

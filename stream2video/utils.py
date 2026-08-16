@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, Protocol
 
-from stream2video.tools import ffprobe_path
+from stream2video.tools import ffprobe_path, run_with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +100,7 @@ def get_video_bitrate(video_path: Path) -> int | None:
         str(video_path),
     ]
     try:
-        result = subprocess.run(
+        result = run_with_retry(
             cmd,
             capture_output=True,
             text=True,
@@ -136,7 +136,7 @@ def get_video_duration(video_path: Path) -> float | None:
         str(video_path),
     ]
     try:
-        result = subprocess.run(
+        result = run_with_retry(
             cmd,
             capture_output=True,
             text=True,
@@ -185,7 +185,7 @@ def get_video_start_time(video_path: Path) -> float:
         str(video_path),
     ]
     try:
-        result = subprocess.run(
+        result = run_with_retry(
             cmd,
             capture_output=True,
             text=True,
@@ -303,7 +303,7 @@ def has_audio_stream(video_path: Path) -> bool:
         str(video_path),
     ]
     try:
-        result = subprocess.run(
+        result = run_with_retry(
             cmd,
             capture_output=True,
             text=True,

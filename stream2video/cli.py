@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import shutil
 import signal
-import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -60,6 +59,7 @@ from stream2video.pipeline_controller import (
     PipelineUnexpectedError,
     build_pipeline_config,
 )
+from stream2video.tools import run_with_retry
 
 # Module-level flag toggled by --log-format json. When True the human-
 # readable banner and Rich progress bars are suppressed so the stdout
@@ -223,8 +223,12 @@ def _run_doctor(config_file: Path | None = None) -> bool:
         exe = shutil.which(tool)
         if exe:
             try:
+                # run_with_retry (audit round 15 P2): a transient
+                # FileNotFoundError from a WinGet shim replacement / AV
+                # filter must not turn the doctor's version line into
+                # "(version unknown)" — retry with re-resolution first.
                 out = (
-                    subprocess.run(
+                    run_with_retry(
                         [exe, "-version"], capture_output=True, text=True, timeout=5, check=False
                     )
                     .stdout.splitlines()[0]

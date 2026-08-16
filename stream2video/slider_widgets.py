@@ -28,6 +28,8 @@ stays in ``gui.py`` — only the pure math / parse / format moves.
 
 from __future__ import annotations
 
+import math
+
 # Round-trip precision: slider steps are 0.1 apart, so anything finer
 # than 0.1 in the entry display doesn't match a slider stop and looks
 # like a bug. The GUI used to call ``round(val, 1)`` inline — same here.
@@ -75,6 +77,13 @@ def parse_slider_entry_value(text: str, min_v: float, max_v: float) -> float | N
         val = float(text.replace(",", "."))
     except (ValueError, AttributeError):
         return None
+    # NaN / ±Infinity: ``max/min`` clamps are all False-comparing against
+    # nan, so the clamp below would either pass nan through or silently
+    # land on a range bound — the GUI must reject, not substitute (audit
+    # round 15 P1). Return None so the caller falls back to the slider's
+    # current value, exactly like a parse failure.
+    if not math.isfinite(val):
+        return None
     val = max(min_v, min(max_v, val))
     return round(val, SLIDER_VALUE_PRECISION)
 
@@ -107,6 +116,10 @@ def sync_slider_entries(
         try:
             val = float(text.replace(",", "."))
         except (ValueError, AttributeError):
+            continue
+        # NaN / ±Infinity: reject like a parse failure instead of
+        # clamping to a range bound (audit round 15 P1).
+        if not math.isfinite(val):
             continue
         if bounds is not None and key in bounds:
             min_v, max_v = bounds[key]

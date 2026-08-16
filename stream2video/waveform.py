@@ -23,7 +23,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from stream2video.formatters import fmt_clock_time
 from stream2video.silence import SilenceSegment
-from stream2video.tools import ffmpeg_path
+from stream2video.tools import ffmpeg_path, popen_with_retry
 from stream2video.utils import no_window_kwargs, registered_process
 
 # Canvas sizing constants. Exposed as module-level so tests can pin them.
@@ -114,7 +114,12 @@ def read_peaks_from_stream(
     ]
 
     try:
-        proc = subprocess.Popen(
+        # popen_with_retry (parity with concat/runner, silence/detect,
+        # download): a transient FileNotFoundError from a WinGet shim
+        # replacement / AV filter must not silently disable the preview
+        # — retry with re-resolution first, then fall through to the
+        # existing "preview unavailable" path (audit round 15 P2).
+        proc = popen_with_retry(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,

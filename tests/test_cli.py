@@ -267,6 +267,21 @@ class TestLoadConfigUnknownKeys:
         assert loaded["threshold"] == -25.0
         assert loaded["force"] is True
 
+    def test_gui_only_keys_rejected_with_dedicated_message(self, tmp_path: Path, capsys):
+        """Audit round 15 P2: ``theme`` and ``recent_projects`` are
+        GUI-only / session keys — the CLI never applies them, so a YAML
+        entry (``theme: banana``, ``recent_projects: 123``) used to load
+        silently as a no-op, reproducing the ``log_format`` defect class.
+        They must be rejected with a message that says so."""
+        for line in ("theme: banana\n", "recent_projects: 123\n", "theme: dark\n"):
+            cfg = tmp_path / "cfg.yaml"
+            cfg.write_text(line)
+            with pytest.raises(typer.Exit):
+                load_config(cfg)
+            out = capsys.readouterr().out
+            assert "Unknown config key" in out
+            assert "GUI-only" in out
+
     def test_non_string_key_rejected_with_clear_message(self, tmp_path: Path, capsys):
         """Audit round 14 P3: YAML allows ``1: value`` — such a key used
         to reach ``sorted()``/``difflib`` and raise an internal TypeError
@@ -310,6 +325,45 @@ class TestLoadConfigUnknownKeys:
         with pytest.raises(typer.Exit):
             load_config(cfg)
         assert "Invalid output_dir" in capsys.readouterr().out
+
+
+class TestLoadConfigNonFiniteNumbers:
+    """Audit round 15 P1: YAML NaN / ±Infinity values must be rejected
+    with a clear message. ``.nan`` parses to float nan, ``1e999``
+    overflows to inf — both used to pass ``min <= value <= max`` (all
+    comparisons with nan are False) and poison downstream numeric
+    consumers (ffmpeg args, cache config, segment/progress math)."""
+
+    def test_yaml_nan_rejected(self, tmp_path: Path, capsys):
+        for line in ("threshold: .nan\n", "min_silence: .nan\n", "margin: -nan\n"):
+            cfg = tmp_path / "cfg.yaml"
+            cfg.write_text(line)
+            with pytest.raises(typer.Exit):
+                load_config(cfg)
+            assert "not a finite number" in capsys.readouterr().out
+
+    def test_yaml_infinity_rejected(self, tmp_path: Path, capsys):
+        for line in ("threshold: .inf\n", "min_silence: -.inf\n", "download_timeout: 1e999\n"):
+            cfg = tmp_path / "cfg.yaml"
+            cfg.write_text(line)
+            with pytest.raises(typer.Exit):
+                load_config(cfg)
+            assert "not a finite number" in capsys.readouterr().out
+
+    def test_cli_float_flag_nan_rejected(self, tmp_path: Path):
+        from typer.testing import CliRunner
+
+        from stream2video.cli import app
+
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"source")
+        result = CliRunner().invoke(
+            app,
+            [str(src), "-o", str(tmp_path / "out"), "--threshold", "nan"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 1
+        assert "Invalid threshold" in result.output
 
 
 class TestLoadConfigIntKeysRejectFractional:
@@ -1107,6 +1161,17 @@ class TestResolverFloatKind:
     def test_garbage_rejected(self):
         with pytest.raises(typer.Exit):
             self._resolve({"margin": "banana"}, "margin", None)
+
+    def test_nan_and_infinity_rejected(self):
+        """Audit round 15 P1: the resolver must reject non-finite floats
+        (hosts/tests can feed raw dicts; ``--threshold nan`` arrives as
+        float nan via Typer). The old ``min <= fv <= max`` checks are
+        all False for nan, so it used to pass straight into
+        PipelineConfig."""
+        for key in ("threshold", "min_silence", "margin"):
+            for bad in (float("nan"), float("inf"), float("-inf")):
+                with pytest.raises(typer.Exit):
+                    self._resolve({key: bad}, key, None)
 
 
 class TestB11CliSanitization:

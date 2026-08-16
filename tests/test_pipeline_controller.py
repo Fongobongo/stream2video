@@ -214,6 +214,21 @@ class TestValidatePipelineConfig:
         errors = validate_pipeline_config(cfg)
         assert any("margin" in e for e in errors)
 
+    def test_nan_and_infinity_rejected(self):
+        """Audit round 15 P1: a non-finite float used to pass
+        ``lo <= value <= hi`` (all comparisons with nan are False) and
+        poison the pipeline's numeric model for direct API hosts / stale
+        settings.json. It must be rejected with a dedicated message."""
+        for key, bad in (
+            ("threshold", float("nan")),
+            ("min_silence", float("inf")),
+            ("margin", float("-inf")),
+            ("download_timeout", float("nan")),
+            ("batch_chunk_size", float("inf")),
+        ):
+            errors = validate_pipeline_config(_valid_config(**{key: bad}))
+            assert any(key in e and "finite" in e for e in errors), (key, errors)
+
     def test_multiple_errors_returned(self):
         cfg = _valid_config(
             input_raw="",

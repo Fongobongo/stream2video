@@ -83,6 +83,16 @@ class TestParseSliderEntryValue:
         # Probably most users just type "5" → "5.0" expected.
         assert parse_slider_entry_value("5", 0, 60) == 5
 
+    def test_nan_and_infinity_rejected(self):
+        """Audit round 15 P1: NaN / ±Infinity must return None (like a
+        parse failure) — the min/max clamp used to pass NaN through or
+        silently pin it to a range bound instead of rejecting."""
+        assert parse_slider_entry_value("nan", 0, 60) is None
+        assert parse_slider_entry_value("NaN", 0, 60) is None
+        assert parse_slider_entry_value("inf", 0, 60) is None
+        assert parse_slider_entry_value("-inf", 0, 60) is None
+        assert parse_slider_entry_value("1e999", 0, 60) is None
+
 
 class TestSyncSliderEntries:
     def test_returns_empty_dict_for_empty_input(self):
@@ -134,6 +144,21 @@ class TestSyncSliderEntries:
         # result; the caller keeps its previous value for it.
         result = sync_slider_entries({"threshold": "-30"})
         assert "min_silence" not in result
+        assert result["threshold"] == -30.0
+
+    def test_nan_and_infinity_skipped(self):
+        """Audit round 15 P1: a NaN/±Inf entry is treated like a parse
+        failure — omitted from the result instead of being clamped to a
+        range bound or passed through to the pipeline config."""
+        result = sync_slider_entries(
+            {
+                "threshold": "-30.0",
+                "min_silence": "nan",
+                "margin": "inf",
+            }
+        )
+        assert "min_silence" not in result
+        assert "margin" not in result
         assert result["threshold"] == -30.0
 
 

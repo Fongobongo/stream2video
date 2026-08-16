@@ -20,6 +20,7 @@ new tunable is a one-line change there (plus the matching
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import typer
@@ -172,6 +173,13 @@ class _Resolver:
             except (TypeError, ValueError) as e:
                 self._fail(name, value, "(must be a number)")
                 raise AssertionError("unreachable") from e
+            # NaN / ±Infinity: ``fv < min`` and ``fv > max`` are both
+            # False for nan, so the range checks below would silently
+            # pass it into PipelineConfig (audit round 15 P1 — the CLI
+            # flag path accepted ``--threshold nan`` exactly like the
+            # YAML path did).
+            if not math.isfinite(fv):
+                self._fail(name, value, "(must be a finite number)")
             min_val = spec.get("min")
             if min_val is not None and fv < min_val:
                 self._fail(name, fv, f"(must be >= {min_val})")
