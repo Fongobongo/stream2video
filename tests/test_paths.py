@@ -508,12 +508,20 @@ class TestValidateProjectDelete:
             assert foreign.is_dir()
 
     def test_rejects_sensitive_target_even_with_marker(self, monkeypatch):
-        """The sensitive-path list wins even over a forged marker."""
+        """The sensitive-path list wins even over a forged marker.
+
+        Patches the ``_user_home`` seam (not ``Path.home`` directly):
+        on Python 3.13.15 the monkeypatch of ``Path.home`` no longer
+        reaches the guard on CI, so the forged-marker scenario saw the
+        delete allowed. The seam is version-stable.
+        """
+        from stream2video import paths as paths_mod
+
         with TemporaryDirectory() as tmp:
             marked = Path(tmp) / "video1"
             marked.mkdir()
             mark_project_dir(marked)
-            monkeypatch.setattr(Path, "home", classmethod(lambda cls: marked))
+            monkeypatch.setattr(paths_mod, "_user_home", lambda: marked)
             ok, reason = validate_project_delete(marked)
             assert not ok
             assert "system or user" in reason

@@ -1,7 +1,7 @@
-"""pytest-qt event-loop tests for the GUI.
+"""Event-loop tests for the GUI.
 
-These tests drive the real Tk event loop (via ``qtbot.wait`` /
-``update()``) to verify state transitions the smoke tests can't cover:
+These tests drive the real Tk event loop (via ``update()`` /
+``_flush_events``) to verify state transitions the smoke tests can't cover:
 
   * **Cancel flow** — ``_cancel_pipeline`` sets the event, the worker
     thread sees it, ``PipelineCancelled`` maps to "Cancelled" status,

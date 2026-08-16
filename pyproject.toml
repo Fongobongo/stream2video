@@ -21,17 +21,24 @@ dependencies = [
 # Dev = linting + typing + tests. Includes the [gui] extra so the full
 # test suite (gui/waveform tests + import-smoke test_import_gui) runs
 # out of the box on `pip install -e .[dev]`.
+#
+# NOTE: pytest-qt and PySide6 were removed (audit). The GUI event-loop
+# tests (test_gui_qt.py) drive the Tk event loop directly via
+# ``update()``/``_flush_events`` — no test consumes the ``qtbot`` fixture.
+# The pytest-qt *plugin* still loaded at pytest startup and imported
+# PySide6, which crashed the ubuntu CI runner at collection time
+# (``ImportError: libEGL.so.1`` — headless boxes lack the Qt shared libs).
+# Dropping the plugin removes the Qt dependency from CI entirely; Tk
+# tests skip cleanly on headless envs via the conftest TclError guard.
 dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
-    "pytest-qt>=4.0.0",
     "pytest-timeout>=2.0.0",
     "ruff>=0.5.0",
     "mypy>=1.10.0",
     "types-PyYAML>=6.0.0",
     "psutil>=5.9.0",
     "numpy>=1.26.0",
-    "PySide6>=6.5.0",
     "stream2video[gui]",
     "stream2video[monitor]",
 ]
@@ -39,17 +46,6 @@ gui = [
     "customtkinter>=5.2.0",
     "Pillow>=10.0.0",
     "psutil>=5.9.0",
-]
-# GUI event-loop tests (test_gui_qt.py) need a Qt binding for pytest-qt's
-# headless display auto-detection. PySide6 is the lightest Qt6 binding.
-# Since [dev] already pulls PySide6 + pytest-qt (so the full suite runs
-# out of the box on `uv sync --extra dev`), this extra is kept only for
-# standalone installs that want the Qt test deps without [dev]'s
-# lint/type toolchain.
-gui-test = [
-    "PySide6>=6.5.0",
-    "pytest-qt>=4.0.0",
-    "pytest-timeout>=2.0.0",
 ]
 # Memory monitoring (P1.17): optional psutil dependency. When installed,
 # ``stream2video.memory.MemoryMonitor`` actively tracks the ffmpeg/yt-dlp

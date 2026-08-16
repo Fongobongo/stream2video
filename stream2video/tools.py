@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess
 import time
@@ -92,6 +93,79 @@ def ffprobe_path() -> str:
 def reset_tool_cache() -> None:
     """Drop the cached resolutions so tests can re-resolve with patched PATH."""
     _resolve_uncached.cache_clear()
+    _ffmpeg_major_minor.cache_clear()
+
+
+# ``-filter_complex_script`` (a filtergraph read from a file) existed since
+# ffmpeg 2.0 but was REMOVED in the 9.x gyan.dev builds the package managers
+# now ship (``Unrecognized option 'filter_complex_script'`` → the whole batch
+# pipeline fails). ffmpeg ≥ 7.0 provides the equivalent ``-/filter_complex
+# <file>`` (the CLI's "read the option argument from a file" feature). The
+# batch pipeline needs the file form to stay under Windows's 32K command-line
+# limit for large keep-segment graphs, so pick the flag by version:
+#   * major >= 7  →  ``-/filter_complex``
+#   * anything else / unparseable  →  legacy ``-filter_complex_script``
+_FILTER_SCRIPT_MIN_MODERN = 7
+
+
+@cache
+def _ffmpeg_major_minor() -> tuple[int, int] | None:
+    """Parse ffmpeg's ``major.minor`` from ``ffmpeg -version`` (cached).
+
+    Returns None when the binary is missing or the banner doesn't match —
+    callers must then assume the legacy option spelling (the oldest builds
+    the pipeline supports predate the ``-/option=file`` syntax, and
+    mis-guessing "modern" on an ancient ffmpeg fails loudly at spawn time
+    instead of silently).
+    """
+    try:
+        proc = subprocess.run(
+            [ffmpeg_path(), "-version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+            **subprocess_kwargs_lowest(),
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.warning("ffmpeg -version probe failed (%s); assuming legacy CLI", e)
+        return None
+    m = re.match(r"ffmpeg version [nN]?(\d+)\.(\d+)", (proc.stdout or "").strip())
+    if not m:
+        logger.warning(
+            "could not parse ffmpeg version from banner %r; assuming legacy CLI",
+            (proc.stdout or "")[:60],
+        )
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def subprocess_kwargs_lowest() -> dict[str, Any]:
+    """No-window / no-flag kwargs for quick diagnostic spawns.
+
+    Kept separate from the pipeline's subprocess plumbing on purpose: the
+    version probe runs before any pipeline subsystem is initialized.
+    """
+    if os.name == "nt":
+        # Windows-only constant; typeshed marks it platform-gated, so
+        # Linux CI needs the ignore (unused on Windows — see the mypy
+        # override in pyproject).
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}  # type: ignore[attr-defined]
+    return {}
+
+
+def filter_complex_script_args(script_path: str) -> list[str]:
+    """Return the CLI args that feed a filtergraph file to ffmpeg.
+
+    ``["-/filter_complex", path]`` on ffmpeg ≥ 7, else
+    ``["-filter_complex_script", path]``. The 9.x builds (now shipped by
+    choco/apt on CI) removed the legacy flag; the ``-/option`` syntax only
+    landed in 7.0 — hence the version fork.
+    """
+    ver = _ffmpeg_major_minor()
+    if ver is not None and ver[0] >= _FILTER_SCRIPT_MIN_MODERN:
+        return ["-/filter_complex", script_path]
+    return ["-filter_complex_script", script_path]
 
 
 # Number of *additional* spawn attempts after the first one fails with

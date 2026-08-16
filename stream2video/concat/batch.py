@@ -2,9 +2,11 @@
 ``filter_complex`` graph per chunk, then join with concat demuxer.
 
 Historically this pipeline traded per-chunk memory for a more expensive
-graph build; the current implementation uses ``-filter_complex_script``
-to keep the command line under the Windows 32K limit regardless of how
-many keep segments the user ends up with.
+graph build; the current implementation keeps the graph in a temp file
+(handed to ffmpeg via ``-filter_complex_script`` / ``-/filter_complex``,
+picked by version — see ``tools.filter_complex_script_args``) to keep the
+command line under the Windows 32K limit regardless of how many keep
+segments the user ends up with.
 """
 
 import logging
@@ -18,7 +20,7 @@ from typing import Any
 from stream2video import concat as _c
 from stream2video.concat.constants import _BATCH_CHUNK_MIN
 from stream2video.concat.options import ConcatOptions, coerce_options
-from stream2video.tools import ffmpeg_path
+from stream2video.tools import ffmpeg_path, filter_complex_script_args
 from stream2video.utils import get_video_start_time
 
 logger = logging.getLogger(__name__)
@@ -333,8 +335,10 @@ def _run_batch_concat(
                         "-copyts",
                         "-i",
                         str(video_path),
-                        "-filter_complex_script",
-                        script_path,
+                        # File-based filtergraph, flag chosen by ffmpeg
+                        # version (legacy ``-filter_complex_script`` was
+                        # removed in the 9.x builds; see tools.py).
+                        *filter_complex_script_args(script_path),
                         "-map",
                         "[outv]",
                         "-c:v",

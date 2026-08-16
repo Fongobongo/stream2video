@@ -4,8 +4,8 @@ These functions have no Tk / no side effects so they can be unit-tested
 without instantiating the GUI. The GUI class delegates formatting and
 string construction to them; this both shrinks ``gui.py`` and lets the
 test suite cover the actual logic (CLI command shape, status-line
-truncation, ETA breakdown) instead of trying to drive the widgets via
-pytest-qt or a Tkinter event loop.
+truncation, ETA breakdown) instead of driving the widgets through the
+Tk event loop.
 
 Anything that touches ``self``, ``ctk``, ``messagebox``, ``Tk``, or the
 clipboard stays in ``gui.py`` — only pure transformations live here.

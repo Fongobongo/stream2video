@@ -823,9 +823,10 @@ class TestPipelineControllerTkIsolation:
     module must not import tkinter / customtkinter / PIL.
 
     A real event-loop test (preview concurrent with pipeline, popup
-    close during decode, etc.) requires pytest-qt and is deferred —
-    this static check is the cheap regression net that catches a
-    careless ``from tkinter import messagebox`` added during a refactor.
+    close during decode, etc.) would need a running display and is
+    deferred — this static check is the cheap regression net that
+    catches a careless ``from tkinter import messagebox`` added during
+    a refactor.
     """
 
     def test_pipeline_controller_does_not_import_tk(self):

@@ -26,7 +26,7 @@ The tests are SKIPPED when:
   * No display is available (headless CI — ``ctk.CTk`` raises TclError
     on instantiation when no display server is reachable).
 
-They don't replace a proper pytest-qt / tkinter simulator harness;
+They don't replace a proper tkinter simulator harness;
 they're a cheap regression net for the kind of bug where a refactor
 renames a widget attribute and the GUI crashes on the first user
 interaction.
@@ -166,9 +166,9 @@ class TestToolkitCallbackDispatch:
          the calling thread's ident inside the dispatched lambda).
 
     A real event-loop test (preview concurrent with pipeline, popup
-    close during decode) requires pytest-qt and is deferred — these
-    smoke checks are the cheap regression net for "the GUI's callback
-    plumbing wasn't broken by a refactor".
+    close during decode) would need a running display and is deferred —
+    these smoke checks are the cheap regression net for "the GUI's
+    callback plumbing wasn't broken by a refactor".
 
     All tests here MUTATE the instance (status label, log queue,
     progress bar value, cancel event), so they use the function-scoped

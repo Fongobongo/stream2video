@@ -29,8 +29,8 @@
 #     stream2video-cli /in.mp4 -o /out --dry-run
 #
 # Entrypoint is the CLI itself; a positional argument maps to
-# ``INPUT_VIDEO``. The image omits the dev extras (pytest/ruff/mypy/
-# PySide6) so it's roughly half the size.
+# ``INPUT_VIDEO``. The image omits the dev extras (pytest/ruff/mypy)
+# so it's roughly half the size.
 
 FROM python:3.13-slim AS test
 

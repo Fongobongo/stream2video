@@ -154,6 +154,20 @@ _USER_SUBDIRS = (
 )
 
 
+def _user_home() -> Path:
+    """The current user's home directory (seam for tests).
+
+    Routed through a module-level function instead of calling
+    ``Path.home()`` inline: tests monkeypatch this function instead of
+    a stdlib classmethod, whose internals CPython keeps re-plumbing
+    between releases (the forge-marker test that patches ``Path.home``
+    stopped intercepting on a newer 3.13 patch release, so the guard
+    silently used the REAL home and allowed the delete). Patching a
+    module seam is version-stable and makes the test's intent explicit.
+    """
+    return Path.home()
+
+
 def is_sensitive_delete_target(path: Path) -> bool:
     """True if ``path`` must never be passed to ``shutil.rmtree``.
 
@@ -161,18 +175,20 @@ def is_sensitive_delete_target(path: Path) -> bool:
     user-profile subdirectories, and the application's own directory
     (deleting the install/config dir would remove the settings file
     the GUI is currently writing to). Comparisons are case-insensitive
-    on Windows via ``os.path.normcase``.
+    on Windows via ``os.path.normcase`` and short-name-insensitive via
+    ``os.path.realpath`` (a Windows 8.3 alias such as ``RUNNER~1``
+    must hit the same blocklist entry as the long profile path).
     """
     try:
-        norm = os.path.normcase(os.path.abspath(str(path)))
+        norm = os.path.normcase(os.path.realpath(str(path)))
     except (OSError, ValueError):
         return True
+    home = os.path.normcase(os.path.realpath(str(_user_home())))
     blocked = {
-        os.path.normcase(os.path.abspath(str(Path(path.anchor)))),
-        os.path.normcase(os.path.abspath(str(Path.home()))),
-        os.path.normcase(os.path.abspath(str(Path(__file__).parent.parent))),
+        os.path.normcase(os.path.realpath(str(Path(path.anchor)))),
+        home,
+        os.path.normcase(os.path.realpath(str(Path(__file__).parent.parent))),
     }
-    home = os.path.normcase(os.path.abspath(str(Path.home())))
     for sub in _USER_SUBDIRS:
         blocked.add(os.path.join(home, os.path.normcase(sub)))
     return norm in blocked

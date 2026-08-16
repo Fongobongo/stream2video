@@ -34,10 +34,9 @@ def _spawn_gui() -> Iterator[object]:
 def gui():
     """Instantiate Stream2VideoGUI per test; skip on headless envs.
 
-    Function-scoped for tests that MUTATE GUI state. pytest-qt's
-    ``qtbot.addWidget`` can't track Tkinter widgets (it expects
-    ``QWidget`` subclasses), so tests that need a live loop use plain Tk
-    ``update()`` / ``update_idletasks()`` directly.
+    Function-scoped for tests that MUTATE GUI state. Event-loop tests
+    drive Tk directly (``update()`` / ``update_idletasks()``); no Qt
+    bindings are involved.
     """
     yield from _spawn_gui()
 
