@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **Project directories for downloads are now site-scoped** — a downloaded source moves into `{output_dir}/{site}_{id}/` (e.g. `youtube_VIDEO_ID/`) instead of `{output_dir}/{id}/`, so two different sites that happen to use the same video id no longer mix their files and caches. Existing `{id}/` directories are not migrated automatically: the next run of the same URL creates the new directory, and the old one can be deleted manually.
+
+### Added
+
+- **Concurrent runs of the same source now wait instead of colliding** — a second run (GUI or CLI) pointed at the same URL or file logs "Another run is processing this source" and waits for the first to finish; the wait can be cancelled from the GUI or with Ctrl+C. Variants of the same URL (different casing, default port, signed query parameters) are recognised as the same source.
+- **Fresh downloads are verified before they replace the previous copy** — a new download is checked with ffprobe (codec + duration) before it overwrites the existing stable source, so a corrupted download can no longer destroy a good one. Audio-only podcasts are validated against the audio track when the output format is mp3/opus/aac/wav/flac.
+- **`--doctor` validates your saved defaults end to end** — it now also reports cross-field errors in `user_defaults.json` (e.g. a stall warning timeout that is not lower than the kill timeout), the same check a real run performs at startup.
+- **CLI accepts `~` in paths** — `stream2video ~/video.mp4 -o ~/Videos` now works like in the GUI.
+
+### Fixed
+
+- **URL secrets no longer leak into logs and errors** — signed links, userinfo (`user:pass@`), query parameters, and yt-dlp error output that echoes the input or proxy URL are redacted in the log file, GUI log and error messages.
+- **Copy CLI command and Start require an input** — an empty input field used to produce a command the CLI rejected as a missing argument; the buttons now explain what to fix.
+- **Cancel during a lock wait stops the wait** — cancelling while another run is processing the same source used to idle until the wait timed out.
+- **GUI gates no longer silently accept invalid settings** — errors for settings without a dedicated widget row (method/encoder/qualities/output format) and unparseable text in the silence slider fields are now reported on Start / Copy CLI / Save defaults instead of quietly using the previous value.
+- **Interrupted-download cleanup is more precise** — multi-suffix fragments (`.f137.mp4.part`, `.webm.ytdl`) are removed, while files belonging to other runs are left alone.
+- **A transient ffprobe start failure no longer deletes a completed download** — a momentary antivirus/package-manager interference keeps the downloaded file and asks for a retry instead of discarding a multi-GB file.
+
 ### Fixed
 
 - **`r_frame_rate` wrong on multi-segment output with ffmpeg 9.x** — after a concat-demuxer join of per-segment MP4 parts, ffprobe reported a bogus video rate (a 30 FPS source measured as `359/12`) on the ffmpeg 9.0.1 builds CI now installs. Root cause: each part's AAC track overshoots its window by the codec's ~21 ms priming (a `-t`-bound encode still writes the final AAC frame), so the join's total duration is stretched and ffmpeg re-derives the rate from it. The batch path was immune because it has always clamped audio to exactly the window (`apad,atrim=0:{dur}`); the segment and `cut_then_encode` paths now apply the same normalisation (verified: the joined output probes exactly `30/1` / 4.000 s / 120 frames on ffmpeg 9.0.1 and 8.1.1). `PIPELINE_VERSION` bumps 5 → 6 so resume never reuses old overshooting parts.

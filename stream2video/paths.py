@@ -14,14 +14,14 @@ project dir and overwrite each other's output and caches.
 
 Layout comparison (per_video_dir=True):
     output_dir/
-        <id>/                       # downloaded source: project dir = epochless yt-dlp id
-            <id>.mp4                # downloaded source (renamed, epoch stripped)
-            <id>_<path-hash>_audio.wav
-            <id>_<path-hash>_silence_cache.json
-            <id>_<path-hash>_compressed.mp4
+        <ns>_<id>/                  # downloaded source: project dir = site namespace + epochless yt-dlp id
+            <ns>_<id>.mp4           # downloaded source (renamed, epoch stripped, site-namespaced)
+            <ns>_<id>_<path-hash>_audio.wav
+            <ns>_<id>_<path-hash>_silence_cache.json
+            <ns>_<id>_<path-hash>_compressed.mp4
             stream2video.log
-            _<id>_<path-hash>_segments/   # temp, cleaned on success
-            _<id>_<path-hash>_batch/      # temp, cleaned on success
+            _<ns>_<id>_<path-hash>_segments/   # temp, cleaned on success
+            _<ns>_<id>_<path-hash>_batch/      # temp, cleaned on success
         <stem>_<path-hash>/         # local file: project dir = stem + source-path hash
             <stem>_<path-hash>_audio.wav
             <stem>_<path-hash>_silence_cache.json
