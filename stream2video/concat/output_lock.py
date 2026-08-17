@@ -103,8 +103,14 @@ class LockHandle:
 def _os_lock_fd(fd: int) -> None:
     """Take the non-blocking OS lock on an open fd."""
     if os.name == "nt":
-        import msvcrt
+        # typeshed has no msvcrt stubs on POSIX and no fcntl stubs on
+        # Windows, so neither module can be imported statically without
+        # a platform-dependent ignore; importlib yields Any on every
+        # platform and the platform guard keeps the branch unreachable
+        # where the module does not exist.
+        import importlib
 
+        msvcrt = importlib.import_module("msvcrt")
         # msvcrt.locking locks bytes relative to the CURRENT position
         # and fails beyond the end of the file — make sure byte 0
         # exists before locking it. A failure here is a disk problem,
@@ -118,24 +124,25 @@ def _os_lock_fd(fd: int) -> None:
         os.lseek(fd, 0, os.SEEK_SET)
         msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
     else:
-        import fcntl
+        import importlib
 
-        # mypy on Windows has no fcntl stubs (unix-only module) —
-        # the guard above guarantees this branch never runs there.
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore[attr-defined]
+        fcntl = importlib.import_module("fcntl")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
 
 def _os_unlock_fd(fd: int) -> None:
     """Drop the OS lock on an open fd."""
     if os.name == "nt":
-        import msvcrt
+        import importlib
 
+        msvcrt = importlib.import_module("msvcrt")
         os.lseek(fd, 0, os.SEEK_SET)
         msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
     else:
-        import fcntl
+        import importlib
 
-        fcntl.flock(fd, fcntl.LOCK_UN)  # type: ignore[attr-defined]
+        fcntl = importlib.import_module("fcntl")
+        fcntl.flock(fd, fcntl.LOCK_UN)
 
 
 def _same_file(fd: int, path: Path) -> bool:
