@@ -733,6 +733,44 @@ class TestDoctorConfigValidation:
         )
         assert cli._doctor_impl(None) is True
 
+    def test_doctor_user_defaults_pipeline_level_stall_pair_fails(
+        self, tmp_path: Path, monkeypatch, capsys
+    ):
+        """Audit round 25 P7: per-key user-defaults checks pass for the
+        stall pair (both values in range), but the EFFECTIVE snapshot
+        (user defaults over stock defaults) violates the pipeline-level
+        contract — the doctor used to bless such defaults as green while
+        the next default-driven run would reject them at startup."""
+        from stream2video import cli
+
+        monkeypatch.setattr(
+            "stream2video.config.user_defaults_path", lambda: tmp_path / "user_defaults.json"
+        )
+        (tmp_path / "user_defaults.json").write_text(
+            '{"stall_warning_timeout": 300, "stall_kill_timeout": 300}',
+            encoding="utf-8",
+        )
+        assert cli._doctor_impl(None) is False
+        out = capsys.readouterr().out
+        assert "User defaults" in out
+        assert "pipeline validation" in out
+        assert "stall_warning_timeout" in out
+
+    def test_doctor_user_defaults_valid_stall_pair_ok(self, tmp_path: Path, monkeypatch):
+        """The effective-snapshot validation must not false-positive: a
+        valid stall pair in user defaults stays green (audit round
+        25 P7)."""
+        from stream2video import cli
+
+        monkeypatch.setattr(
+            "stream2video.config.user_defaults_path", lambda: tmp_path / "user_defaults.json"
+        )
+        (tmp_path / "user_defaults.json").write_text(
+            '{"stall_warning_timeout": 120, "stall_kill_timeout": 300}',
+            encoding="utf-8",
+        )
+        assert cli._doctor_impl(None) is True
+
 
 class TestSliderClampVsCliRejectContract:
     """Audit round 23 P8: the GUI CLAMPS out-of-range typed slider
@@ -1200,9 +1238,13 @@ class TestAdvancedWidgetCrossFieldGate:
         errors = self._fake_gui({}, 120, 300)._advanced_widget_errors()
         assert errors == {}
 
-    def test_gate_is_fail_open_on_broken_settings(self):
-        """A settings shape that cannot build a PipelineConfig must not
-        block Start — the worker's own pre-flight reports it."""
+    def test_gate_is_fail_closed_on_broken_settings(self):
+        """A settings shape that cannot build a PipelineConfig must
+        BLOCK the gates: Copy CLI and Save defaults must never
+        persist/copy a snapshot the run itself would reject, and Start
+        must not rely on the worker's second validator (audit round
+        25 P8). The synthetic ``internal_validation`` key is shown by
+        every consumer, so the failure is never silent."""
         from stream2video.config import effective_defaults
         from stream2video.gui_advanced import AdvancedSettingsMixin
 
@@ -1222,7 +1264,19 @@ class TestAdvancedWidgetCrossFieldGate:
             def _read_widget_values(self) -> dict[str, object]:
                 raise RuntimeError("settings corrupt")
 
-        assert Broken()._advanced_widget_errors() == {}
+        errors = Broken()._advanced_widget_errors()
+        assert "internal_validation" in errors
+        assert (
+            "Cannot verify" in errors["internal_validation"]
+            or "cannot verify" in errors["internal_validation"].lower()
+        )
+
+    def test_gate_fail_closed_with_healthy_settings_stays_empty(self):
+        """Fail-closed must not over-trigger: a healthy snapshot still
+        passes the gate with no errors (regression guard for the
+        fail-open→fail-closed rewrite)."""
+        errors = self._fake_gui({}, 120, 300)._advanced_widget_errors()
+        assert errors == {}
 
 
 class TestLoggingSessionThreadSerialization:

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
@@ -27,6 +28,12 @@ logger = logging.getLogger(__name__)
 class DownloadResult(NamedTuple):
     path: Path
     is_downloaded: bool
+    # yt-dlp extractor key (``YouTube``, ``Twitch``, ...) of the resolved
+    # video, when yt-dlp reported it. None for local files and when the
+    # report could not be parsed. Used to namespace the stable project
+    # identity so two sites with the same video id never collide
+    # (audit round 25 P2).
+    extractor_key: str | None = None
 
 
 class DownloadProgress(NamedTuple):
@@ -96,6 +103,37 @@ def _validate_url(url: str) -> bool:
     ``_is_local_file`` check has passed (non-existent local path).
     """
     return bool(re.match(r"^https?://", url, re.IGNORECASE))
+
+
+def redact_input_url(url: str) -> str:
+    """Mask the secret-bearing parts of an input URL for logging.
+
+    Signed URLs, basic-auth userinfo, API tokens and private query
+    parameters must never reach the GUI log, ``stream2video.log`` or a
+    lock-wait message (audit round 25 P4): the full URL stays in
+    memory only, handed to yt-dlp as-is. Query and fragment are dropped
+    entirely (no whitelist of "safe" params to maintain), userinfo is
+    replaced with ``<redacted>``, and the scheme+host+port+path are
+    kept so the user can still see which site the run is about. Local
+    paths and anything that is not an http(s) URL pass through
+    unchanged.
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return url
+    if parts.scheme.lower() not in ("http", "https"):
+        return url
+    host = parts.hostname or parts.netloc
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    netloc = f"<redacted>@{host}" if parts.username else host
+    path = parts.path
+    if parts.query:
+        path = f"{path}?<redacted>"
+    if parts.fragment:
+        path = f"{path}#<redacted>"
+    return urllib.parse.urlunsplit((parts.scheme, netloc, path, "", ""))
 
 
 def _is_local_file(path_str: str) -> bool:
@@ -349,9 +387,14 @@ def _sweep_partial_fragments(out_dir: Path, run_id: str) -> None:
     and an mtime/snapshot heuristic misclassifies a sibling's fragment
     created after our snapshot as ours — deleting another run's live
     download. The token is unique per invocation and embedded in every
-    filename this run's yt-dlp writes (``<id>-<epoch>-<token>.part``),
-    so "name contains run_id AND ends in a fragment suffix" is exact.
+    filename this run's yt-dlp writes (``<id>-<epoch>-<token>.<ext>.part``),
+    so a name is matched structurally: the token must sit in the
+    ``-<epoch>-<token>`` slot of the outtmpl, right before the fragment
+    suffix — a plain substring test could hit a video id or another
+    run's fragment that happens to contain the same eight hex chars
+    (audit round 25 P9).
     """
+    fragment_re = re.compile(rf"-{re.escape(run_id)}\.[^.]*\.(?:part|ytdl|temp)$")
     try:
         entries = list(out_dir.iterdir())
     except OSError:
@@ -364,7 +407,7 @@ def _sweep_partial_fragments(out_dir: Path, run_id: str) -> None:
             continue
         if not name.endswith((".part", ".ytdl", ".temp")):
             continue
-        if run_id not in name:
+        if fragment_re.search(name) is None:
             continue
         try:
             os.unlink(p)
@@ -391,6 +434,32 @@ def _resolve_reported_download_path(
         if resolved is not None:
             return resolved, candidate
     return None, last_candidate
+
+
+def _parse_extractor_key(stdout_lines: list[str]) -> str | None:
+    """Read the ``before_dl:%(extractor_key)s`` line from yt-dlp stdout.
+
+    The print arrives as the FIRST stdout line (it runs before the
+    download produces any progress output). Returns None when the line
+    is missing or looks like something else (a relative path, a
+    progress echo): the caller then falls back to the un-namespaced
+    identity, which is no worse than before the extractor existed.
+    """
+    for line in stdout_lines:
+        text = line.strip()
+        if not text:
+            continue
+        # A path-like first line (relative path without separators,
+        # extension, or a drive prefix) is not an extractor key.
+        if (
+            os.sep in text
+            or (os.altsep and os.altsep in text)
+            or text.lower().endswith(tuple(_VIDEO_EXTENSIONS))
+            or re.match(r"^[a-zA-Z]:[\\/]", text)
+        ):
+            return None
+        return text
+    return None
 
 
 def download(
@@ -510,13 +579,21 @@ def download(
         format_str,
         "--print",
         "after_move:filepath",
+        # The extractor key (``YouTube``, ``Twitch``, ...) namespaces the
+        # stable project identity: two different sites with the same
+        # video id must never share a project dir / caches (audit round
+        # 25 P2). Printed once BEFORE the download (before_dl) so the
+        # line arrives as the FIRST stdout line, ahead of any progress
+        # output.
+        "--print",
+        "before_dl:%(extractor_key)s",
         url,
     ]
 
     if proxy:
         cmd.extend(["--proxy", proxy])
 
-    logger.info(f"Downloading: {url}")
+    logger.info(f"Downloading: {redact_input_url(url)}")
     try:
         # popen_with_retry: a winget shim / AV filter driver
         # intermittently returns FileNotFoundError on spawn; an 8-hour VOD
@@ -722,6 +799,8 @@ def download(
             if resolved is None:
                 raise DownloadError(f"Download completed but file not found: {reported_path}")
 
+            extractor_key = _parse_extractor_key(stdout_lines)
+
             # ``stat()`` can raise a raw OSError (file quarantined by AV
             # between the resolve and here, permissions, ...) which is
             # not a ``DownloadError`` — surface it as one so the pipeline
@@ -736,7 +815,7 @@ def download(
 
             logger.info(f"Successfully downloaded: {resolved} ({size // 1024 // 1024} MB)")
             success = True
-            return DownloadResult(resolved, is_downloaded=True)
+            return DownloadResult(resolved, is_downloaded=True, extractor_key=extractor_key)
 
         finally:
             # Join drain threads in the finally so cancel/timeout/early-raise

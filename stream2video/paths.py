@@ -275,6 +275,23 @@ def _epochless(stem: str) -> str:
     return stripped if stripped else stem
 
 
+def downloaded_identity(stem: str, extractor_key: str | None = None) -> str:
+    """Stable project identity for a DOWNLOADED source.
+
+    ``stem`` is the epochless video id; ``extractor_key`` (the yt-dlp
+    site namespace, e.g. ``YouTube``) disambiguates ids that are only
+    unique within one site — two different services returning the same
+    id ``12345`` must never share a project dir, caches or the
+    post-download project lock (audit round 25 P2). Returns
+    ``<extractor>_<id>`` when the extractor is known, else the bare id
+    (the historical layout, kept for extractor-less callers and
+    local-file naming where the path hash already disambiguates).
+    """
+    if extractor_key:
+        return f"{extractor_key}_{stem}"
+    return stem
+
+
 def artifact_stem(video_path: Path) -> str:
     """Per-source base name: ``<stem>_<path-hash>``.
 
@@ -458,6 +475,7 @@ def apply_per_video_dir(
     video_path: Path,
     is_downloaded: bool,
     per_video_dir: bool = True,
+    extractor_key: str | None = None,
 ) -> tuple[Path, Path]:
     """Resolve the per-video project directory and move the source if needed.
 
@@ -472,39 +490,46 @@ def apply_per_video_dir(
     source is moved into it:
 
     - Downloaded sources get a project dir named after the *epochless*
-      yt-dlp id (``<id>/``) and are renamed to ``<id><ext>`` inside it.
-      The epochless name is what makes the identity — and every cache
-      keyed on it — stable across re-runs of the same URL, instead of
-      forking per download (see ``_epochless``).
+      yt-dlp id, namespaced by the extractor/site when known
+      (``YouTube_<id>/``) so two sites sharing an id never collide
+      (audit round 25 P2), and are renamed to ``<extractor>_<id><ext>``
+      inside it. The epochless name is what makes the identity — and
+      every cache keyed on it — stable across re-runs of the same URL,
+      instead of forking per download (see ``_epochless``); the
+      extractor prefix keeps the identity site-scoped so the same id on
+      another service can not collide.
     - Local files get a project dir named ``<stem>_<path-hash>`` (stem +
       source-path hash) and are never moved; the hash keeps two
       same-named files in different directories independent.
 
     When ``per_video_dir`` is False the project IS the flat ``output_dir``,
-    and a DOWNLOADED source is still renamed to its epochless ``<id><ext>``
-    name (atomic replace): ``artifact_stem()`` keys every cache and the
-    output name on ``source_path_key()`` — a hash of the RAW filename —
-    so a per-run ``<id>-<epoch>-<token>`` name would fork the identity
-    (and every cache) on each re-download (audit round 24 P6). A local
-    file is never renamed: its identity is its resolved path.
+    and a DOWNLOADED source is still renamed to its epochless,
+    extractor-namespaced ``<extractor>_<id><ext>`` name (atomic
+    replace): ``artifact_stem()`` keys every cache and the output name
+    on ``source_path_key()`` — a hash of the RAW filename — so a
+    per-run ``<id>-<epoch>-<token>`` name would fork the identity (and
+    every cache) on each re-download (audit round 24 P6), and two sites
+    sharing an id would overwrite each other's file in the flat dir
+    (audit round 25 P2). A local file is never renamed: its identity is
+    its resolved path.
     """
     if not per_video_dir:
         if is_downloaded:
-            stem = _epochless(video_path.stem)
-            dest = output_dir / f"{stem}{video_path.suffix}"
+            dest_name = f"{downloaded_identity(_epochless(video_path.stem), extractor_key)}{video_path.suffix}"
+            dest = output_dir / dest_name
             if video_path != dest:
-                video_path = move_into_project(
-                    video_path, output_dir, dest_name=f"{stem}{video_path.suffix}"
-                )
+                video_path = move_into_project(video_path, output_dir, dest_name=dest_name)
         return output_dir, video_path
     stem = _epochless(video_path.stem)
     if is_downloaded:
-        project_name = stem
+        project_name = downloaded_identity(stem, extractor_key)
     else:
         project_name = f"{stem}_{source_path_key(video_path)}"
     project_dir = ensure_project_dir(output_dir, project_name, True)
     if is_downloaded:
         video_path = move_into_project(
-            video_path, project_dir, dest_name=f"{stem}{video_path.suffix}"
+            video_path,
+            project_dir,
+            dest_name=f"{downloaded_identity(stem, extractor_key)}{video_path.suffix}",
         )
     return project_dir, video_path

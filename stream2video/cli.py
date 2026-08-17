@@ -530,12 +530,62 @@ def _doctor_impl(config_file: Path | None = None) -> bool:
                     f"stock defaults are used for those)",
                 )
             else:
-                _row(
-                    "[green]✓[/green]",
-                    "ok",
-                    f"User defaults: {user_cfg}",
-                    f"User defaults: {user_cfg}",
+                # (audit round 25 P7) Per-key checks pass, but the
+                # PIPELINE-level contract the run enforces (cross-field
+                # stall pair etc.) can still reject the EFFECTIVE
+                # snapshot. Build the exact PipelineConfig the run would
+                # use (user defaults over stock defaults — the same
+                # merge load_user_defaults does — with every key
+                # coerce-typed so the merged dict is what a run would
+                # actually see) and run the shared validator, exactly
+                # like the explicit --config check above.
+                merged = dict(CONFIG_DEFAULTS)
+                for k, v in _user.items():
+                    if k in CONFIG_DEFAULTS:
+                        coerced = coerce_typed_value(k, v)
+                        if coerced is not None:
+                            merged[k] = coerced
+                params = PipelineWorkerParams(
+                    input_raw="doctor",
+                    output_dir=Path(str(merged.get("output_dir") or ".")),
+                    method=str(merged.get("method") or CONFIG_DEFAULTS["method"]),
+                    encoder=str(merged.get("encoder") or CONFIG_DEFAULTS["encoder"]),
+                    video_quality=str(
+                        merged.get("video_quality") or CONFIG_DEFAULTS["video_quality"]
+                    ),
+                    audio_quality=str(
+                        merged.get("audio_quality") or CONFIG_DEFAULTS["audio_quality"]
+                    ),
+                    download_quality=str(
+                        merged.get("download_quality") or CONFIG_DEFAULTS["download_quality"]
+                    ),
+                    force=bool(merged.get("force") or CONFIG_DEFAULTS["force"]),
+                    per_video_dir=bool(
+                        merged.get("per_video_dir") or CONFIG_DEFAULTS["per_video_dir"]
+                    ),
+                    delete_after=bool(
+                        merged.get("delete_after") or CONFIG_DEFAULTS["delete_after"]
+                    ),
                 )
+                pipe_cfg = build_pipeline_config_from_snapshot(params, merged)
+                pipe_errors = validate_pipeline_config(pipe_cfg)
+                if pipe_errors:
+                    _row(
+                        "[red]✗[/red]",
+                        "fail",
+                        f"User defaults: {user_cfg} [red](pipeline validation: "
+                        f"{'; '.join(pipe_errors)})[/red]",
+                        f"User defaults: {user_cfg} "
+                        f"(pipeline validation: {'; '.join(pipe_errors)})",
+                    )
+                    all_critical_ok = False
+                else:
+                    _row(
+                        "[green]✓[/green]",
+                        "ok",
+                        f"User defaults: {user_cfg}",
+                        f"User defaults: {user_cfg}",
+                    )
         except (OSError, ValueError) as _e:
             # A corrupt user_defaults.json is silently ignored by
             # load_user_defaults (the run falls back to stock

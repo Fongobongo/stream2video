@@ -54,6 +54,7 @@ Race safety:
 """
 
 import contextlib
+import errno
 import logging
 import os
 import secrets
@@ -69,6 +70,31 @@ logger = logging.getLogger(__name__)
 
 class ConcatLockError(ConcatError):
     """Raised when the lock for this output is held by another run."""
+
+
+class LockCancelledError(ConcatError):
+    """Raised when the caller cancels while waiting for a held lock.
+
+    Distinct from ``ConcatLockError`` so hosts can map a user-cancelled
+    wait to their cancellation exception instead of a lock failure.
+    """
+
+
+def _is_contention_error(e: OSError) -> bool:
+    """True when ``e`` means "another process holds the OS lock".
+
+    Only the platform's contention codes are retryable: flock reports
+    EAGAIN/EWOULDBLOCK (and EACCES on some platforms), msvcrt.locking
+    reports winerror 33 (ERROR_LOCK_VIOLATION). Anything else (EBADF,
+    ENOLCK, an unsupported filesystem, a vanished file...) is a real
+    fault that must surface immediately, not masquerade as "another
+    run is holding the lock" until the timeout (audit round 25 P6).
+    """
+    if os.name == "nt":
+        if getattr(e, "winerror", None) == 33:
+            return True
+        return e.errno in (errno.EACCES, errno.EAGAIN)
+    return e.errno in (errno.EACCES, errno.EAGAIN)
 
 
 def lock_path_for(output_path: Path) -> Path:
@@ -172,6 +198,7 @@ def _acquire_lock(
     output_hint: str,
     timeout: float,
     on_wait: Callable[[], None] | None = None,
+    cancel_callback: Callable[[], bool] | None = None,
 ) -> LockHandle:
     """Shared acquire: OS-lock ``lock_path``, retrying until ``timeout``.
 
@@ -181,7 +208,11 @@ def _acquire_lock(
     observe a locked file without its record — and never needs one:
     the OS decides liveness, not the content. ``on_wait`` fires once
     when the first contention is observed (hosts log "waiting for
-    another run" through it).
+    another run" through it). ``cancel_callback`` is polled between
+    retries — when it turns true the wait aborts with
+    :class:`LockCancelledError` instead of spinning until the timeout
+    (audit round 25 P5: a Cancel / GUI close must stop the worker even
+    while it is waiting for a same-project run to finish).
     """
     # os.makedirs (not Path.mkdir): hosts that monkeypatch ``Path``
     # methods for testing would break the plain create call.
@@ -203,14 +234,27 @@ def _acquire_lock(
             with contextlib.suppress(OSError):
                 os.unlink(lock_path)
             raise
-        except OSError:
+        except OSError as e:
             os.close(fd)
+            if not _is_contention_error(e):
+                # Not "someone else holds the lock" — a real fault (bad
+                # fd, filesystem without lock support, ...). It will not
+                # heal by retrying; say what it actually was instead of
+                # blaming a phantom concurrent run after the timeout
+                # (audit round 25 P6).
+                raise ConcatLockError(
+                    f"Lock {lock_path} could not be locked ({e}) — refusing to run"
+                ) from None
             if not warned and on_wait is not None:
                 warned = True
                 try:
                     on_wait()
                 except Exception:
                     logger.debug("on_wait raised", exc_info=True)
+            if cancel_callback is not None and cancel_callback():
+                raise LockCancelledError(
+                    f"Cancelled while waiting for the {what} lock ({output_hint})"
+                ) from None
             if time.monotonic() >= deadline:
                 raise ConcatLockError(
                     f"Another stream2video run holds the {what} lock ({output_hint}). "
@@ -227,6 +271,10 @@ def _acquire_lock(
             # current file — bounded by the same deadline so a churning
             # path can never hang the acquire.
             os.close(fd)
+            if cancel_callback is not None and cancel_callback():
+                raise LockCancelledError(
+                    f"Cancelled while waiting for the {what} lock ({output_hint})"
+                ) from None
             if time.monotonic() >= deadline:
                 raise ConcatLockError(
                     f"Lock {lock_path} kept changing identity while acquiring "
@@ -248,12 +296,29 @@ def _acquire_lock(
         # Trim a longer stale record from a previous owner.
         os.ftruncate(fd, os.lseek(fd, 0, os.SEEK_CUR))
     except OSError as e:
-        with contextlib.suppress(OSError):
-            _os_unlock_fd(fd)
-        with contextlib.suppress(OSError):
-            os.close(fd)
-        with contextlib.suppress(OSError):
-            os.unlink(lock_path)
+        # Audit round 25 P1: between our unlock/close and the unlink a
+        # waiter can take the SAME file and write its own valid record;
+        # deleting the pathname then severs the new owner's protection
+        # (on POSIX a third process would open a fresh file and both
+        # would "hold" the lock). Remove our own inode FIRST on POSIX
+        # (exactly like release) so the waiter can only ever take a
+        # fresh file; on Windows an open file cannot be unlinked, so a
+        # new owner's lock makes the unlink fail harmlessly.
+        if os.name == "nt":
+            with contextlib.suppress(OSError):
+                _os_unlock_fd(fd)
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            with contextlib.suppress(OSError):
+                os.unlink(lock_path)
+        else:
+            if _same_file(fd, lock_path):
+                with contextlib.suppress(OSError):
+                    os.unlink(lock_path)
+            with contextlib.suppress(OSError):
+                _os_unlock_fd(fd)
+            with contextlib.suppress(OSError):
+                os.close(fd)
         raise ConcatLockError(
             f"Lock {lock_path} could not be written ({e}) — refusing to run"
         ) from None
@@ -262,7 +327,11 @@ def _acquire_lock(
     return LockHandle(path=lock_path, token=token, what=what, fd=fd)
 
 
-def acquire_output_lock(output_path: Path, timeout: float = _DEFAULT_TIMEOUT_SECONDS) -> LockHandle:
+def acquire_output_lock(
+    output_path: Path,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    cancel_callback: Callable[[], bool] | None = None,
+) -> LockHandle:
     """Exclusively lock ``<output>.lock``; raise if another run holds it.
 
     Returns a :class:`LockHandle` for :func:`release_output_lock`. The
@@ -276,6 +345,7 @@ def acquire_output_lock(output_path: Path, timeout: float = _DEFAULT_TIMEOUT_SEC
         token=secrets.token_hex(16),
         output_hint=f"output={output_path}",
         timeout=timeout,
+        cancel_callback=cancel_callback,
     )
 
 
@@ -284,6 +354,7 @@ def acquire_lock_file(
     what: str,
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
     on_wait: Callable[[], None] | None = None,
+    cancel_callback: Callable[[], bool] | None = None,
 ) -> LockHandle:
     """Low-level: exclusively lock an arbitrary lock file.
 
@@ -293,7 +364,9 @@ def acquire_lock_file(
     of the same URL from clobbering each other's project dir (audit
     round 24 P4). ``what`` names the protected resource in the
     refusal message; ``on_wait`` fires once when another run holds the
-    lock (hosts log a "waiting" note through it).
+    lock (hosts log a "waiting" note through it); ``cancel_callback``
+    aborts the wait with :class:`LockCancelledError` (audit round
+    25 P5).
     """
     return _acquire_lock(
         lock_path,
@@ -302,6 +375,7 @@ def acquire_lock_file(
         output_hint=f"resource={lock_path}",
         timeout=timeout,
         on_wait=on_wait,
+        cancel_callback=cancel_callback,
     )
 
 

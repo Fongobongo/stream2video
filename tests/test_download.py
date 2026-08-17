@@ -3,6 +3,7 @@
 import os
 import sys
 import time
+from itertools import pairwise
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -133,6 +134,26 @@ class TestDownloadFunction:
     def test_cancelled_is_subclass_of_download_error(self):
         """DownloadCancelledError must remain a DownloadError for backwards-compat catches."""
         assert issubclass(DownloadCancelledError, DownloadError)
+
+    def test_ytdlp_command_carries_extractor_print(self):
+        """The yt-dlp command must include the
+        ``before_dl:%(extractor_key)s`` print (audit round 25 P2) so the
+        controller can namespace the project identity by site."""
+        cmds: list[list[str]] = []
+
+        def fake_popen(cmd, **kwargs):
+            cmds.append(list(cmd))
+            raise DownloadCancelledError("stop", partial=False)
+
+        with (
+            patch("stream2video.download.popen_with_retry", side_effect=fake_popen),
+            pytest.raises(DownloadCancelledError),
+        ):
+            download("https://example.com/v", Path("out"))
+        assert cmds
+        cmd = cmds[0]
+        assert "before_dl:%(extractor_key)s" in cmd
+        assert ("--print", "after_move:filepath") in pairwise(cmd)
 
 
 class TestFindDownloadedFile:
@@ -728,3 +749,105 @@ class TestSweepPartialFragments:
 
     def test_missing_dir_is_noop(self):
         _sweep_partial_fragments(Path("does-not-exist-xyz"), "a1b2c3d4")
+
+    def test_token_inside_video_id_is_not_matched(self):
+        """A fragment whose VIDEO ID happens to contain the token as a
+        substring (no ``-<token>.`` slot) must NOT be deleted — the
+        structural match is the whole point of the strict regex
+        (audit round 25 P9)."""
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            embedded = out / "vid-a1b2c3d4extra.webm.part"
+            embedded.write_bytes(b"id contains the token")
+            # yt-dlp always writes ``-<epoch>-<token>``; the token glued
+            # to the id (or a longer token glued to the epoch) is a
+            # different run's naming — keep it.
+            glued = out / "vid-12345-a1b2c3d4zz.webm.part"
+            glued.write_bytes(b"token continues into the extension")
+            _sweep_partial_fragments(out, "a1b2c3d4")
+            assert embedded.exists()
+            assert glued.exists()
+
+    def test_legacy_youtube_run_token_slot_still_matches(self):
+        """The yt-dlp outtmpl slot is ``<id>-<epoch>-<token>`` — the
+        fragment ``<id>-<epoch>-<token>.<ext>.part`` must still be
+        deleted (regression guard for the strict rewrite)."""
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            frag = out / "vid-12345-a1b2c3d4.webm.part"
+            frag.write_bytes(b"ours")
+            _sweep_partial_fragments(out, "a1b2c3d4")
+            assert not frag.exists()
+
+
+class TestParseExtractorKey:
+    """Audit round 25 P2: the yt-dlp ``before_dl:%(extractor_key)s``
+    print line gives the project identity its site namespace."""
+
+    def test_returns_first_non_blank_line(self):
+        from stream2video.download import _parse_extractor_key
+
+        assert _parse_extractor_key(["YouTube", "[download] ..."]) == "YouTube"
+        assert _parse_extractor_key(["", "  ", "Vimeo"]) == "Vimeo"
+
+    def test_strips_whitespace(self):
+        from stream2video.download import _parse_extractor_key
+
+        assert _parse_extractor_key(["  YouTube  "]) == "YouTube"
+
+    def test_path_like_first_line_rejected(self):
+        from stream2video.download import _parse_extractor_key
+
+        assert _parse_extractor_key(["video.mp4"]) is None
+        assert _parse_extractor_key(["./video.mp4"]) is None
+        assert _parse_extractor_key([r"C:\videos\x.mp4"]) is None
+        assert _parse_extractor_key(["sub/dir/video"]) is None
+
+    def test_empty_stdout_returns_none(self):
+        from stream2video.download import _parse_extractor_key
+
+        assert _parse_extractor_key([]) is None
+
+
+class TestRedactInputUrl:
+    """Audit round 25 P4: signed URLs / userinfo / query must never hit
+    logs; scheme+host+path stay visible."""
+
+    def test_plain_url_unchanged(self):
+        from stream2video.download import redact_input_url
+
+        assert redact_input_url("https://example.com/video.mp4") == (
+            "https://example.com/video.mp4"
+        )
+
+    def test_query_and_fragment_masked(self):
+        from stream2video.download import redact_input_url
+
+        redacted = redact_input_url("https://example.com/v?token=secret&x=1#frag")
+        assert "secret" not in redacted
+        assert "token=" not in redacted
+        assert redacted == "https://example.com/v?<redacted>#<redacted>"
+
+    def test_userinfo_masked(self):
+        from stream2video.download import redact_input_url
+
+        redacted = redact_input_url("https://user:pass@example.com/v")
+        assert "user" not in redacted
+        assert "pass" not in redacted
+        assert redacted == "https://<redacted>@example.com/v"
+
+    def test_port_kept(self):
+        from stream2video.download import redact_input_url
+
+        assert redact_input_url("https://example.com:8443/v") == ("https://example.com:8443/v")
+
+    def test_local_path_passes_through(self):
+        from stream2video.download import redact_input_url
+
+        assert redact_input_url(r"C:\Videos\clip.mp4") == r"C:\Videos\clip.mp4"
+        assert redact_input_url("clip.mp4") == "clip.mp4"
+
+    def test_non_http_scheme_passes_through(self):
+        from stream2video.download import redact_input_url
+
+        assert redact_input_url("ftp://user:pass@host/x") == "ftp://user:pass@host/x"

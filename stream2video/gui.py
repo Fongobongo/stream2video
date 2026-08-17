@@ -33,6 +33,7 @@ from typing import Any
 import customtkinter as ctk
 
 from stream2video.config import effective_defaults
+from stream2video.download import redact_input_url
 from stream2video.gui_advanced import AdvancedSettingsMixin
 from stream2video.gui_dialogs import DialogsMixin
 from stream2video.gui_encoder_panel import EncoderPanelMixin
@@ -391,7 +392,7 @@ class Stream2VideoGUI(
         self._ui_update_output(output_dir)
 
         self._log(
-            f"Starting pipeline: input={input_raw}, output_dir={output_dir}, "
+            f"Starting pipeline: input={redact_input_url(input_raw)}, output_dir={output_dir}, "
             f"method={method}, encoder={encoder}, "
             f"video_quality={video_quality}, download_quality={download_quality}, "
             f"output_format={config_snapshot['output_format']}, "

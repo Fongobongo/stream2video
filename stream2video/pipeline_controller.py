@@ -40,6 +40,7 @@ from stream2video.concat import (
     generate_keep_segments,
 )
 from stream2video.concat.output_lock import (
+    LockCancelledError,
     LockHandle,
     acquire_lock_file,
     acquire_output_lock,
@@ -68,11 +69,17 @@ from stream2video.download import (
     URLValidationError,
     VideoNotAvailableError,
     download,
+    redact_input_url,
 )
 from stream2video.formatters import fmt_size, fmt_time
 from stream2video.gui_helpers import build_silence_info_line
 from stream2video.memory import check_memory_reserve
-from stream2video.paths import _epochless, apply_per_video_dir, artifact_stem
+from stream2video.paths import (
+    _epochless,
+    apply_per_video_dir,
+    artifact_stem,
+    downloaded_identity,
+)
 from stream2video.silence import (
     SilenceCancelledError,
     SilenceDetectionError,
@@ -568,13 +575,32 @@ class PipelineController:
 
     # How long a run may wait for a concurrent same-project run to
     # finish before failing with a clear "another run holds this" error.
-    # A generous ceiling: a legit run can last hours (final-concat
-    # timeouts reach 24 h), and the waiting run has already announced
-    # itself via on_wait before the countdown matters.
+    # The ceiling below any configured pipeline timeout would produce a
+    # FALSE refusal against a legitimately long first run, so the actual
+    # wait is derived from the run's own timeouts (see
+    # ``_project_lock_timeout``) — this constant is the floor.
     _PROJECT_LOCK_TIMEOUT_SECONDS = 3600.0
 
     def _set_status(self, text: str, *, force: bool = False) -> None:
         self.cb.on_status(text, force=force)
+
+    def _project_lock_timeout(self) -> float:
+        """Wait budget for a concurrent same-project run, in seconds.
+
+        A first run may legitimately last as long as its own timeouts
+        allow (download + silence + final concat; the concat ceiling
+        alone reaches 7 days). A wait shorter than that would refuse a
+        run whose holder is alive and healthy — an operational failure,
+        not a corruption, but still one that forces a re-download and a
+        manual retry (audit round 25 P11). The wait therefore covers
+        this run's worst-case phase sum, floored at the historical hour.
+        """
+        return max(
+            self._PROJECT_LOCK_TIMEOUT_SECONDS,
+            float(self.cfg.download_timeout)
+            + float(self.cfg.silence_timeout)
+            + float(self.cfg.final_concat_timeout),
+        )
 
     def _set_phase_progress(self, fraction: float) -> None:
         """Dispatch the per-phase bar update (no-op when the callback
@@ -779,6 +805,16 @@ class PipelineController:
             )
             self._cleanup_partial_output()
             raise PipelineCancelled(str(e)) from e
+        except LockCancelledError as e:
+            # The user cancelled while this run was WAITING for a
+            # same-project lock. Not a lock failure: the wait simply
+            # stops, the already-held URL/source locks are released by
+            # the finally below, and a completed download (when one was
+            # registered before the wait) is kept and announced
+            # (audit round 25 P5 / P3).
+            self._cleanup_download_path(partial_only=True)
+            self._cleanup_partial_output()
+            raise PipelineCancelled(str(e)) from e
         except DownloadError as e:
             # URLValidationError is a DownloadError subclass — no separate
             # clause needed. Only a download-time failure should purge
@@ -841,18 +877,23 @@ class PipelineController:
 
         def _on_wait() -> None:
             self.cb.on_log(
-                f"Another run is processing this source ({raw[:80]}) — waiting for it to finish..."
+                f"Another run is processing this source "
+                f"({redact_input_url(raw)[:80]}) — waiting for it to finish..."
             )
 
         locks: list[LockHandle] = []
         if raw.startswith(("http://", "https://")):
-            url_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
+            # 16 hex chars (64-bit): 32-bit truncation would collide
+            # realistically under many URLs and falsely serialize /
+            # refuse unrelated runs (audit round 25 P10).
+            url_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
             locks.append(
                 acquire_lock_file(
                     out_dir / f".s2v_url_{url_hash}.lock",
                     what="URL",
-                    timeout=self._PROJECT_LOCK_TIMEOUT_SECONDS,
+                    timeout=self._project_lock_timeout(),
                     on_wait=_on_wait,
+                    cancel_callback=lambda: self.cancel_event.is_set(),
                 )
             )
         else:
@@ -861,8 +902,9 @@ class PipelineController:
                 acquire_lock_file(
                     out_dir / f".s2v_{stem}.lock",
                     what="source",
-                    timeout=self._PROJECT_LOCK_TIMEOUT_SECONDS,
+                    timeout=self._project_lock_timeout(),
                     on_wait=_on_wait,
+                    cancel_callback=lambda: self.cancel_event.is_set(),
                 )
             )
         return locks
@@ -925,6 +967,15 @@ class PipelineController:
             raise PipelineDownloadError(str(e)) from e
 
         video_path = download_result.path
+        # Register the completed download IMMEDIATELY (audit round
+        # 25 P3): a multi-GB file that download() fully wrote must be
+        # known to this controller before any further lock can fail —
+        # otherwise a timeout/refusal of the video-id lock leaves the
+        # file orphaned in the top-level output dir, invisible to the
+        # cleanup that would otherwise keep it and log its path.
+        if download_result.is_downloaded:
+            self._download_path = video_path
+            self._download_was_real = True
         if download_result.is_downloaded:
             # Second project lock for URL runs: keyed on the video id,
             # NOT the URL hash — two alias URLs of the same video (or
@@ -932,17 +983,23 @@ class PipelineController:
             # in the same project dir and must be serialised there.
             # Taken BEFORE apply_per_video_dir's atomic replace of the
             # stable source path and before any cache phase touches the
-            # project dir (audit round 24 P4).
-            project_id = _epochless(video_path.stem)
+            # project dir (audit round 24 P4). The identity is
+            # namespaced by the yt-dlp extractor/site when known, so
+            # two DIFFERENT sites with the same id do not collide
+            # (audit round 25 P2).
+            project_id = downloaded_identity(
+                _epochless(video_path.stem), download_result.extractor_key
+            )
             self._project_locks.append(
                 acquire_lock_file(
                     self.cfg.output_dir / f".s2v_project_{project_id}.lock",
                     what="project",
-                    timeout=self._PROJECT_LOCK_TIMEOUT_SECONDS,
+                    timeout=self._project_lock_timeout(),
                     on_wait=lambda: self.cb.on_log(
                         f"Another run is processing this video (id={project_id}) — "
                         "waiting for it to finish..."
                     ),
+                    cancel_callback=lambda: self.cancel_event.is_set(),
                 )
             )
         # Per-video project directory (the function honours
@@ -952,12 +1009,16 @@ class PipelineController:
             video_path,
             download_result.is_downloaded,
             per_video_dir=self.cfg.per_video_dir,
+            extractor_key=download_result.extractor_key,
         )
         # Re-bind output_dir on the controller so phases 2+ use it.
         # dataclass(frozen=False) on PipelineConfig would be cleaner;
         # for now we mutate a local var and pass it to phase 2/3.
         self._output_dir_resolved = output_dir
 
+        # Re-point the registered download at its moved location (the
+        # epochless rename above) — the early registration stays valid
+        # across the move.
         self._download_path = video_path if download_result.is_downloaded else None
         # From here on the download, when one happened, is *complete*:
         # the phases above (see ``_cleanup_download_path`` docstring)
@@ -1009,7 +1070,7 @@ class PipelineController:
         if download_result.is_downloaded:
             self._set_phase_progress(1.0)
             self._set_status("Step 1/4: Download complete", force=True)
-            self.cb.on_log(f"Downloaded: {self.cfg.input_raw} -> {video_path}")
+            self.cb.on_log(f"Downloaded: {redact_input_url(self.cfg.input_raw)} -> {video_path}")
         else:
             self._set_phase_progress(1.0)
             self._set_status("Step 1/4: Local file ready", force=True)

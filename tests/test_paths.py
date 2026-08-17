@@ -424,6 +424,49 @@ class TestDownloadedEpochStripping:
             assert moved.read_text() == "data"
             assert not src.exists()
 
+    def test_downloaded_identity_namespaced_by_extractor_key(self):
+        """Audit round 25 P2: the post-download identity carries the
+        extractor/site namespace when yt-dlp reports one, so equal video
+        ids from different sites do not collide."""
+        from stream2video.paths import downloaded_identity
+
+        assert downloaded_identity("vid123") == "vid123"
+        assert downloaded_identity("vid123", None) == "vid123"
+        assert downloaded_identity("vid123", "youtube") == "youtube_vid123"
+        assert downloaded_identity("vid123", "vimeo") == "vimeo_vid123"
+        assert downloaded_identity("vid123", "YouTube") == "YouTube_vid123"
+
+    def test_apply_per_video_dir_namespaces_extractor_downloads(self):
+        """With an extractor key, a downloaded file's project dir and
+        moved name are namespaced (``<extractor>_<id>``) — two sites
+        sharing a video id must never share a project dir (audit round
+        25 P2)."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "out"
+            src = root / "vid123-1755000000.mp4"
+            src.write_text("data")
+            project, moved = apply_per_video_dir(
+                out, src, is_downloaded=True, extractor_key="youtube"
+            )
+            assert project == out / "youtube_vid123"
+            assert moved == project / "youtube_vid123.mp4"
+            assert moved.read_text() == "data"
+            assert not src.exists()
+            # The same id from another site lands in its own dir.
+            src2 = root / "vid123-1755000001.mp4"
+            src2.write_text("b")
+            project2, _moved2 = apply_per_video_dir(
+                out, src2, is_downloaded=True, extractor_key="vimeo"
+            )
+            assert project2 == out / "vimeo_vid123"
+            assert project2 != project
+            # Extractor-less downloads keep the historical layout.
+            src3 = root / "vid123-1755000002.mp4"
+            src3.write_text("c")
+            project3, _moved3 = apply_per_video_dir(out, src3, is_downloaded=True)
+            assert project3 == out / "vid123"
+
     def test_downloaded_identity_stable_across_epochs(self):
         """Two runs of the same URL (different epochs) must land in the
         same project dir with the same artifact identity, so the silence

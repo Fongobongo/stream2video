@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import customtkinter as ctk
 
+from stream2video.download import redact_input_url
 from stream2video.formatters import fmt_clock_time, fmt_time, fmt_zoom_text
 from stream2video.paths import artifact_stem
 from stream2video.silence import (
@@ -102,9 +103,10 @@ class WaveformRenderMixin:
             return
         in_path = Path(input_raw)
         if not in_path.is_file():
-            self._log(f"Input not a local file (downloads not previewable): {input_raw}")
-            return
-        # Normalise to the same form the pipeline_worker uses as the
+            self._log(
+                f"Input not a local file (downloads not previewable): {redact_input_url(input_raw)}"
+            )
+            return  # Normalise to the same form the pipeline_worker uses as the
         # live-segments store key (resolved, symlinks forward). The
         # store.put runs from the pipeline thread with a *resolved*
         # path; a raw ``./video.mp4`` here would never match it, leaving

@@ -4,6 +4,7 @@ Every test in this module maps directly to a numbered audit finding.
 A test that starts failing again means the corresponding bug came back.
 """
 
+import errno
 import os
 import subprocess
 import sys
@@ -445,6 +446,68 @@ class TestOutputLock:
             pytest.raises(ConcatLockError, match="kept changing identity"),
         ):
             acquire_output_lock(out, timeout=0.1)
+
+    def test_cancel_callback_aborts_lock_wait(self, tmp_path: Path):
+        """A cancel requested while waiting for a held lock stops the
+        wait immediately with LockCancelledError — the host maps it to
+        its cancellation exception, not a lock failure (audit round
+        25 P5)."""
+        from stream2video.concat.errors import ConcatError
+        from stream2video.concat.output_lock import (
+            LockCancelledError,
+            acquire_output_lock,
+            release_output_lock,
+        )
+
+        out = tmp_path / "x.mp4"
+        holder = acquire_output_lock(out)
+        try:
+            with pytest.raises(LockCancelledError) as ei:
+                acquire_output_lock(out, timeout=60, cancel_callback=lambda: True)
+            assert isinstance(ei.value, ConcatError)
+        finally:
+            release_output_lock(holder)
+
+    def test_cancel_callback_ignored_when_lock_free(self, tmp_path: Path):
+        """The cancel callback only guards the WAIT: a free lock is
+        acquired even when the callback already reports cancel
+        (audit round 25 P5)."""
+        from stream2video.concat.output_lock import (
+            acquire_output_lock,
+            release_output_lock,
+        )
+
+        out = tmp_path / "x.mp4"
+        lp = acquire_output_lock(out, cancel_callback=lambda: True)
+        release_output_lock(lp)
+        assert not lp.path.exists()
+
+    def test_non_contention_lock_fault_refused_immediately(self, tmp_path: Path):
+        """Only the platform's contention codes are retryable: a lock
+        syscall failing with anything else (bad fd, filesystem without
+        lock support) must refuse IMMEDIATELY, not masquerade as
+        "another run is holding the lock" until the timeout
+        (audit round 25 P6)."""
+        import stream2video.concat.output_lock as ol
+
+        out = tmp_path / "x.mp4"
+        calls = {"n": 0}
+
+        def broken_lock(fd):
+            calls["n"] += 1
+            if os.name == "nt":
+                # ERROR_INVALID_HANDLE (winerror 6 → errno EBADF) — a
+                # real fault, NOT lock contention (winerror 33 /
+                # errno EACCES).
+                raise OSError(0, "invalid handle", None, 6)
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        with (
+            patch.object(ol, "_os_lock_fd", side_effect=broken_lock),
+            pytest.raises(ConcatLockError, match="could not be locked"),
+        ):
+            acquire_output_lock(out, timeout=30)
+        assert calls["n"] == 1, "a non-contention fault must not retry"
 
     def test_release_does_not_unlink_replaced_lock(self, tmp_path: Path):
         """Release must not delete a file that no longer belongs to our

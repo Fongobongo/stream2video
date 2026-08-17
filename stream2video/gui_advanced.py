@@ -108,8 +108,13 @@ class AdvancedSettingsMixin:
         the Advanced widget whose name appears in the error — the same
         key space this dict already reports per-key errors with, so all
         three gates (Start / Copy CLI / Save defaults) surface it
-        identically. Fail-open: a broken settings shape must not block
-        Start — the worker's own pre-flight reports it in the status.
+        identically. Fail-CLOSED (audit round 25 P8): a broken settings
+        shape or a snapshot-build exception reports an internal
+        validation error instead of silently blessing the state — Copy
+        CLI and Save defaults must never persist/copy values the run
+        itself would reject, and Start blocks until the state is
+        recoverable rather than relying on the worker's second
+        validator.
         """
         errors = validate_advanced_widgets(self._raw_advanced_widget_values())
         if errors:
@@ -142,8 +147,15 @@ class AdvancedSettingsMixin:
                 key = err.split(" ")[0]
                 if key in ADVANCED_WIDGET_SPECS:
                     errors[key] = err
-        except Exception:
-            return {}
+        except Exception as e:
+            # Fail closed: the gate cannot prove the snapshot is valid,
+            # so it must not approve it. The synthetic key keeps the
+            # error visible in every consumer (Start / Copy / Save
+            # dialog) instead of being dropped by the per-key filter.
+            errors["internal_validation"] = (
+                f"Internal validation error: {e} — cannot verify this "
+                "configuration. Fix the settings or restart the app."
+            )
         return errors
 
     def _set_advanced_widget_values(self, values: dict[str, Any]) -> None:

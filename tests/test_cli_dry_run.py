@@ -55,7 +55,7 @@ def _invoke(argv: list[str]) -> tuple[int, str, MagicMock, MagicMock]:
         patch("stream2video.pipeline_controller.check_memory_reserve", return_value=True),
         patch(
             "stream2video.pipeline_controller.apply_per_video_dir",
-            side_effect=lambda o, v, d, per_video_dir=False: (o, v),
+            side_effect=lambda o, v, d, per_video_dir=False, extractor_key=None: (o, v),
         ),
     ):
         # download() passthrough: return the input path as-is.
@@ -163,7 +163,7 @@ class TestDryRun:
             patch("stream2video.pipeline_controller.check_memory_reserve", side_effect=_counted),
             patch(
                 "stream2video.pipeline_controller.apply_per_video_dir",
-                side_effect=lambda o, v, d, per_video_dir=False: (o, v),
+                side_effect=lambda o, v, d, per_video_dir=False, extractor_key=None: (o, v),
             ),
         ):
             mock_dl.return_value = MagicMock(path=src, is_downloaded=False)
