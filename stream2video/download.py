@@ -1,5 +1,6 @@
 """Video download module using yt-dlp CLI subprocess (cancellable)."""
 
+import hashlib
 import logging
 import os
 import re
@@ -128,10 +129,15 @@ def redact_input_url(url: str) -> str:
         must not crash the redactor itself: the userinfo is stripped
         from the raw authority and the rest of the URL is masked, so
         the error path stays redacted even when the URL is broken.
+      * An UNPARSEABLE URL-like string (``urlsplit`` ValueError) must
+        not come back raw either (audit round 27 P4): the scheme is
+        kept and everything after ``://`` is masked.
     """
     try:
         parts = urllib.parse.urlsplit(url)
     except ValueError:
+        if "://" in url:
+            return f"{url.split('://', 1)[0]}://<redacted>"
         return url
     if not parts.scheme or not parts.netloc:
         # Not a URL (drive letter, relative path, bare host) — nothing
@@ -163,13 +169,15 @@ def canonical_url_lock_key(url: str) -> str:
     The URL lock exists to serialize concurrent runs of the same
     source BEFORE the download resolves a video id (audit round 24
     P4). Equivalent URLs must land on the same lock (audit round 26
-    P7): scheme/host case, default ports and the signed query/fragment
-    vary between invocations and requests, so the key keeps only
-    scheme (lowercased) + host (lowercased) + non-default port +
-    normalized path. Two DIFFERENT paths stay distinct — the path is
-    the only pre-download signal of "different video" available.
-    Unparseable input falls back to the raw string (the caller also
-    gates on ``_validate_url``).
+    P7): scheme/host case and default ports vary between invocations,
+    so the key keeps only scheme (lowercased) + host (lowercased) +
+    non-default port + normalized path. The QUERY is hashed, not
+    dropped (audit round 27 P5): on many sites the query defines the
+    resource (``youtube.com/watch?v=A`` vs ``?v=B``), so dropping it
+    serialized DIFFERENT videos on one lock for the whole pipeline —
+    while hashing it keeps the secrets out of the lock name and keeps
+    the resource distinction. Unparseable input falls back to the raw
+    string (the caller also gates on ``_validate_url``).
     """
     try:
         parts = urllib.parse.urlsplit(url)
@@ -184,7 +192,25 @@ def canonical_url_lock_key(url: str) -> str:
     if port and not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
         host = f"{host}:{port}"
     path = parts.path.rstrip("/") or "/"
+    if parts.query:
+        query_tag = f"?q={hashlib.sha1(parts.query.encode('utf-8')).hexdigest()[:12]}"
+        return f"{scheme}://{host}{path}{query_tag}"
     return f"{scheme}://{host}{path}"
+
+
+def _redact_process_output(text: str, secrets: set[str]) -> str:
+    """Scrub secret-bearing substrings out of subprocess output.
+
+    yt-dlp/ffmpeg stderr gets embedded into ``DownloadError`` /
+    timeout messages verbatim, and it can echo the input URL or the
+    proxy URL (with credentials) — the most informative failure logs
+    were exactly the ones leaking (audit round 27 P4). Replaces every
+    occurrence of each secret with its redacted form.
+    """
+    for secret in secrets:
+        if secret and secret in text:
+            text = text.replace(secret, redact_input_url(secret))
+    return text
 
 
 def _is_local_file(path_str: str) -> bool:
@@ -416,8 +442,14 @@ def _stderr_snippet(stderr_chunks: list[str], limit: int = 300) -> str:
     return text[-limit:] if text else ""
 
 
-def _timeout_error(message: str, stderr_chunks: list[str]) -> DownloadTimeoutError:
+def _timeout_error(
+    message: str,
+    stderr_chunks: list[str],
+    scrub: Callable[[str], str] | None = None,
+) -> DownloadTimeoutError:
     snippet = _stderr_snippet(stderr_chunks)
+    if scrub is not None:
+        snippet = scrub(snippet)
     if snippet:
         return DownloadTimeoutError(f"{message}. stderr: {snippet}")
     return DownloadTimeoutError(message)
@@ -574,7 +606,11 @@ def download(
         return DownloadResult(path, is_downloaded=False)
 
     if not _validate_url(url):
-        raise URLValidationError(f"Invalid URL: {url}")
+        # The error goes to the CLI/GUI log, so the URL it echoes must
+        # be redacted exactly like the happy-path logs (audit round
+        # 27 P4): an ftp://user:pass@host input must not leak its
+        # credentials through the rejection message.
+        raise URLValidationError(f"Invalid URL: {redact_input_url(url)}")
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -584,6 +620,13 @@ def download(
     # (audit round 24 P2). The token also lets the failure-path sweep
     # identify exactly this run's fragments (audit round 24 P3).
     run_id = secrets.token_hex(4)
+
+    # Every failure message below embeds yt-dlp stderr verbatim, and
+    # stderr can echo the input URL or the proxy URL (with
+    # credentials) — scrub both before they reach the CLI/GUI log
+    # (audit round 27 P4).
+    def _scrub(text: str) -> str:
+        return _redact_process_output(text, {url, proxy})
 
     format_str = _format_selector_for_quality(quality)
     logger.info(f"Download quality: {quality} ({format_str})")
@@ -792,6 +835,7 @@ def download(
                     raise _timeout_error(
                         f"Download timeout after {download_timeout}s",
                         stderr_chunks,
+                        scrub=_scrub,
                     )
 
                 # Connection / progress watchdog. Two branches:
@@ -819,6 +863,7 @@ def download(
                             f"within {connect_timeout}s of start "
                             "(DNS/TLS/handshake?)",
                             stderr_chunks,
+                            scrub=_scrub,
                         )
                 else:
                     silent_for = now - last_progress_time[0]
@@ -833,6 +878,7 @@ def download(
                         raise _timeout_error(
                             f"Download stalled: no progress for {int(silent_for)}s",
                             stderr_chunks,
+                            scrub=_scrub,
                         )
                 try:
                     process.wait(timeout=min(CANCEL_POLL_INTERVAL, remaining))
@@ -844,11 +890,13 @@ def download(
 
             if process.returncode != 0:
                 stderr_text = "".join(stderr_chunks)
-                raise _classify_error(stderr_text) from None
+                raise _classify_error(_scrub(stderr_text)) from None
 
             if not stdout_lines:
                 stderr_text = "".join(stderr_chunks)
-                raise DownloadError(f"yt-dlp produced no file path. stderr: {stderr_text[:300]}")
+                raise DownloadError(
+                    f"yt-dlp produced no file path. stderr: {_scrub(stderr_text[:300])}"
+                )
 
             resolved, reported_path = _resolve_reported_download_path(out_dir, stdout_lines)
             if resolved is None:

@@ -253,7 +253,7 @@ class Stream2VideoGUI(
         # up-front instead of running with a silent fallback while the
         # widget still shows the bad text. Mirrors the CLI resolver,
         # which rejects the same input with an explicit error.
-        adv_errors = self._advanced_widget_errors()
+        adv_errors = self._advanced_widget_errors(require_input=True)
         if adv_errors:
             for err in adv_errors.values():
                 self._log(f"[ERROR] Invalid setting: {err}")

@@ -529,6 +529,8 @@ class TestProxySecretHandling:
         secret = "socks5://user:super-secret@host:1080"
         gui.settings["proxy"] = secret
         gui.settings["proxy_active"] = True
+        gui.entry_input.delete(0, "end")
+        gui.entry_input.insert(0, "https://example.com/v")
         gui.entry_output.delete(0, "end")
         gui.entry_output.insert(0, str(tmp_path))
         # The credential-carrying proxy makes ``_copy_cli_command`` ask

@@ -1,6 +1,7 @@
 """ffprobe-based validity helpers for resume-skip logic."""
 
 import logging
+import math
 import subprocess
 from pathlib import Path
 
@@ -55,6 +56,59 @@ def _ffprobe_is_valid_media(path: Path, stream_type: str = "v") -> bool:
 # search/grep across older branches doesn't report a dangling reference.
 def _ffprobe_is_valid_mp4(path: Path) -> bool:
     return _ffprobe_is_valid_media(path, stream_type="v")
+
+
+def _ffprobe_media_complete(path: Path, stream_type: str = "v") -> bool:
+    """Strict freshness check for a file about to be PUBLISHED as the
+    stable source (audit round 27 P2): ``_ffprobe_is_valid_media``
+    proves only that the requested stream has a readable codec name —
+    a file with a valid header but a truncated/corrupt body passes it,
+    and the publish would then atomically replace the previous good
+    copy with garbage. This probe additionally requires a finite,
+    non-zero container duration, which a truncated body cannot supply
+    (ffprobe reads the duration from the actual media, not from a
+    header field alone).
+
+    Fail-closed like its sibling: spawn faults, timeouts and
+    unparseable output all return False — the caller must then refuse
+    to publish. Exceptions of the "ffprobe cannot run at all" kind
+    (transient spawn failure) are NOT swallowed here: they re-raise so
+    the caller can distinguish "invalid media" from "validation
+    unavailable" and must not delete the download (audit round 27 P1).
+    """
+    r = run_with_retry(
+        [
+            ffprobe_path(),
+            "-v",
+            "error",
+            "-select_streams",
+            stream_type,
+            "-show_entries",
+            "stream=codec_name:format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        **no_window_kwargs(),
+    )
+    if r.returncode != 0:
+        return False
+    lines = [line.strip() for line in r.stdout.splitlines() if line.strip()]
+    if not lines or not lines[0]:
+        return False
+    duration: float | None = None
+    for line in lines[1:]:
+        try:
+            value = float(line)
+        except ValueError:
+            continue
+        if math.isfinite(value) and value > 0:
+            duration = value
+            break
+    return duration is not None
 
 
 def _ffprobe_duration_ok(path: Path, expected_seconds: float, *, slack: float = 1.0) -> bool:

@@ -596,25 +596,31 @@ class PipelineController:
         """
         return float("inf")
 
-    def _downloaded_media_is_valid(self, path: Path) -> bool:
-        """ffprobe validity check for a FRESH download.
+    def _downloaded_media_is_valid(self, path: Path, *, stream_type: str = "v") -> bool:
+        """Strict integrity check for a FRESH download.
 
         yt-dlp's rc=0 + a non-zero file size do not prove the file
-        plays — a corrupt moov atom, a truncated stream or a site
-        error page saved as media all pass that bar, and the move into
-        the stable source path would then ATOMICALLY REPLACE the
-        previous good copy with garbage (audit round 26 P4): the old
-        reusable source is destroyed before any later phase discovers
-        the problem. The probe runs BEFORE ``apply_per_video_dir``
-        publishes the file, so a rejected download is discarded while
-        the previous copy stays intact. A probe that cannot run at all
-        (ffprobe missing) also rejects — the pipeline needs ffprobe
-        for duration anyway, and approving an unverifiable file would
-        re-open the replace-with-garbage path.
-        """
-        from stream2video.concat.probing import _ffprobe_is_valid_media
+        plays — a corrupt moov atom, a truncated body or a site error
+        page saved as media all pass that bar, and the move into the
+        stable source path would then ATOMICALLY REPLACE the previous
+        good copy with garbage (audit round 26 P4 / 27 P2). The probe
+        runs BEFORE ``apply_per_video_dir`` publishes the file and
+        requires a readable codec AND a finite non-zero duration
+        (``_ffprobe_media_complete``), so a header-only file cannot
+        pass. ``stream_type`` selects the required stream: audio
+        outputs validate the audio stream, video outputs the video
+        stream (audit round 27 P6 — an audio-only podcast is a valid
+        source for ``--output-format mp3``).
 
-        return _ffprobe_is_valid_media(path)
+        Exceptions are NOT converted to False: a transient ffprobe
+        spawn fault (WinGet shim / AV filter) means "validation
+        unavailable", not "media invalid" — the caller must keep the
+        file and report a retryable error instead of deleting a
+        multi-GB good download (audit round 27 P1).
+        """
+        from stream2video.concat.probing import _ffprobe_media_complete
+
+        return _ffprobe_media_complete(path, stream_type=stream_type)
 
     def _set_phase_progress(self, fraction: float) -> None:
         """Dispatch the per-phase bar update (no-op when the callback
@@ -1003,20 +1009,30 @@ class PipelineController:
             # move_into_project's atomic replace would destroy the
             # previous good copy with garbage. A rejected file is
             # discarded (the was-real flag drops, so the error cleanup
-            # unlinks it) while the stable source stays untouched.
+            # unlinks it) while the stable source stays untouched. A
+            # transient PROBE failure is NOT treated as invalid media
+            # (audit round 27 P1): the file is kept (was-real stays
+            # True — the cleanup announces and preserves it) and the
+            # error message says retry.
+            from stream2video.config import OUTPUT_FORMAT_SPECS
+
+            stream_type = "a" if self.cfg.output_format in OUTPUT_FORMAT_SPECS else "v"
             try:
-                media_ok = self._downloaded_media_is_valid(video_path)
+                media_ok = self._downloaded_media_is_valid(video_path, stream_type=stream_type)
             except Exception as e:
-                media_ok = False
-                media_error = f" ({e})"
-            else:
-                media_error = ""
+                raise PipelineDownloadError(
+                    f"Download completed but media validation could not run "
+                    f"({e}) — the downloaded file was kept at {video_path}; "
+                    "retry to re-validate (a transient ffprobe start failure "
+                    "is not a reason to delete it)."
+                ) from e
             if not media_ok:
                 self._download_was_real = False
                 raise PipelineDownloadError(
                     f"Downloaded file failed media validation: "
-                    f"{redact_input_url(self.cfg.input_raw)} -> {video_path}{media_error}"
+                    f"{redact_input_url(self.cfg.input_raw)} -> {video_path}"
                 )
+        namespace: str | None = None
         if download_result.is_downloaded:
             # Second project lock for URL runs: keyed on the video id
             # within its site namespace, NOT the URL hash — two alias
@@ -1028,10 +1044,21 @@ class PipelineController:
             # yt-dlp extractor/site when known; when the extractor is
             # missing (old yt-dlp, custom extractor) the URL HOST is
             # the fallback namespace — a bare id is only unique within
-            # one site (audit round 26 P3). The lock FILE name is a
-            # hash of the identity (audit round 26 P2): the readable id
-            # stays in the record and the wait message only.
-            namespace = download_result.extractor_key or url_host_namespace(self.cfg.input_raw)
+            # one site (audit round 26 P3). The catch-all ``generic``
+            # extractor serves MANY different sites, so its namespace
+            # is scoped by the host too (audit round 27 P3). The lock
+            # FILE name is a hash of the identity (audit round 26 P2):
+            # the readable id stays in the record and the wait message
+            # only.
+            host_ns = url_host_namespace(self.cfg.input_raw)
+            extractor_ns = download_result.extractor_key
+            if extractor_ns and extractor_ns.casefold() in (
+                "generic",
+                "genericvideo",
+                "genericmusic",
+            ):
+                extractor_ns = f"{extractor_ns}_{host_ns}" if host_ns else extractor_ns
+            namespace = extractor_ns or host_ns
             project_id = downloaded_identity(_epochless(video_path.stem), namespace)
             self._project_locks.append(
                 acquire_lock_file(
@@ -1052,7 +1079,7 @@ class PipelineController:
             video_path,
             download_result.is_downloaded,
             per_video_dir=self.cfg.per_video_dir,
-            namespace=download_result.extractor_key or url_host_namespace(self.cfg.input_raw),
+            namespace=namespace,
         )
         # Re-bind output_dir on the controller so phases 2+ use it.
         # dataclass(frozen=False) on PipelineConfig would be cleaner;

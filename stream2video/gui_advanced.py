@@ -89,7 +89,7 @@ class AdvancedSettingsMixin:
             key: getattr(self, ADVANCED_WIDGET_NAMES[key]).get() for key in ADVANCED_WIDGET_SPECS
         }
 
-    def _advanced_widget_errors(self) -> dict[str, str]:
+    def _advanced_widget_errors(self, *, require_input: bool = False) -> dict[str, str]:
         """Per-key error strings for invalid Advanced widget content.
 
         Empty dict = all widgets parse and are in range. Mirrors the CLI
@@ -97,6 +97,13 @@ class AdvancedSettingsMixin:
         the CLI rejects with "Invalid X (use ...)" also blocks Start /
         Copy CLI command here, so the GUI can no longer run with a value
         different from what its own field shows.
+
+        ``require_input`` splits the settings check from the ACTION
+        check (audit round 27 P8): Start and Copy CLI demand a real
+        non-empty input (a copied command without a positional input
+        would be rejected by the CLI as a missing argument), while
+        Save defaults runs with the placeholder — settings are input-
+        agnostic.
 
         Also runs the pipeline-level validation the run's pre-flight
         enforces (audit round 24 P10): per-key checks can NOT catch the
@@ -119,6 +126,10 @@ class AdvancedSettingsMixin:
         the worker's second validator.
         """
         errors = validate_advanced_widgets(self._raw_advanced_widget_values())
+        if require_input:
+            input_raw = self.entry_input.get().strip()
+            if not input_raw:
+                errors["input"] = "input: a video URL or local file is required"
         # The slider panel (threshold / min_silence / margin) has the
         # same silent-fallback hazard the Advanced gate exists to
         # prevent (audit round 26 P12): an entry that fails to parse

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import signal
 import sys
@@ -48,6 +49,7 @@ from stream2video.download import (
     PermissionDeniedError,
     URLValidationError,
     VideoNotAvailableError,
+    _validate_url,
 )
 from stream2video.formatters import fmt_completion_summary, fmt_dry_run_summary
 from stream2video.gui_helpers import build_download_status
@@ -444,25 +446,29 @@ def _doctor_impl(config_file: Path | None = None) -> bool:
                 # validate_pipeline_config only requires it non-empty.
                 params = PipelineWorkerParams(
                     input_raw="doctor",
-                    output_dir=Path(str(loaded.get("output_dir") or ".")),
-                    method=str(loaded.get("method") or CONFIG_DEFAULTS["method"]),
-                    encoder=str(loaded.get("encoder") or CONFIG_DEFAULTS["encoder"]),
+                    output_dir=Path(str(loaded.get("output_dir", "."))),
+                    method=str(loaded.get("method", CONFIG_DEFAULTS["method"])),
+                    encoder=str(loaded.get("encoder", CONFIG_DEFAULTS["encoder"])),
                     video_quality=str(
-                        loaded.get("video_quality") or CONFIG_DEFAULTS["video_quality"]
+                        loaded.get("video_quality", CONFIG_DEFAULTS["video_quality"])
                     ),
                     audio_quality=str(
-                        loaded.get("audio_quality") or CONFIG_DEFAULTS["audio_quality"]
+                        loaded.get("audio_quality", CONFIG_DEFAULTS["audio_quality"])
                     ),
                     download_quality=str(
-                        loaded.get("download_quality") or CONFIG_DEFAULTS["download_quality"]
+                        loaded.get("download_quality", CONFIG_DEFAULTS["download_quality"])
                     ),
-                    force=bool(loaded.get("force") or CONFIG_DEFAULTS["force"]),
+                    # ``get(key, default)``, NOT ``get(key) or default``:
+                    # an explicit ``false`` / ``0`` / ``""`` is a REAL
+                    # value and must survive into the snapshot the
+                    # doctor validates (audit round 27 P10) — the
+                    # truthiness fallback silently flipped it back to
+                    # the factory default.
+                    force=bool(loaded.get("force", CONFIG_DEFAULTS["force"])),
                     per_video_dir=bool(
-                        loaded.get("per_video_dir") or CONFIG_DEFAULTS["per_video_dir"]
+                        loaded.get("per_video_dir", CONFIG_DEFAULTS["per_video_dir"])
                     ),
-                    delete_after=bool(
-                        loaded.get("delete_after") or CONFIG_DEFAULTS["delete_after"]
-                    ),
+                    delete_after=bool(loaded.get("delete_after", CONFIG_DEFAULTS["delete_after"])),
                 )
                 pipe_cfg = build_pipeline_config_from_snapshot(params, loaded)
                 pipe_errors = validate_pipeline_config(pipe_cfg)
@@ -547,25 +553,25 @@ def _doctor_impl(config_file: Path | None = None) -> bool:
                             merged[k] = coerced
                 params = PipelineWorkerParams(
                     input_raw="doctor",
-                    output_dir=Path(str(merged.get("output_dir") or ".")),
-                    method=str(merged.get("method") or CONFIG_DEFAULTS["method"]),
-                    encoder=str(merged.get("encoder") or CONFIG_DEFAULTS["encoder"]),
+                    output_dir=Path(str(merged.get("output_dir", "."))),
+                    method=str(merged.get("method", CONFIG_DEFAULTS["method"])),
+                    encoder=str(merged.get("encoder", CONFIG_DEFAULTS["encoder"])),
                     video_quality=str(
-                        merged.get("video_quality") or CONFIG_DEFAULTS["video_quality"]
+                        merged.get("video_quality", CONFIG_DEFAULTS["video_quality"])
                     ),
                     audio_quality=str(
-                        merged.get("audio_quality") or CONFIG_DEFAULTS["audio_quality"]
+                        merged.get("audio_quality", CONFIG_DEFAULTS["audio_quality"])
                     ),
                     download_quality=str(
-                        merged.get("download_quality") or CONFIG_DEFAULTS["download_quality"]
+                        merged.get("download_quality", CONFIG_DEFAULTS["download_quality"])
                     ),
-                    force=bool(merged.get("force") or CONFIG_DEFAULTS["force"]),
+                    # get(key, default): explicit false/0 must survive
+                    # (audit round 27 P10).
+                    force=bool(merged.get("force", CONFIG_DEFAULTS["force"])),
                     per_video_dir=bool(
-                        merged.get("per_video_dir") or CONFIG_DEFAULTS["per_video_dir"]
+                        merged.get("per_video_dir", CONFIG_DEFAULTS["per_video_dir"])
                     ),
-                    delete_after=bool(
-                        merged.get("delete_after") or CONFIG_DEFAULTS["delete_after"]
-                    ),
+                    delete_after=bool(merged.get("delete_after", CONFIG_DEFAULTS["delete_after"])),
                 )
                 pipe_cfg = build_pipeline_config_from_snapshot(params, merged)
                 pipe_errors = validate_pipeline_config(pipe_cfg)
@@ -1305,6 +1311,17 @@ def main(
             # CLI while the GUI rejected the same configuration (audit
             # round 23 P1). Validate the assembled snapshot the same way
             # the worker does.
+
+            # Tilde normalization (audit round 27 P9): the GUI expands
+            # ``~`` in both paths, the CLI used to treat ``~/video.mp4``
+            # as a non-existent local path and created a literal ``~``
+            # output directory. One shared rule, applied only to LOCAL
+            # paths — a URL must never be expanduser'd (``~`` can appear
+            # inside signed URLs).
+            if "~" in input_video and not _validate_url(input_video):
+                input_video = os.path.expanduser(input_video)
+            output_dir = Path(os.path.expanduser(str(output_dir)))
+
             _pcfg = build_pipeline_config(
                 input_raw=input_video,
                 output_dir=output_dir,

@@ -220,6 +220,15 @@ def _acquire_lock(
     deadline = time.monotonic() + timeout
     warned = False
     while True:
+        # A cancel must stop the acquire BEFORE it opens/creates the
+        # lock file too (audit round 27 P11): the old contract only
+        # polled between contention retries, so an already-cancelled
+        # run could still create the lock file and write its owner
+        # record before noticing the cancel at the next phase.
+        if cancel_callback is not None and cancel_callback():
+            raise LockCancelledError(
+                f"Cancelled before acquiring the {what} lock ({output_hint})"
+            ) from None
         try:
             fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o666)
         except OSError as e:
@@ -282,6 +291,17 @@ def _acquire_lock(
                 ) from None
             time.sleep(_RETRY_SLEEP_SECONDS)
             continue
+        # We hold the OS lock. A cancel that arrived during the open/
+        # lock window must stop the acquire BEFORE the owner record is
+        # published (audit round 27 P11): release exactly like
+        # release_output_lock (platform-correct order) and raise — the
+        # file we remove is our own fresh acquisition, so no live
+        # owner is ever severed.
+        if cancel_callback is not None and cancel_callback():
+            release_output_lock(LockHandle(path=lock_path, token=token, what=what, fd=fd))
+            raise LockCancelledError(
+                f"Cancelled before publishing the {what} lock ({output_hint})"
+            ) from None
         break
 
     try:
@@ -399,8 +419,19 @@ def _release_stale_pathname(path: Path) -> None:
         return
     try:
         _os_lock_fd(fd)
-    except (OSError, ConcatLockError):
-        logger.warning("Refusing pathname release of %s: a live owner holds the lock", path)
+    except ConcatLockError as e:
+        # Lock-preparation failure (Windows placeholder write): a disk
+        # or filesystem defect, NOT proof of a live owner (audit round
+        # 27 P12) — report it truthfully.
+        logger.warning("Pathname release of %s failed (lock fault): %s", path, e)
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        return
+    except OSError as e:
+        if _is_contention_error(e):
+            logger.warning("Refusing pathname release of %s: a live owner holds the lock", path)
+        else:
+            logger.warning("Pathname release of %s failed (lock fault): %s", path, e)
         with contextlib.suppress(OSError):
             os.close(fd)
         return

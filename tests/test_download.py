@@ -96,6 +96,15 @@ class TestDownloadFunction:
         with TemporaryDirectory() as tmpdir, pytest.raises(URLValidationError):
             download("not a valid url", Path(tmpdir))
 
+    def test_invalid_url_error_is_redacted(self):
+        """The rejection message goes to the CLI/GUI log and must not
+        carry the credentials of an unsupported-scheme URL (audit
+        round 27 P4)."""
+        with TemporaryDirectory() as tmpdir, pytest.raises(URLValidationError) as ei:
+            download("ftp://user:pass@host/x", Path(tmpdir))
+        assert "user" not in str(ei.value)
+        assert "pass" not in str(ei.value)
+
     def test_cancel_callback_aborts(self):
         """Cancel callback should kill the subprocess and raise DownloadCancelledError."""
         import subprocess
@@ -902,10 +911,13 @@ class TestRedactInputUrl:
         redacted2 = redact_input_url("https://host:99999/x")
         assert redacted2 == "https://host:99999/x"
 
-    def test_unparseable_passes_through(self):
+    def test_unparseable_url_like_string_masked(self):
+        """An unparseable URL-LIKE string must not come back raw
+        (audit round 27 P4): scheme kept, everything after ``://``
+        masked."""
         from stream2video.download import redact_input_url
 
-        assert redact_input_url("://") == "://"
+        assert redact_input_url("https://[broken") == "https://<redacted>"
 
 
 class TestCanonicalUrlLockKey:
@@ -918,8 +930,28 @@ class TestCanonicalUrlLockKey:
 
         base = canonical_url_lock_key("https://example.com/v")
         assert canonical_url_lock_key("HTTPS://EXAMPLE.COM/v") == base
-        assert canonical_url_lock_key("https://example.com/v?token=abc&x=1") == base
         assert canonical_url_lock_key("https://example.com/v#frag") == base
+
+    def test_same_query_same_key(self):
+        from stream2video.download import canonical_url_lock_key
+
+        assert canonical_url_lock_key("https://example.com/v?x=1") == (
+            canonical_url_lock_key("https://example.com/v?x=1")
+        )
+
+    def test_different_queries_are_different_resources(self):
+        """The query is hashed, not dropped (audit round 27 P5):
+        ``youtube.com/watch?v=A`` and ``?v=B`` are different videos and
+        must not serialize on one lock — while the hash keeps query
+        secrets out of the lock name."""
+        from stream2video.download import canonical_url_lock_key
+
+        assert canonical_url_lock_key("https://youtube.com/watch?v=A") != (
+            canonical_url_lock_key("https://youtube.com/watch?v=B")
+        )
+        key = canonical_url_lock_key("https://example.com/v?token=supersecret")
+        assert "supersecret" not in key
+        assert "token" not in key
 
     def test_default_ports_dropped(self):
         from stream2video.download import canonical_url_lock_key
@@ -956,3 +988,28 @@ class TestCanonicalUrlLockKey:
         from stream2video.download import canonical_url_lock_key
 
         assert canonical_url_lock_key("https://host:bad/x") == "https://host:bad/x"
+
+
+class TestRedactProcessOutput:
+    """Audit round 27 P4: yt-dlp stderr embedded into DownloadError /
+    timeout messages can echo the input URL and the proxy URL — both
+    must be scrubbed before reaching the log."""
+
+    def test_url_and_proxy_scrubbed(self):
+        from stream2video.download import _redact_process_output
+
+        text = (
+            "ERROR: unable to download https://user:pass@example.com/v "
+            "via proxy http://puser:ppass@proxy.local:8080"
+        )
+        out = _redact_process_output(
+            text, {"https://user:pass@example.com/v", "http://puser:ppass@proxy.local:8080"}
+        )
+        assert "user:pass" not in out
+        assert "puser:ppass" not in out
+        assert "<redacted>" in out
+
+    def test_no_secrets_unchanged(self):
+        from stream2video.download import _redact_process_output
+
+        assert _redact_process_output("generic error", set()) == "generic error"

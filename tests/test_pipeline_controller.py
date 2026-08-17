@@ -1114,6 +1114,125 @@ class TestProjectLocks:
         controller = PipelineController(cfg=cfg, cb=cb, cancel_event=threading.Event())
         assert controller._project_lock_timeout() == float("inf")
 
+    def test_transient_probe_failure_keeps_download(self, tmp_path: Path):
+        """A TRANSIENT ffprobe failure means "validation unavailable",
+        NOT "media invalid" (audit round 27 P1): the completed download
+        must survive (was-real stays True — the cleanup announces and
+        keeps it) and the error must say retry."""
+        import threading
+
+        from stream2video.download import DownloadResult
+        from stream2video.pipeline_controller import PipelineDownloadError
+
+        cfg = _valid_config(output_dir=tmp_path, input_raw="https://example.com/v")
+        cb, calls = _make_callbacks()
+        controller = PipelineController(cfg=cfg, cb=cb, cancel_event=threading.Event())
+        fake_video = tmp_path / "vid123-1755000000-a1b2c3d4.mp4"
+        fake_video.write_bytes(b"dummy")
+
+        def fake_download(url, out_dir, **kwargs):
+            return DownloadResult(path=fake_video, is_downloaded=True)
+
+        with (
+            patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+            patch.object(
+                PipelineController,
+                "_downloaded_media_is_valid",
+                side_effect=OSError("transient spawn failure"),
+            ),
+            pytest.raises(PipelineDownloadError, match="could not run"),
+        ):
+            controller.run()
+        assert fake_video.exists(), "a transient probe failure must not delete the download"
+        assert any("Keeping completed download for possible reuse" in m for m in calls["log"])
+
+    def test_invalid_media_deletes_download(self, tmp_path: Path):
+        """A GENUINELY invalid download is discarded (was-real drops,
+        so the cleanup unlinks it) — the stable source is never
+        replaced with garbage (audit round 26 P4)."""
+        import threading
+
+        from stream2video.download import DownloadResult
+        from stream2video.pipeline_controller import PipelineDownloadError
+
+        cfg = _valid_config(output_dir=tmp_path, input_raw="https://example.com/v")
+        cb, _calls = _make_callbacks()
+        controller = PipelineController(cfg=cfg, cb=cb, cancel_event=threading.Event())
+        fake_video = tmp_path / "vid123-1755000000-a1b2c3d4.mp4"
+        fake_video.write_bytes(b"dummy")
+
+        def fake_download(url, out_dir, **kwargs):
+            return DownloadResult(path=fake_video, is_downloaded=True)
+
+        with (
+            patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+            patch.object(PipelineController, "_downloaded_media_is_valid", return_value=False),
+            pytest.raises(PipelineDownloadError, match="failed media validation"),
+        ):
+            controller.run()
+        assert not fake_video.exists(), "invalid media must be discarded"
+
+    def test_audio_output_validates_audio_stream(self, tmp_path: Path):
+        """An audio-only source is a valid input for audio outputs —
+        the fresh-download probe must select the AUDIO stream when
+        output_format is mp3/opus/aac/wav/flac (audit round 27 P6)."""
+        import threading
+
+        from stream2video.download import DownloadResult
+        from stream2video.pipeline_controller import PipelineDownloadError
+
+        cfg = _valid_config(
+            output_dir=tmp_path, input_raw="https://example.com/v", output_format="mp3"
+        )
+        cb, _ = _make_callbacks()
+        controller = PipelineController(cfg=cfg, cb=cb, cancel_event=threading.Event())
+        fake_video = tmp_path / "vid123-1755000000-a1b2c3d4.mp4"
+        fake_video.write_bytes(b"dummy")
+        probed: dict = {}
+
+        def fake_probe(path, *, stream_type="v"):
+            probed["stream_type"] = stream_type
+            return False
+
+        def fake_download(url, out_dir, **kwargs):
+            return DownloadResult(path=fake_video, is_downloaded=True)
+
+        with (
+            patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+            patch.object(PipelineController, "_downloaded_media_is_valid", side_effect=fake_probe),
+            pytest.raises(PipelineDownloadError, match="failed media validation"),
+        ):
+            controller.run()
+        assert probed["stream_type"] == "a"
+
+    def test_video_output_validates_video_stream(self, tmp_path: Path):
+        import threading
+
+        from stream2video.download import DownloadResult
+        from stream2video.pipeline_controller import PipelineDownloadError
+
+        cfg = _valid_config(output_dir=tmp_path, input_raw="https://example.com/v")
+        cb, _ = _make_callbacks()
+        controller = PipelineController(cfg=cfg, cb=cb, cancel_event=threading.Event())
+        fake_video = tmp_path / "vid123-1755000000-a1b2c3d4.mp4"
+        fake_video.write_bytes(b"dummy")
+        probed: dict = {}
+
+        def fake_probe(path, *, stream_type="v"):
+            probed["stream_type"] = stream_type
+            return False
+
+        def fake_download(url, out_dir, **kwargs):
+            return DownloadResult(path=fake_video, is_downloaded=True)
+
+        with (
+            patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+            patch.object(PipelineController, "_downloaded_media_is_valid", side_effect=fake_probe),
+            pytest.raises(PipelineDownloadError, match="failed media validation"),
+        ):
+            controller.run()
+        assert probed["stream_type"] == "v"
+
     def test_local_source_lock_keyed_on_artifact_stem(self, tmp_path: Path):
         """A local-file run takes its project lock keyed on the artifact
         stem (the stable project identity for local sources)."""

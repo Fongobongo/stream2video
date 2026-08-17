@@ -1345,6 +1345,41 @@ class TestAdvancedWidgetCrossFieldGate:
         errors = WithSliderError()._advanced_widget_errors()
         assert "threshold" in errors
 
+    def test_require_input_gates_empty_input(self):
+        """Start / Copy CLI must demand a non-empty input (audit round
+        27 P8) — a copied command without a positional input would be
+        rejected by the CLI as a missing argument. Save defaults keeps
+        the placeholder."""
+        from stream2video.config import effective_defaults
+        from stream2video.gui_advanced import AdvancedSettingsMixin
+
+        class _Entry:
+            def __init__(self, value: str) -> None:
+                self._value = value
+
+            def get(self) -> str:
+                return self._value
+
+        class EmptyInput(AdvancedSettingsMixin):
+            def __init__(self) -> None:
+                self.entry_input = _Entry("")
+                self.entry_output = _Entry("./processed_videos")
+                self.settings = effective_defaults()
+
+            def _raw_advanced_widget_values(self) -> dict[str, str]:
+                return {}
+
+            def _read_widget_values(self) -> dict[str, object]:
+                return effective_defaults()
+
+        errors = EmptyInput()._advanced_widget_errors(require_input=True)
+        assert "input" in errors
+        assert not EmptyInput()._advanced_widget_errors()
+
+    def test_save_defaults_does_not_require_input(self):
+        errors = self._fake_gui({}, 120, 300)._advanced_widget_errors()
+        assert "input" not in errors
+
 
 class TestSliderRawEntryErrors:
     """Audit round 26 P12: the slider sync silently keeps the previous

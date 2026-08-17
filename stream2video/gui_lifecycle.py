@@ -277,8 +277,11 @@ class LifecycleMixin:
         self._sync_slider_entries()
         # Validation gate (audit P2): a copied command must not silently
         # carry a fallback value while the widget shows invalid text —
-        # refuse the copy and tell the user which fields to fix.
-        adv_errors = self._advanced_widget_errors()
+        # refuse the copy and tell the user which fields to fix. The
+        # input is required here (audit round 27 P8): without it the
+        # copied command has no positional argument and the CLI rejects
+        # it as a missing argument.
+        adv_errors = self._advanced_widget_errors(require_input=True)
         if adv_errors:
             for err in adv_errors.values():
                 self._log(f"[ERROR] Invalid setting: {err}")

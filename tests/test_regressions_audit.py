@@ -468,19 +468,21 @@ class TestOutputLock:
         finally:
             release_output_lock(holder)
 
-    def test_cancel_callback_ignored_when_lock_free(self, tmp_path: Path):
-        """The cancel callback only guards the WAIT: a free lock is
-        acquired even when the callback already reports cancel
-        (audit round 25 P5)."""
+    def test_cancel_aborts_even_a_free_lock_acquire(self, tmp_path: Path):
+        """A cancel must stop the acquire BEFORE it creates the lock
+        file too (audit round 27 P11): the old contract only polled
+        between contention retries, so an already-cancelled run could
+        still open/create the lock and publish its owner record."""
         from stream2video.concat.output_lock import (
+            LockCancelledError,
             acquire_output_lock,
-            release_output_lock,
+            lock_path_for,
         )
 
         out = tmp_path / "x.mp4"
-        lp = acquire_output_lock(out, cancel_callback=lambda: True)
-        release_output_lock(lp)
-        assert not lp.path.exists()
+        with pytest.raises(LockCancelledError):
+            acquire_output_lock(out, cancel_callback=lambda: True)
+        assert not lock_path_for(out).exists(), "a cancelled acquire must leave no lock file"
 
     def test_non_contention_lock_fault_refused_immediately(self, tmp_path: Path):
         """Only the platform's contention codes are retryable: a lock
@@ -687,6 +689,26 @@ class TestOutputLock:
             release_output_lock(holder)
         # After the owner released, the pathname release succeeds.
         assert not lock_path_for(out).exists()
+
+    def test_pathname_release_reports_fault_not_live_owner(self, tmp_path: Path):
+        """A non-contention lock fault (EBADF, unsupported FS, ...) must
+        be diagnosed as a FAULT, not as "a live owner holds the lock"
+        (audit round 27 P12) — the file stays (safe), the message stays
+        truthful."""
+        import stream2video.concat.output_lock as ol
+
+        out = tmp_path / "x.mp4"
+        lock = lock_path_for(out)
+        lock.write_text("stale\n", encoding="utf-8")
+
+        def broken_lock(fd):
+            if os.name == "nt":
+                raise OSError(0, "invalid handle", None, 6)
+            raise OSError(errno.ENOSPC, "No space left on device")
+
+        with patch.object(ol, "_os_lock_fd", side_effect=broken_lock):
+            release_output_lock(lock)
+        assert lock.exists(), "a fault must not delete the file"
 
     def test_three_contenders_multiprocessing_one_winner(self, tmp_path: Path):
         """The audit's CI scenario (Linux/Windows multiprocessing, THREE

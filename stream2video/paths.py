@@ -288,10 +288,25 @@ _RESERVED_NAMES = frozenset(
     | {f"LPT{i}" for i in range(1, 10)}
 )
 
-# Cap on a namespace component: a custom extractor/plugin can return
-# an arbitrarily long key, and the identity lands in directory + file
-# + lock names where ENAMETOOLONG is one hostile value away.
+# Caps on identity components: the namespace and the video-id stem
+# both land in directory + file names where NAME_MAX (255) is one
+# hostile value away — a 32-char namespace + an 80-char stem + suffix
+# + extension + cache suffixes fit with room to spare.
 _NAMESPACE_MAX_LEN = 32
+_STEM_MAX_LEN = 80
+
+
+def _short_hash(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
+
+
+def _idna_if_possible(raw: str) -> str:
+    """Punycode an internationalized host/namespace so two distinct
+    IDN names cannot both sanitize into the same underscore soup."""
+    try:
+        return raw.encode("idna").decode("ascii")
+    except (UnicodeError, ValueError):
+        return raw
 
 
 def canonical_namespace(raw: str) -> str:
@@ -303,25 +318,60 @@ def canonical_namespace(raw: str) -> str:
     (audit round 26 P2/P14): ``foo:bar`` breaks file creation on
     Windows, a reserved device name breaks it everywhere on Windows, a
     300-char key forks ENAMETOOLONG, and unstable casing forks the
-    identity per platform (``YouTube`` vs ``youtube`` — different
-    project dirs on case-sensitive filesystems, unpredictable merges
-    on case-insensitive ones). The canonical form:
+    identity per platform. The canonical form:
 
+      * IDNA-encodes internationalized (host) input first, so
+        ``пример.рф`` becomes ``xn--e1afmkfd.xn--p1ai`` instead of
+        collapsing into the same sanitized form as every other
+        non-ASCII name;
       * keeps only ``[A-Za-z0-9._-]`` (everything else → ``_``);
       * casefolds (so the identity is stable across extractor casing);
       * prefixes a reserved device name with ``_``;
-      * caps the length and appends a short hash suffix when truncated
-        (so two distinct long keys never collide).
+      * is COLLISION-RESISTANT (audit round 27 P3): whenever the
+        sanitized form differs from the casefolded input (any
+        character was replaced, reserved-name prefixed, or truncated),
+        a short hash of the casefolded input is appended — so
+        ``foo:bar`` and ``foo/bar`` can never share an identity, and
+        neither can two IDNs that used to strip to the same
+        underscores;
+      * caps the length.
     """
-    cleaned = _NAMESPACE_RE.sub("_", raw).strip("._-")
+    key = _idna_if_possible(raw).casefold()
+    cleaned = _NAMESPACE_RE.sub("_", key).strip("._-")
     if not cleaned:
         cleaned = "site"
     if cleaned.split(".")[0].upper() in _RESERVED_NAMES:
         cleaned = f"_{cleaned}"
-    cleaned = cleaned.casefold()
+    if cleaned != key:
+        cleaned = f"{cleaned}_{_short_hash(key)}"
     if len(cleaned) > _NAMESPACE_MAX_LEN:
-        digest = hashlib.sha1(cleaned.encode("utf-8")).hexdigest()[:8]
-        cleaned = f"{cleaned[: _NAMESPACE_MAX_LEN - 9]}_{digest}"
+        cleaned = f"{cleaned[: _NAMESPACE_MAX_LEN - 9]}_{_short_hash(cleaned)}"
+    return cleaned
+
+
+def canonical_stem(stem: str) -> str:
+    """Canonical video-id component for downloaded identity.
+
+    The epochless yt-dlp id lands verbatim in project dirs and stable
+    filenames next to the 32-char namespace (audit round 27 P7): a
+    custom extractor can return an unbounded id, and a namespace+id
+    pair then exceeds NAME_MAX and breaks every artifact write. The
+    stem is bounded to ``_STEM_MAX_LEN``, sanitized to the same safe
+    charset, reserved-name-guarded, and hash-suffixed whenever the
+    sanitized form differs from the raw stem — so two distinct ids
+    that sanitize alike stay distinct. Case is PRESERVED (video ids
+    are case-sensitive tokens; the filesystem is the only casefold
+    and that predates this change).
+    """
+    cleaned = _NAMESPACE_RE.sub("_", stem).strip("._-")
+    if not cleaned:
+        cleaned = "id"
+    if cleaned.split(".")[0].upper() in _RESERVED_NAMES:
+        cleaned = f"_{cleaned}"
+    if cleaned != stem:
+        cleaned = f"{cleaned}_{_short_hash(stem)}"
+    if len(cleaned) > _STEM_MAX_LEN:
+        cleaned = f"{cleaned[: _STEM_MAX_LEN - 9]}_{_short_hash(cleaned)}"
     return cleaned
 
 
@@ -378,11 +428,14 @@ def downloaded_identity(stem: str, extractor_key: str | None = None) -> str:
     post-download project lock (audit round 25 P2). Returns
     ``<namespace>_<id>`` when the extractor is known, else the bare id
     (the historical layout, kept for extractor-less callers and
-    local-file naming where the path hash already disambiguates). The
-    namespace is canonicalized first (audit round 26 P2/P14): casefold,
-    ``[A-Za-z0-9._-]`` only, reserved-name guard, length cap with a
-    hash suffix.
+    local-file naming where the path hash already disambiguates). Both
+    components are canonicalized (audit round 26 P2 / 27 P3/P7): the
+    namespace via :func:`canonical_namespace` (casefold, safe charset,
+    reserved-name guard, length cap, collision hash) and the stem via
+    :func:`canonical_stem` (safe charset, reserved-name guard, length
+    cap, collision hash, case preserved).
     """
+    stem = canonical_stem(stem)
     if extractor_key:
         return f"{canonical_namespace(extractor_key)}_{stem}"
     return stem

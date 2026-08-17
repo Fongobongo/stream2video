@@ -577,30 +577,52 @@ class TestDownloadedEpochStripping:
 
 
 class TestCanonicalNamespace:
-    """Audit round 26 P2/P14: the identity namespace (extractor key or
-    URL host) lands in directory, file and lock names — it must be
-    platform-safe, bounded and case-stable."""
+    """Audit round 26 P2 / 27 P3: the identity namespace (extractor key
+    or URL host) lands in directory, file and lock names — it must be
+    platform-safe, bounded, case-stable AND collision-resistant
+    (sanitized forms that would collide get a hash of the raw input)."""
 
     def test_casefolded(self):
         from stream2video.paths import canonical_namespace
 
         assert canonical_namespace("YouTube") == "youtube"
         assert canonical_namespace("Vimeo") == "vimeo"
+        # Case variants unify (casefold happens BEFORE the collision
+        # hash, so they must produce the SAME identity).
+        assert canonical_namespace("YouTube") == canonical_namespace("youtube")
 
-    def test_unsafe_chars_replaced(self):
+    def test_unsafe_chars_replaced_with_collision_hash(self):
         from stream2video.paths import canonical_namespace
 
-        assert canonical_namespace("foo:bar") == "foo_bar"
-        assert canonical_namespace("foo bar\tbaz") == "foo_bar_baz"
-        assert canonical_namespace("site/with/slashes") == "site_with_slashes"
+        foo_bar = canonical_namespace("foo:bar")
+        assert foo_bar.startswith("foo_bar_")
+        assert len(foo_bar) == len("foo_bar_") + 8
+        assert canonical_namespace("site/with/slashes").startswith("site_with_slashes_")
+
+    def test_distinct_raw_values_never_collide(self):
+        """``foo:bar`` and ``foo/bar`` sanitize to the same text — the
+        hash of the RAW input must keep them apart (audit round
+        27 P3)."""
+        from stream2video.paths import canonical_namespace
+
+        assert canonical_namespace("foo:bar") != canonical_namespace("foo/bar")
+
+    def test_idn_hosts_punycode_encoded(self):
+        """Distinct internationalized hosts must not strip to the same
+        underscore soup (audit round 27 P3): IDNA first, then sanitize."""
+        from stream2video.paths import canonical_namespace
+
+        a = canonical_namespace("пример.рф")
+        b = canonical_namespace("тест.рф")
+        assert a.startswith("xn--")
+        assert a != b
 
     def test_reserved_device_name_prefixed(self):
         from stream2video.paths import canonical_namespace
 
-        assert canonical_namespace("CON") == "_con"
-        assert canonical_namespace("con") == "_con"
-        assert canonical_namespace("com1") == "_com1"
-        assert canonical_namespace("nul") == "_nul"
+        assert canonical_namespace("CON").startswith("_con_")
+        assert canonical_namespace("com1").startswith("_com1_")
+        assert canonical_namespace("nul").startswith("_nul_")
 
     def test_long_value_capped_with_hash_suffix(self):
         from stream2video.paths import canonical_namespace
@@ -608,7 +630,6 @@ class TestCanonicalNamespace:
         long = "x" * 300
         canon = canonical_namespace(long)
         assert len(canon) <= 32
-        assert canon.endswith(f"_{canon[-8:]}")
         # Two different long keys must not collide.
         canon2 = canonical_namespace("y" * 300)
         assert canon2 != canon
@@ -616,8 +637,42 @@ class TestCanonicalNamespace:
     def test_empty_garbage_gets_site_fallback(self):
         from stream2video.paths import canonical_namespace
 
-        assert canonical_namespace("...") == "site"
-        assert canonical_namespace("///") == "site"
+        assert canonical_namespace("...").startswith("site_")
+        assert canonical_namespace("///").startswith("site_")
+
+
+class TestCanonicalStem:
+    """Audit round 27 P7: the epochless video id lands verbatim in
+    project dirs and stable filenames — it must be bounded, sanitized
+    and collision-resistant too."""
+
+    def test_plain_id_unchanged(self):
+        from stream2video.paths import canonical_stem
+
+        assert canonical_stem("vid123") == "vid123"
+        assert canonical_stem("aBc123") == "aBc123"  # case preserved
+
+    def test_unsafe_chars_hash_suffixed(self):
+        from stream2video.paths import canonical_stem
+
+        assert canonical_stem("a/b").startswith("a_b_")
+        assert canonical_stem("a:b") != canonical_stem("a/b")
+
+    def test_long_id_bounded(self):
+        from stream2video.paths import canonical_stem
+
+        long = "v" * 250
+        canon = canonical_stem(long)
+        assert len(canon) <= 80
+
+    def test_identity_component_bounded(self):
+        """namespace + stem + extension + cache suffixes must fit
+        NAME_MAX (audit round 27 P7)."""
+        from stream2video.paths import canonical_namespace, canonical_stem
+
+        ns = canonical_namespace("x" * 300)
+        stem = canonical_stem("y" * 250)
+        assert len(ns) + 1 + len(stem) + len("_silence_cache.json") < 255
 
 
 class TestProjectLockName:
