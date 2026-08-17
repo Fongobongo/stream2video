@@ -1079,6 +1079,56 @@ class TestCliSilenceFlags:
         assert detected["min_silence"] == 3.5
         assert detected["margin"] == 0.2
 
+    def test_relative_config_output_dir_is_config_relative(self, tmp_path: Path):
+        """A relative ``output_dir`` written in the YAML is relative to
+        the CONFIG FILE's directory (audit round 28 P8), not the process
+        cwd — the same config run from two different cwd's must not
+        write into two different trees."""
+        from typer.testing import CliRunner
+
+        from stream2video.cli import app
+        from stream2video.download import DownloadResult
+
+        conf_dir = tmp_path / "conf"
+        conf_dir.mkdir()
+        cfg = conf_dir / "config.yaml"
+        cfg.write_text("output_dir: rel_out\n", encoding="utf-8")
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"source")
+
+        with (
+            patch(
+                "stream2video.pipeline_controller.download",
+                return_value=DownloadResult(src, is_downloaded=False),
+            ),
+            patch("stream2video.pipeline_controller.detect_silence", return_value=[]),
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=None),
+            patch("stream2video.pipeline_controller.save_silence_cache", lambda *a, **kw: None),
+            patch("stream2video.pipeline_controller.get_video_duration", return_value=10.0),
+            patch("stream2video.concat.get_video_duration", return_value=10.0),
+            patch("stream2video.pipeline_controller.cut_and_concat") as mock_cut,
+            patch("stream2video.pipeline_controller.check_memory_reserve", return_value=True),
+            patch(
+                "stream2video.pipeline_controller.apply_per_video_dir",
+                side_effect=lambda o, v, d, per_video_dir=False, namespace=None: (o, v),
+            ),
+        ):
+
+            def _fake_cut(source, silence_segments, output_video, **kwargs):
+                Path(output_video).write_bytes(b"\x00" * 1024)
+
+            mock_cut.side_effect = _fake_cut
+            result = CliRunner().invoke(
+                app,
+                [str(src), "-c", str(cfg), "--no-per-video-dir"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert (conf_dir / "rel_out").is_dir(), (
+            "relative YAML output_dir resolves against the config dir"
+        )
+
     def test_out_of_range_flag_rejected(self, tmp_path: Path):
         # The CLI flag is range-checked against CONFIG_RANGES exactly
         # like its YAML twin.

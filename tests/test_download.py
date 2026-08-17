@@ -989,6 +989,19 @@ class TestCanonicalUrlLockKey:
 
         assert canonical_url_lock_key("https://host:bad/x") == "https://host:bad/x"
 
+    def test_userinfo_distinguishes_accounts(self):
+        """Basic-auth credentials can identify a DIFFERENT resource or
+        account on the same path (audit round 28 P5): the userinfo is
+        hashed into the key — distinct users get distinct locks, and
+        the secret itself never reaches the lock name."""
+        from stream2video.download import canonical_url_lock_key
+
+        key_a = canonical_url_lock_key("https://alice:pass@host/private")
+        key_b = canonical_url_lock_key("https://bob:pass@host/private")
+        assert key_a != key_b
+        assert "alice" not in key_a
+        assert "pass" not in key_a
+
 
 class TestRedactProcessOutput:
     """Audit round 27 P4: yt-dlp stderr embedded into DownloadError /
@@ -1013,3 +1026,19 @@ class TestRedactProcessOutput:
         from stream2video.download import _redact_process_output
 
         assert _redact_process_output("generic error", set()) == "generic error"
+
+    def test_transformed_secrets_scrubbed(self):
+        """The toolchain may print secrets percent-decoded, re-quoted or
+        without the scheme (audit round 28 P6): the URL-shaped sweep
+        must catch variants exact matching cannot."""
+        from stream2video.download import _redact_process_output
+
+        text = (
+            "failed to fetch https%3A%2F%2Fuser%3Apass%40host%2Fv "
+            "via socks5://host:1080 proxy user:pass@proxy.local:8080 retry"
+        )
+        out = _redact_process_output(
+            text, {"https://user:pass@host/v", "socks5://user:pass@proxy.local:8080"}
+        )
+        assert "user:pass" not in out
+        assert "user:pass@proxy.local" not in out

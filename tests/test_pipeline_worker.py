@@ -472,6 +472,10 @@ class _FakeGuiCallbacks:
         # dedicated fake subclass.
         return False
 
+    def ask_legacy_rename(self, legacy: object, target: object) -> bool:
+        # Tests: never rename (no Tk dialog to answer).
+        return False
+
 
 class TestPipelineWorkerRun:
     def _params(self) -> PipelineWorkerParams:

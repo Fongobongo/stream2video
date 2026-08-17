@@ -615,6 +615,44 @@ class _PipelineGuiCallbacksAdapter(_GuiLogAdapterBase):
                 pass
         return consent[0]
 
+    def ask_legacy_rename(self, legacy: Path, target: Path) -> bool:
+        """Block the worker while the user answers a yes/no dialog on
+        the Tk main loop: a legacy (pre-namespace) project directory
+        was found — offer an opt-in rename so the old multi-GB source
+        and caches are reused instead of re-downloaded (audit round
+        28 P9). Same bridge pattern as ``ask_fallback_consent``: any
+        dialog error or timeout defaults to False (no rename — the old
+        dir is simply left alone).
+        """
+        answered = threading.Event()
+        consent: list[bool] = [False]
+
+        def _ask() -> None:
+            try:
+                consent[0] = bool(
+                    messagebox.askyesno(
+                        "Legacy project directory found",
+                        "An older stream2video version stored this video's "
+                        f"project under:\n{legacy}\n\nThe current version uses:\n"
+                        f"{target}\n\nRename the old directory so its files "
+                        "(source, caches) are reused instead of re-downloaded?",
+                        parent=self._gui,
+                    )
+                )
+            except Exception:
+                consent[0] = False
+            finally:
+                answered.set()
+
+        try:
+            self._gui._tk_after(0, _ask)
+        except Exception:
+            return False
+        if not answered.wait(timeout=60):
+            self._gui._log("[WARN] Legacy-project dialog timed out — keeping the old directory")
+            return False
+        return consent[0]
+
     def ui_progress(self, value: float) -> None:
         self._gui._ui_progress(value)
 

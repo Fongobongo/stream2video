@@ -5,7 +5,7 @@ import math
 import subprocess
 from pathlib import Path
 
-from stream2video.tools import ffprobe_path, run_with_retry
+from stream2video.tools import ffmpeg_path, ffprobe_path, run_with_retry
 from stream2video.utils import no_window_kwargs
 
 logger = logging.getLogger(__name__)
@@ -109,6 +109,88 @@ def _ffprobe_media_complete(path: Path, stream_type: str = "v") -> bool:
             duration = value
             break
     return duration is not None
+
+
+def _ffprobe_duration(path: Path) -> float | None:
+    """Container duration from ffprobe, or None when unreadable."""
+    try:
+        r = run_with_retry(
+            [
+                ffprobe_path(),
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            **no_window_kwargs(),
+        )
+        if r.returncode != 0:
+            return None
+        value = float(r.stdout.strip())
+    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _ffmpeg_decode_probe(path: Path, at_seconds: float, stream_type: str) -> bool:
+    """Decode ONE second of ``path`` (video or audio stream) at
+    ``at_seconds`` into the null sink.
+
+    A truncated body can still carry a header with a PLANNED duration
+    (audit round 28 P1): ffprobe metadata alone cannot tell a
+    header-only file from a complete one, so the publish gate decodes
+    the head AND (when the duration is known) the tail — a body hole
+    makes the decode fail. Fail-closed like the other probes; spawn
+    faults re-raise so the caller keeps the file and reports
+    "validation unavailable".
+    """
+    r = run_with_retry(
+        [
+            ffmpeg_path(),
+            "-v",
+            "error",
+            "-ss",
+            f"{max(0.0, at_seconds):.2f}",
+            "-i",
+            str(path),
+            "-map",
+            "0:v:0" if stream_type == "v" else "0:a:0",
+            "-t",
+            "1",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        **no_window_kwargs(),
+    )
+    if r.returncode != 0:
+        return False
+    # A truncated payload does not always fail the process: ffmpeg
+    # warns "partial file" / "packet corrupt" on stderr and still
+    # exits 0 (observed live). Treat every truncation marker as a
+    # failed decode — with ``-v error`` a healthy file decodes with a
+    # clean stderr.
+    stderr = (r.stderr or "").lower()
+    return not any(
+        marker in stderr
+        for marker in (
+            "partial file",
+            "moov atom not found",
+            "packet corrupt",
+            "invalid data",
+            "error while decoding",
+            "truncated",
+        )
+    )
 
 
 def _ffprobe_duration_ok(path: Path, expected_seconds: float, *, slack: float = 1.0) -> bool:

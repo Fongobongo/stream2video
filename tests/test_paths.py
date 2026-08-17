@@ -642,15 +642,28 @@ class TestCanonicalNamespace:
 
 
 class TestCanonicalStem:
-    """Audit round 27 P7: the epochless video id lands verbatim in
-    project dirs and stable filenames — it must be bounded, sanitized
-    and collision-resistant too."""
+    """Audit round 27 P7 / 28 P2/P3: the video id lands in project
+    dirs and stable filenames — it must be bounded, sanitized,
+    case-safe on every filesystem and collision-resistant."""
 
-    def test_plain_id_unchanged(self):
+    def test_plain_lowercase_id_unchanged(self):
         from stream2video.paths import canonical_stem
 
         assert canonical_stem("vid123") == "vid123"
-        assert canonical_stem("aBc123") == "aBc123"  # case preserved
+        assert canonical_stem("clip.mp4") == "clip.mp4"
+
+    def test_mixed_case_id_is_casefolded_with_hash(self):
+        """``AbC`` and ``abc`` are distinct case-sensitive ids that
+        collide on case-insensitive filesystems (audit round 28 P3):
+        the path component is casefolded and carries a hash of the
+        ORIGINAL id, so each id keeps one stable identity on every FS
+        while all-lowercase ids stay unchanged."""
+        from stream2video.paths import canonical_stem
+
+        assert canonical_stem("abc") == "abc"
+        mixed = canonical_stem("AbC")
+        assert mixed.startswith("abc_")
+        assert mixed != canonical_stem("abc")
 
     def test_unsafe_chars_hash_suffixed(self):
         from stream2video.paths import canonical_stem
@@ -673,6 +686,18 @@ class TestCanonicalStem:
         ns = canonical_namespace("x" * 300)
         stem = canonical_stem("y" * 250)
         assert len(ns) + 1 + len(stem) + len("_silence_cache.json") < 255
+
+    def test_artifact_stem_bounds_local_filenames(self):
+        """A legal local filename near NAME_MAX used to blow past it
+        once ``_compressed.mp4`` / ``_silence_cache.json`` were
+        appended (audit round 28 P2): ``artifact_stem`` now
+        canonicalizes the stem."""
+        from stream2video.paths import artifact_stem
+
+        long_name = ("x" * 240) + ".mp4"
+        stem = artifact_stem(Path(long_name))
+        assert len(stem) <= 80 + 1 + 8  # canonical stem + "_" + path hash
+        assert len(stem) + len("_compressed.mp4") < 255
 
 
 class TestProjectLockName:

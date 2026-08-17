@@ -1233,6 +1233,107 @@ class TestProjectLocks:
             controller.run()
         assert probed["stream_type"] == "v"
 
+    def test_legacy_project_dir_offered_opt_in_rename(self, tmp_path: Path):
+        """A legacy pre-namespace project dir (``<id>/``) is detected,
+        the host's callback decides, and the rename is atomic + opt-in
+        (audit round 28 P9)."""
+        import threading
+
+        from stream2video.download import DownloadResult
+        from stream2video.paths import mark_project_dir
+
+        url = "https://example.com/v"
+        cfg = _valid_config(output_dir=tmp_path, input_raw=url)
+        cb, _ = _make_callbacks()
+        offered: list[tuple[Path, Path]] = []
+        controller = PipelineController(
+            cfg=cfg,
+            cb=cb,
+            cancel_event=threading.Event(),
+            on_legacy_project=lambda legacy, target: offered.append((legacy, target)) or True,
+        )
+        legacy = tmp_path / "vid123"
+        legacy.mkdir()
+        mark_project_dir(legacy)
+        fake_video = tmp_path / "vid123-1755000000-a1b2c3d4.mp4"
+        fake_video.write_bytes(b"dummy")
+
+        def fake_download(url, out_dir, **kwargs):
+            return DownloadResult(path=fake_video, is_downloaded=True)
+
+        with (
+            patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+            patch.object(PipelineController, "_downloaded_media_is_valid", return_value=True),
+            patch.object(PipelineController, "_project_lock_timeout", return_value=0.2),
+            patch("stream2video.pipeline_controller.detect_silence", return_value=[]),
+            patch("stream2video.pipeline_controller.save_silence_cache"),
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=None),
+            patch(
+                "stream2video.pipeline_controller.cut_and_concat",
+                side_effect=lambda *a, **k: a[2].write_bytes(b"output"),
+            ),
+            patch(
+                "stream2video.pipeline_controller.generate_keep_segments",
+                return_value=[(0.0, 1.0)],
+            ),
+            patch("stream2video.pipeline_controller.get_video_duration", return_value=10.0),
+        ):
+            controller.run()
+        assert offered, "the legacy dir must be offered to the host"
+        assert offered[0][0] == legacy
+        assert offered[0][1] == tmp_path / "example.com_vid123"
+        assert not legacy.exists(), "a consented rename moves the legacy dir"
+        assert (tmp_path / "example.com_vid123").is_dir()
+
+    def test_legacy_project_dir_declined_is_left_alone(self, tmp_path: Path):
+        """Declining the rename keeps the legacy dir untouched; the run
+        proceeds with the new layout (audit round 28 P9 — never rename
+        user data automatically)."""
+        import threading
+
+        from stream2video.download import DownloadResult
+        from stream2video.paths import mark_project_dir
+
+        url = "https://example.com/v"
+        cfg = _valid_config(output_dir=tmp_path, input_raw=url)
+        cb, calls = _make_callbacks()
+        controller = PipelineController(
+            cfg=cfg,
+            cb=cb,
+            cancel_event=threading.Event(),
+            on_legacy_project=lambda legacy, target: False,
+        )
+        legacy = tmp_path / "vid123"
+        legacy.mkdir()
+        mark_project_dir(legacy)
+        fake_video = tmp_path / "vid123-1755000000-a1b2c3d4.mp4"
+        fake_video.write_bytes(b"dummy")
+
+        def fake_download(url, out_dir, **kwargs):
+            return DownloadResult(path=fake_video, is_downloaded=True)
+
+        with (
+            patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+            patch.object(PipelineController, "_downloaded_media_is_valid", return_value=True),
+            patch.object(PipelineController, "_project_lock_timeout", return_value=0.2),
+            patch("stream2video.pipeline_controller.detect_silence", return_value=[]),
+            patch("stream2video.pipeline_controller.save_silence_cache"),
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=None),
+            patch(
+                "stream2video.pipeline_controller.cut_and_concat",
+                side_effect=lambda *a, **k: a[2].write_bytes(b"output"),
+            ),
+            patch(
+                "stream2video.pipeline_controller.generate_keep_segments",
+                return_value=[(0.0, 1.0)],
+            ),
+            patch("stream2video.pipeline_controller.get_video_duration", return_value=10.0),
+        ):
+            controller.run()
+        assert legacy.is_dir(), "a declined rename must not touch the legacy dir"
+        assert any("Keeping the legacy directory as-is" in m for m in calls["log"])
+        assert (tmp_path / "example.com_vid123").is_dir()
+
     def test_local_source_lock_keyed_on_artifact_stem(self, tmp_path: Path):
         """A local-file run takes its project lock keyed on the artifact
         stem (the stable project identity for local sources)."""

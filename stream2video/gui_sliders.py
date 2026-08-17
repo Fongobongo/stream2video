@@ -166,6 +166,12 @@ class SlidersMixin:
                 continue
             raw = slider._entry_val.get().strip()
             if not raw:
+                # An EMPTY field is a parse failure too (audit round
+                # 28 P4): the sync silently keeps the previous value
+                # while the field shows nothing — the run must not
+                # bless that. The Default button exists for a
+                # deliberate reset.
+                errors[key] = f"{key}: value is required"
                 continue
             lo, hi = bounds.get(key, (float(slider.cget("from_")), float(slider.cget("to"))))
             if parse_slider_entry_value(raw, lo, hi) is None:

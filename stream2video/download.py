@@ -192,9 +192,17 @@ def canonical_url_lock_key(url: str) -> str:
     if port and not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
         host = f"{host}:{port}"
     path = parts.path.rstrip("/") or "/"
+    tags: list[str] = []
+    if parts.username is not None:
+        # Basic-auth credentials can identify a DIFFERENT resource or
+        # account on the same path (audit round 28 P5): hashed, so
+        # alice@ and bob@ do not share one lock and the secret never
+        # reaches the lock name.
+        tags.append(f"u={hashlib.sha1((parts.username or '').encode('utf-8')).hexdigest()[:8]}")
     if parts.query:
-        query_tag = f"?q={hashlib.sha1(parts.query.encode('utf-8')).hexdigest()[:12]}"
-        return f"{scheme}://{host}{path}{query_tag}"
+        tags.append(f"q={hashlib.sha1(parts.query.encode('utf-8')).hexdigest()[:12]}")
+    if tags:
+        return f"{scheme}://{host}{path}?{'&'.join(tags)}"
     return f"{scheme}://{host}{path}"
 
 
@@ -204,12 +212,31 @@ def _redact_process_output(text: str, secrets: set[str]) -> str:
     yt-dlp/ffmpeg stderr gets embedded into ``DownloadError`` /
     timeout messages verbatim, and it can echo the input URL or the
     proxy URL (with credentials) — the most informative failure logs
-    were exactly the ones leaking (audit round 27 P4). Replaces every
-    occurrence of each secret with its redacted form.
+    were exactly the ones leaking (audit round 27 P4). Two layers:
+
+      * exact replacement of every known secret (input URL, proxy);
+      * a URL-shaped sweep (audit round 28 P6): the toolchain may
+        print the secret percent-decoded, re-quoted, without the
+        scheme, or partially parsed — exact matching alone lets such
+        variants through. Every ``scheme://...`` token is passed
+        through the same redactor, and bare ``user:pass@host``
+        credentials are masked wherever they appear.
     """
     for secret in secrets:
         if secret and secret in text:
             text = text.replace(secret, redact_input_url(secret))
+
+    def _mask_scheme_token(match: "re.Match[str]") -> str:
+        token = match.group(0)
+        try:
+            return redact_input_url(token)
+        except Exception:
+            return f"{token.split('://', 1)[0]}://<redacted>"
+
+    text = re.sub(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s'\"]+", _mask_scheme_token, text)
+    # Bare credentials without a scheme (proxies often print
+    # ``user:pass@host:port``): keep the host, drop the secret part.
+    text = re.sub(r"(?i)\b[\w.\-]+:[^\s@\"]+@([\w.\-]+(?::\d+)?)", r"<redacted>@\1", text)
     return text
 
 

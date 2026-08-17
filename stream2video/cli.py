@@ -1140,7 +1140,21 @@ def main(
             # default. The typer option's default stays as the fallback for
             # hosts that call main() with an explicit value.
             if not is_from_cli(ctx, "output_dir"):
-                output_dir = Path(config.get("output_dir") or "./processed_videos")
+                output_dir = Path(config.get("output_dir", "./processed_videos"))
+                # A RELATIVE output_dir written in the YAML is relative to
+                # the CONFIG FILE's directory (audit round 28 P8), not to
+                # the process cwd — the same config run from two different
+                # cwd's used to write into two different trees. Only
+                # applies when the key was explicitly written in the file:
+                # the default fallback stays cwd-relative for backward
+                # compatibility.
+                explicit = getattr(config, "explicit_keys", None) or frozenset()
+                if (
+                    config_file is not None
+                    and "output_dir" in explicit
+                    and not output_dir.is_absolute()
+                ):
+                    output_dir = config_file.parent / output_dir
 
             # Ensure the output directory exists — deliberately AFTER config
             # load and resolution, so an invalid config aborts before any
@@ -1575,6 +1589,19 @@ def main(
                 # validation / delete-after — the old hand-rolled phases
                 # here drifted from the GUI's (e.g. missing-output success),
                 # which is exactly what the audit flagged.
+
+                def _ask_legacy_rename(legacy: Path, target: Path) -> bool:
+                    # Opt-in legacy project rename (audit round 28 P9).
+                    # JSON log mode keeps stdout line-per-record — a
+                    # prompt would corrupt it, so non-JSON runs only.
+                    return bool(
+                        typer.confirm(
+                            f"Legacy project directory found: {legacy}\n"
+                            f"Rename it to {target} so old files are reused?",
+                            default=False,
+                        )
+                    )
+
                 controller = PipelineController(
                     cfg=_pcfg,
                     cb=PipelineCallbacks(
@@ -1591,6 +1618,7 @@ def main(
                     cancel_event=cancel_event,
                     on_output_resolved=_on_output_resolved,
                     on_fallback_consent=_make_fallback_consent(),
+                    on_legacy_project=(None if _JSON_LOG_MODE else _ask_legacy_rename),
                 )
 
                 # CLI ↔ GUI parity: the GUI's worker plays an "attention"

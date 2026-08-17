@@ -350,25 +350,32 @@ def canonical_namespace(raw: str) -> str:
 
 
 def canonical_stem(stem: str) -> str:
-    """Canonical video-id component for downloaded identity.
+    """Canonical video-id component for project identity.
 
-    The epochless yt-dlp id lands verbatim in project dirs and stable
-    filenames next to the 32-char namespace (audit round 27 P7): a
-    custom extractor can return an unbounded id, and a namespace+id
-    pair then exceeds NAME_MAX and breaks every artifact write. The
-    stem is bounded to ``_STEM_MAX_LEN``, sanitized to the same safe
-    charset, reserved-name-guarded, and hash-suffixed whenever the
-    sanitized form differs from the raw stem — so two distinct ids
-    that sanitize alike stay distinct. Case is PRESERVED (video ids
-    are case-sensitive tokens; the filesystem is the only casefold
-    and that predates this change).
+    The epochless id lands in project dirs and stable filenames next
+    to the 32-char namespace (audit round 27 P7): a custom extractor
+    can return an unbounded id, and a namespace+id pair then exceeds
+    NAME_MAX and breaks every artifact write. The stem is bounded to
+    ``_STEM_MAX_LEN``, sanitized to the same safe charset, and
+    reserved-name-guarded.
+
+    Case is CASEFOLDED with a hash of the ORIGINAL id whenever the
+    casefold differs (audit round 28 P3): video ids are
+    case-sensitive tokens, but the filesystem path component is
+    case-insensitive on Windows/macOS — ``AbC`` and ``abc`` used to
+    collapse into one project dir there while staying distinct on
+    Linux. The casefolded component plus a hash of the original
+    case-sensitive id keeps one stable identity per id on EVERY
+    filesystem: an all-lowercase id is unchanged (``vid123``), a
+    mixed-case id gets ``abc_<hash(AbC)>``.
     """
-    cleaned = _NAMESPACE_RE.sub("_", stem).strip("._-")
+    folded = stem.casefold()
+    cleaned = _NAMESPACE_RE.sub("_", folded).strip("._-")
     if not cleaned:
         cleaned = "id"
     if cleaned.split(".")[0].upper() in _RESERVED_NAMES:
         cleaned = f"_{cleaned}"
-    if cleaned != stem:
+    if folded != stem or cleaned != folded:
         cleaned = f"{cleaned}_{_short_hash(stem)}"
     if len(cleaned) > _STEM_MAX_LEN:
         cleaned = f"{cleaned[: _STEM_MAX_LEN - 9]}_{_short_hash(cleaned)}"
@@ -452,9 +459,44 @@ def artifact_stem(video_path: Path) -> str:
     The stem is epoch-stripped (see ``_epochless``): yt-dlp names a
     download ``<id>-<epoch>.mp4`` with a fresh epoch per run, so without
     the strip every artifact would re-key on every re-download of the
-    same URL.
+    same URL. It is also canonicalized (audit round 28 P2): a legal
+    local filename near NAME_MAX used to blow past it once
+    ``_compressed.mp4`` / ``_silence_cache.json`` / the path hash were
+    appended — ``canonical_stem`` bounds, sanitizes and casefolds it
+    exactly like downloaded ids.
     """
-    return f"{_epochless(video_path.stem)}_{source_path_key(video_path)}"
+    return f"{canonical_stem(_epochless(video_path.stem))}_{source_path_key(video_path)}"
+
+
+def find_legacy_project_dir(output_dir: Path, legacy_name: str, new_name: str) -> Path | None:
+    """Locate a legacy (pre-namespace) project dir eligible for rename.
+
+    The site-namespaced layout changed the downloaded project dir from
+    ``<id>`` to ``<ns>_<id>`` (audit round 25 P2); existing multi-GB
+    projects under the OLD name were orphaned — the next run of the
+    same URL re-downloads and re-detects while the old artifacts sit
+    beside it (audit round 28 P9). This helper reports a MARKED legacy
+    dir so the host can offer an opt-in atomic rename. Never renames
+    on its own: moving user data is a decision for the user.
+
+    Returns the legacy dir when it exists, is app-marked, and the new
+    name does not exist yet; ``None`` otherwise.
+    """
+    if legacy_name == new_name:
+        return None
+    legacy = output_dir / legacy_name
+    target = output_dir / new_name
+    try:
+        if not legacy.is_dir() or target.exists():
+            return None
+    except OSError:
+        return None
+    try:
+        if not is_marked_project_dir(legacy):
+            return None
+    except (OSError, ValueError):
+        return None
+    return legacy
 
 
 def project_dir(output_dir: Path, video_stem: str, per_video_dir: bool) -> Path:

@@ -1433,6 +1433,10 @@ class TestSliderRawEntryErrors:
         assert fake._raw_slider_entry_errors() == {}
 
     def test_empty_and_nan_are_errors(self):
+        """An EMPTY field is a parse failure too (audit round 28 P4):
+        the sync silently keeps the previous value while the field
+        shows nothing — the gate must block Start/Copy/Save. NaN stays
+        rejected like any non-number."""
         from stream2video.gui_sliders import SlidersMixin
 
         class Fake(SlidersMixin):
@@ -1446,7 +1450,8 @@ class TestSliderRawEntryErrors:
             "min_silence": (0.0, 10.0),
         }
         errors = fake._raw_slider_entry_errors()
-        assert errors == {"min_silence": "min_silence 'nan' is not a number"}
+        assert errors["threshold"] == "threshold: value is required"
+        assert errors["min_silence"] == "min_silence 'nan' is not a number"
 
 
 class TestLoggingSessionThreadSerialization:

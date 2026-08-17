@@ -81,6 +81,7 @@ from stream2video.paths import (
     apply_per_video_dir,
     artifact_stem,
     downloaded_identity,
+    find_legacy_project_dir,
     project_lock_name,
     url_host_namespace,
 )
@@ -540,8 +541,13 @@ class PipelineController:
     # update the output label, and refresh the file-info panel — all
     # main-thread operations the worker thread defers to this hook.
     on_output_resolved: Callable[[Path, Path, bool], None] | None = None
-    # ``on_fallback_consent`` implements ``software_fallback="ask"`` for
-    # interactive hosts. The pipeline controller's fresh-encoder check
+    # ``on_legacy_project`` offers an opt-in rename when a legacy
+    # (pre-namespace) project dir is found: the controller passes the
+    # legacy dir and the new target, and renames only when the host
+    # returns True. None (tests, non-interactive hosts) just logs the
+    # discovery (audit round 28 P9).
+    on_legacy_project: Callable[[Path, Path], bool] | None = None
+    # ``on_fallback_consent`` implements ``software_fallback="ask"`` for    # interactive hosts. The pipeline controller's fresh-encoder check
     # and mid-run fallback both call it when the requested encoder is
     # missing / fails; the GUI pops a yes/no dialog on the main thread
     # and the CLI wires ``typer.confirm``. When None (default) and the
@@ -603,24 +609,42 @@ class PipelineController:
         plays — a corrupt moov atom, a truncated body or a site error
         page saved as media all pass that bar, and the move into the
         stable source path would then ATOMICALLY REPLACE the previous
-        good copy with garbage (audit round 26 P4 / 27 P2). The probe
-        runs BEFORE ``apply_per_video_dir`` publishes the file and
-        requires a readable codec AND a finite non-zero duration
-        (``_ffprobe_media_complete``), so a header-only file cannot
-        pass. ``stream_type`` selects the required stream: audio
-        outputs validate the audio stream, video outputs the video
-        stream (audit round 27 P6 — an audio-only podcast is a valid
-        source for ``--output-format mp3``).
+        good copy with garbage (audit round 26 P4 / 27 P2 / 28 P1).
+        Three gates before publish:
 
-        Exceptions are NOT converted to False: a transient ffprobe
-        spawn fault (WinGet shim / AV filter) means "validation
+          1. ffprobe: a readable codec name for the required stream
+             (``stream_type``: audio outputs validate the audio
+             stream, video outputs the video stream — audit round
+             27 P6);
+          2. a finite, non-zero container duration;
+          3. an actual DECODE of one second at the head and (when the
+             duration is known) one second near the tail — a header
+             can carry a PLANNED duration while the body is truncated
+             or corrupt, and only decoding proves the payload is
+             really there (audit round 28 P1).
+
+        Exceptions are NOT converted to False: a transient ffprobe/
+        ffmpeg spawn fault (WinGet shim / AV filter) means "validation
         unavailable", not "media invalid" — the caller must keep the
         file and report a retryable error instead of deleting a
         multi-GB good download (audit round 27 P1).
         """
-        from stream2video.concat.probing import _ffprobe_media_complete
+        from stream2video.concat.probing import (
+            _ffmpeg_decode_probe,
+            _ffprobe_duration,
+            _ffprobe_media_complete,
+        )
 
-        return _ffprobe_media_complete(path, stream_type=stream_type)
+        if not _ffprobe_media_complete(path, stream_type=stream_type):
+            return False
+        duration = _ffprobe_duration(path)
+        if not _ffmpeg_decode_probe(path, 0.0, stream_type):
+            return False
+        return not (
+            duration is not None
+            and duration > 2.0
+            and not _ffmpeg_decode_probe(path, duration - 1.0, stream_type)
+        )
 
     def _set_phase_progress(self, fraction: float) -> None:
         """Dispatch the per-phase bar update (no-op when the callback
@@ -1072,6 +1096,37 @@ class PipelineController:
                     cancel_callback=lambda: self.cancel_event.is_set(),
                 )
             )
+            # Opt-in legacy project migration (audit round 28 P9): the
+            # pre-namespace layout stored the project under the bare
+            # ``<id>`` — if a MARKED legacy dir exists and the new name
+            # does not, offer the host a rename. The rename itself is
+            # NEVER automatic: moving user data is the user's call.
+            legacy = find_legacy_project_dir(
+                self.cfg.output_dir, _epochless(video_path.stem), project_id
+            )
+            if legacy is not None:
+                target = self.cfg.output_dir / project_id
+                self.cb.on_log(f"Found a legacy project directory from an older layout: {legacy}")
+                rename = False
+                if self.on_legacy_project is not None:
+                    try:
+                        rename = bool(self.on_legacy_project(legacy, target))
+                    except Exception:
+                        logger.debug("on_legacy_project raised", exc_info=True)
+                if rename:
+                    try:
+                        os.rename(legacy, target)
+                        self.cb.on_log(f"Renamed legacy project directory to {target}")
+                    except OSError as e:
+                        self.cb.on_log(
+                            f"[WARN] Could not rename legacy project directory "
+                            f"{legacy} -> {target} ({e})"
+                        )
+                else:
+                    self.cb.on_log(
+                        f"Keeping the legacy directory as-is — new files for this "
+                        f"video will use {target}"
+                    )
         # Per-video project directory (the function honours
         # per_video_dir itself).
         output_dir, video_path = apply_per_video_dir(

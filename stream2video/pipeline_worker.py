@@ -162,6 +162,10 @@ class PipelineGuiCallbacks(Protocol):
     # Returning True consents to the libx264 retry; False aborts.
     def ask_fallback_consent(self) -> bool: ...
 
+    # Opt-in legacy project rename (audit round 28 P9): GUI shows a
+    # yes/no dialog; True renames the legacy dir to the new layout.
+    def ask_legacy_rename(self, legacy: Path, target: Path) -> bool: ...
+
     # ``cancel_event`` is the GUI's threading.Event the controller
     # checks after each phase; the worker reads it through the GUI
     # callbacks object so the test fake can return a fresh event. Plain
@@ -489,6 +493,7 @@ class PipelineWorker:
                 on_live_segment=_on_live_segment,
                 on_output_resolved=_on_output_resolved,
                 on_fallback_consent=self._gui.ask_fallback_consent,
+                on_legacy_project=self._gui.ask_legacy_rename,
             )
 
             # The controller owns the REAL resolved paths

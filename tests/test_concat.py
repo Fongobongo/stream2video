@@ -281,6 +281,64 @@ class TestFfprobeDurationOkFailClosed:
         assert self._probe(tmp_path, result) is False
 
 
+class TestFfmpegDecodeProbe:
+    """The publish-gate decode probe must fail CLOSED on truncation.
+
+    A truncated payload does not always fail the ffmpeg process: with
+    a moov-at-start file it warns ``partial file`` on stderr and still
+    exits 0 (observed live, audit round 28 P1). The probe treats every
+    truncation marker on stderr as a failed decode — a healthy file
+    decodes with a clean stderr under ``-v error``."""
+
+    def _probe(self, result, *, raise_exc=None):
+        from stream2video.concat.probing import _ffmpeg_decode_probe
+
+        exc = raise_exc
+
+        def _run(cmd, **kwargs):
+            if exc is not None:
+                raise exc("ffmpeg", 60)
+            return result
+
+        with (
+            patch("stream2video.concat.probing.ffmpeg_path", return_value="ffmpeg"),
+            patch("stream2video.concat.probing.run_with_retry", side_effect=_run),
+        ):
+            return _ffmpeg_decode_probe(Path("part.mp4"), 5.0, "v")
+
+    def test_clean_decode_accepted(self):
+        from subprocess import CompletedProcess
+
+        result = CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        assert self._probe(result) is True
+
+    def test_rc_nonzero_rejected(self):
+        from subprocess import CompletedProcess
+
+        result = CompletedProcess(args=[], returncode=1, stdout="", stderr="")
+        assert self._probe(result) is False
+
+    def test_partial_file_marker_rejected(self):
+        from subprocess import CompletedProcess
+
+        result = CompletedProcess(
+            args=[], returncode=0, stdout="", stderr="stream 0, offset 0x24a7: partial file"
+        )
+        assert self._probe(result) is False
+
+    def test_packet_corrupt_marker_rejected(self):
+        from subprocess import CompletedProcess
+
+        result = CompletedProcess(args=[], returncode=0, stdout="", stderr="[mov] packet corrupt")
+        assert self._probe(result) is False
+
+    def test_spawn_fault_propagates(self):
+        import pytest
+
+        with pytest.raises(FileNotFoundError):
+            self._probe(None, raise_exc=FileNotFoundError)
+
+
 class TestMakePhaseProgress:
     """_make_phase_progress — the single shared progress funnel (audit
     round 14 P3: the wrapper used to be built twice in _run_locked and
