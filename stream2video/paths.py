@@ -46,6 +46,7 @@ import os
 import re
 import secrets
 import shutil
+import urllib.parse
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -275,6 +276,98 @@ def _epochless(stem: str) -> str:
     return stripped if stripped else stem
 
 
+_NAMESPACE_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+# Windows reserved device names: a directory/file named ``CON``,
+# ``AUX``, ``COM1``... cannot be created on Windows, so a hostile or
+# merely unusual extractor key that sanitizes into one of these would
+# break every artifact write on that platform.
+_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+# Cap on a namespace component: a custom extractor/plugin can return
+# an arbitrarily long key, and the identity lands in directory + file
+# + lock names where ENAMETOOLONG is one hostile value away.
+_NAMESPACE_MAX_LEN = 32
+
+
+def canonical_namespace(raw: str) -> str:
+    """Canonical project-identity namespace from an arbitrary string.
+
+    The namespace comes from yt-dlp's ``extractor_key`` (a plugin can
+    return anything) or from a URL host fallback. Raw values used to
+    land in directory names, stable source filenames and lock records
+    (audit round 26 P2/P14): ``foo:bar`` breaks file creation on
+    Windows, a reserved device name breaks it everywhere on Windows, a
+    300-char key forks ENAMETOOLONG, and unstable casing forks the
+    identity per platform (``YouTube`` vs ``youtube`` — different
+    project dirs on case-sensitive filesystems, unpredictable merges
+    on case-insensitive ones). The canonical form:
+
+      * keeps only ``[A-Za-z0-9._-]`` (everything else → ``_``);
+      * casefolds (so the identity is stable across extractor casing);
+      * prefixes a reserved device name with ``_``;
+      * caps the length and appends a short hash suffix when truncated
+        (so two distinct long keys never collide).
+    """
+    cleaned = _NAMESPACE_RE.sub("_", raw).strip("._-")
+    if not cleaned:
+        cleaned = "site"
+    if cleaned.split(".")[0].upper() in _RESERVED_NAMES:
+        cleaned = f"_{cleaned}"
+    cleaned = cleaned.casefold()
+    if len(cleaned) > _NAMESPACE_MAX_LEN:
+        digest = hashlib.sha1(cleaned.encode("utf-8")).hexdigest()[:8]
+        cleaned = f"{cleaned[: _NAMESPACE_MAX_LEN - 9]}_{digest}"
+    return cleaned
+
+
+def url_host_namespace(raw: str) -> str | None:
+    """Fallback identity namespace for a URL when yt-dlp reports no
+    extractor key (audit round 26 P3): old yt-dlp versions, custom
+    extractors or a modified stdout make ``before_dl:%(extractor_key)s``
+    disappear, and a bare video id is only unique WITHIN one site —
+    two different services returning the same id must not share a
+    project dir, caches or the post-download project lock. The
+    normalized host keeps the historical bare-id layout for local
+    files while URL downloads always get a site scope.
+
+    Returns the canonical namespace of the URL's host, or ``None``
+    when the input is not a parseable http(s) URL.
+    """
+    try:
+        parts = urllib.parse.urlsplit(raw)
+    except ValueError:
+        return None
+    if parts.scheme.lower() not in ("http", "https"):
+        return None
+    try:
+        host = parts.hostname
+    except ValueError:
+        return None
+    if not host:
+        return None
+    return canonical_namespace(host)
+
+
+def project_lock_name(project_id: str) -> str:
+    """Lock filename for a post-download project identity.
+
+    The readable identity (``<extractor>_<id>``) is not safe as a
+    filename: sanitized or not, a hostile extractor key still controls
+    its length and character set (audit round 26 P2). The lock FILE
+    name is therefore a 64-bit hash of the full identity — the readable
+    form lives only in the lock record, the wait log line and the
+    project directory name (which ``canonical_namespace`` already
+    bounded).
+    """
+    digest = hashlib.sha256(project_id.encode("utf-8")).hexdigest()[:16]
+    return f".s2v_project_{digest}.lock"
+
+
 def downloaded_identity(stem: str, extractor_key: str | None = None) -> str:
     """Stable project identity for a DOWNLOADED source.
 
@@ -283,12 +376,15 @@ def downloaded_identity(stem: str, extractor_key: str | None = None) -> str:
     unique within one site — two different services returning the same
     id ``12345`` must never share a project dir, caches or the
     post-download project lock (audit round 25 P2). Returns
-    ``<extractor>_<id>`` when the extractor is known, else the bare id
+    ``<namespace>_<id>`` when the extractor is known, else the bare id
     (the historical layout, kept for extractor-less callers and
-    local-file naming where the path hash already disambiguates).
+    local-file naming where the path hash already disambiguates). The
+    namespace is canonicalized first (audit round 26 P2/P14): casefold,
+    ``[A-Za-z0-9._-]`` only, reserved-name guard, length cap with a
+    hash suffix.
     """
     if extractor_key:
-        return f"{extractor_key}_{stem}"
+        return f"{canonical_namespace(extractor_key)}_{stem}"
     return stem
 
 
@@ -475,7 +571,7 @@ def apply_per_video_dir(
     video_path: Path,
     is_downloaded: bool,
     per_video_dir: bool = True,
-    extractor_key: str | None = None,
+    namespace: str | None = None,
 ) -> tuple[Path, Path]:
     """Resolve the per-video project directory and move the source if needed.
 
@@ -490,21 +586,25 @@ def apply_per_video_dir(
     source is moved into it:
 
     - Downloaded sources get a project dir named after the *epochless*
-      yt-dlp id, namespaced by the extractor/site when known
-      (``YouTube_<id>/``) so two sites sharing an id never collide
-      (audit round 25 P2), and are renamed to ``<extractor>_<id><ext>``
+      yt-dlp id, namespaced by the site when known
+      (``youtube_<id>/``) so two sites sharing an id never collide
+      (audit round 25 P2), and are renamed to ``<ns>_<id><ext>``
       inside it. The epochless name is what makes the identity — and
       every cache keyed on it — stable across re-runs of the same URL,
       instead of forking per download (see ``_epochless``); the
-      extractor prefix keeps the identity site-scoped so the same id on
-      another service can not collide.
+      namespace prefix keeps the identity site-scoped so the same id on
+      another service can not collide. ``namespace`` is the canonical
+      identity scope: the yt-dlp extractor key when available, else the
+      URL host fallback (audit round 26 P3) — it is canonicalized
+      inside :func:`downloaded_identity` (casefold, safe charset,
+      reserved-name guard, length cap).
     - Local files get a project dir named ``<stem>_<path-hash>`` (stem +
       source-path hash) and are never moved; the hash keeps two
       same-named files in different directories independent.
 
     When ``per_video_dir`` is False the project IS the flat ``output_dir``,
     and a DOWNLOADED source is still renamed to its epochless,
-    extractor-namespaced ``<extractor>_<id><ext>`` name (atomic
+    namespaced ``<ns>_<id><ext>`` name (atomic
     replace): ``artifact_stem()`` keys every cache and the output name
     on ``source_path_key()`` — a hash of the RAW filename — so a
     per-run ``<id>-<epoch>-<token>`` name would fork the identity (and
@@ -515,14 +615,16 @@ def apply_per_video_dir(
     """
     if not per_video_dir:
         if is_downloaded:
-            dest_name = f"{downloaded_identity(_epochless(video_path.stem), extractor_key)}{video_path.suffix}"
+            dest_name = (
+                f"{downloaded_identity(_epochless(video_path.stem), namespace)}{video_path.suffix}"
+            )
             dest = output_dir / dest_name
             if video_path != dest:
                 video_path = move_into_project(video_path, output_dir, dest_name=dest_name)
         return output_dir, video_path
     stem = _epochless(video_path.stem)
     if is_downloaded:
-        project_name = downloaded_identity(stem, extractor_key)
+        project_name = downloaded_identity(stem, namespace)
     else:
         project_name = f"{stem}_{source_path_key(video_path)}"
     project_dir = ensure_project_dir(output_dir, project_name, True)
@@ -530,6 +632,6 @@ def apply_per_video_dir(
         video_path = move_into_project(
             video_path,
             project_dir,
-            dest_name=f"{downloaded_identity(stem, extractor_key)}{video_path.suffix}",
+            dest_name=f"{downloaded_identity(stem, namespace)}{video_path.suffix}",
         )
     return project_dir, video_path

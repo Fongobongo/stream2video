@@ -1278,6 +1278,141 @@ class TestAdvancedWidgetCrossFieldGate:
         errors = self._fake_gui({}, 120, 300)._advanced_widget_errors()
         assert errors == {}
 
+    def test_non_advanced_pipeline_error_not_dropped(self):
+        """Pipeline-level errors for fields WITHOUT an Advanced widget
+        row (method/encoder/qualities/output_format) used to be
+        DROPPED by the per-key filter (audit round 26 P11) — Start /
+        Copy / Save could bless a snapshot the worker rejects. They are
+        now collected under the synthetic ``pipeline_validation`` key."""
+        from stream2video.config import effective_defaults
+        from stream2video.gui_advanced import AdvancedSettingsMixin
+
+        class _Entry:
+            def __init__(self, value: str) -> None:
+                self._value = value
+
+            def get(self) -> str:
+                return self._value
+
+        class BadMethod(AdvancedSettingsMixin):
+            def __init__(self) -> None:
+                self.entry_input = _Entry("https://example.com/v")
+                self.entry_output = _Entry("./processed_videos")
+                self.settings = effective_defaults()
+
+            def _raw_advanced_widget_values(self) -> dict[str, str]:
+                return {}
+
+            def _read_widget_values(self) -> dict[str, object]:
+                values = effective_defaults()
+                values["method"] = "not_a_method"
+                return values
+
+        errors = BadMethod()._advanced_widget_errors()
+        assert "pipeline_validation" in errors
+        assert "method" in errors["pipeline_validation"]
+
+    def test_slider_raw_parse_errors_surface_in_gate(self):
+        """A slider entry that fails to parse must BLOCK the gate
+        (audit round 26 P12): the sync silently keeps the previous
+        value, but Start / Copy / Save must not bless a snapshot that
+        doesn't match the visible text."""
+        from stream2video.config import effective_defaults
+        from stream2video.gui_advanced import AdvancedSettingsMixin
+
+        class _Entry:
+            def __init__(self, value: str) -> None:
+                self._value = value
+
+            def get(self) -> str:
+                return self._value
+
+        class WithSliderError(AdvancedSettingsMixin):
+            def __init__(self) -> None:
+                self.entry_input = _Entry("https://example.com/v")
+                self.entry_output = _Entry("./processed_videos")
+                self.settings = effective_defaults()
+
+            def _raw_advanced_widget_values(self) -> dict[str, str]:
+                return {}
+
+            def _read_widget_values(self) -> dict[str, object]:
+                return effective_defaults()
+
+            def _raw_slider_entry_errors(self) -> dict[str, str]:
+                return {"threshold": "threshold 'abc' is not a number"}
+
+        errors = WithSliderError()._advanced_widget_errors()
+        assert "threshold" in errors
+
+
+class TestSliderRawEntryErrors:
+    """Audit round 26 P12: the slider sync silently keeps the previous
+    value for an entry that fails to parse — the gate must surface the
+    raw parse failure on Start / Copy / Save instead."""
+
+    @staticmethod
+    def _fake_slider(text: str, lo: float, hi: float) -> object:
+        class _Entry:
+            def get(self) -> str:
+                return text
+
+        class _Slider:
+            def __init__(self) -> None:
+                self._entry_val = _Entry()
+
+            def cget(self, key: str) -> float:
+                return {"from_": lo, "to": hi}[key]
+
+        return _Slider()
+
+    def test_parse_failure_is_an_error(self):
+        from stream2video.gui_sliders import SlidersMixin
+
+        class Fake(SlidersMixin):
+            pass
+
+        fake = Fake()
+        fake._slider_threshold = self._fake_slider("abc", -60.0, 0.0)
+        fake._slider_min_silence = self._fake_slider("2.5", 0.0, 10.0)
+        fake._slider_margin = self._fake_slider("-0.5", -10.0, 10.0)
+        fake._slider_bounds = {
+            "threshold": (-60.0, 0.0),
+            "min_silence": (0.0, 10.0),
+            "margin": (-10.0, 10.0),
+        }
+        errors = fake._raw_slider_entry_errors()
+        assert errors == {"threshold": "threshold 'abc' is not a number"}
+
+    def test_out_of_range_is_not_an_error(self):
+        """Out-of-range text stays allowed — the deliberate
+        GUI-clamp/CLI-reject contract (audit round 23 P8)."""
+        from stream2video.gui_sliders import SlidersMixin
+
+        class Fake(SlidersMixin):
+            pass
+
+        fake = Fake()
+        fake._slider_threshold = self._fake_slider("-999", -60.0, 0.0)
+        fake._slider_bounds = {"threshold": (-60.0, 0.0)}
+        assert fake._raw_slider_entry_errors() == {}
+
+    def test_empty_and_nan_are_errors(self):
+        from stream2video.gui_sliders import SlidersMixin
+
+        class Fake(SlidersMixin):
+            pass
+
+        fake = Fake()
+        fake._slider_threshold = self._fake_slider("", -60.0, 0.0)
+        fake._slider_min_silence = self._fake_slider("nan", 0.0, 10.0)
+        fake._slider_bounds = {
+            "threshold": (-60.0, 0.0),
+            "min_silence": (0.0, 10.0),
+        }
+        errors = fake._raw_slider_entry_errors()
+        assert errors == {"min_silence": "min_silence 'nan' is not a number"}
+
 
 class TestLoggingSessionThreadSerialization:
     """Audit round 16 P2 / 19 P2: logging_session mutates GLOBAL logging

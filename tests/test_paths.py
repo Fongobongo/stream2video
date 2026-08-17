@@ -427,14 +427,16 @@ class TestDownloadedEpochStripping:
     def test_downloaded_identity_namespaced_by_extractor_key(self):
         """Audit round 25 P2: the post-download identity carries the
         extractor/site namespace when yt-dlp reports one, so equal video
-        ids from different sites do not collide."""
+        ids from different sites do not collide. The namespace is
+        CANONICALIZED (audit round 26 P2/P14): casefolded and safe for
+        directory/file names."""
         from stream2video.paths import downloaded_identity
 
         assert downloaded_identity("vid123") == "vid123"
         assert downloaded_identity("vid123", None) == "vid123"
         assert downloaded_identity("vid123", "youtube") == "youtube_vid123"
         assert downloaded_identity("vid123", "vimeo") == "vimeo_vid123"
-        assert downloaded_identity("vid123", "YouTube") == "YouTube_vid123"
+        assert downloaded_identity("vid123", "YouTube") == "youtube_vid123"
 
     def test_apply_per_video_dir_namespaces_extractor_downloads(self):
         """With an extractor key, a downloaded file's project dir and
@@ -446,9 +448,7 @@ class TestDownloadedEpochStripping:
             out = root / "out"
             src = root / "vid123-1755000000.mp4"
             src.write_text("data")
-            project, moved = apply_per_video_dir(
-                out, src, is_downloaded=True, extractor_key="youtube"
-            )
+            project, moved = apply_per_video_dir(out, src, is_downloaded=True, namespace="youtube")
             assert project == out / "youtube_vid123"
             assert moved == project / "youtube_vid123.mp4"
             assert moved.read_text() == "data"
@@ -457,7 +457,7 @@ class TestDownloadedEpochStripping:
             src2 = root / "vid123-1755000001.mp4"
             src2.write_text("b")
             project2, _moved2 = apply_per_video_dir(
-                out, src2, is_downloaded=True, extractor_key="vimeo"
+                out, src2, is_downloaded=True, namespace="vimeo"
             )
             assert project2 == out / "vimeo_vid123"
             assert project2 != project
@@ -466,6 +466,21 @@ class TestDownloadedEpochStripping:
             src3.write_text("c")
             project3, _moved3 = apply_per_video_dir(out, src3, is_downloaded=True)
             assert project3 == out / "vid123"
+
+    def test_apply_per_video_dir_uses_host_namespace_fallback(self):
+        """Without an extractor key the caller passes the URL-host
+        namespace (audit round 26 P3) — a bare id is only unique within
+        one site."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "out"
+            src = root / "12345-1755000000.mp4"
+            src.write_text("data")
+            project, moved = apply_per_video_dir(
+                out, src, is_downloaded=True, namespace="example.com"
+            )
+            assert project == out / "example.com_12345"
+            assert moved == project / "example.com_12345.mp4"
 
     def test_downloaded_identity_stable_across_epochs(self):
         """Two runs of the same URL (different epochs) must land in the
@@ -559,6 +574,104 @@ class TestDownloadedEpochStripping:
             assert project == out
             assert moved == src
             assert (out / "vid123.mp4").read_text() == "data"
+
+
+class TestCanonicalNamespace:
+    """Audit round 26 P2/P14: the identity namespace (extractor key or
+    URL host) lands in directory, file and lock names — it must be
+    platform-safe, bounded and case-stable."""
+
+    def test_casefolded(self):
+        from stream2video.paths import canonical_namespace
+
+        assert canonical_namespace("YouTube") == "youtube"
+        assert canonical_namespace("Vimeo") == "vimeo"
+
+    def test_unsafe_chars_replaced(self):
+        from stream2video.paths import canonical_namespace
+
+        assert canonical_namespace("foo:bar") == "foo_bar"
+        assert canonical_namespace("foo bar\tbaz") == "foo_bar_baz"
+        assert canonical_namespace("site/with/slashes") == "site_with_slashes"
+
+    def test_reserved_device_name_prefixed(self):
+        from stream2video.paths import canonical_namespace
+
+        assert canonical_namespace("CON") == "_con"
+        assert canonical_namespace("con") == "_con"
+        assert canonical_namespace("com1") == "_com1"
+        assert canonical_namespace("nul") == "_nul"
+
+    def test_long_value_capped_with_hash_suffix(self):
+        from stream2video.paths import canonical_namespace
+
+        long = "x" * 300
+        canon = canonical_namespace(long)
+        assert len(canon) <= 32
+        assert canon.endswith(f"_{canon[-8:]}")
+        # Two different long keys must not collide.
+        canon2 = canonical_namespace("y" * 300)
+        assert canon2 != canon
+
+    def test_empty_garbage_gets_site_fallback(self):
+        from stream2video.paths import canonical_namespace
+
+        assert canonical_namespace("...") == "site"
+        assert canonical_namespace("///") == "site"
+
+
+class TestProjectLockName:
+    """Audit round 26 P2: the lock FILE name is a hash of the readable
+    identity — a hostile extractor key cannot reach the filesystem
+    through it."""
+
+    def test_hash_form(self):
+        from stream2video.paths import project_lock_name
+
+        name = project_lock_name("youtube_vid123")
+        assert name.startswith(".s2v_project_")
+        assert name.endswith(".lock")
+        digest = name[len(".s2v_project_") : -len(".lock")]
+        assert len(digest) == 16
+        assert all(c in "0123456789abcdef" for c in digest)
+
+    def test_distinct_identities_get_distinct_names(self):
+        from stream2video.paths import project_lock_name
+
+        assert project_lock_name("a") != project_lock_name("b")
+
+    def test_stable_for_same_identity(self):
+        from stream2video.paths import project_lock_name
+
+        assert project_lock_name("x") == project_lock_name("x")
+
+
+class TestUrlHostNamespace:
+    """Audit round 26 P3: when yt-dlp reports no extractor key, the URL
+    HOST becomes the identity namespace — a bare video id is only
+    unique within one site."""
+
+    def test_host_namespace(self):
+        from stream2video.paths import url_host_namespace
+
+        assert url_host_namespace("https://Example.com/v") == "example.com"
+        assert url_host_namespace("HTTPS://YOUTU.BE/abc") == "youtu.be"
+
+    def test_non_http_or_unparseable_returns_none(self):
+        from stream2video.paths import url_host_namespace
+
+        assert url_host_namespace("ftp://host/x") is None
+        assert url_host_namespace("clip.mp4") is None
+
+    def test_malformed_port_still_yields_host(self):
+        """A malformed port cannot hide the host: the namespace is the
+        normalized host even when the port part is broken (the URL
+        itself fails in download, but the identity scope stays
+        host-based)."""
+        from stream2video.paths import url_host_namespace
+
+        assert url_host_namespace("https://host:bad/x") == "host"
+        assert url_host_namespace("https://Host:99999/x") == "host"
 
 
 class TestProjectMarker:

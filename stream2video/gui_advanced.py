@@ -104,19 +104,33 @@ class AdvancedSettingsMixin:
         ``stall_kill_timeout`` makes the warning unreachable), so Start
         used to pass the widget gate and then fail inside the worker's
         validate_pipeline_config AFTER the run began. The full-snapshot
-        build (same factory the worker uses) catches it here, keyed to
-        the Advanced widget whose name appears in the error — the same
-        key space this dict already reports per-key errors with, so all
-        three gates (Start / Copy CLI / Save defaults) surface it
-        identically. Fail-CLOSED (audit round 25 P8): a broken settings
-        shape or a snapshot-build exception reports an internal
-        validation error instead of silently blessing the state — Copy
-        CLI and Save defaults must never persist/copy values the run
-        itself would reject, and Start blocks until the state is
-        recoverable rather than relying on the worker's second
-        validator.
+        build (same factory the worker uses) catches it here — Advanced
+        errors are keyed to the offending widget row, and NON-Advanced
+        errors (method / encoder / qualities / output_format / input)
+        are collected under the synthetic ``pipeline_validation`` key
+        instead of being dropped (audit round 26 P11), so all three
+        gates (Start / Copy CLI / Save defaults) surface the same
+        errors the worker would reject. Fail-CLOSED (audit round
+        25 P8): a broken settings shape or a snapshot-build exception
+        reports an internal validation error instead of silently
+        blessing the state — Copy CLI and Save defaults must never
+        persist/copy values the run itself would reject, and Start
+        blocks until the state is recoverable rather than relying on
+        the worker's second validator.
         """
         errors = validate_advanced_widgets(self._raw_advanced_widget_values())
+        # The slider panel (threshold / min_silence / margin) has the
+        # same silent-fallback hazard the Advanced gate exists to
+        # prevent (audit round 26 P12): an entry that fails to parse
+        # keeps the previous value while the field shows garbage. The
+        # composite GUI carries SlidersMixin; a bare
+        # AdvancedSettingsMixin test double doesn't — the getattr guard
+        # keeps the gate usable for unit tests either way.
+        raw_slider_errors = getattr(self, "_raw_slider_entry_errors", None)
+        if raw_slider_errors is not None:
+            slider_errors = raw_slider_errors()
+            if slider_errors:
+                errors = {**errors, **slider_errors}
         if errors:
             return errors
         try:
@@ -143,10 +157,21 @@ class AdvancedSettingsMixin:
                 delete_after=bool(values["delete_after"]),
             )
             cfg = build_pipeline_config_from_snapshot(params, {**self.settings, **values})
+            pipeline_errors: list[str] = []
             for err in validate_pipeline_config(cfg):
                 key = err.split(" ")[0]
                 if key in ADVANCED_WIDGET_SPECS:
                     errors[key] = err
+                else:
+                    # method / encoder / qualities / output_format /
+                    # input errors have no Advanced widget row — key
+                    # them under one synthetic gate key instead of
+                    # DROPPING them (audit round 26 P11): Start /
+                    # Copy / Save must not bless a snapshot the
+                    # worker's own pre-flight will reject.
+                    pipeline_errors.append(err)
+            if pipeline_errors:
+                errors["pipeline_validation"] = "; ".join(pipeline_errors)
         except Exception as e:
             # Fail closed: the gate cannot prove the snapshot is valid,
             # so it must not approve it. The synthetic key keeps the

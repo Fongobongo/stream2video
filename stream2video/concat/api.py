@@ -185,7 +185,11 @@ def cut_and_concat(
 
     if lock is not None:
         return _locked_body()
-    _lock_path = acquire_output_lock(output_path)
+    # Direct API callers take the output lock themselves; their
+    # cancel_callback must reach the WAIT too (audit round 26 P5) — a
+    # cancel during output-lock contention would otherwise be ignored
+    # until the 60s timeout or the holder's release.
+    _lock_path = acquire_output_lock(output_path, cancel_callback=cancel_callback)
     try:
         return _locked_body()
     finally:

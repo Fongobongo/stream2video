@@ -68,6 +68,8 @@ from stream2video.download import (
     PermissionDeniedError,
     URLValidationError,
     VideoNotAvailableError,
+    _validate_url,
+    canonical_url_lock_key,
     download,
     redact_input_url,
 )
@@ -79,6 +81,8 @@ from stream2video.paths import (
     apply_per_video_dir,
     artifact_stem,
     downloaded_identity,
+    project_lock_name,
+    url_host_namespace,
 )
 from stream2video.silence import (
     SilenceCancelledError,
@@ -573,34 +577,44 @@ class PipelineController:
     # concat phases; see _acquire_project_locks.
     _project_locks: list[LockHandle] = field(default_factory=list, init=False)
 
-    # How long a run may wait for a concurrent same-project run to
-    # finish before failing with a clear "another run holds this" error.
-    # The ceiling below any configured pipeline timeout would produce a
-    # FALSE refusal against a legitimately long first run, so the actual
-    # wait is derived from the run's own timeouts (see
-    # ``_project_lock_timeout``) — this constant is the floor.
-    _PROJECT_LOCK_TIMEOUT_SECONDS = 3600.0
-
     def _set_status(self, text: str, *, force: bool = False) -> None:
         self.cb.on_status(text, force=force)
 
     def _project_lock_timeout(self) -> float:
         """Wait budget for a concurrent same-project run, in seconds.
 
-        A first run may legitimately last as long as its own timeouts
-        allow (download + silence + final concat; the concat ceiling
-        alone reaches 7 days). A wait shorter than that would refuse a
-        run whose holder is alive and healthy — an operational failure,
-        not a corruption, but still one that forces a re-download and a
-        manual retry (audit round 25 P11). The wait therefore covers
-        this run's worst-case phase sum, floored at the historical hour.
+        A first run's real duration has no closed-form ceiling: segment
+        encodes are per-segment watchdogged, retries and fallbacks
+        multiply, and a batch/gapless tree re-encodes whole layers — any
+        SUM of phase timeouts under-covers a legitimate run and
+        produces a false refusal against a live, healthy holder (audit
+        round 26 P6). The OS lock already proves liveness reliably, so
+        the wait is unbounded: it ends when the holder releases or when
+        the USER cancels — every project-lock acquire passes the
+        cancel_callback (audit round 25 P5), so an infinite wait is
+        still promptly abortable from the GUI/CLI.
         """
-        return max(
-            self._PROJECT_LOCK_TIMEOUT_SECONDS,
-            float(self.cfg.download_timeout)
-            + float(self.cfg.silence_timeout)
-            + float(self.cfg.final_concat_timeout),
-        )
+        return float("inf")
+
+    def _downloaded_media_is_valid(self, path: Path) -> bool:
+        """ffprobe validity check for a FRESH download.
+
+        yt-dlp's rc=0 + a non-zero file size do not prove the file
+        plays — a corrupt moov atom, a truncated stream or a site
+        error page saved as media all pass that bar, and the move into
+        the stable source path would then ATOMICALLY REPLACE the
+        previous good copy with garbage (audit round 26 P4): the old
+        reusable source is destroyed before any later phase discovers
+        the problem. The probe runs BEFORE ``apply_per_video_dir``
+        publishes the file, so a rejected download is discarded while
+        the previous copy stays intact. A probe that cannot run at all
+        (ffprobe missing) also rejects — the pipeline needs ffprobe
+        for duration anyway, and approving an unverifiable file would
+        re-open the replace-with-garbage path.
+        """
+        from stream2video.concat.probing import _ffprobe_is_valid_media
+
+        return _ffprobe_is_valid_media(path)
 
     def _set_phase_progress(self, fraction: float) -> None:
         """Dispatch the per-phase bar update (no-op when the callback
@@ -882,11 +896,18 @@ class PipelineController:
             )
 
         locks: list[LockHandle] = []
-        if raw.startswith(("http://", "https://")):
+        if _validate_url(raw):
             # 16 hex chars (64-bit): 32-bit truncation would collide
             # realistically under many URLs and falsely serialize /
-            # refuse unrelated runs (audit round 25 P10).
-            url_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+            # refuse unrelated runs (audit round 25 P10). The digest is
+            # taken over the CANONICAL URL (scheme/host lowercased,
+            # default port dropped, signed query/fragment dropped —
+            # audit round 26 P7): ``HTTPS://EXAMPLE.COM/v?token=...``
+            # and ``https://example.com/v`` are the same resource and
+            # must share the pre-download lock instead of racing each
+            # other until the post-download id lock.
+            url_key = canonical_url_lock_key(raw)
+            url_hash = hashlib.sha256(url_key.encode("utf-8")).hexdigest()[:16]
             locks.append(
                 acquire_lock_file(
                     out_dir / f".s2v_url_{url_hash}.lock",
@@ -976,23 +997,45 @@ class PipelineController:
         if download_result.is_downloaded:
             self._download_path = video_path
             self._download_was_real = True
+            # Media-validate the FRESH download BEFORE it is published
+            # over the stable source path (audit round 26 P4): yt-dlp
+            # rc=0 + non-zero size do not prove the file plays, and
+            # move_into_project's atomic replace would destroy the
+            # previous good copy with garbage. A rejected file is
+            # discarded (the was-real flag drops, so the error cleanup
+            # unlinks it) while the stable source stays untouched.
+            try:
+                media_ok = self._downloaded_media_is_valid(video_path)
+            except Exception as e:
+                media_ok = False
+                media_error = f" ({e})"
+            else:
+                media_error = ""
+            if not media_ok:
+                self._download_was_real = False
+                raise PipelineDownloadError(
+                    f"Downloaded file failed media validation: "
+                    f"{redact_input_url(self.cfg.input_raw)} -> {video_path}{media_error}"
+                )
         if download_result.is_downloaded:
-            # Second project lock for URL runs: keyed on the video id,
-            # NOT the URL hash — two alias URLs of the same video (or
-            # two different URLs the site resolves to the same id) land
-            # in the same project dir and must be serialised there.
-            # Taken BEFORE apply_per_video_dir's atomic replace of the
-            # stable source path and before any cache phase touches the
-            # project dir (audit round 24 P4). The identity is
-            # namespaced by the yt-dlp extractor/site when known, so
-            # two DIFFERENT sites with the same id do not collide
-            # (audit round 25 P2).
-            project_id = downloaded_identity(
-                _epochless(video_path.stem), download_result.extractor_key
-            )
+            # Second project lock for URL runs: keyed on the video id
+            # within its site namespace, NOT the URL hash — two alias
+            # URLs of the same video land in the same project dir and
+            # must be serialised there. Taken BEFORE
+            # apply_per_video_dir's atomic replace of the stable source
+            # path and before any cache phase touches the project dir
+            # (audit round 24 P4). The identity is namespaced by the
+            # yt-dlp extractor/site when known; when the extractor is
+            # missing (old yt-dlp, custom extractor) the URL HOST is
+            # the fallback namespace — a bare id is only unique within
+            # one site (audit round 26 P3). The lock FILE name is a
+            # hash of the identity (audit round 26 P2): the readable id
+            # stays in the record and the wait message only.
+            namespace = download_result.extractor_key or url_host_namespace(self.cfg.input_raw)
+            project_id = downloaded_identity(_epochless(video_path.stem), namespace)
             self._project_locks.append(
                 acquire_lock_file(
-                    self.cfg.output_dir / f".s2v_project_{project_id}.lock",
+                    self.cfg.output_dir / project_lock_name(project_id),
                     what="project",
                     timeout=self._project_lock_timeout(),
                     on_wait=lambda: self.cb.on_log(
@@ -1009,7 +1052,7 @@ class PipelineController:
             video_path,
             download_result.is_downloaded,
             per_video_dir=self.cfg.per_video_dir,
-            extractor_key=download_result.extractor_key,
+            namespace=download_result.extractor_key or url_host_namespace(self.cfg.input_raw),
         )
         # Re-bind output_dir on the controller so phases 2+ use it.
         # dataclass(frozen=False) on PipelineConfig would be cleaner;
@@ -1249,7 +1292,12 @@ class PipelineController:
         # run()'s finally (appended last → released first). Passed into
         # cut_and_concat as ``lock=`` so it isn't re-acquired inside
         # (which would risk a lock-order inversion with such a caller).
-        self._project_locks.append(acquire_output_lock(output_path))
+        # The wait is cancellable like every project lock (audit round
+        # 26 P5): a Cancel while a concurrent run holds the output lock
+        # must stop THIS run, not idle until the holder finishes.
+        self._project_locks.append(
+            acquire_output_lock(output_path, cancel_callback=lambda: self.cancel_event.is_set())
+        )
 
         # Pre-flight disk space estimate (warning only — does not cancel,
         # matches memory_reserve warning semantics). Shared estimator also

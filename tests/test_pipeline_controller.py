@@ -520,6 +520,7 @@ class TestPipelineControllerRun:
 
         with (
             patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+            patch.object(PipelineController, "_downloaded_media_is_valid", return_value=True),
             patch("stream2video.pipeline_controller.detect_silence") as detect_mock,
             patch("stream2video.pipeline_controller.save_silence_cache"),
             patch(
@@ -925,6 +926,7 @@ class TestProjectLocks:
 
         with (
             patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+            patch.object(PipelineController, "_downloaded_media_is_valid", return_value=True),
             patch("stream2video.pipeline_controller.detect_silence", return_value=[]),
             patch("stream2video.pipeline_controller.save_silence_cache"),
             patch("stream2video.pipeline_controller.load_silence_cache", return_value=None),
@@ -951,11 +953,16 @@ class TestProjectLocks:
     def test_alias_urls_serialize_on_video_id_lock(self, tmp_path: Path):
         """Two DIFFERENT URLs of the same video (alias URLs hash
         differently) collide on the post-download video-id lock — the
-        url-hash lock alone cannot see the alias (audit round 24 P4)."""
+        url-hash lock alone cannot see the alias (audit round 24 P4).
+        Without an extractor key the identity is host-namespaced
+        (audit round 26 P3), so same-host aliases share one lock; the
+        lock FILE name is a hash of the readable identity (audit
+        round 26 P2)."""
         import threading
 
         from stream2video.concat.output_lock import acquire_lock_file, release_output_lock
         from stream2video.download import DownloadResult
+        from stream2video.paths import project_lock_name
         from stream2video.pipeline_controller import PipelineError
 
         url = "https://youtu.be/abc123"
@@ -964,9 +971,9 @@ class TestProjectLocks:
         controller = PipelineController(cfg=cfg, cb=cb, cancel_event=threading.Event())
         fake_video = tmp_path / "vid123-1755000000-a1b2c3d4.mp4"
         fake_video.write_bytes(b"dummy")
-        # Another run already holds the project lock for video id
-        # "vid123" (its URL hash would be different).
-        holder = acquire_lock_file(tmp_path / ".s2v_project_vid123.lock", what="project")
+        # Another run already holds the project lock for the same
+        # host-namespaced video id (its URL hash would be different).
+        holder = acquire_lock_file(tmp_path / project_lock_name("youtu.be_vid123"), what="project")
 
         def fake_download(url, out_dir, **kwargs):
             return DownloadResult(path=fake_video, is_downloaded=True)
@@ -974,6 +981,7 @@ class TestProjectLocks:
         try:
             with (
                 patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+                patch.object(PipelineController, "_downloaded_media_is_valid", return_value=True),
                 patch.object(PipelineController, "_project_lock_timeout", return_value=0.2),
                 pytest.raises(PipelineError, match="project lock"),
             ):
@@ -993,6 +1001,7 @@ class TestProjectLocks:
 
         from stream2video.concat.output_lock import acquire_lock_file, release_output_lock
         from stream2video.download import DownloadResult
+        from stream2video.paths import project_lock_name
         from stream2video.pipeline_controller import PipelineError
 
         url = "https://example.com/v"
@@ -1001,7 +1010,11 @@ class TestProjectLocks:
         controller = PipelineController(cfg=cfg, cb=cb, cancel_event=threading.Event())
         fake_video = tmp_path / "vid123-1755000000-a1b2c3d4.mp4"
         fake_video.write_bytes(b"dummy")
-        holder = acquire_lock_file(tmp_path / ".s2v_project_vid123.lock", what="project")
+        # No extractor key → the identity is host-namespaced (audit
+        # round 26 P3): example.com_vid123.
+        holder = acquire_lock_file(
+            tmp_path / project_lock_name("example.com_vid123"), what="project"
+        )
 
         def fake_download(url, out_dir, **kwargs):
             return DownloadResult(path=fake_video, is_downloaded=True)
@@ -1009,6 +1022,7 @@ class TestProjectLocks:
         try:
             with (
                 patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+                patch.object(PipelineController, "_downloaded_media_is_valid", return_value=True),
                 patch.object(PipelineController, "_project_lock_timeout", return_value=0.2),
                 pytest.raises(PipelineError, match="project lock"),
             ):
@@ -1024,11 +1038,13 @@ class TestProjectLocks:
         """The post-download project identity is namespaced by the
         extractor/site when yt-dlp reports one (audit round 25 P2):
         two DIFFERENT sites that happen to use the same video id must
-        not serialize/refuse each other."""
+        not serialize/refuse each other. The lock FILE name is a hash
+        of the readable identity (audit round 26 P2)."""
         import threading
 
         from stream2video.concat.output_lock import acquire_lock_file, release_output_lock
         from stream2video.download import DownloadResult
+        from stream2video.paths import project_lock_name
         from stream2video.pipeline_controller import PipelineError
 
         url = "https://example.com/v"
@@ -1038,9 +1054,9 @@ class TestProjectLocks:
         fake_video = tmp_path / "abc123-1755000000-a1b2c3d4.mp4"
         fake_video.write_bytes(b"dummy")
         # A run from a DIFFERENT site whose video id is also "abc123"
-        # holds the non-namespaced project lock; our youtube-namespaced
+        # holds the vimeo-namespaced project lock; our youtube-namespaced
         # identity must NOT collide with it.
-        holder = acquire_lock_file(tmp_path / ".s2v_project_abc123.lock", what="project")
+        holder = acquire_lock_file(tmp_path / project_lock_name("vimeo_abc123"), what="project")
 
         def fake_download(url, out_dir, **kwargs):
             return DownloadResult(path=fake_video, is_downloaded=True, extractor_key="youtube")
@@ -1050,6 +1066,7 @@ class TestProjectLocks:
             # proceeds all the way through (no project lock refusal).
             with (
                 patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+                patch.object(PipelineController, "_downloaded_media_is_valid", return_value=True),
                 patch.object(PipelineController, "_project_lock_timeout", return_value=0.2),
                 patch("stream2video.pipeline_controller.detect_silence", return_value=[]),
                 patch("stream2video.pipeline_controller.save_silence_cache"),
@@ -1070,10 +1087,11 @@ class TestProjectLocks:
 
         # The SAME extractor + id DOES collide: the namespaced identity
         # is what the second run locks.
-        holder2 = acquire_lock_file(tmp_path / ".s2v_project_youtube_abc123.lock", what="project")
+        holder2 = acquire_lock_file(tmp_path / project_lock_name("youtube_abc123"), what="project")
         try:
             with (
                 patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+                patch.object(PipelineController, "_downloaded_media_is_valid", return_value=True),
                 patch.object(PipelineController, "_project_lock_timeout", return_value=0.2),
                 pytest.raises(PipelineError, match="project lock"),
             ):
@@ -1081,34 +1099,20 @@ class TestProjectLocks:
         finally:
             release_output_lock(holder2)
 
-    def test_project_lock_timeout_covers_phase_sum(self, tmp_path: Path):
-        """The lock-wait budget covers this run's worst-case phase sum
-        (download + silence + final concat), floored at the historical
-        hour (audit round 25 P11): a legitimately long first run must
-        not produce a FALSE refusal."""
+    def test_project_lock_timeout_waits_until_cancel(self, tmp_path: Path):
+        """The lock wait is UNBOUNDED (audit round 26 P6): a first
+        run's real duration has no closed-form ceiling (segment
+        encodes, retries, fallbacks multiply), so any computed budget
+        under-covers a legitimate run and produces a false refusal
+        against a live holder. The wait ends when the holder releases
+        or the user cancels (every project lock acquire passes the
+        cancel_callback)."""
         import threading
 
-        cfg = _valid_config(
-            output_dir=tmp_path,
-            input_raw="clip.mp4",
-            download_timeout=3600,
-            silence_timeout=3600,
-            final_concat_timeout=3600,
-        )
+        cfg = _valid_config(output_dir=tmp_path, input_raw="clip.mp4")
         cb, _ = _make_callbacks()
         controller = PipelineController(cfg=cfg, cb=cb, cancel_event=threading.Event())
-        assert controller._project_lock_timeout() == 10800.0
-        # Floor: tiny phase timeouts must not shrink the wait below the
-        # historical hour.
-        cfg2 = _valid_config(
-            output_dir=tmp_path,
-            input_raw="clip.mp4",
-            download_timeout=1,
-            silence_timeout=1,
-            final_concat_timeout=1,
-        )
-        controller2 = PipelineController(cfg=cfg2, cb=cb, cancel_event=threading.Event())
-        assert controller2._project_lock_timeout() == 3600.0
+        assert controller._project_lock_timeout() == float("inf")
 
     def test_local_source_lock_keyed_on_artifact_stem(self, tmp_path: Path):
         """A local-file run takes its project lock keyed on the artifact

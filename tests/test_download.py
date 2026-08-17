@@ -779,6 +779,34 @@ class TestSweepPartialFragments:
             _sweep_partial_fragments(out, "a1b2c3d4")
             assert not frag.exists()
 
+    def test_multi_suffix_format_fragments_matched(self):
+        """Separate formats produce multi-suffix fragments
+        (``-token.f137.mp4.part``, ``-token.webm.ytdl``) — the dotted
+        chain between the token and the final fragment extension must
+        match too (audit round 26 P10)."""
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            f137 = out / "vid-12345-a1b2c3d4.f137.mp4.part"
+            f137.write_bytes(b"format stream fragment")
+            webm_ytdl = out / "vid-12345-a1b2c3d4.webm.ytdl"
+            webm_ytdl.write_bytes(b"format stream ytdl")
+            nested_temp = out / "vid-12345-a1b2c3d4.f137.mp4.temp"
+            nested_temp.write_bytes(b"format stream temp")
+            _sweep_partial_fragments(out, "a1b2c3d4")
+            assert not f137.exists()
+            assert not webm_ytdl.exists()
+            assert not nested_temp.exists()
+
+    def test_token_glued_to_suffix_is_not_matched(self):
+        """A token glued to trailing characters (``-a1b2c3d4zz``) is
+        not this run's token slot — keep the file."""
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            glued = out / "vid-12345-a1b2c3d4zz.webm.part"
+            glued.write_bytes(b"token continues into the suffix")
+            _sweep_partial_fragments(out, "a1b2c3d4")
+            assert glued.exists()
+
 
 class TestParseExtractorKey:
     """Audit round 25 P2: the yt-dlp ``before_dl:%(extractor_key)s``
@@ -847,7 +875,84 @@ class TestRedactInputUrl:
         assert redact_input_url(r"C:\Videos\clip.mp4") == r"C:\Videos\clip.mp4"
         assert redact_input_url("clip.mp4") == "clip.mp4"
 
-    def test_non_http_scheme_passes_through(self):
+    def test_non_http_scheme_userinfo_masked(self):
+        """Any parseable URL scheme is redacted (audit round 26 P9):
+        ``_validate_url`` later rejects ftp:// inputs, and the "Invalid
+        URL" error + log must not carry the credentials."""
         from stream2video.download import redact_input_url
 
-        assert redact_input_url("ftp://user:pass@host/x") == "ftp://user:pass@host/x"
+        redacted = redact_input_url("ftp://user:pass@host/x?tok=1#f")
+        assert "user" not in redacted
+        assert "pass" not in redacted
+        assert "tok" not in redacted
+        assert redacted == "ftp://<redacted>@host/x?<redacted>#<redacted>"
+
+    def test_malformed_port_redacted_not_crashing(self):
+        """A malformed/out-of-range port must not crash the redactor
+        itself (audit round 26 P8) — the userinfo is stripped from the
+        raw authority and the rest stays masked."""
+        from stream2video.download import redact_input_url
+
+        redacted = redact_input_url("https://user:pass@host:bad/x?secret=1")
+        assert "user" not in redacted
+        assert "pass" not in redacted
+        assert "secret" not in redacted
+        assert redacted.startswith("https://<redacted>@")
+
+        redacted2 = redact_input_url("https://host:99999/x")
+        assert redacted2 == "https://host:99999/x"
+
+    def test_unparseable_passes_through(self):
+        from stream2video.download import redact_input_url
+
+        assert redact_input_url("://") == "://"
+
+
+class TestCanonicalUrlLockKey:
+    """Audit round 26 P7: equivalent URLs must land on the same
+    pre-download URL lock — scheme/host case, default ports and signed
+    query/fragment variants are one resource."""
+
+    def test_scheme_and_host_case_insensitive(self):
+        from stream2video.download import canonical_url_lock_key
+
+        base = canonical_url_lock_key("https://example.com/v")
+        assert canonical_url_lock_key("HTTPS://EXAMPLE.COM/v") == base
+        assert canonical_url_lock_key("https://example.com/v?token=abc&x=1") == base
+        assert canonical_url_lock_key("https://example.com/v#frag") == base
+
+    def test_default_ports_dropped(self):
+        from stream2video.download import canonical_url_lock_key
+
+        assert canonical_url_lock_key("https://example.com:443/v") == (
+            canonical_url_lock_key("https://example.com/v")
+        )
+        assert canonical_url_lock_key("http://example.com:80/v") == (
+            canonical_url_lock_key("http://example.com/v")
+        )
+
+    def test_non_default_port_kept(self):
+        from stream2video.download import canonical_url_lock_key
+
+        assert canonical_url_lock_key("https://example.com:8443/v") == (
+            "https://example.com:8443/v"
+        )
+
+    def test_different_paths_are_different_resources(self):
+        from stream2video.download import canonical_url_lock_key
+
+        assert canonical_url_lock_key("https://example.com/a") != (
+            canonical_url_lock_key("https://example.com/b")
+        )
+
+    def test_trailing_slash_normalized(self):
+        from stream2video.download import canonical_url_lock_key
+
+        assert canonical_url_lock_key("https://example.com/v/") == (
+            canonical_url_lock_key("https://example.com/v")
+        )
+
+    def test_malformed_port_falls_back_to_raw(self):
+        from stream2video.download import canonical_url_lock_key
+
+        assert canonical_url_lock_key("https://host:bad/x") == "https://host:bad/x"

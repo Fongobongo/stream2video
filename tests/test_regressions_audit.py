@@ -668,6 +668,26 @@ class TestOutputLock:
         release_output_lock(lock)
         assert not lock.exists()
 
+    def test_pathname_release_refuses_live_lock(self, tmp_path: Path):
+        """The bare-Path overload must NOT unlink a LIVE owner's lock
+        file (audit round 26 P1): unlinking would orphan the owner's OS
+        lock and let a third process take the freed name — two "owners"
+        of one resource. The release tries to take the OS lock itself;
+        contention proves a live owner and the file survives."""
+        out = tmp_path / "x.mp4"
+        holder = acquire_output_lock(out)
+        try:
+            release_output_lock(lock_path_for(out))
+            assert lock_path_for(out).exists(), "live lock file must survive pathname release"
+            # The owner still holds the real lock: a concurrent acquire
+            # still refuses.
+            with pytest.raises(ConcatLockError):
+                acquire_output_lock(out, timeout=0.2)
+        finally:
+            release_output_lock(holder)
+        # After the owner released, the pathname release succeeds.
+        assert not lock_path_for(out).exists()
+
     def test_three_contenders_multiprocessing_one_winner(self, tmp_path: Path):
         """The audit's CI scenario (Linux/Windows multiprocessing, THREE
         contenders for one lock): exactly one process acquires, the

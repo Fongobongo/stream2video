@@ -379,6 +379,37 @@ def acquire_lock_file(
     )
 
 
+def _release_stale_pathname(path: Path) -> None:
+    """Release a bare-pathname lock file IF (and only if) it is stale.
+
+    The historical ``release_output_lock(Path)`` contract unlinked the
+    pathname unconditionally — a live owner's lock file could be
+    deleted out from under it (audit round 26 P1): its OS lock lives
+    on the now-orphaned inode and a newcomer locks a fresh file at the
+    same path, so two processes believe they own the resource and the
+    whole identity verification in acquire is bypassed. The fix: try
+    to take the OS lock OURSELVES first. Success proves no live owner
+    exists (the kernel released it with the crashed owner) and the
+    file is ours to remove; contention proves a live owner exists and
+    the pathname must survive.
+    """
+    try:
+        fd = os.open(path, os.O_RDWR)
+    except OSError:
+        return
+    try:
+        _os_lock_fd(fd)
+    except (OSError, ConcatLockError):
+        logger.warning("Refusing pathname release of %s: a live owner holds the lock", path)
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        return
+    # We hold the OS lock: the file was a stale leftover. Hand it to
+    # the normal handle release (platform-correct unlock/close/unlink
+    # with the same-file identity check).
+    release_output_lock(LockHandle(path=path, token="legacy", what="pathname", fd=fd))
+
+
 def release_output_lock(handle: LockHandle | Path) -> None:
     """Best-effort release of the lock; never raises.
 
@@ -388,12 +419,17 @@ def release_output_lock(handle: LockHandle | Path) -> None:
     file; Windows closes first (an open file cannot be unlinked) and
     the residual race self-heals.
 
-    A bare :class:`Path` (legacy callers) is removed unconditionally —
-    no fd was ever held, so there is nothing else to do.
+    A bare :class:`Path` (legacy callers) is NOT removed
+    unconditionally (audit round 26 P1): the pathname may name a LIVE
+    lock held by another process, and unlinking it would sever that
+    owner's protection (its OS lock stays on the orphaned inode while
+    a third process takes the freed name — two "owners" of one lock).
+    The pathname is released only after THIS process successfully
+    takes the OS lock itself, which proves the file is a stale
+    leftover from a crashed run.
     """
     if isinstance(handle, Path):
-        with contextlib.suppress(OSError):
-            os.unlink(handle)
+        _release_stale_pathname(handle)
         return
     if handle.fd < 0:
         return  # already released

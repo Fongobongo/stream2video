@@ -995,7 +995,7 @@ class TestCliSilenceFlags:
             patch("stream2video.pipeline_controller.check_memory_reserve", return_value=True),
             patch(
                 "stream2video.pipeline_controller.apply_per_video_dir",
-                side_effect=lambda o, v, d, per_video_dir=False, extractor_key=None: (o, v),
+                side_effect=lambda o, v, d, per_video_dir=False, namespace=None: (o, v),
             ),
         ):
 
@@ -1060,7 +1060,7 @@ class TestCliSilenceFlags:
             patch("stream2video.pipeline_controller.check_memory_reserve", return_value=True),
             patch(
                 "stream2video.pipeline_controller.apply_per_video_dir",
-                side_effect=lambda o, v, d, per_video_dir=False, extractor_key=None: (o, v),
+                side_effect=lambda o, v, d, per_video_dir=False, namespace=None: (o, v),
             ),
         ):
 

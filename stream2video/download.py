@@ -114,26 +114,77 @@ def redact_input_url(url: str) -> str:
     memory only, handed to yt-dlp as-is. Query and fragment are dropped
     entirely (no whitelist of "safe" params to maintain), userinfo is
     replaced with ``<redacted>``, and the scheme+host+port+path are
-    kept so the user can still see which site the run is about. Local
-    paths and anything that is not an http(s) URL pass through
-    unchanged.
+    kept so the user can still see which site the run is about.
+
+    Two hardening rules from audit round 26 (P8/P9):
+
+      * ANY parseable URL scheme is redacted, not just http(s) — an
+        ``ftp://user:pass@host/x`` that ``_validate_url`` later rejects
+        still reaches the "Invalid URL" error and the log, and its
+        userinfo must not. Unparseable strings and non-URL paths
+        (drive letters, relative names — no ``scheme://netloc``) pass
+        through untouched.
+      * A malformed port (``https://host:bad/x``, out-of-range port)
+        must not crash the redactor itself: the userinfo is stripped
+        from the raw authority and the rest of the URL is masked, so
+        the error path stays redacted even when the URL is broken.
     """
     try:
         parts = urllib.parse.urlsplit(url)
     except ValueError:
         return url
-    if parts.scheme.lower() not in ("http", "https"):
+    if not parts.scheme or not parts.netloc:
+        # Not a URL (drive letter, relative path, bare host) — nothing
+        # to mask, and rebuilding would corrupt the string.
         return url
-    host = parts.hostname or parts.netloc
-    if parts.port:
-        host = f"{host}:{parts.port}"
-    netloc = f"<redacted>@{host}" if parts.username else host
+    userinfo = "<redacted>@" if parts.username is not None else ""
+    try:
+        host = parts.hostname or parts.netloc
+        port = parts.port  # raises ValueError on malformed/out-of-range port
+    except ValueError:
+        netloc = parts.netloc
+        if "@" in netloc:
+            netloc = netloc.rsplit("@", 1)[1]
+        host = netloc
+        port = None
+    if port:
+        host = f"{host}:{port}"
     path = parts.path
     if parts.query:
         path = f"{path}?<redacted>"
     if parts.fragment:
         path = f"{path}#<redacted>"
-    return urllib.parse.urlunsplit((parts.scheme, netloc, path, "", ""))
+    return urllib.parse.urlunsplit((parts.scheme, f"{userinfo}{host}", path, "", ""))
+
+
+def canonical_url_lock_key(url: str) -> str:
+    """Normalised identity for the pre-download URL-hash lock.
+
+    The URL lock exists to serialize concurrent runs of the same
+    source BEFORE the download resolves a video id (audit round 24
+    P4). Equivalent URLs must land on the same lock (audit round 26
+    P7): scheme/host case, default ports and the signed query/fragment
+    vary between invocations and requests, so the key keeps only
+    scheme (lowercased) + host (lowercased) + non-default port +
+    normalized path. Two DIFFERENT paths stay distinct — the path is
+    the only pre-download signal of "different video" available.
+    Unparseable input falls back to the raw string (the caller also
+    gates on ``_validate_url``).
+    """
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return url
+    scheme = parts.scheme.lower()
+    try:
+        host = parts.hostname.lower() if parts.hostname else ""
+        port = parts.port  # raises ValueError on malformed/out-of-range port
+    except ValueError:
+        return url
+    if port and not ((scheme == "http" and port == 80) or (scheme == "https" and port == 443)):
+        host = f"{host}:{port}"
+    path = parts.path.rstrip("/") or "/"
+    return f"{scheme}://{host}{path}"
 
 
 def _is_local_file(path_str: str) -> bool:
@@ -390,11 +441,15 @@ def _sweep_partial_fragments(out_dir: Path, run_id: str) -> None:
     filename this run's yt-dlp writes (``<id>-<epoch>-<token>.<ext>.part``),
     so a name is matched structurally: the token must sit in the
     ``-<epoch>-<token>`` slot of the outtmpl, right before the fragment
-    suffix — a plain substring test could hit a video id or another
-    run's fragment that happens to contain the same eight hex chars
-    (audit round 25 P9).
+    suffix chain — a plain substring test could hit a video id or
+    another run's fragment that happens to contain the same eight hex
+    chars (audit round 25 P9). The chain allows the multi-suffix
+    fragments separate formats produce (``-token.f137.mp4.part``,
+    ``-token.webm.ytdl`` — audit round 26 P10): one or more dotted
+    segments between the token and the final ``.part``/``.ytdl``/
+    ``.temp`` extension.
     """
-    fragment_re = re.compile(rf"-{re.escape(run_id)}\.[^.]*\.(?:part|ytdl|temp)$")
+    fragment_re = re.compile(rf"-{re.escape(run_id)}(?:\.[^.]+)*\.(?:part|ytdl|temp)$")
     try:
         entries = list(out_dir.iterdir())
     except OSError:
@@ -800,6 +855,16 @@ def download(
                 raise DownloadError(f"Download completed but file not found: {reported_path}")
 
             extractor_key = _parse_extractor_key(stdout_lines)
+            if extractor_key:
+                # Canonicalize BEFORE the value fans out into project
+                # dirs, stable filenames and lock records (audit round
+                # 26 P2): a custom extractor/plugin can return a value
+                # with reserved names, control chars or unbounded
+                # length, and the identity must be platform-safe and
+                # case-stable.
+                from stream2video.paths import canonical_namespace
+
+                extractor_key = canonical_namespace(extractor_key)
 
             # ``stat()`` can raise a raw OSError (file quarantined by AV
             # between the resolve and here, permissions, ...) which is

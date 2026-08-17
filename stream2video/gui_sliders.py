@@ -143,3 +143,31 @@ class SlidersMixin:
         updates = sync_slider_entries(entries, bounds)
         for key, val in updates.items():
             self.settings[key] = val
+
+    def _raw_slider_entry_errors(self) -> dict[str, str]:
+        """Errors for slider entry text that does not PARSE.
+
+        ``_sync_slider_entries`` silently keeps the previous value for
+        an entry that fails to parse — the correct runtime fallback,
+        but a silent one: if the user typed ``abc`` and clicked Start /
+        Copy CLI / Save defaults before FocusOut confirmed the entry,
+        the gates used to bless a snapshot that does not match the
+        visible text (audit round 26 P12). This gate surfaces exactly
+        those entries: parse failure is an ERROR on all three actions;
+        out-of-range text stays allowed and is clamped by the sync
+        (the deliberate GUI-clamp/CLI-reject contract, audit round
+        23 P8).
+        """
+        bounds: dict[str, tuple[float, float]] = getattr(self, "_slider_bounds", {})
+        errors: dict[str, str] = {}
+        for key in ("threshold", "min_silence", "margin"):
+            slider = getattr(self, f"_slider_{key}", None)
+            if not slider or not hasattr(slider, "_entry_val"):
+                continue
+            raw = slider._entry_val.get().strip()
+            if not raw:
+                continue
+            lo, hi = bounds.get(key, (float(slider.cget("from_")), float(slider.cget("to"))))
+            if parse_slider_entry_value(raw, lo, hi) is None:
+                errors[key] = f"{key} {raw!r} is not a number"
+        return errors
