@@ -4,8 +4,23 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from tkinter import TclError
+from unittest.mock import patch
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _fake_output_media_validation():
+    """Tests write dummy bytes as the pipeline output — the real
+    ffmpeg validation seam (audit round 29 P0-2) would reject every
+    one of them. Patch the seam suite-wide; tests that exercise the
+    REAL validation override it with a local ``patch.object`` (an
+    inner patch wins over this autouse one)."""
+    with patch(
+        "stream2video.pipeline_controller.PipelineController._output_media_is_valid",
+        return_value=True,
+    ):
+        yield
 
 
 def _spawn_gui() -> Iterator[object]:

@@ -991,9 +991,10 @@ class TestCanonicalUrlLockKey:
 
     def test_userinfo_distinguishes_accounts(self):
         """Basic-auth credentials can identify a DIFFERENT resource or
-        account on the same path (audit round 28 P5): the userinfo is
-        hashed into the key — distinct users get distinct locks, and
-        the secret itself never reaches the lock name."""
+        account on the same path (audit round 28 P5 / 29 P6): the FULL
+        userinfo is hashed into the key — distinct users AND distinct
+        passwords get distinct locks, and the secret itself never
+        reaches the lock name."""
         from stream2video.download import canonical_url_lock_key
 
         key_a = canonical_url_lock_key("https://alice:pass@host/private")
@@ -1001,6 +1002,14 @@ class TestCanonicalUrlLockKey:
         assert key_a != key_b
         assert "alice" not in key_a
         assert "pass" not in key_a
+        # Same username, different password = different credentials.
+        assert canonical_url_lock_key("https://alice:one@host/p") != (
+            canonical_url_lock_key("https://alice:two@host/p")
+        )
+        # A password is not the same credential as an empty one.
+        assert canonical_url_lock_key("https://alice@host/p") != (
+            canonical_url_lock_key("https://alice:one@host/p")
+        )
 
 
 class TestRedactProcessOutput:
@@ -1042,3 +1051,23 @@ class TestRedactProcessOutput:
         )
         assert "user:pass" not in out
         assert "user:pass@proxy.local" not in out
+
+    def test_password_with_at_sign_fully_masked(self):
+        """A bare credential whose PASSWORD contains ``@`` must be cut
+        at the LAST @ before the host (audit round 29 P7) — the old
+        regex stopped at the first one and left the ``ss`` suffix of
+        ``pa@ss`` in the log."""
+        from stream2video.download import _redact_process_output
+
+        out = _redact_process_output("via user:pa@ss@host:1080 retry", set())
+        assert "pa@ss" not in out
+        assert "ss@host" not in out
+        assert "<redacted>@host:1080" in out
+
+    def test_percent_decoded_secret_scrubbed(self):
+        from stream2video.download import _redact_process_output
+
+        text = "failed https%3A%2F%2Fuser%3Apass%40host%2Fv retry"
+        out = _redact_process_output(text, {"https://user:pass@host/v"})
+        assert "user%3Apass" not in out
+        assert "user:pass" not in out

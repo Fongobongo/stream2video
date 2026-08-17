@@ -1334,6 +1334,151 @@ class TestProjectLocks:
         assert any("Keeping the legacy directory as-is" in m for m in calls["log"])
         assert (tmp_path / "example.com_vid123").is_dir()
 
+
+class TestOutputAtomicPublish:
+    """Audit round 29 P0-1/P0-2: a failed rerun must never destroy the
+    previous GOOD result — the old output is moved to a backup sibling
+    before the encode, restored on failure, deleted on success — and a
+    "success" requires full media validation, not just a non-zero size."""
+
+    def _controller(self, tmp_path: Path, **kw):
+        import threading
+
+        cfg = _valid_config(output_dir=tmp_path, input_raw=str(tmp_path / "src.mp4"))
+        cb, calls = _make_callbacks()
+        return (
+            PipelineController(cfg=cfg, cb=cb, cancel_event=threading.Event(), **kw),
+            calls,
+        )
+
+    def _patches(self, tmp_path: Path, cut):
+        import contextlib
+
+        from stream2video.download import DownloadResult
+
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"source")
+        stack = contextlib.ExitStack()
+        stack.enter_context(
+            patch(
+                "stream2video.pipeline_controller.download",
+                return_value=DownloadResult(src, is_downloaded=False),
+            )
+        )
+        stack.enter_context(
+            patch("stream2video.pipeline_controller.detect_silence", return_value=[])
+        )
+        stack.enter_context(patch("stream2video.pipeline_controller.save_silence_cache"))
+        stack.enter_context(
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=None)
+        )
+        stack.enter_context(
+            patch(
+                "stream2video.pipeline_controller.generate_keep_segments",
+                return_value=[(0.0, 1.0)],
+            )
+        )
+        stack.enter_context(
+            patch("stream2video.pipeline_controller.get_video_duration", return_value=10.0)
+        )
+        stack.enter_context(
+            patch(
+                "stream2video.pipeline_controller.apply_per_video_dir",
+                side_effect=lambda o, v, d, per_video_dir=False, namespace=None: (o, v),
+            )
+        )
+        stack.enter_context(
+            patch("stream2video.pipeline_controller.cut_and_concat", side_effect=cut)
+        )
+        return stack
+
+    def test_failed_rerun_restores_previous_output(self, tmp_path: Path):
+        """First run succeeds; the second run's encode fails mid-write
+        — the previous good output must come back (audit round 29 P0-1)."""
+        from stream2video.pipeline_controller import PipelineError
+
+        controller, _ = self._controller(tmp_path)
+        good = b"previous good result"
+
+        def first_cut(source, silence_segments, output_video, **kwargs):
+            Path(output_video).write_bytes(good)
+
+        with self._patches(tmp_path, first_cut):
+            controller.run()
+        out = next(p for p in tmp_path.iterdir() if p.suffix == ".mp4" and "compressed" in p.name)
+        assert out.read_bytes() == good
+        assert not list(tmp_path.glob(".*.s2v_bak")), "success must remove the backup"
+
+        def failing_cut(source, silence_segments, output_video, **kwargs):
+            Path(output_video).write_bytes(b"partial garbage")
+            raise PipelineError("encode failed")
+
+        with self._patches(tmp_path, failing_cut), pytest.raises(PipelineError):
+            controller.run()
+        assert out.read_bytes() == good, "failed rerun must restore the previous output"
+
+    def test_invalid_output_restores_previous_result(self, tmp_path: Path):
+        """A finished-but-invalid output (media validation fails) must
+        restore the previous good result too (audit round 29 P0-2)."""
+        from stream2video.pipeline_controller import PipelineError
+
+        controller, calls = self._controller(tmp_path)
+        good = b"previous good result"
+
+        def first_cut(source, silence_segments, output_video, **kwargs):
+            Path(output_video).write_bytes(good)
+
+        with self._patches(tmp_path, first_cut):
+            controller.run()
+        out = next(p for p in tmp_path.iterdir() if p.suffix == ".mp4" and "compressed" in p.name)
+
+        def bad_cut(source, silence_segments, output_video, **kwargs):
+            Path(output_video).write_bytes(b"corrupt bytes")
+
+        with (
+            self._patches(tmp_path, bad_cut),
+            patch.object(PipelineController, "_output_media_is_valid", return_value=False),
+            pytest.raises(PipelineError, match="failed media validation"),
+        ):
+            controller.run()
+        assert out.read_bytes() == good
+        assert any("Restored previous output after failure" in m for m in calls["log"])
+
+    def test_backup_removed_on_success(self, tmp_path: Path):
+        controller, _ = self._controller(tmp_path)
+
+        def cut(source, silence_segments, output_video, **kwargs):
+            Path(output_video).write_bytes(b"fresh result")
+
+        with self._patches(tmp_path, cut):
+            controller.run()
+        assert not list(tmp_path.glob(".*.s2v_bak"))
+
+    def test_stale_backup_restored_before_new_run(self, tmp_path: Path):
+        """A crashed run leaves backup + partial; the NEXT run restores
+        the backup before re-backing it up."""
+        controller, calls = self._controller(tmp_path)
+        good = b"interrupted good result"
+
+        def cut(source, silence_segments, output_video, **kwargs):
+            Path(output_video).write_bytes(b"fresh result")
+
+        # Simulate the crash residue: backup exists, stable path has a
+        # partial (the restore path must replace it).
+        from stream2video.paths import artifact_stem
+
+        stem = artifact_stem(Path(tmp_path / "src.mp4"))
+        out = tmp_path / f"{stem}_compressed.mp4"
+        out.write_bytes(b"partial")
+        backup = tmp_path / f".{out.name}.s2v_bak"
+        backup.write_bytes(good)
+
+        with self._patches(tmp_path, cut):
+            controller.run()
+        assert out.read_bytes() == b"fresh result", "new run produces a fresh output"
+        assert not list(tmp_path.glob(".*.s2v_bak")), "success removes the backup"
+        assert any("Restored output from an interrupted run" in m for m in calls["log"])
+
     def test_local_source_lock_keyed_on_artifact_stem(self, tmp_path: Path):
         """A local-file run takes its project lock keyed on the artifact
         stem (the stable project identity for local sources)."""

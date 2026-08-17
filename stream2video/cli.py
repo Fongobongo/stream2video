@@ -73,6 +73,15 @@ from stream2video.tools import run_with_retry
 # like ELK is unaffected by decorative output).
 _JSON_LOG_MODE: bool = False
 
+
+def _set_json_mode(value: bool) -> None:
+    """Single writer for the JSON-mode global (audit round 29 P9): the
+    eager-doctor path and main() used to carry two identical local
+    closures over the same global."""
+    global _JSON_LOG_MODE
+    _JSON_LOG_MODE = value
+
+
 # The two console log formats --log-format accepts. The ONLY spelling
 # rule for them lives in :func:`normalize_log_format` (case-insensitive)
 # so the main() validator and the eager --doctor argv scan can never
@@ -215,10 +224,6 @@ def _doctor_callback(ctx: typer.Context, param: Any, value: bool) -> bool:
             _validate_log_format(log_format_raw) if log_format_raw is not None else "rich"
         )
         log_level = _validate_log_level(log_level_raw) if log_level_raw is not None else "INFO"
-
-        def _set_json_mode(value: bool) -> None:
-            global _JSON_LOG_MODE
-            _JSON_LOG_MODE = value
 
         # Doctor runs under the SAME logging session guard as main()
         # (audit round 21 P1): the session owns _JSON_LOG_MODE (enter
@@ -1054,10 +1059,6 @@ def main(
     # audit's P1). The session makes that mistake structurally impossible:
     # setup and restore are one construct, not two code sites to keep in
     # sync (audit round 13 follow-up).
-
-    def _set_json_mode(value: bool) -> None:
-        global _JSON_LOG_MODE
-        _JSON_LOG_MODE = value
 
     prev_handler: Any = None
     # False until the current SIGINT handler has been captured. A

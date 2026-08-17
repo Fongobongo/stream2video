@@ -193,6 +193,53 @@ def _ffmpeg_decode_probe(path: Path, at_seconds: float, stream_type: str) -> boo
     )
 
 
+def _ffmpeg_full_decode(path: Path, stream_type: str = "v", timeout: int = 43200) -> bool:
+    """Decode the WHOLE requested stream into the null sink.
+
+    Head+tail probes cannot prove body integrity: zeroing a 256-byte
+    window in the MIDDLE of an MP4 leaves the header, head decode and
+    tail decode all clean (reproduced live, audit round 29 P3/P4). A
+    full decode is the only check that reads every packet, so it is
+    used by the fresh-download publish gate and by every resume-reuse
+    decision (a reused part with a corrupt middle would otherwise be
+    declared "ready" and inject a broken chunk into the final
+    concat). The 12 h ceiling covers an 8 h VOD on a slow decoder;
+    spawn faults re-raise (validation unavailable ≠ invalid).
+    """
+    r = run_with_retry(
+        [
+            ffmpeg_path(),
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-map",
+            "0:v:0" if stream_type == "v" else "0:a:0",
+            "-f",
+            "null",
+            "-",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        **no_window_kwargs(),
+    )
+    if r.returncode != 0:
+        return False
+    stderr = (r.stderr or "").lower()
+    return not any(
+        marker in stderr
+        for marker in (
+            "partial file",
+            "moov atom not found",
+            "packet corrupt",
+            "invalid data",
+            "error while decoding",
+            "truncated",
+        )
+    )
+
+
 def _ffprobe_duration_ok(path: Path, expected_seconds: float, *, slack: float = 1.0) -> bool:
     """Check that a resume part's ffprobe duration is close to the expected value.
 

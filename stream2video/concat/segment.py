@@ -101,6 +101,11 @@ def _run_segment_concat(
             # into the manifest and the final concat would silently
             # drop the missing tail. Mirrors ``batch.py`` (slack=1.0)
             # and ``cut_encode.py`` (slack=1.0 after the P2 audit).
+            #
+            # FULL decode (audit round 29 P4): a header can carry the
+            # PLANNED duration while the middle of the body is corrupt
+            # — neither the codec probe nor the duration check sees
+            # that. Only a whole-stream decode reads every packet.
             if (
                 seg_path.exists()
                 and seg_path.stat().st_size >= options.min_part_bytes
@@ -110,6 +115,7 @@ def _run_segment_concat(
                     or _c._ffprobe_is_valid_media(seg_path, stream_type="a")
                 )
                 and _c._ffprobe_duration_ok(seg_path, dur)
+                and _c._ffmpeg_full_decode(seg_path, stream_type="v")
             ):
                 skipped += 1
                 encoded_keep += dur

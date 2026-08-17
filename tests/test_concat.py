@@ -339,6 +339,47 @@ class TestFfmpegDecodeProbe:
             self._probe(None, raise_exc=FileNotFoundError)
 
 
+class TestFfmpegFullDecode:
+    """The whole-stream decode gate (audit round 29 P3/P4) — the only
+    check that reads every packet, used by the fresh-download publish
+    and every resume-reuse decision."""
+
+    def _probe(self, result, *, raise_exc=None):
+        from stream2video.concat.probing import _ffmpeg_full_decode
+
+        exc = raise_exc
+
+        def _run(cmd, **kwargs):
+            if exc is not None:
+                raise exc("ffmpeg", 60)
+            return result
+
+        with (
+            patch("stream2video.concat.probing.ffmpeg_path", return_value="ffmpeg"),
+            patch("stream2video.concat.probing.run_with_retry", side_effect=_run),
+        ):
+            return _ffmpeg_full_decode(Path("part.mp4"), "v")
+
+    def test_clean_decode_accepted(self):
+        from subprocess import CompletedProcess
+
+        result = CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+        assert self._probe(result) is True
+
+    def test_rc_nonzero_rejected(self):
+        from subprocess import CompletedProcess
+
+        result = CompletedProcess(args=[], returncode=1, stdout="", stderr="")
+        assert self._probe(result) is False
+
+    def test_truncation_markers_rejected(self):
+        from subprocess import CompletedProcess
+
+        for marker in ("partial file", "packet corrupt", "moov atom not found"):
+            result = CompletedProcess(args=[], returncode=0, stdout="", stderr=f"[mov] {marker}")
+            assert self._probe(result) is False, marker
+
+
 class TestMakePhaseProgress:
     """_make_phase_progress — the single shared progress funnel (audit
     round 14 P3: the wrapper used to be built twice in _run_locked and

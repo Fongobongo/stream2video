@@ -145,6 +145,9 @@ def _run_batch_concat(
             # after the moov write but before the AAC body validates as
             # video-but-not-audio and would inject a broken track into
             # the final concat (mirrors the cut_encode.py audio check).
+            # FULL decode (audit round 29 P4): mid-body corruption
+            # passes every header-level probe; only a whole-stream
+            # decode reads every packet.
             if (
                 chunk_path.exists()
                 and chunk_path.stat().st_size >= options.min_part_bytes
@@ -154,6 +157,7 @@ def _run_batch_concat(
                     or _c._ffprobe_is_valid_media(chunk_path, stream_type="a")
                 )
                 and _c._ffprobe_duration_ok(chunk_path, sum(e - s for s, e in chunk))
+                and _c._ffmpeg_full_decode(chunk_path, stream_type="v")
             ):
                 skipped += 1
                 encoded_duration += sum(e - s for s, e in chunk)

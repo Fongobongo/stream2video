@@ -96,6 +96,7 @@ from stream2video.concat.output_lock import (
     release_output_lock,
 )
 from stream2video.concat.probing import (
+    _ffmpeg_full_decode,
     _ffprobe_duration_ok,
     _ffprobe_is_valid_media,
     _ffprobe_is_valid_mp4,
@@ -194,6 +195,7 @@ __all__ = [
     "_concat_filter_one_pass",
     "_concat_progress_callback",
     "_ensure_fresh_work_dir",
+    "_ffmpeg_full_decode",
     "_ffprobe_duration_ok",
     "_ffprobe_is_valid_media",
     "_ffprobe_is_valid_mp4",

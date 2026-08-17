@@ -721,7 +721,13 @@ def apply_per_video_dir(
     if is_downloaded:
         project_name = downloaded_identity(stem, namespace)
     else:
-        project_name = f"{stem}_{source_path_key(video_path)}"
+        # Local project dir = the SAME canonical identity every other
+        # artifact uses (audit round 29 P5): the previous
+        # ``stem + hash`` here bypassed ``canonical_stem``, so a long
+        # or unsafe legal filename still blew past NAME_MAX / Windows
+        # reserved names at the DIRECTORY level even though the cache
+        # and output names were already bounded.
+        project_name = artifact_stem(video_path)
     project_dir = ensure_project_dir(output_dir, project_name, True)
     if is_downloaded:
         video_path = move_into_project(

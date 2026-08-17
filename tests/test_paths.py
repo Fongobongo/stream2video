@@ -699,6 +699,22 @@ class TestCanonicalStem:
         assert len(stem) <= 80 + 1 + 8  # canonical stem + "_" + path hash
         assert len(stem) + len("_compressed.mp4") < 255
 
+    def test_local_project_dir_uses_canonical_stem(self):
+        """The local project DIRECTORY must use the same canonical
+        identity as the caches (audit round 29 P5): the previous
+        ``raw stem + hash`` branch bypassed ``canonical_stem``, so a
+        long/unsafe legal filename still blew past NAME_MAX at the
+        directory level."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "out"
+            long = root / (("L" * 240) + ".mp4")
+            long.write_text("data")
+            project, _moved = apply_per_video_dir(out, long, is_downloaded=False)
+            assert len(project.name) <= 80 + 1 + 8
+            assert project.name == artifact_stem(long)
+            assert project.is_dir()
+
 
 class TestProjectLockName:
     """Audit round 26 P2: the lock FILE name is a hash of the readable

@@ -195,10 +195,12 @@ def canonical_url_lock_key(url: str) -> str:
     tags: list[str] = []
     if parts.username is not None:
         # Basic-auth credentials can identify a DIFFERENT resource or
-        # account on the same path (audit round 28 P5): hashed, so
-        # alice@ and bob@ do not share one lock and the secret never
-        # reaches the lock name.
-        tags.append(f"u={hashlib.sha1((parts.username or '').encode('utf-8')).hexdigest()[:8]}")
+        # account on the same path (audit round 28 P5 / 29 P6): hash
+        # the FULL userinfo (username:password), not just the username
+        # — different passwords for one user are different credentials
+        # too. Hashed, so the secret never reaches the lock name.
+        userinfo = f"{parts.username or ''}:{parts.password or ''}"
+        tags.append(f"u={hashlib.sha1(userinfo.encode('utf-8')).hexdigest()[:8]}")
     if parts.query:
         tags.append(f"q={hashlib.sha1(parts.query.encode('utf-8')).hexdigest()[:12]}")
     if tags:
@@ -214,17 +216,28 @@ def _redact_process_output(text: str, secrets: set[str]) -> str:
     proxy URL (with credentials) — the most informative failure logs
     were exactly the ones leaking (audit round 27 P4). Two layers:
 
-      * exact replacement of every known secret (input URL, proxy);
+      * exact replacement of every known secret (input URL, proxy)
+        PLUS their URL-decoded form (the toolchain may print
+        percent-decoded variants);
       * a URL-shaped sweep (audit round 28 P6): the toolchain may
-        print the secret percent-decoded, re-quoted, without the
-        scheme, or partially parsed — exact matching alone lets such
-        variants through. Every ``scheme://...`` token is passed
-        through the same redactor, and bare ``user:pass@host``
-        credentials are masked wherever they appear.
+        print the secret re-quoted, without the scheme, or partially
+        parsed — exact matching alone lets such variants through.
+        Every ``scheme://...`` token is passed through the same
+        redactor, and bare ``user:pass@host`` credentials are masked
+        wherever they appear (the authority is cut at the LAST ``@``
+        before the host, so a password containing ``@`` cannot leave
+        its suffix behind — audit round 29 P7).
     """
     for secret in secrets:
         if secret and secret in text:
             text = text.replace(secret, redact_input_url(secret))
+        if secret:
+            decoded = urllib.parse.unquote(secret)
+            if decoded != secret and decoded in text:
+                text = text.replace(decoded, redact_input_url(secret))
+            encoded = urllib.parse.quote(secret, safe="")
+            if encoded != secret and encoded in text:
+                text = text.replace(encoded, redact_input_url(secret))
 
     def _mask_scheme_token(match: "re.Match[str]") -> str:
         token = match.group(0)
@@ -236,7 +249,10 @@ def _redact_process_output(text: str, secrets: set[str]) -> str:
     text = re.sub(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s'\"]+", _mask_scheme_token, text)
     # Bare credentials without a scheme (proxies often print
     # ``user:pass@host:port``): keep the host, drop the secret part.
-    text = re.sub(r"(?i)\b[\w.\-]+:[^\s@\"]+@([\w.\-]+(?::\d+)?)", r"<redacted>@\1", text)
+    # ``[^\s\"]*@`` is GREEDY, so it reaches the LAST @ that still
+    # lets the host group match — ``user:pa@ss@host`` masks the whole
+    # credential, not ``user:pa`` + a leaked ``ss@host``.
+    text = re.sub(r"(?i)\b[\w.\-]+:[^\s\"]*@([\w.\-]+(?::\d+)?)", r"<redacted>@\1", text)
     return text
 
 

@@ -49,6 +49,7 @@ from stream2video.concat.output_lock import (
 from stream2video.config import (
     AUTO_OR_INT_KEYS,
     CONFIG_RANGES,
+    OUTPUT_FORMAT_SPECS,
     VALID_DOWNLOAD_QUALITIES,
     VALID_ENCODERS,
     VALID_METHODS,
@@ -582,6 +583,11 @@ class PipelineController:
     # same-URL / same-source runs across the download → move → cache →
     # concat phases; see _acquire_project_locks.
     _project_locks: list[LockHandle] = field(default_factory=list, init=False)
+    # Sibling the previous GOOD output is moved to before the concat
+    # phase overwrites the stable path (audit round 29 P0-1): a failed
+    # rerun must not destroy the previous result. Restored in
+    # _cleanup_partial_output; removed on success.
+    _output_backup: Path | None = field(default=None, init=False)
 
     def _set_status(self, text: str, *, force: bool = False) -> None:
         self.cb.on_status(text, force=force)
@@ -609,19 +615,21 @@ class PipelineController:
         plays — a corrupt moov atom, a truncated body or a site error
         page saved as media all pass that bar, and the move into the
         stable source path would then ATOMICALLY REPLACE the previous
-        good copy with garbage (audit round 26 P4 / 27 P2 / 28 P1).
-        Three gates before publish:
+        good copy with garbage (audit round 26 P4 / 27 P2 / 28 P1 /
+        29 P3). Gates before publish:
 
           1. ffprobe: a readable codec name for the required stream
              (``stream_type``: audio outputs validate the audio
              stream, video outputs the video stream — audit round
              27 P6);
           2. a finite, non-zero container duration;
-          3. an actual DECODE of one second at the head and (when the
-             duration is known) one second near the tail — a header
-             can carry a PLANNED duration while the body is truncated
-             or corrupt, and only decoding proves the payload is
-             really there (audit round 28 P1).
+          3. a FULL decode of the whole stream into the null sink.
+             Head+tail one-second probes were replaced (audit round
+             29 P3): zeroing 256 bytes in the MIDDLE of an MP4 leaves
+             the header, head probe and tail probe all clean, and
+             only a whole-stream decode reads every packet. The cost
+             is bounded — the pipeline fully decodes the file during
+             silence detection anyway.
 
         Exceptions are NOT converted to False: a transient ffprobe/
         ffmpeg spawn fault (WinGet shim / AV filter) means "validation
@@ -630,20 +638,36 @@ class PipelineController:
         multi-GB good download (audit round 27 P1).
         """
         from stream2video.concat.probing import (
-            _ffmpeg_decode_probe,
-            _ffprobe_duration,
+            _ffmpeg_full_decode,
             _ffprobe_media_complete,
         )
 
-        if not _ffprobe_media_complete(path, stream_type=stream_type):
-            return False
-        duration = _ffprobe_duration(path)
-        if not _ffmpeg_decode_probe(path, 0.0, stream_type):
-            return False
-        return not (
-            duration is not None
-            and duration > 2.0
-            and not _ffmpeg_decode_probe(path, duration - 1.0, stream_type)
+        return _ffprobe_media_complete(path, stream_type=stream_type) and _ffmpeg_full_decode(
+            path, stream_type=stream_type
+        )
+
+    def _output_media_is_valid(self, path: Path, *, stream_type: str = "v") -> bool:
+        """Validation for a FINISHED output before it is accepted.
+
+        ``_finish`` used to bless any non-empty file (audit round
+        29 P0-2): a corrupt container, a header-only file or a wrong
+        stream set was declared success — and with ``delete_after``
+        the source was then deleted. Now the output must have the
+        required stream (video output → video stream, audio output →
+        audio stream) and fully decode into the null sink. Combined
+        with the backup/restore publish (P0-1) this is the one check
+        before the previous good result is discarded. Exceptions
+        propagate — a transient probe fault means the output cannot
+        be VERIFIED, so the previous result is restored and the run
+        reports a retryable concat error.
+        """
+        from stream2video.concat.probing import (
+            _ffmpeg_full_decode,
+            _ffprobe_is_valid_media,
+        )
+
+        return _ffprobe_is_valid_media(path, stream_type=stream_type) and _ffmpeg_full_decode(
+            path, stream_type=stream_type
         )
 
     def _set_phase_progress(self, fraction: float) -> None:
@@ -697,18 +721,34 @@ class PipelineController:
         muxed ``*_compressed.*`` file on disk that looks like a completed
         output (a bare ``ffmpeg -i`` inside the concat step writes the
         container header at t=0 — the file plays, but it's truncated
-        mid-stream). Deleting it here catches the same file the GUI's
-        on-close cleanup never reaches, but located in the controller
-        (the only place that actually knows the resolved path).
+        mid-stream).
+
+        Since audit round 29 P0-1 the previous GOOD result is moved to a
+        backup sibling before the encode starts, so a failed rerun can
+        no longer destroy it: the backup is restored over the partial
+        instead of deleting anything the user still needs. Only when no
+        backup exists (first run) is the partial deleted, exactly like
+        before.
         """
-        if self._output_path is not None and self._output_path.exists():
+        if self._output_backup is not None and self._output_backup.exists():
+            if self._output_path is not None:
+                try:
+                    os.replace(self._output_backup, self._output_path)
+                    self.cb.on_log(f"Restored previous output after failure: {self._output_path}")
+                except OSError as e:
+                    self.cb.on_log(
+                        f"[WARN] Could not restore previous output "
+                        f"{self._output_backup} -> {self._output_path} ({e})"
+                    )
+        elif self._output_path is not None and self._output_path.exists():
             if _unlink_with_retry(self._output_path):
                 self.cb.on_log(f"Deleted incomplete output: {self._output_path}")
             else:
                 self.cb.on_log(f"[WARN] Could not delete incomplete output: {self._output_path}")
-        # Always clear the slot so a subsequent run (or the GUI's on-close
-        # cleanup) can't chase a stale path.
+        # Always clear the slots so a subsequent run (or the GUI's
+        # on-close cleanup) can't chase a stale path.
         self._output_path = None
+        self._output_backup = None
 
     def cleanup_incomplete_on_close(self) -> None:
         """Best-effort removal of artifacts left mid-run when the app closes.
@@ -1368,6 +1408,33 @@ class PipelineController:
         # overwrite each other's output even in a flat output dir.
         output_path = output_dir / f"{artifact_stem(video_path)}_{output_suffix}"
         self._output_path = output_path
+        # Atomic-publish protection for the PREVIOUS result (audit
+        # round 29 P0-1): the concat below writes straight to the
+        # stable ``*_compressed.*`` path, so a failed rerun used to
+        # overwrite and then DELETE the previous good file. The
+        # previous result is moved to a backup sibling first; the
+        # failure cleanup restores it, success removes it. A stale
+        # backup from a crashed run is restored over the partial it
+        # left behind BEFORE the new attempt re-backs it up.
+        self._output_backup = output_path.with_name(f".{output_path.name}.s2v_bak")
+        if self._output_backup.exists():
+            try:
+                os.replace(self._output_backup, output_path)
+                self.cb.on_log(f"Restored output from an interrupted run: {output_path}")
+            except OSError as e:
+                self.cb.on_log(
+                    f"[WARN] Could not restore interrupted output {self._output_backup} ({e})"
+                )
+        if output_path.exists():
+            try:
+                os.replace(output_path, self._output_backup)
+                self.cb.on_log(f"Backed up previous output: {self._output_backup}")
+            except OSError:
+                self._output_backup = None
+                self.cb.on_log(
+                    f"[WARN] Could not back up previous output {output_path} — "
+                    "a failure would destroy it"
+                )
         # The project locks serialise same-project runs; the output lock
         # additionally excludes a DIRECT concat API caller that bypasses
         # the pipeline and only takes the output lock itself. Held via
@@ -1587,9 +1654,29 @@ class PipelineController:
             ) from None
         if dst_size_bytes <= 0:
             raise PipelineConcatError(f"Output file is empty after concat finished: {output_path}")
-        # The output is validated — from here on the incomplete-output
-        # cleanup must no longer consider it (it is complete, and the
-        # on-close cleanup must not delete a finished video).
+        # FULL media validation before the result is accepted (audit
+        # round 29 P0-2): a non-empty file can still be a corrupt
+        # container, a header-only file or a wrong stream set — and
+        # with ``delete_after`` the source would then be deleted.
+        # The previous good result is still in the backup; a failed
+        # validation restores it via the error cleanup.
+        stream_type = "a" if self.cfg.output_format in OUTPUT_FORMAT_SPECS else "v"
+        try:
+            output_ok = self._output_media_is_valid(output_path, stream_type=stream_type)
+        except Exception as e:
+            raise PipelineConcatError(
+                f"Output media validation could not run ({e}) — the previous "
+                "output was kept; retry to re-validate."
+            ) from e
+        if not output_ok:
+            raise PipelineConcatError(
+                f"Output failed media validation: {output_path} — the previous output was kept"
+            )
+        # The output is validated — drop the previous-result backup and
+        # stop the incomplete-output cleanup from considering the file.
+        if self._output_backup is not None:
+            _unlink_with_retry(self._output_backup)
+        self._output_backup = None
         self._output_path = None
         total_elapsed = time.monotonic() - self._pipeline_start
 
