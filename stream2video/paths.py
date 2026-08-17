@@ -43,6 +43,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 from pathlib import Path
@@ -243,26 +244,35 @@ def source_path_key(video_path: Path) -> str:
     return digest
 
 
+# yt-dlp's outtmpl is ``%(id)s-%(epoch)s[-<run-token>].%(ext)s`` — the
+# run token (8 hex chars, added in audit round 24 P2) makes the name
+# unique per invocation even within the same second. Both the modern
+# ``-<10 digits>-<8 hex>`` and the legacy ``-<10 digits>`` suffixes are
+# stripped, so a downloaded file keeps the stable ``<id>`` identity
+# across runs and alias URLs of the same video.
+_EPOCH_SUFFIX_RE = re.compile(r"-\d{10}(?:-[0-9a-f]{8})?$")
+
+
 def _epochless(stem: str) -> str:
-    """Strip yt-dlp's ``-<epoch>`` suffix from a filename stem.
+    """Strip yt-dlp's per-run suffix from a filename stem.
 
-    yt-dlp's outtmpl is ``%(id)s-%(epoch)s.%(ext)s``, so a downloaded
-    file is ``<id>-<10-digit-epoch>.mp4`` — a DIFFERENT name every run.
-    Keying artifacts on the raw stem would fork the identity per run:
-    every re-download lands in a new project dir and the silence / WAV
-    / resume caches miss forever (re-detection + re-download of the
-    same URL every time). Stripping the trailing ``-<10 digits>``
-    restores a stable per-URL identity.
+    yt-dlp's outtmpl is ``%(id)s-%(epoch)s[-<run-token>].%(ext)s``, so a
+    downloaded file is ``<id>-<10-digit-epoch>[-<8-hex-token>].mp4`` — a
+    DIFFERENT name every run. Keying artifacts on the raw stem would
+    fork the identity per run: every re-download lands in a new project
+    dir and the silence / WAV / resume caches miss forever
+    (re-detection + re-download of the same URL every time). Stripping
+    the trailing ``-<10 digits>[-<8 hex>]`` restores a stable per-URL
+    identity.
 
-    Local files whose names happen to end in ``-<10 digits>`` are
-    stripped too — a deliberate trade-off: the pattern is distinctive
-    enough that a false positive is unlikely (and such names are
-    typically yt-dlp exports anyway), while the alternative is a
-    per-run cache miss for every URL download.
+    Local files whose names happen to end in the pattern are stripped
+    too — a deliberate trade-off: the pattern is distinctive enough
+    that a false positive is unlikely (and such names are typically
+    yt-dlp exports anyway), while the alternative is a per-run cache
+    miss for every URL download.
     """
-    if len(stem) > 11 and stem[-11] == "-" and stem[-10:].isdigit():
-        return stem[:-11]
-    return stem
+    stripped = _EPOCH_SUFFIX_RE.sub("", stem)
+    return stripped if stripped else stem
 
 
 def artifact_stem(video_path: Path) -> str:
@@ -469,8 +479,23 @@ def apply_per_video_dir(
     - Local files get a project dir named ``<stem>_<path-hash>`` (stem +
       source-path hash) and are never moved; the hash keeps two
       same-named files in different directories independent.
+
+    When ``per_video_dir`` is False the project IS the flat ``output_dir``,
+    and a DOWNLOADED source is still renamed to its epochless ``<id><ext>``
+    name (atomic replace): ``artifact_stem()`` keys every cache and the
+    output name on ``source_path_key()`` — a hash of the RAW filename —
+    so a per-run ``<id>-<epoch>-<token>`` name would fork the identity
+    (and every cache) on each re-download (audit round 24 P6). A local
+    file is never renamed: its identity is its resolved path.
     """
     if not per_video_dir:
+        if is_downloaded:
+            stem = _epochless(video_path.stem)
+            dest = output_dir / f"{stem}{video_path.suffix}"
+            if video_path != dest:
+                video_path = move_into_project(
+                    video_path, output_dir, dest_name=f"{stem}{video_path.suffix}"
+                )
         return output_dir, video_path
     stem = _epochless(video_path.stem)
     if is_downloaded:

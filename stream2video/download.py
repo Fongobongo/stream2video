@@ -1,7 +1,9 @@
 """Video download module using yt-dlp CLI subprocess (cancellable)."""
 
 import logging
+import os
 import re
+import secrets
 import subprocess
 import sys
 import threading
@@ -11,7 +13,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from stream2video.config import CONFIG_DEFAULTS
-from stream2video.tools import popen_with_retry
+from stream2video.tools import _is_transient_spawn_error, popen_with_retry
 from stream2video.utils import (
     CANCEL_POLL_INTERVAL,
     drain_stderr_lines,
@@ -332,50 +334,28 @@ def _timeout_error(message: str, stderr_chunks: list[str]) -> DownloadTimeoutErr
     return DownloadTimeoutError(message)
 
 
-def _sweep_partial_fragments(
-    out_dir: Path,
-    since_monotonic: float,
-    existing_before: set[str] | None = None,
-) -> None:
-    """Remove orphaned yt-dlp partial fragments created since ``since_monotonic``.
+def _sweep_partial_fragments(out_dir: Path, run_id: str) -> None:
+    """Remove THIS run's orphaned yt-dlp partial fragments.
 
-    yt-dlp's outtmpl leaves ``*.part`` / ``*.ytdl`` / ``*.temp`` behind when a
-    download is cancelled mid-write. The download loop raises
+    yt-dlp's outtmpl leaves ``*.part`` / ``*.ytdl`` / ``*.temp`` behind
+    when a download is cancelled mid-write. The download loop raises
     ``DownloadCancelledError(partial=True)`` BEFORE the resolver maps
-    stdout to a destination path, so the pipeline controller's cleanup can
-    not unlink a path it never learned (P2 audit: every cancelled download
-    leaked a uniquely-named dead file thanks to the ``%(epoch)s`` template).
+    stdout to a destination path, so the pipeline controller's cleanup
+    can not unlink a path it never learned (P2 audit: every cancelled
+    download leaked a uniquely-named dead file).
 
-    This sweep is the one place inside ``download()`` that knows both the
-    directory AND the windows of the run. We only delete files whose mtime
-    falls after the monotonic start time of THIS attempt — older fragments
-    belonging to unrelated (still-running or abandoned) attempts are kept.
-
-    ``existing_before``: names of entries that already existed in
-    ``out_dir`` when THIS attempt started (caller snapshots them right
-    before spawning yt-dlp). Any such name is skipped unconditionally:
-    with parallel downloads into the same directory, a fragment can be
-    RE-CREATED or re-touched by a sibling attempt after our snapshot, and
-    the mtime window alone would then mark it as "ours" (the sibling
-    started later and its writes are younger than our start time).
+    Only files carrying THIS run's unique token are deleted (audit
+    round 24 P3): the directory can hold concurrent sibling downloads,
+    and an mtime/snapshot heuristic misclassifies a sibling's fragment
+    created after our snapshot as ours — deleting another run's live
+    download. The token is unique per invocation and embedded in every
+    filename this run's yt-dlp writes (``<id>-<epoch>-<token>.part``),
+    so "name contains run_id AND ends in a fragment suffix" is exact.
     """
-    import time
-
     try:
         entries = list(out_dir.iterdir())
     except OSError:
         return
-
-    # Convert ``since_monotonic`` (time.monotonic()) to a wall-clock
-    # reference. ``time.monotonic`` and ``time.time`` are independent
-    # bases, but for age-filtering partial fragments a monotonic-to-wall
-    # delta captured at this moment is accurate enough — the worst-case
-    # misclassification window is bounded by how far the two clocks
-    # drift over the duration of the download, which is well under a
-    # second on any healthy machine (NTP-stepped wallclock excluded).
-    now_wall = time.time()
-    now_mono = time.monotonic()
-    approx_start_wall = now_wall - max(0.0, now_mono - since_monotonic)
 
     for p in entries:
         try:
@@ -384,20 +364,13 @@ def _sweep_partial_fragments(
             continue
         if not name.endswith((".part", ".ytdl", ".temp")):
             continue
-        if existing_before is not None and name in existing_before:
-            # Pre-existed this attempt — belongs to another (possibly
-            # still-running) attempt; never touch it.
+        if run_id not in name:
             continue
         try:
-            st = p.stat()
-        except OSError:
-            continue
-        if st.st_mtime + 1.0 < approx_start_wall:
-            # Pre-dates this download attempt — leave untouched.
-            continue
-        try:
-            p.unlink(missing_ok=True)
+            os.unlink(p)
             logger.info(f"Removed orphaned download fragment: {p}")
+        except FileNotFoundError:
+            pass
         except OSError as e:
             logger.debug(f"Could not unlink partial fragment {p}: {e}")
 
@@ -481,16 +454,12 @@ def download(
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Snapshot the directory BEFORE spawning yt-dlp so the failure-path
-    # fragment sweep can never delete a file that pre-existed this
-    # attempt — with parallel downloads into the same out_dir, a sibling
-    # attempt's fragment may be younger than our start time (its writes
-    # happen after our snapshot) and the mtime window alone would
-    # misclassify it as ours.
-    try:
-        existing_before = {p.name for p in out_dir.iterdir()}
-    except OSError:
-        existing_before = None
+    # Per-invocation token embedded in every filename this run's yt-dlp
+    # writes. ``%(epoch)s`` alone has SECOND granularity — two runs of
+    # the same URL in the same second would write/resume the SAME file
+    # (audit round 24 P2). The token also lets the failure-path sweep
+    # identify exactly this run's fragments (audit round 24 P3).
+    run_id = secrets.token_hex(4)
 
     format_str = _format_selector_for_quality(quality)
     logger.info(f"Download quality: {quality} ({format_str})")
@@ -528,13 +497,15 @@ def download(
             f"|%(progress.speed)s|%(progress.eta)s"
         ),
         "--output",
-        # %(epoch)s makes the filename unique per invocation so two runs
-        # pointed at the same URL (or a rerun against an abandoned .part
-        # fragment from a previous run) can never write into / resume the
-        # same file. The stdout ``after_move:filepath`` report still gives
-        # us the exact path, and _find_downloaded_file's stem-glob matches
-        # "<id>-NNN.*" under the "<id>.*" prefix (newest mtime wins).
-        str(out_dir / "%(id)s-%(epoch)s.%(ext)s"),
+        # %(epoch)s + a per-invocation token makes the filename unique
+        # per run: two runs pointed at the same URL in the same second
+        # (or a rerun against an abandoned .part fragment from a
+        # previous run) can never write into / resume the same file.
+        # The stdout ``after_move:filepath`` report still gives us the
+        # exact path, and _find_downloaded_file's stem-glob matches
+        # "<id>-NNN-TOKEN.*" under the "<id>.*" prefix (newest mtime
+        # wins).
+        str(out_dir / f"%(id)s-%(epoch)s-{run_id}.%(ext)s"),
         "--format",
         format_str,
         "--print",
@@ -572,6 +543,23 @@ def download(
         )
     except FileNotFoundError as e:
         raise DownloadError("yt-dlp not found (install via 'pip install yt-dlp')") from e
+    except OSError as e:
+        # popen_with_retry retries transient spawn failures; an
+        # EXHAUSTED transient (e.g. WinError 206: the executable was
+        # being replaced by a package-manager shim / AV filter during
+        # the retry window) must surface as a download-class error, not
+        # leak into the pipeline as "Unexpected" (audit round 24 P9 —
+        # the encoder smoke-test already classifies this via
+        # _is_transient_spawn_error). A PERMANENT OSError (permissions,
+        # resource limits) is not a download failure — propagate it
+        # truthfully so the caller sees the real cause.
+        if _is_transient_spawn_error(e):
+            raise DownloadError(
+                "yt-dlp could not be started (the executable was unavailable "
+                "or being replaced — antivirus / package-manager shim). "
+                "Retry the download."
+            ) from e
+        raise
 
     with registered_process(process):
         stdout_lines: list[str] = []
@@ -784,25 +772,24 @@ def download(
             # yt-dlp's stdout to a downloaded file runs AFTER the loop.
             # Exit is caused here, and the pipeline controller's cleanup
             # can't unlink a path it never learned. yt-dlp template uses
-            # ``%(id)s-%(epoch)s.webm.part`` (epoch second resolution), so
-            # every cancelled download leaks a uniquely-named dead file:
-            # GBs of truncated VOD that a re-run can't reuse, accumulating
-            # across cancelled sessions.
+            # ``%(id)s-%(epoch)s-<run-token>.webm.part`` (epoch second
+            # resolution), so every cancelled download leaks a
+            # uniquely-named dead file: GBs of truncated VOD that a
+            # re-run can't reuse, accumulating across cancelled sessions.
             #
             # Sweep ``out_dir`` for *.part / *.ytdl / *.temp fragments
-            # whose mtime is no older than this download attempt. Files
-            # predating ``start_time`` (left by an earlier unrelated run)
-            # are kept; files younger are orphaned by THIS attempt and
-            # are unlinked here. Any OSError is logged at debug because
-            # an AV sweep locking the partial mid-unlink surfaces here,
-            # and elevating it would mask the original cancel exception.
+            # whose name carries THIS run's token. The token filter (not
+            # an mtime/snapshot heuristic) makes the sweep exact under
+            # concurrency: a sibling download's fragment is never
+            # touched, regardless of when it was created (audit round
+            # 24 P3). Any OSError is logged at debug because an AV sweep
+            # locking the partial mid-unlink surfaces here, and
+            # elevating it would mask the original cancel exception.
             #
             # Failure paths only: on success the download's own fragment
-            # was renamed by yt-dlp, so a sweep has nothing to reclaim —
-            # and running it would race parallel downloads in the same
-            # out_dir whose fragments are younger than OUR start time.
+            # was renamed by yt-dlp, so a sweep has nothing to reclaim.
             if not success:
                 try:
-                    _sweep_partial_fragments(out_dir, start_time, existing_before)
+                    _sweep_partial_fragments(out_dir, run_id)
                 except Exception:
                     logger.debug("partial-fragment sweep failed", exc_info=True)

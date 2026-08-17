@@ -17,12 +17,14 @@ tooltip, so a future tunable is a one-line table addition.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import customtkinter as ctk
 
 from stream2video.config import PRESETS
 from stream2video.gui_widgets import Tooltip as _Tooltip
+from stream2video.param_specs import PARAM_SPECS
 from stream2video.settings_io import (
     ADVANCED_WIDGET_NAMES,
     ADVANCED_WIDGET_SPECS,
@@ -54,7 +56,7 @@ class AdvancedSettingsMixin:
             name = ADVANCED_WIDGET_NAMES[key]
             if spec["kind"] == "combo":
                 widget = ctk.CTkComboBox(
-                    grid, values=list(spec["valid"]), state="readonly", width=120
+                    grid, values=list(PARAM_SPECS[key]["valid"]), state="readonly", width=120
                 )
             else:
                 widget = ctk.CTkEntry(grid, width=120)
@@ -95,8 +97,54 @@ class AdvancedSettingsMixin:
         the CLI rejects with "Invalid X (use ...)" also blocks Start /
         Copy CLI command here, so the GUI can no longer run with a value
         different from what its own field shows.
+
+        Also runs the pipeline-level validation the run's pre-flight
+        enforces (audit round 24 P10): per-key checks can NOT catch the
+        cross-field stall pair (``stall_warning_timeout`` >=
+        ``stall_kill_timeout`` makes the warning unreachable), so Start
+        used to pass the widget gate and then fail inside the worker's
+        validate_pipeline_config AFTER the run began. The full-snapshot
+        build (same factory the worker uses) catches it here, keyed to
+        the Advanced widget whose name appears in the error — the same
+        key space this dict already reports per-key errors with, so all
+        three gates (Start / Copy CLI / Save defaults) surface it
+        identically. Fail-open: a broken settings shape must not block
+        Start — the worker's own pre-flight reports it in the status.
         """
-        return validate_advanced_widgets(self._raw_advanced_widget_values())
+        errors = validate_advanced_widgets(self._raw_advanced_widget_values())
+        if errors:
+            return errors
+        try:
+            # Full widget snapshot (method/encoder/qualities + sliders +
+            # advanced), NOT just the advanced widgets: the stall-pair
+            # contract is a pipeline-level property.
+            values = self._read_widget_values()
+            from stream2video.pipeline_controller import validate_pipeline_config
+            from stream2video.pipeline_worker import (
+                PipelineWorkerParams,
+                build_pipeline_config_from_snapshot,
+            )
+
+            params = PipelineWorkerParams(
+                input_raw=self.entry_input.get().strip() or "pipeline",
+                output_dir=Path(self.entry_output.get().strip() or "./processed_videos"),
+                method=str(values["method"]),
+                encoder=str(values["encoder"]),
+                video_quality=str(values["video_quality"]),
+                audio_quality=str(values["audio_quality"]),
+                download_quality=str(values["download_quality"]),
+                force=bool(values["force"]),
+                per_video_dir=bool(values["per_video_dir"]),
+                delete_after=bool(values["delete_after"]),
+            )
+            cfg = build_pipeline_config_from_snapshot(params, {**self.settings, **values})
+            for err in validate_pipeline_config(cfg):
+                key = err.split(" ")[0]
+                if key in ADVANCED_WIDGET_SPECS:
+                    errors[key] = err
+        except Exception:
+            return {}
+        return errors
 
     def _set_advanced_widget_values(self, values: dict[str, Any]) -> None:
         """Push a config dict (e.g. restored defaults) into the widgets."""

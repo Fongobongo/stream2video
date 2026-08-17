@@ -15,7 +15,11 @@ from stream2video.concat.constants import (
     _STALL_WARNING,
 )
 from stream2video.concat.options import ConcatOptions
-from stream2video.concat.output_lock import acquire_output_lock, release_output_lock
+from stream2video.concat.output_lock import (
+    LockHandle,
+    acquire_output_lock,
+    release_output_lock,
+)
 from stream2video.config import VALID_OUTPUT_FORMATS
 
 if TYPE_CHECKING:
@@ -117,6 +121,15 @@ def cut_and_concat(
     stall_warning_timeout: int = _STALL_WARNING,
     batch_chunk_size: int = _BATCH_CHUNK_SIZE,
     min_part_bytes: int = _MIN_PART_BYTES,
+    # Pre-acquired project lock (the pipeline controller's project
+    # lock covers this output — audit round 24 P4): when provided, the
+    # output lock is NOT re-acquired, because the project lock already
+    # serialises every run that could write this output (and acquiring
+    # a second lock inside the project lock would risk a lock-order
+    # inversion with a direct API caller that holds only the output
+    # lock). A caller WITHOUT a project lock keeps the historical
+    # self-acquiring behaviour.
+    lock: LockHandle | None = None,
 ) -> Path:
     if not video_path.exists():
         raise _c.ConcatError(f"Input video not found: {video_path}")
@@ -137,8 +150,7 @@ def cut_and_concat(
     # makes GUI+CLI collisions look "stuck" during the other run's pre-
     # ambles. All body code below is inside the try/finally that drops
     # the lock on every exit path.
-    _lock_path = acquire_output_lock(output_path)
-    try:
+    def _locked_body() -> Path:
         return _run_locked(
             video_path=video_path,
             silence_segments=silence_segments,
@@ -170,6 +182,12 @@ def cut_and_concat(
             memory_limit_mb=memory_limit_mb,
             memory_reserve_mb=memory_reserve_mb,
         )
+
+    if lock is not None:
+        return _locked_body()
+    _lock_path = acquire_output_lock(output_path)
+    try:
+        return _locked_body()
     finally:
         release_output_lock(_lock_path)
 

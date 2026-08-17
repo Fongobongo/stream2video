@@ -1,28 +1,56 @@
-"""Exclusive lock on the pipeline's output file.
+"""Exclusive lock on the pipeline's output file (OS-level file locking).
 
 Two concurrent runs (GUI + CLI, or two CLIs) pointed at the same
 ``output_path`` would otherwise interleave ``-y`` writes into the same
-file and silently corrupt each other. The lock is a small
-sibling file created with ``O_CREAT | O_EXCL`` — atomic on every
-filesystem, no third-party dependency, and it self-describes: while
-``out.mp4.lock`` exists, a second run fails fast with a clear message
-instead of producing a half-overwritten video.
+file and silently corrupt each other. The lock is an OS-level file
+lock on a small sibling file (``<output>.lock``):
 
-Ownership model (fixes the acquire race where a second process could
-read the lock file in the gap between ``os.open`` and the pid write,
-judge it stale and delete a live lock):
+  * POSIX: ``fcntl.flock(fd, LOCK_EX | LOCK_NB)`` — advisory, tied to
+    the locked inode;
+  * Windows: ``msvcrt.locking(fd, LK_NBLCK, 1)`` — a byte-range lock
+    on the first byte of the file.
 
-* Every lock records an unique owner token plus the pid. The token is
-  generated BEFORE the lock file exists, so it is written in the same
-  breath as the pid.
-* A lock whose content is unreadable (no pid/token yet) is presumed
-  *mid-acquire* while its mtime is fresh and the caller simply retries
-  — it is never reclaimed during that grace window.
-* Only a lock whose pid line is missing AND whose mtime is older than
-  the grace window is reclaimed (crashed between create and write).
-* :func:`release_output_lock` removes the lock only when the stored
-  token still matches the caller's — a lock that was reclaimed and
-  re-taken by another run is never deleted out from under it.
+Why OS locks instead of the previous ``O_EXCL`` + pid-liveness scheme
+(audit round 24 P1): the kernel releases the lock automatically when
+the owner dies (crash, ``kill -9``, BSOD, power loss), so no stale
+lock can ever outlive its owner. The heuristic stack that could steal
+a *live* lock disappears:
+
+  * the pid-liveness probe (a dead-pid judgment could reclaim a
+    genuine concurrent run's lock; a reused pid could keep a stale
+    lock "alive" forever);
+  * the quarantine reclaim (``os.rename(lock, quarantine)`` moved a
+    pathname that could already belong to another run — between the
+    rename and the restore a third process could take the free name
+    with ``O_EXCL``, and the moved owner's lock no longer protected
+    anything: the exact double-write the lock exists to prevent);
+  * the 30 s acquire grace (a crashed owner's lock file looked like an
+    in-progress acquire forever until its mtime aged out).
+
+A leftover lock FILE is harmless: the OS lock is gone with the owner,
+and the next acquirer takes the file immediately. The file content is
+a diagnostic owner record (token + pid + resource) — no locking
+decision ever reads it, so a corrupt or hand-edited record cannot
+break acquire/release.
+
+Race safety:
+
+  * Acquire verifies the locked file is the file the path currently
+    names (``stat(path)`` vs ``fstat(fd)`` — inode on POSIX, file
+    index on Windows). Without the check, a waiter that opened the
+    file just before a release unlinked it would lock an orphaned
+    inode while a newcomer locks a fresh file at the same path — two
+    "holders" of one lock.
+  * Release unlinks the file BEFORE unlocking on POSIX, so no waiter
+    can slip into the unlock→unlink gap and end up holding a lock on
+    a file that is about to vanish (the acquire-side verification
+    makes such a waiter re-open and see the real lock anyway).
+  * Windows cannot unlink an open file: release unlocks, closes, then
+    removes the file best-effort. The only residual is a fast
+    retrying acquirer locking the file in the microseconds between
+    our close and our unlink — that leaves an orphaned lock FILE
+    behind, which the next acquirer takes immediately (the OS lock
+    died with the owner); the scheme self-heals.
 """
 
 import contextlib
@@ -30,6 +58,7 @@ import logging
 import os
 import secrets
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,337 +68,272 @@ logger = logging.getLogger(__name__)
 
 
 class ConcatLockError(ConcatError):
-    """Raised when another run already holds the lock for this output."""
+    """Raised when the lock for this output is held by another run."""
 
 
 def lock_path_for(output_path: Path) -> Path:
     return output_path.with_name(output_path.name + ".lock")
 
 
-# A lock whose content is missing/unreadable is given this long to gain
-# a pid line (the acquire writes it within milliseconds; the grace
-# absorbs scheduler stalls / slow filesystems) before it may be
-# reclaimed as a crashed-acquire.
-_ACQUIRE_GRACE_SECONDS = 30.0
 # Retry cadence while waiting for a concurrent acquirer to finish
-# writing its pid line.
+# opening/locking the file (the OS lock is held from BEFORE the owner
+# record is written, so contention at this granularity is a matter of
+# milliseconds — the same window the old "no pid yet" grace covered).
 _RETRY_SLEEP_SECONDS = 0.05
-_RETRY_MAX_TRIES = int(_ACQUIRE_GRACE_SECONDS / _RETRY_SLEEP_SECONDS)
+_DEFAULT_TIMEOUT_SECONDS = 60.0
 
 
-@dataclass(frozen=True)
+@dataclass
 class LockHandle:
-    """The token an acquired lock is released with.
+    """An acquired OS lock, handed to :func:`release_output_lock`.
 
-    ``token`` is generated before the lock file is created, so the
-    owner can prove the file on disk is still its own when releasing —
-    a lock that was reclaimed and re-taken by another run is left
-    alone.
+    ``token`` is diagnostic only (written into the lock file so a
+    leftover file says what run created it) — ownership is the OS lock
+    on ``fd``, which the kernel drops when the process dies. ``fd`` is
+    ``-1`` once the handle has been released.
     """
 
     path: Path
     token: str
+    # Human-readable resource the lock protects, for refusal messages.
+    what: str = "output"
+    fd: int = -1
 
 
-def _lock_text_from_content(lock_path: Path) -> str:
-    """Read the lock file's diagnostic text (empty string on any error)."""
-    try:
-        return lock_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
+def _os_lock_fd(fd: int) -> None:
+    """Take the non-blocking OS lock on an open fd."""
+    if os.name == "nt":
+        import msvcrt
 
-
-def _lock_pid_from_text(text: str) -> int | None:
-    for token in text.split():
-        if token.startswith("pid="):
+        # msvcrt.locking locks bytes relative to the CURRENT position
+        # and fails beyond the end of the file — make sure byte 0
+        # exists before locking it. A failure here is a disk problem,
+        # NOT contention (nothing is locked yet): surface it as a
+        # lock-preparation error, not a retryable EWOULDBLOCK.
+        if os.fstat(fd).st_size < 1:
             try:
-                return int(token.split("=", 1)[1])
-            except ValueError:
-                return None
-    return None
-
-
-def _lock_token_from_text(text: str) -> str | None:
-    for token in text.split():
-        if token.startswith("token="):
-            return token.split("=", 1)[1]
-    return None
-
-
-def _lock_create_time_from_text(text: str) -> float | None:
-    for token in text.split():
-        if token.startswith("started="):
-            try:
-                return float(token.split("=", 1)[1])
-            except ValueError:
-                return None
-    return None
-
-
-def _lock_is_fresh(lock_path: Path, now: float | None = None) -> bool:
-    """True when the lock file's mtime is inside the acquire grace window.
-
-    The mtime of a live lock is never refreshed during a run, so this
-    check is ONLY used to distinguish "another process is mid-acquire"
-    (fresh, no pid yet) from "a process crashed before writing its pid"
-    (stale, no pid). Pid-bearing locks are judged purely on pid
-    liveness, never on age.
-    """
-    try:
-        mtime = lock_path.stat().st_mtime
-    except OSError:
-        return True
-    return mtime >= (time.time() if now is None else now) - _ACQUIRE_GRACE_SECONDS
-
-
-def _owner_is_alive(pid: int, create_time: float | None) -> bool:
-    """Best-effort liveness probe (no hard psutil dependency).
-
-    With the process creation time recorded in the lock (audit round 22
-    P9), PID reuse cannot keep a stale lock "alive" forever: a NEW
-    process that happened to inherit the dead owner's PID was started
-    at a different moment, so the lock is provably abandoned and gets
-    reclaimed. Without the timestamp (no psutil at acquire time, legacy
-    lock files) fall back to plain pid liveness — and REFUSE (treat as
-    alive) rather than risk stealing a live lock when even that probe
-    fails: the user gets the manual-cleanup message.
-    """
-    try:
-        import psutil
-
-        proc = psutil.Process(pid)
-        if create_time is not None:
-            return abs(proc.create_time() - create_time) < 1.0
-        return psutil.pid_exists(pid)
-    except psutil.NoSuchProcess:
-        return False
-    except (psutil.AccessDenied, psutil.ZombieProcess):
-        # Process exists but cannot be inspected — assume alive.
-        return True
-    except Exception:
-        # psutil API hiccup — refuse rather than risk stealing a live
-        # lock: the user gets the manual-cleanup message.
-        return True
-
-
-def _reclaim_stale_lock(lock_path: Path, observed_text: str) -> bool:
-    """Atomically move a judged-stale lock aside and delete it — but
-    only the exact file that was judged (audit round 23 P5).
-
-    Reclaiming via ``unlink()`` is a classic TOCTOU: between judging
-    "stale" and the unlink, another process may have deleted the stale
-    lock and created its own LIVE lock at the same path — the unlink
-    would then delete a live lock and let two runs write the same
-    output. Instead the lock is renamed to a unique quarantine name
-    (atomic on every filesystem) and the moved file is verified to
-    still be the one that was judged — same inode AND same content. A
-    mismatch means a concurrent re-acquire raced us: the moved file is
-    put back (best-effort — if a third process already took the name
-    again, the quarantine copy stays behind as a diagnostic artifact)
-    and the caller re-reads the path.
-
-    Returns True when the stale lock is gone (the path is now free),
-    False when the caller must re-read the lock file and retry.
-    """
-    try:
-        before = lock_path.stat()
-    except FileNotFoundError:
-        return True  # already gone (another reclaim won the race)
-    except OSError as e:
-        raise ConcatLockError(f"Stale lock {lock_path} could not be inspected ({e})") from None
-    quarantine = lock_path.with_name(
-        f"{lock_path.name}.reclaim-{os.getpid()}-{secrets.token_hex(4)}"
-    )
-    try:
-        os.rename(lock_path, quarantine)
-    except FileNotFoundError:
-        return True  # already gone between the stat and the rename
-    except OSError as e:
-        raise ConcatLockError(f"Stale lock {lock_path} could not be removed ({e})") from None
-    try:
-        moved = quarantine.stat()
-        if (
-            getattr(moved, "st_ino", None) != getattr(before, "st_ino", None)
-            or _lock_text_from_content(quarantine) != observed_text
-        ):
-            # We moved a DIFFERENT file than the one we judged: another
-            # run reclaimed and re-created its own lock in the gap. Put
-            # it back and let the caller re-read it.
-            with contextlib.suppress(OSError):
-                os.rename(quarantine, lock_path)
-            return False
-        quarantine.unlink(missing_ok=True)
-        return True
-    except OSError as e:
-        # Cannot verify — the moved file must not be destroyed blindly:
-        # put it back and let the caller retry.
-        with contextlib.suppress(OSError):
-            os.rename(quarantine, lock_path)
-        raise ConcatLockError(f"Stale lock {lock_path} could not be reclaimed ({e})") from None
-
-
-def acquire_output_lock(output_path: Path) -> LockHandle:
-    """Create ``<output>.lock`` atomically; raise if another run holds it.
-
-    Returns a :class:`LockHandle` (path + owner token) to hand to
-    :func:`release_output_lock`. The file's *content* is diagnostic
-    (token + pid + source path hint) in case a stale lock survives a
-    crash and the user wonders what it is.
-
-    Stale-lock handling:
-
-    * A lock whose pid is ALIVE is refused unconditionally — regardless
-      of the lock file's age: the mtime is never refreshed during a
-      run, so an old mtime only means the run is *long* (final-concat
-      timeouts reach 24 h), not that the owner died. Deleting it would
-      clobber a genuinely concurrent run writing the same output.
-    * A lock whose pid line is missing but whose mtime is fresh is
-      another run in the tiny window between creating the lock file and
-      writing its pid — the caller retries briefly instead of stealing
-      the lock (race fix).
-    * A lock whose pid is gone — or whose pid line never appeared and
-      whose mtime is older than the grace window — is presumed
-      abandoned (BSOD, ``kill -9``, power loss, crash mid-write) and is
-      reclaimed instead of bricking the next run forever.
-    """
-    token = secrets.token_hex(16)
-    lock_path = lock_path_for(output_path)
-    # Record OUR process creation time so a later reclaim can tell "the
-    # same process still runs" from "some other process reused the pid"
-    # (audit round 22 P9). psutil is optional: without it the lock is
-    # written without the timestamp and liveness falls back to plain
-    # pid checks.
-    create_time: float | None = None
-    try:
-        import psutil
-
-        create_time = psutil.Process().create_time()
-    except Exception:
-        create_time = None
-    for _ in range(_RETRY_MAX_TRIES):
-        try:
-            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            break
-        except FileExistsError:
-            text = _lock_text_from_content(lock_path)
-            pid = _lock_pid_from_text(text)
-            if pid is None:
-                if _lock_is_fresh(lock_path):
-                    # Another run is between open() and its pid write —
-                    # the race the audit flagged. Wait for the pid line
-                    # to appear instead of deleting a live lock.
-                    time.sleep(_RETRY_SLEEP_SECONDS)
-                    continue
-                # Old lock that never gained a pid line: the previous
-                # run crashed in the create→write gap. Fall through to
-                # the reclaim path below.
-            elif _owner_is_alive(pid, _lock_create_time_from_text(text)):
-                # Refuse to clobber another run's output. The error
-                # message points at the lock so the user can delete it
-                # manually after confirming the other run is really gone.
-                raise ConcatLockError(
-                    f"Another stream2video run already holds {lock_path} "
-                    f"(output {output_path.name} is being written by it, pid={pid}). "
-                    f"If that run crashed, delete the .lock file and retry."
-                ) from None
-            logger.warning(f"Output lock {lock_path} is stale (pid={pid}) — reclaiming it")
-            _reclaim_stale_lock(lock_path, text)
-            # Whether the reclaim won (True) or lost the race to a
-            # concurrent re-acquire (False — the path was restored with
-            # a different lock), the next iteration re-reads the path
-            # from scratch: a fresh live lock is refused, a free path
-            # is taken with O_EXCL.
-            continue
-        except PermissionError as e:
-            # Windows: an open handle (another process mid-write) can
-            # surface as PermissionError instead of FileExistsError.
-            raise ConcatLockError(f"Could not create output lock {lock_path}: {e}") from None
+                os.write(fd, b"\0")
+            except OSError as e:
+                raise ConcatLockError(f"Lock file could not be prepared ({e})") from None
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
     else:
-        raise ConcatLockError(
-            f"Another stream2video run is still starting up and holding {lock_path} "
-            f"(no pid recorded after {_ACQUIRE_GRACE_SECONDS:.0f}s). "
-            f"If that run crashed, delete the .lock file and retry."
-        ) from None
-    write_error: OSError | None = None
+        import fcntl
+
+        # mypy on Windows has no fcntl stubs (unix-only module) —
+        # the guard above guarantees this branch never runs there.
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore[attr-defined]
+
+
+def _os_unlock_fd(fd: int) -> None:
+    """Drop the OS lock on an open fd."""
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_UN)  # type: ignore[attr-defined]
+
+
+def _same_file(fd: int, path: Path) -> bool:
+    """True when ``path`` still names the same file as ``fd``.
+
+    Compares device + file index (inode on POSIX; the file index on
+    Windows, which Python's stat exposes). Uses ``os.stat``/``os.fstat``
+    (not ``Path.stat()``) so the check survives hosts that monkeypatch
+    ``Path`` methods. A platform that reports no index (``st_ino == 0``)
+    cannot verify identity — assume same.
+    """
     try:
-        owner_fields = f"pid={os.getpid()}"
-        if create_time is not None:
-            owner_fields += f" started={create_time}"
-        payload = f"token={token} {owner_fields} output={output_path}\n".encode("utf-8", "replace")
-        # POSIX allows PARTIAL writes; a truncated ownership record
-        # would make release skip our own lock and could let a live
-        # lock be reclaimed as stale (audit round 22 P6). Loop until
-        # every byte has landed.
+        p = os.stat(path)
+        f = os.fstat(fd)
+    except OSError:
+        return False
+    if not p.st_ino or not f.st_ino:
+        return True
+    return (p.st_dev, p.st_ino) == (f.st_dev, f.st_ino)
+
+
+def _acquire_lock(
+    lock_path: Path,
+    *,
+    what: str,
+    token: str,
+    output_hint: str,
+    timeout: float,
+    on_wait: Callable[[], None] | None = None,
+) -> LockHandle:
+    """Shared acquire: OS-lock ``lock_path``, retrying until ``timeout``.
+
+    ``what`` / ``output_hint`` shape the refusal message (the hint
+    names the resource the lock protects). The owner record is written
+    AFTER the OS lock is held, so a concurrent acquirer can never
+    observe a locked file without its record — and never needs one:
+    the OS decides liveness, not the content. ``on_wait`` fires once
+    when the first contention is observed (hosts log "waiting for
+    another run" through it).
+    """
+    # os.makedirs (not Path.mkdir): hosts that monkeypatch ``Path``
+    # methods for testing would break the plain create call.
+    os.makedirs(lock_path.parent, exist_ok=True)
+    deadline = time.monotonic() + timeout
+    warned = False
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o666)
+        except OSError as e:
+            raise ConcatLockError(f"Could not open lock {lock_path}: {e}") from None
+        try:
+            _os_lock_fd(fd)
+        except ConcatLockError:
+            # Lock-preparation failure (Windows placeholder write): not
+            # contention — clean up and surface it truthfully.
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            with contextlib.suppress(OSError):
+                os.unlink(lock_path)
+            raise
+        except OSError:
+            os.close(fd)
+            if not warned and on_wait is not None:
+                warned = True
+                try:
+                    on_wait()
+                except Exception:
+                    logger.debug("on_wait raised", exc_info=True)
+            if time.monotonic() >= deadline:
+                raise ConcatLockError(
+                    f"Another stream2video run holds the {what} lock ({output_hint}). "
+                    f"Refusing to run after {timeout:.0f}s of waiting. A crashed run "
+                    "cannot leave this lock behind (the OS releases it automatically) — "
+                    "if the other run is truly gone, delete the lock file and retry."
+                ) from None
+            time.sleep(_RETRY_SLEEP_SECONDS)
+            continue
+        if not _same_file(fd, lock_path):
+            # The path was unlinked + recreated between our open and
+            # our lock: the fd locks an orphaned inode that protects
+            # nothing. Close (which auto-releases) and retry on the
+            # current file — bounded by the same deadline so a churning
+            # path can never hang the acquire.
+            os.close(fd)
+            if time.monotonic() >= deadline:
+                raise ConcatLockError(
+                    f"Lock {lock_path} kept changing identity while acquiring "
+                    f"({output_hint}) — refusing to run."
+                ) from None
+            time.sleep(_RETRY_SLEEP_SECONDS)
+            continue
+        break
+
+    try:
+        os.lseek(fd, 0, os.SEEK_SET)
+        payload = f"token={token} pid={os.getpid()} {output_hint}\n".encode("utf-8", "replace")
         view = memoryview(payload)
         while view:
             written = os.write(fd, view)
             if written <= 0:
-                raise OSError("output lock write stalled")
+                raise OSError("lock record write stalled")
             view = view[written:]
+        # Trim a longer stale record from a previous owner.
+        os.ftruncate(fd, os.lseek(fd, 0, os.SEEK_CUR))
     except OSError as e:
-        write_error = e
-    finally:
-        os.close(fd)
-    if write_error is not None:
-        # A half-written (or unwritten) lock is worse than no lock:
-        # left in place it would force the NEXT acquirer to wait out
-        # the full grace window before reclaiming it, and the raw
-        # OSError leaks an implementation detail. Remove our own fresh
-        # lock and fail fast with the pipeline's own error type (audit
-        # round 23 P4). The fd must be closed first (Windows refuses
-        # to delete an open file), and a path-level unlink is safe
-        # here — unlike the reclaim path (P5) there is no TOCTOU to
-        # defend against: the file was created O_EXCL milliseconds
-        # ago, so any other process that could replace it would first
-        # have to judge it stale, which the 30s acquire-grace window
-        # forbids for a fresh pid-less lock.
         with contextlib.suppress(OSError):
-            lock_path.unlink(missing_ok=True)
+            _os_unlock_fd(fd)
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        with contextlib.suppress(OSError):
+            os.unlink(lock_path)
         raise ConcatLockError(
-            f"Output lock {lock_path} could not be written ({write_error}) — refusing to run"
+            f"Lock {lock_path} could not be written ({e}) — refusing to run"
         ) from None
-    # Verify the record round-trips: a lock whose own token/pid cannot
-    # be parsed back is a correctness failure, not a diagnostic nicety
-    # — refuse to run with an unverifiable lock rather than risk a
-    # double-write race or a release that never fires.
-    written_text = _lock_text_from_content(lock_path)
-    if _lock_token_from_text(written_text) != token or _lock_pid_from_text(written_text) is None:
-        try:
-            lock_path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise ConcatLockError(
-            f"Output lock {lock_path} could not be verified after writing "
-            "(token/pid missing) — refusing to run with an unverifiable lock"
-        ) from None
-    logger.debug(f"Acquired output lock {lock_path}")
-    return LockHandle(path=lock_path, token=token)
+
+    logger.debug(f"Acquired lock {lock_path}")
+    return LockHandle(path=lock_path, token=token, what=what, fd=fd)
+
+
+def acquire_output_lock(output_path: Path, timeout: float = _DEFAULT_TIMEOUT_SECONDS) -> LockHandle:
+    """Exclusively lock ``<output>.lock``; raise if another run holds it.
+
+    Returns a :class:`LockHandle` for :func:`release_output_lock`. The
+    OS lock is held from before the owner record is written, so a
+    second acquirer can never judge a locked-but-record-less file
+    "stale" — the OS decides liveness, not content.
+    """
+    return _acquire_lock(
+        lock_path_for(output_path),
+        what="output",
+        token=secrets.token_hex(16),
+        output_hint=f"output={output_path}",
+        timeout=timeout,
+    )
+
+
+def acquire_lock_file(
+    lock_path: Path,
+    what: str,
+    timeout: float = _DEFAULT_TIMEOUT_SECONDS,
+    on_wait: Callable[[], None] | None = None,
+) -> LockHandle:
+    """Low-level: exclusively lock an arbitrary lock file.
+
+    Used for the pipeline's project locks (per-URL / per-source
+    identity), which must be held from BEFORE the download/move/cache
+    phases — the output lock alone is taken too late to stop two runs
+    of the same URL from clobbering each other's project dir (audit
+    round 24 P4). ``what`` names the protected resource in the
+    refusal message; ``on_wait`` fires once when another run holds the
+    lock (hosts log a "waiting" note through it).
+    """
+    return _acquire_lock(
+        lock_path,
+        what=what,
+        token=secrets.token_hex(16),
+        output_hint=f"resource={lock_path}",
+        timeout=timeout,
+        on_wait=on_wait,
+    )
 
 
 def release_output_lock(handle: LockHandle | Path) -> None:
-    """Best-effort removal of the lock file — only if still owned by us.
+    """Best-effort release of the lock; never raises.
 
-    Accepts a :class:`LockHandle` (from :func:`acquire_output_lock`) or
-    a bare path (legacy callers). With a handle, the lock is removed
-    only when its content still carries the caller's token: if the lock
-    was reclaimed and re-taken by another run meanwhile, it is left
-    alone instead of deleting a live lock out from under the new owner.
-    A bare path is removed unconditionally (legacy behaviour).
+    Unlocks, closes the fd and removes the lock file. The file removal
+    order differs per platform (see the module docstring): POSIX
+    unlinks BEFORE unlocking so a waiter can never land on a dying
+    file; Windows closes first (an open file cannot be unlinked) and
+    the residual race self-heals.
 
-    Any failure is logged, never raised, so cleanup doesn't mask the
-    pipeline's real error. A leftover lock from a killed process is
-    surfaced by :func:`acquire_output_lock` with a clear message on the
-    next run.
+    A bare :class:`Path` (legacy callers) is removed unconditionally —
+    no fd was ever held, so there is nothing else to do.
     """
-    try:
-        if isinstance(handle, LockHandle):
-            path, token = handle.path, handle.token
-            if _lock_token_from_text(_lock_text_from_content(path)) != token:
-                logger.debug(f"Not removing {path}: lock re-acquired by another run")
-                return
-        else:
-            path = handle
-        path.unlink(missing_ok=True)
-        logger.debug(f"Released output lock {path}")
-    except OSError as e:
-        logger.warning(f"Could not remove output lock {path}: {e}")
+    if isinstance(handle, Path):
+        with contextlib.suppress(OSError):
+            os.unlink(handle)
+        return
+    if handle.fd < 0:
+        return  # already released
+    fd, path = handle.fd, handle.path
+    handle.fd = -1
+    if os.name == "nt":
+        with contextlib.suppress(OSError):
+            _os_unlock_fd(fd)
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+    else:
+        # Unlink BEFORE unlock: while the path still names our inode,
+        # a waiter on the path sees our lock until we drop it — it
+        # cannot land in the unlock→unlink gap.
+        if _same_file(fd, path):
+            with contextlib.suppress(OSError):
+                os.unlink(path)
+        with contextlib.suppress(OSError):
+            _os_unlock_fd(fd)
+        with contextlib.suppress(OSError):
+            os.close(fd)
+    logger.debug(f"Released lock {path}")

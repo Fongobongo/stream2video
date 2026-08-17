@@ -24,12 +24,7 @@ from __future__ import annotations
 from typing import Any
 
 from stream2video.config import CONFIG_DEFAULTS as _CONFIG_DEFAULTS
-from stream2video.config import (
-    USER_DEFAULT_KEYS,
-    VALID_OUTPUT_FPS,
-    VALID_SOFTWARE_FALLBACKS,
-    VALID_X264_PRESETS,
-)
+from stream2video.config import USER_DEFAULT_KEYS
 from stream2video.param_specs import PARAM_SPECS
 
 # Canonical key order for ``settings.json``. Session-only state
@@ -70,19 +65,22 @@ USER_DEFAULTS_KEYS: tuple[str, ...] = tuple(USER_DEFAULT_KEYS)
 # tunables the audit found without a GUI surface). Single source of
 # truth for how each key is rendered and parsed:
 #
-#   * ``kind``       — ``"combo"`` (CTkComboBox from ``valid``) or
-#                      ``"entry"`` (CTkEntry, parsed via
-#                      ``parse_advanced_widgets``);
-#   * ``label``      — row label in the Advanced section;
-#   * ``value_type`` — for entries: ``"auto_or_int"`` (accepts the
-#                      literal ``"auto"`` or an int) or ``"int"``;
-#   * ``valid``      — for combos: the allowed choices;
-#   * ``tooltip``    — hover help.
+#   * ``kind``    — ``"combo"`` (CTkComboBox) or ``"entry"``
+#                   (CTkEntry, parsed via ``parse_advanced_widgets``) —
+#                   pure layout metadata;
+#   * ``label``   — row label in the Advanced section;
+#   * ``tooltip`` — hover help.
+#
+# The VALUES a combo offers and the type each entry parses to are NOT
+# restated here: they come from ``PARAM_SPECS`` (the shared pipeline-
+# parameter table the CLI resolver and the GUI's copied-command
+# builder use), so a tunable's allowed choices / type live in exactly
+# one place (audit round 24 P11 — this table used to duplicate
+# ``valid`` and ``value_type`` and could drift from the real spec).
 ADVANCED_WIDGET_SPECS: dict[str, dict[str, Any]] = {
     "software_fallback": {
         "kind": "combo",
         "label": "SW fallback:",
-        "valid": VALID_SOFTWARE_FALLBACKS,
         "tooltip": (
             "Encoder fallback policy when the selected HW encoder is "
             "unavailable or fails mid-run.\nask — confirm before falling "
@@ -93,106 +91,89 @@ ADVANCED_WIDGET_SPECS: dict[str, dict[str, Any]] = {
     "x264_preset": {
         "kind": "combo",
         "label": "x264 preset:",
-        "valid": VALID_X264_PRESETS,
         "tooltip": "CPU preset for libx264 encodes (ultrafast = fastest, "
         "largest files; slow = smallest files, slower encode).",
     },
     "output_fps": {
         "kind": "combo",
         "label": "Output FPS:",
-        "valid": VALID_OUTPUT_FPS,
         "tooltip": "Output frame rate.\nsource — keep the input's cadence (default)\n24/25/30/50/60 — force a constant frame rate (duplicates frames).",
     },
     "encoder_threads": {
         "kind": "entry",
         "label": "Threads:",
-        "value_type": "auto_or_int",
         "tooltip": "Encoder thread budget.\nauto — let ffmpeg decide (default)\n1-1024 — cap the thread count.",
     },
     "memory_limit_mb": {
         "kind": "entry",
         "label": "RAM limit (MB):",
-        "value_type": "auto_or_int",
         "tooltip": "RAM budget for the encode.\nauto — 60% of total RAM (default)\n0 — disable the in-process budget check.",
     },
     "memory_reserve_mb": {
         "kind": "entry",
         "label": "RAM reserve (MB):",
-        "value_type": "int",
         "tooltip": "Available-RAM floor; below it new heavy phases refuse to start.",
     },
     "rlimit_as_mb": {
         "kind": "entry",
         "label": "RLIMIT_AS (MB):",
-        "value_type": "int",
         "tooltip": "POSIX-only hard cap on each ffmpeg subprocess's virtual "
         "address space. 0 disables (default). Ignored on Windows.",
     },
     "batch_chunk_size": {
         "kind": "entry",
         "label": "Batch chunk:",
-        "value_type": "int",
         "tooltip": "Keep-segments per batch filter invocation (batch method).",
     },
     "min_part_bytes": {
         "kind": "entry",
         "label": "Min part (B):",
-        "value_type": "int",
         "tooltip": "Minimum bytes for a resumed part file to be treated as "
         "valid; smaller files are re-encoded.",
     },
     "download_timeout": {
         "kind": "entry",
         "label": "DL timeout (s):",
-        "value_type": "int",
         "tooltip": "Absolute ceiling for the whole download phase.",
     },
     "connect_timeout": {
         "kind": "entry",
         "label": "Connect timeout:",
-        "value_type": "int",
         "tooltip": "Seconds to wait for the first download byte.",
     },
     "no_progress_timeout": {
         "kind": "entry",
         "label": "No-progress timeout:",
-        "value_type": "int",
         "tooltip": "Mid-download stall watchdog (no progress for this long aborts).",
     },
     "segment_encode_timeout": {
         "kind": "entry",
         "label": "Segment timeout:",
-        "value_type": "int",
         "tooltip": "Per-segment encode watchdog (segment method).",
     },
     "final_concat_timeout": {
         "kind": "entry",
         "label": "Concat timeout:",
-        "value_type": "int",
         "tooltip": "Absolute ceiling on the final concat pass.",
     },
     "silence_timeout": {
         "kind": "entry",
         "label": "Silence timeout:",
-        "value_type": "int",
         "tooltip": "Ceiling on silence detection.",
     },
     "stall_kill_timeout": {
         "kind": "entry",
         "label": "Stall kill (s):",
-        "value_type": "int",
         "tooltip": "No-progress for this long during an ffmpeg phase kills it.",
     },
     "stall_warning_timeout": {
         "kind": "entry",
         "label": "Stall warn (s):",
-        "value_type": "int",
         "tooltip": "No-progress for this long during an ffmpeg phase logs a warning.",
     },
     "waveform_timeout": {
         "kind": "entry",
         "label": "Waveform timeout:",
-        "value_type": "int",
         "tooltip": "Ceiling on the waveform-preview ffmpeg decode.",
     },
 }
@@ -203,6 +184,20 @@ ADVANCED_WIDGET_NAMES: dict[str, str] = {
 }
 
 
+def _advanced_spec_valid(key: str) -> tuple[str, ...]:
+    """Allowed choices for an Advanced combo — from ``PARAM_SPECS``,
+    the single source of truth (audit round 24 P11: the widget table
+    used to duplicate the list and could drift from the CLI resolver).
+    """
+    return tuple(PARAM_SPECS[key]["valid"])
+
+
+def _advanced_spec_is_auto_or_int(key: str) -> bool:
+    """Whether an Advanced entry key accepts ``"auto"`` or an int —
+    the key's PARAM_SPECS kind, not a restated widget-table field."""
+    return PARAM_SPECS[key]["kind"] == "auto_or_int"
+
+
 def parse_advanced_widgets(
     raw: dict[str, str],
     current: dict[str, Any] | None = None,
@@ -211,12 +206,13 @@ def parse_advanced_widgets(
 
     ``raw`` maps a config key to the widget's *string* value
     (``CTkEntry.get()`` / ``CTkComboBox.get()``). Combo values pass
-    through unchanged; entry values are parsed per ``value_type``:
+    through unchanged; entry values are parsed per the key's
+    ``PARAM_SPECS`` kind:
 
       * ``auto_or_int`` — the literal ``"auto"`` (case-insensitive) or
         an int; anything else falls back to ``current[key]`` (the GUI's
         live settings, which are already typed);
-      * ``int`` — an int, else the same fallback.
+      * anything else — an int, else the same fallback.
 
     The fallback keeps a half-typed field from crashing the run with a
     ``TypeError``/``ValueError`` — the widget shows the bad text, the
@@ -236,7 +232,7 @@ def parse_advanced_widgets(
             out[key] = value
             continue
         text = str(value).strip()
-        if spec["value_type"] == "auto_or_int" and text.lower() == "auto":
+        if _advanced_spec_is_auto_or_int(key) and text.lower() == "auto":
             out[key] = "auto"
             continue
         try:
@@ -271,23 +267,23 @@ def validate_advanced_widgets(raw: dict[str, str]) -> dict[str, str]:
         if value is None:
             continue
         if spec["kind"] == "combo":
-            valid = tuple(spec["valid"])
+            valid = _advanced_spec_valid(key)
             if value not in valid:
                 errors[key] = f"{key} {value!r} (use {' or '.join(repr(v) for v in valid)})"
             continue
         text = str(value).strip()
-        if spec["value_type"] == "auto_or_int" and text.lower() == "auto":
+        if _advanced_spec_is_auto_or_int(key) and text.lower() == "auto":
             continue
         try:
             parsed = int(text)
         except ValueError:
-            what = "an integer" if spec["value_type"] == "int" else "'auto' or an integer"
+            what = "'auto' or an integer" if _advanced_spec_is_auto_or_int(key) else "an integer"
             errors[key] = f"{key} {value!r} (must be {what})"
             continue
         lo, hi = CONFIG_RANGES[key]
         if not lo <= parsed <= hi:
             allowed = (
-                f"'auto' or {lo}..{hi}" if spec["value_type"] == "auto_or_int" else f"{lo}..{hi}"
+                f"'auto' or {lo}..{hi}" if _advanced_spec_is_auto_or_int(key) else f"{lo}..{hi}"
             )
             errors[key] = f"{key} {parsed} out of range [{allowed}]"
     return errors

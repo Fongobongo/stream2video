@@ -23,6 +23,32 @@ from stream2video.concat import (
 from stream2video.concat.output_lock import lock_path_for
 
 
+def _lock_three_contender(
+    out_path: str,
+    name: str,
+    results: dict[str, str],
+    barrier: object,
+    release_gate: object,
+) -> None:
+    """Multiprocessing contender for the three-way lock race test.
+
+    Module level (not a local closure) so the ``spawn`` context on
+    Windows can pickle it by name. Exactly one of the three contenders
+    may acquire; the others must be refused by the OS lock."""
+    from stream2video.concat.output_lock import acquire_output_lock, release_output_lock
+
+    barrier.wait(timeout=30)  # type: ignore[attr-defined]
+    try:
+        h = acquire_output_lock(Path(out_path), timeout=1.0)
+        results[name] = "acquired"
+        release_gate.wait(timeout=30)  # type: ignore[attr-defined]
+        release_output_lock(h)
+    except ConcatLockError:
+        results[name] = "refused"
+    except Exception as e:
+        results[name] = f"error:{type(e).__name__}:{e}"
+
+
 # ── #4/#3b ── resume cache path is shared between CLI and GUI ──────────
 class TestResumeCachePathShared:
     def test_cli_and_gui_agree_on_resume_path(self, tmp_path: Path):
@@ -288,54 +314,65 @@ class TestForceClearsInUseCheckpoint:
         )
 
 
-# ── #6 ── output lock ──────────────────────────────────────────────────
+# ── #6 ── output lock (audit round 24 P1: OS-level file locks) ─────────
 class TestOutputLock:
+    """The lock is an OS-level file lock on ``<output>.lock``.
+
+    Audit round 24 P1 replaced the pid-liveness + quarantine scheme:
+    the kernel releases the OS lock when the owner dies (crash,
+    ``kill -9``, BSOD), so no stale lock can outlive its owner and no
+    heuristic can ever steal a live one. These tests pin the new
+    protocol: lock-file content is diagnostic only, liveness IS the OS
+    lock, a leftover lock FILE is taken immediately, and the audit's
+    three-contender multiprocessing scenario serializes exactly one
+    winner (Linux and Windows).
+    """
+
     def test_second_acquire_raises(self, tmp_path: Path):
         out = tmp_path / "x.mp4"
         lp = acquire_output_lock(out)
         assert lp.path.exists()
         with pytest.raises(ConcatLockError):
-            acquire_output_lock(out)
+            acquire_output_lock(out, timeout=0.2)
         release_output_lock(lp)
         assert not lp.path.exists()
         # Releasing frees the name for the next run.
         lp2 = acquire_output_lock(out)
-        lp2.path.unlink()
+        assert lp2.path.exists()
+        release_output_lock(lp2)
+        assert not lp2.path.exists()
 
-    def test_stale_lock_without_pid_reclaimed(self, tmp_path: Path):
-        """#C15: a lock with no pid line (crashed before write completed)
-        must be reclaimed, not brick the next run forever."""
+    def test_orphan_lock_file_is_taken_immediately(self, tmp_path: Path):
+        """A leftover lock FILE from a crashed run holds no OS lock — the
+        next acquirer takes it immediately, regardless of age or content.
+        The old scheme needed pid probes + mtime windows to judge
+        staleness; the OS lock already decided (audit round 24 P1)."""
         out = tmp_path / "x.mp4"
         lock = lock_path_for(out)
-        lock.write_text("output=x.mp4\n", encoding="utf-8")
+        lock.write_text("token=dead pid=424242 output=x.mp4\n", encoding="utf-8")
         old = time.time() - 60 * 60 - 60
         os.utime(lock, (old, old))
         lp = acquire_output_lock(out)
         assert lp.path.exists()
-        lp.path.unlink()
+        release_output_lock(lp)
+        assert not lock.exists()
 
-    def test_fresh_lock_without_pid_not_reclaimed(self, tmp_path: Path):
-        """Audit #1: a lock created by another run that has not yet
-        written its pid line (the os.open -> os.write gap) must NOT be
-        reclaimed — deleting it would let two runs write one output."""
-        import stream2video.concat.output_lock as ol
-
+    def test_orphan_lock_file_with_live_pid_is_taken_immediately(self, tmp_path: Path):
+        """Even a record claiming OUR OWN live pid must not matter: a
+        lock file whose owner is gone holds no OS lock, so it is taken.
+        The old scheme refused fresh pid-less locks and probed pid
+        liveness; content is diagnostic only now."""
         out = tmp_path / "x.mp4"
         lock = lock_path_for(out)
-        lock.write_text("", encoding="utf-8")  # fresh mtime, no pid
-        with (
-            patch.object(ol, "_RETRY_SLEEP_SECONDS", 0.001),
-            patch.object(ol, "_RETRY_MAX_TRIES", 3),
-            pytest.raises(ConcatLockError),
-        ):
-            acquire_output_lock(out)
-        assert lock.exists(), "fresh pid-less lock must be left in place"
+        lock.write_text(f"token=dead pid={os.getpid()} output=x.mp4\n", encoding="utf-8")
+        lp = acquire_output_lock(out)
+        assert lp.path.exists()
+        release_output_lock(lp)
 
     def test_slow_writer_race_is_not_stealable(self, tmp_path: Path):
-        """Audit #1: simulate the exact race — acquire A pauses between
-        os.open and os.write (patch the write to sleep). A concurrent
-        acquire B must retry, see A's pid once written, and refuse —
-        never delete A's live lock."""
+        """Acquirer A holds the OS lock BEFORE writing its owner record;
+        a concurrent acquire B retries, observes A's lock and refuses —
+        never deleting A's live lock (the old audit-#1 race)."""
         import stream2video.concat.output_lock as ol
 
         out = tmp_path / "x.mp4"
@@ -353,14 +390,13 @@ class TestOutputLock:
 
         with (
             patch.object(ol, "_RETRY_SLEEP_SECONDS", 0.001),
-            patch.object(ol, "_RETRY_MAX_TRIES", 5000),
             patch.object(ol.os, "write", side_effect=slow_write),
         ):
             a = threading.Thread(target=acquire_a)
             a.start()
             assert opened.wait(timeout=5), "acquirer A never reached its write"
             with pytest.raises(ConcatLockError):
-                acquire_output_lock(out)
+                acquire_output_lock(out, timeout=0.2)
             a.join(timeout=10)
         assert not a.is_alive()
         handle = a_result["handle"]
@@ -369,20 +405,63 @@ class TestOutputLock:
         release_output_lock(handle)
         assert not handle.path.exists()
 
-    def test_release_does_not_remove_reclaimed_lock(self, tmp_path: Path):
-        """Audit #1: release must not unlink a lock that was reclaimed
-        and re-taken by another run (token ownership check)."""
+    def test_identity_churn_retries_then_acquires(self, tmp_path: Path):
+        """Between our open and our lock the path was unlinked+recreated
+        (a release raced us): the fd locks an orphaned inode. The
+        acquire closes and retries on the current file."""
+        import stream2video.concat.output_lock as ol
+
         out = tmp_path / "x.mp4"
-        lp_a = acquire_output_lock(out)
-        # Simulate: A died, B reclaimed the lock, then re-wrote it.
+        real_same = ol._same_file
+        calls = {"n": 0}
+
+        def churn_then_stable(fd, path):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return False  # path swapped under us once
+            return real_same(fd, path)
+
+        with patch.object(ol, "_same_file", side_effect=churn_then_stable):
+            lp = acquire_output_lock(out)
+        assert lp.path.exists()
+        release_output_lock(lp)
+        assert not lp.path.exists()
+
+    def test_identity_churn_past_deadline_raises(self, tmp_path: Path):
+        """A path that keeps changing identity (an external tool
+        recreating the lock file faster than we can acquire) must time
+        out with an explicit refusal — never hang (audit round 24 P1)."""
+        import stream2video.concat.output_lock as ol
+
+        out = tmp_path / "x.mp4"
+        with (
+            patch.object(ol, "_same_file", return_value=False),
+            patch.object(ol, "_RETRY_SLEEP_SECONDS", 0.001),
+            pytest.raises(ConcatLockError, match="kept changing identity"),
+        ):
+            acquire_output_lock(out, timeout=0.1)
+
+    def test_release_does_not_unlink_replaced_lock(self, tmp_path: Path):
+        """Release must not delete a file that no longer belongs to our
+        lock: if the path was unlinked + recreated while we held the
+        handle, the identity check keeps the new owner's file (only
+        possible on POSIX — Windows cannot unlink an open file)."""
+        if os.name == "nt":
+            pytest.skip("Windows cannot unlink an open file")
+        out = tmp_path / "x.mp4"
+        lp = acquire_output_lock(out)
         lock = lock_path_for(out)
+        # The path is replaced by another run's file while we hold the
+        # (now orphaned) inode lock.
+        lock.unlink()
         lock.write_text("token=other pid=424242 output=x.mp4\n", encoding="utf-8")
-        release_output_lock(lp_a)
-        assert lock.exists(), "release must not delete another owner's lock"
+        release_output_lock(lp)
+        assert lock.exists(), "release must not delete another owner's lock file"
 
     def test_release_removes_own_lock_after_external_touch(self, tmp_path: Path):
-        """Release still works when the lock content kept our token but
-        the file was touched (mtime bump) by an external tool."""
+        """Release still works when the lock file was touched (mtime
+        bump) by an external tool — identity is the inode, not the
+        record or the mtime."""
         out = tmp_path / "x.mp4"
         lp = acquire_output_lock(out)
         lock = lock_path_for(out)
@@ -390,90 +469,9 @@ class TestOutputLock:
         release_output_lock(lp)
         assert not lock.exists()
 
-    def test_live_lock_with_own_pid_refused(self, tmp_path: Path):
-        """#C15: a lock whose pid is alive is a genuinely concurrent run —
-        the acquire must refuse it (never reclaim a live owner)."""
-        out = tmp_path / "x.mp4"
-        lock = lock_path_for(out)
-        lock.write_text(f"pid={os.getpid()} output=x.mp4\n", encoding="utf-8")
-        with pytest.raises(ConcatLockError):
-            acquire_output_lock(out)
-
-    def test_live_lock_with_old_mtime_refused(self, tmp_path: Path):
-        """Audit regression: a lock whose pid is ALIVE must be refused
-        even when its mtime is older than the old 1h threshold. The lock
-        mtime is never refreshed during a run, so an old mtime means the
-        run is long (final-concat timeout reaches 24h), not that the
-        owner died — reclaiming it would make two runs write the same
-        output file."""
-        out = tmp_path / "x.mp4"
-        lock = lock_path_for(out)
-        lock.write_text(f"pid={os.getpid()} output=x.mp4\n", encoding="utf-8")
-        old = time.time() - 60 * 60 - 60
-        os.utime(lock, (old, old))
-        with pytest.raises(ConcatLockError):
-            acquire_output_lock(out)
-
-    def test_stale_lock_with_old_mtime_reclaimed(self, tmp_path: Path):
-        """A lock whose pid is DEAD is reclaimed regardless of its age."""
-        psutil = pytest.importorskip("psutil")
-        out = tmp_path / "x.mp4"
-        lock = lock_path_for(out)
-        pid = 2**31 - 2  # far above any real pid on this machine
-        assert not psutil.pid_exists(pid)
-        lock.write_text(f"pid={pid} output=x.mp4\n", encoding="utf-8")
-        old = time.time() - 60 * 60 - 60
-        os.utime(lock, (old, old))
-        lp = acquire_output_lock(out)
-        assert lp.path.exists()
-        lp.path.unlink()
-
-    def test_stale_lock_with_dead_pid_reclaimed(self, tmp_path: Path):
-        """#C15: pid-based reclaim — a fresh lock owned by a gone process
-        is reclaimed. Needs psutil for the liveness probe; without it the
-        lock is refused and the user gets the manual-cleanup message."""
-        psutil = pytest.importorskip("psutil")
-        out = tmp_path / "x.mp4"
-        lock = lock_path_for(out)
-        pid = 2**31 - 2  # far above any real pid on this machine
-        assert not psutil.pid_exists(pid)
-        lock.write_text(f"pid={pid} output=x.mp4\n", encoding="utf-8")
-        lp = acquire_output_lock(out)
-        assert lp.path.exists()
-        lp.path.unlink()
-
-    def test_lock_reclaimed_when_pid_reused_with_other_create_time(self, tmp_path: Path):
-        """Audit round 22 P9: a REUSED pid must not keep a stale lock
-        alive forever — the lock records the owner's process creation
-        time, and a new process at the same pid started at a different
-        moment is provably not the owner, so the lock is reclaimed."""
-        pytest.importorskip("psutil")
-        out = tmp_path / "x.mp4"
-        lock = lock_path_for(out)
-        # Own pid (alive!) but a creation time that no process can match:
-        # epoch 0 is millennia away from the real start time.
-        lock.write_text(f"pid={os.getpid()} started=0.0 output=x.mp4\n", encoding="utf-8")
-        lp = acquire_output_lock(out)
-        assert lp.path.exists()
-        lp.path.unlink()
-
-    def test_live_lock_with_matching_create_time_refused(self, tmp_path: Path):
-        """Audit round 22 P9: a lock owned by the REAL current process
-        (matching pid AND creation time) is refused like a normal live
-        lock — create-time identity must not weaken the liveness check."""
-        psutil = pytest.importorskip("psutil")
-        out = tmp_path / "x.mp4"
-        lock = lock_path_for(out)
-        create_time = psutil.Process().create_time()
-        lock.write_text(f"pid={os.getpid()} started={create_time} output=x.mp4\n", encoding="utf-8")
-        with pytest.raises(ConcatLockError):
-            acquire_output_lock(out)
-
     def test_partial_write_loops_until_complete(self, tmp_path: Path):
-        """Audit round 22 P6: a POSIX partial write (the fd accepts one
-        byte at a time) must not truncate the ownership record — the
-        acquire loops until the full payload landed and verifies the
-        token/pid round-trip."""
+        """A one-byte-at-a-time fd must not truncate the ownership
+        record — the acquire loops until the full payload landed."""
         import stream2video.concat.output_lock as ol
 
         out = tmp_path / "x.mp4"
@@ -485,21 +483,27 @@ class TestOutputLock:
 
         with patch.object(ol.os, "write", side_effect=one_byte):
             lp = acquire_output_lock(out)
-        text = lock.read_text(encoding="utf-8")
+        # Read through the LOCKING handle: on Windows the locked byte 0
+        # denies reads via any OTHER handle, so the file cannot be read
+        # by path while the lock is held.
+        os.lseek(lp.fd, 0, os.SEEK_SET)
+        text = os.read(lp.fd, 4096).decode("utf-8")
         assert text.startswith("token=")
         assert f"pid={os.getpid()}" in text
         release_output_lock(lp)
         assert not lock.exists()
 
     def test_write_failure_removes_fresh_lock_and_raises_lock_error(self, tmp_path: Path):
-        """Audit round 23 P4: an os.write failure mid-acquire must not
-        leave a fresh pid-less lock behind (the next run would burn the
-        full grace window waiting for a pid that never arrives) and must
-        surface as ConcatLockError, not a raw OSError."""
+        """A record-write failure must not leave a fresh lock behind and
+        must surface as ConcatLockError, not a raw OSError. The lock
+        file is pre-filled so the exploding write hits the OWNER RECORD
+        write on both platforms (on Windows the byte-0 placeholder write
+        is skipped for a non-empty file)."""
         import stream2video.concat.output_lock as ol
 
         out = tmp_path / "x.mp4"
         lock = lock_path_for(out)
+        lock.write_text("pre-existing\n", encoding="utf-8")
 
         def exploding_write(fd, data):
             raise OSError("disk on fire")
@@ -511,10 +515,30 @@ class TestOutputLock:
             acquire_output_lock(out)
         assert not lock.exists(), "failed acquire must not leave its fresh lock behind"
 
+    @pytest.mark.skipif(os.name != "nt", reason="placeholder write is Windows-only")
+    def test_placeholder_write_failure_cleans_up_and_raises(self, tmp_path: Path):
+        """Windows: a failure of the byte-0 placeholder write (empty
+        lock file) is a disk problem, not contention — it must raise
+        ConcatLockError immediately instead of retrying the 60 s
+        contention loop, and must not leave its fresh file behind."""
+        import stream2video.concat.output_lock as ol
+
+        out = tmp_path / "x.mp4"
+        lock = lock_path_for(out)
+
+        def exploding_write(fd, data):
+            raise OSError("disk on fire")
+
+        with (
+            patch.object(ol.os, "write", side_effect=exploding_write),
+            pytest.raises(ConcatLockError, match="could not be prepared"),
+        ):
+            acquire_output_lock(out)
+        assert not lock.exists(), "failed placeholder write must not leave its file behind"
+
     def test_zero_byte_write_removes_fresh_lock_and_raises_lock_error(self, tmp_path: Path):
-        """Audit round 23 P4: a write that reports zero bytes (the
-        stalled-write guard inside the loop) takes the same cleanup
-        path as a raising write."""
+        """A write that reports zero bytes takes the same cleanup path
+        as a raising write."""
         import stream2video.concat.output_lock as ol
 
         out = tmp_path / "x.mp4"
@@ -530,55 +554,96 @@ class TestOutputLock:
             acquire_output_lock(out)
         assert not lock.exists()
 
-    def test_reclaim_restores_lock_replaced_during_reclaim(self, tmp_path: Path):
-        """Audit round 23 P5: the stale-reclaim TOCTOU — between the
-        acquire reading the stale lock and unlinking it, a concurrent
-        run deletes it and creates its OWN live lock at the same path.
-        The reclaim must move the file aside atomically, notice it is no
-        longer the judged file, put it back, and report False so the
-        caller re-reads (and refuses the live lock)."""
+    def test_acquire_lock_file_dedupes_arbitrary_paths(self, tmp_path: Path):
+        """acquire_lock_file — the pipeline's project locks (URL-hash,
+        source-stem) — uses the same OS-lock core: same path excludes,
+        a different path is independent."""
+        import stream2video.concat.output_lock as ol
+
+        p = tmp_path / ".s2v_url_a1b2c3d4.lock"
+        lp = ol.acquire_lock_file(p, what="URL", timeout=0.2)
+        with pytest.raises(ConcatLockError, match="URL lock"):
+            ol.acquire_lock_file(p, what="URL", timeout=0.2)
+        # A DIFFERENT lock file is independent.
+        lp2 = ol.acquire_lock_file(tmp_path / ".s2v_url_ffffffff.lock", what="URL", timeout=0.2)
+        release_output_lock(lp)
+        release_output_lock(lp2)
+        assert not lp.path.exists()
+        assert not lp2.path.exists()
+
+    def test_acquire_lock_file_on_wait_fires_on_contention(self, tmp_path: Path):
+        """The pipeline passes ``on_wait`` to log "waiting for another
+        run" — it must fire exactly when contention is observed."""
         import stream2video.concat.output_lock as ol
 
         out = tmp_path / "x.mp4"
-        lock = lock_path_for(out)
-        STALE_TEXT = "token=stale pid=999999 output=x.mp4\n"
-        LIVE_TEXT = "token=live pid=999999 output=x.mp4\n"
-        lock.write_text(STALE_TEXT, encoding="utf-8")
-        old = time.time() - 60 * 60 - 60
-        os.utime(lock, (old, old))
+        holder = acquire_output_lock(out)
+        fired: list[int] = []
+        with (
+            patch.object(ol, "_RETRY_SLEEP_SECONDS", 0.001),
+            pytest.raises(ConcatLockError),
+        ):
+            ol.acquire_lock_file(
+                lock_path_for(out),
+                what="output",
+                timeout=0.1,
+                on_wait=lambda: fired.append(1),
+            )
+        assert fired, "on_wait must fire when contention is observed"
+        release_output_lock(holder)
 
-        real_rename = ol.os.rename
-
-        def sneaky_rename(src, dst):
-            if src == lock:
-                # Concurrent re-acquire: the stale lock dies and a new
-                # live lock takes its place right before our rename.
-                lock.unlink(missing_ok=True)
-                lock.write_text(LIVE_TEXT, encoding="utf-8")
-            return real_rename(src, dst)
-
-        with patch.object(ol.os, "rename", side_effect=sneaky_rename):
-            reclaimed = ol._reclaim_stale_lock(lock, STALE_TEXT)
-        assert reclaimed is False, "the reclaim must refuse to destroy the replacement lock"
-        assert lock.read_text(encoding="utf-8") == LIVE_TEXT, (
-            "the concurrent run's live lock must be restored in place"
-        )
-
-    def test_reclaim_deletes_exact_stale_file(self, tmp_path: Path):
-        """Audit round 23 P5: the happy path — the judged stale lock is
-        still the file on disk when the reclaim runs, so it is moved
-        aside, verified and deleted; the path is left free."""
-        import stream2video.concat.output_lock as ol
-
+    def test_release_accepts_bare_path(self, tmp_path: Path):
+        """The legacy Path overload removes the file without a handle."""
         out = tmp_path / "x.mp4"
         lock = lock_path_for(out)
-        STALE_TEXT = "token=stale pid=999999 output=x.mp4\n"
-        lock.write_text(STALE_TEXT, encoding="utf-8")
-        assert ol._reclaim_stale_lock(lock, STALE_TEXT) is True
+        lock.write_text("stale\n", encoding="utf-8")
+        release_output_lock(lock)
         assert not lock.exists()
-        # No quarantine artifacts left behind.
-        leftovers = [p for p in lock.parent.iterdir() if ".reclaim-" in p.name]
-        assert leftovers == []
+
+    def test_three_contenders_multiprocessing_one_winner(self, tmp_path: Path):
+        """The audit's CI scenario (Linux/Windows multiprocessing, THREE
+        contenders for one lock): exactly one process acquires, the
+        other two fail with ConcatLockError, and after the winner
+        releases a newcomer acquires immediately — the OS lock
+        serializes across processes and leaves no stale state behind."""
+        import multiprocessing as mp
+
+        ctx = mp.get_context("spawn" if os.name == "nt" else "fork")
+        out = tmp_path / "x.mp4"
+        lock = lock_path_for(out)
+        results = ctx.Manager().dict()
+        barrier = ctx.Barrier(3)
+        release_gate = ctx.Event()
+
+        procs = [
+            ctx.Process(
+                target=_lock_three_contender,
+                args=(str(out), f"p{i}", results, barrier, release_gate),
+            )
+            for i in range(3)
+        ]
+        for p in procs:
+            p.start()
+        # Wait until every contender has reported (acquired or refused)
+        # BEFORE freeing the winner — otherwise a loser still inside its
+        # retry window could take the freed lock and become a second
+        # "winner".
+        deadline = time.monotonic() + 60
+        while len(results) < 3 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        release_gate.set()
+        for p in procs:
+            p.join(timeout=60)
+        for p in procs:
+            assert p.exitcode == 0, f"{p.name} exited {p.exitcode}"
+        acquired = [k for k, v in results.items() if v == "acquired"]
+        assert len(acquired) == 1, f"expected exactly one winner, got {dict(results)}"
+
+        # Winner released (its record is gone); a newcomer acquires.
+        assert not lock.exists(), "winner must have removed the lock file"
+        lp = acquire_output_lock(out)
+        release_output_lock(lp)
+        assert not lock.exists()
 
     def test_lock_released_on_pipeline_error(self, tmp_path: Path):
         """#6: a pipeline that raises still releases the lock."""

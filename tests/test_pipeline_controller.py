@@ -332,6 +332,55 @@ class TestValidatePipelineConfig:
         assert key in CONFIG_RANGES, f"{key} has no range entry"
 
 
+def _make_callbacks() -> tuple[PipelineCallbacks, dict]:
+    """Build a PipelineCallbacks bundle that records calls in a dict."""
+    calls: dict = {
+        "progress": [],
+        "status": [],
+        "log": [],
+        "overall": [],
+        "total": [],
+        "download_progress": [],
+        "complete": [],
+    }
+
+    def on_progress(f: float) -> None:
+        calls["progress"].append(f)
+
+    def on_status(s: str, force: bool = False) -> None:
+        calls["status"].append(s)
+
+    def on_log(s: str) -> None:
+        calls["log"].append(s)
+
+    def on_info(s: str) -> None:
+        calls.setdefault("info", []).append(s)
+
+    def on_overall(elapsed: float, remaining: float | None, more: bool) -> None:
+        calls["overall"].append((elapsed, remaining, more))
+
+    def on_total(t: float) -> None:
+        calls["total"].append(t)
+
+    def on_download_progress(p) -> None:
+        calls["download_progress"].append(p)
+
+    def on_pipeline_complete(d: dict) -> None:
+        calls["complete"].append(d)
+
+    cb = PipelineCallbacks(
+        on_progress=on_progress,
+        on_status=on_status,
+        on_log=on_log,
+        on_info=on_info,
+        on_overall=on_overall,
+        on_total=on_total,
+        on_download_progress=on_download_progress,
+        on_pipeline_complete=on_pipeline_complete,
+    )
+    return cb, calls
+
+
 class TestPipelineControllerRun:
     """Orchestration tests for PipelineController.run().
 
@@ -340,56 +389,11 @@ class TestPipelineControllerRun:
     """
 
     def _make_callbacks(self) -> tuple[PipelineCallbacks, dict]:
-        """Build a PipelineCallbacks bundle that records calls in a dict."""
-        calls: dict = {
-            "progress": [],
-            "status": [],
-            "log": [],
-            "overall": [],
-            "total": [],
-            "download_progress": [],
-            "complete": [],
-        }
-
-        def on_progress(f: float) -> None:
-            calls["progress"].append(f)
-
-        def on_status(s: str, force: bool = False) -> None:
-            calls["status"].append(s)
-
-        def on_log(s: str) -> None:
-            calls["log"].append(s)
-
-        def on_info(s: str) -> None:
-            calls.setdefault("info", []).append(s)
-
-        def on_overall(elapsed: float, remaining: float | None, more: bool) -> None:
-            calls["overall"].append((elapsed, remaining, more))
-
-        def on_total(t: float) -> None:
-            calls["total"].append(t)
-
-        def on_download_progress(p) -> None:
-            calls["download_progress"].append(p)
-
-        def on_pipeline_complete(d: dict) -> None:
-            calls["complete"].append(d)
-
-        cb = PipelineCallbacks(
-            on_progress=on_progress,
-            on_status=on_status,
-            on_log=on_log,
-            on_info=on_info,
-            on_overall=on_overall,
-            on_total=on_total,
-            on_download_progress=on_download_progress,
-            on_pipeline_complete=on_pipeline_complete,
-        )
-        return cb, calls
+        return _make_callbacks()
 
     def test_success_path_calls_callbacks_and_returns_result(self, tmp_path: Path):
         cfg = _valid_config(output_dir=tmp_path, input_raw=str(tmp_path / "src.mp4"))
-        cb, calls = self._make_callbacks()
+        cb, calls = _make_callbacks()
         cancel = __import__("threading").Event()
         controller = PipelineController(cfg=cfg, cb=cb, cancel_event=cancel)
 
@@ -438,7 +442,7 @@ class TestPipelineControllerRun:
 
     def test_local_input_uses_compact_dynamic_progress_weights(self, tmp_path: Path):
         cfg = _valid_config(output_dir=tmp_path, input_raw=str(tmp_path / "src.mp4"))
-        cb, calls = self._make_callbacks()
+        cb, calls = _make_callbacks()
         cancel = __import__("threading").Event()
         controller = PipelineController(cfg=cfg, cb=cb, cancel_event=cancel)
 
@@ -497,7 +501,7 @@ class TestPipelineControllerRun:
 
     def test_silence_cache_hit_reweights_progress_toward_concat(self, tmp_path: Path):
         cfg = _valid_config(output_dir=tmp_path, input_raw="https://example.com/v")
-        cb, calls = self._make_callbacks()
+        cb, calls = _make_callbacks()
         cancel = __import__("threading").Event()
         controller = PipelineController(cfg=cfg, cb=cb, cancel_event=cancel)
 
@@ -856,6 +860,205 @@ class TestPipelineControllerRun:
         assert isinstance(result, PipelineResult)
 
 
+class TestProjectLocks:
+    """Audit round 24 P4: the controller takes project-level locks from
+    BEFORE the download / cache / move phases — the output lock inside
+    cut_and_concat is taken too late to stop two runs of the same URL
+    (or same source) from colliding on .part files and cache writes.
+    The locks are released (and their files removed) when run()
+    finishes, and a second run WAITS (logged) then refuses.
+    """
+
+    def test_second_url_run_waits_then_refuses(self, tmp_path: Path):
+        import hashlib
+        import threading
+
+        from stream2video.concat.output_lock import acquire_lock_file, release_output_lock
+        from stream2video.pipeline_controller import PipelineError
+
+        url = "https://example.com/v"
+        cfg = _valid_config(output_dir=tmp_path, input_raw=url)
+        cb, calls = _make_callbacks()
+        # Another run holds the per-URL-hash lock.
+        url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()[:8]
+        holder = acquire_lock_file(tmp_path / f".s2v_url_{url_hash}.lock", what="URL")
+        controller = PipelineController(cfg=cfg, cb=cb, cancel_event=threading.Event())
+        try:
+            with (
+                patch.object(PipelineController, "_PROJECT_LOCK_TIMEOUT_SECONDS", 0.2),
+                pytest.raises(PipelineError, match="URL lock"),
+            ):
+                controller.run()
+            # The refusal was announced, not silent.
+            assert any("Another run is processing this source" in m for m in calls["log"])
+        finally:
+            release_output_lock(holder)
+        # After the holder releases, the name is free again.
+        lp = acquire_lock_file(tmp_path / f".s2v_url_{url_hash}.lock", what="URL")
+        release_output_lock(lp)
+
+    def test_url_run_holds_hash_lock_until_finish(self, tmp_path: Path):
+        """While a URL run is in flight, the per-URL-hash lock is held
+        (a concurrent acquire is refused); after run() the lock file is
+        gone and the name is free."""
+        import hashlib
+        import threading
+
+        from stream2video.concat.output_lock import acquire_lock_file, release_output_lock
+        from stream2video.download import DownloadResult
+
+        url = "https://example.com/v"
+        cfg = _valid_config(output_dir=tmp_path, input_raw=url)
+        cb, _ = _make_callbacks()
+        controller = PipelineController(cfg=cfg, cb=cb, cancel_event=threading.Event())
+        fake_video = tmp_path / "vid123-1755000000-a1b2c3d4.mp4"
+        fake_video.write_bytes(b"dummy")
+        url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()[:8]
+        lock_path = tmp_path / f".s2v_url_{url_hash}.lock"
+
+        def fake_download(url, out_dir, **kwargs):
+            return DownloadResult(path=fake_video, is_downloaded=True)
+
+        def fake_cut_and_concat(*args, **kwargs):
+            args[2].write_bytes(b"output")
+
+        with (
+            patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+            patch("stream2video.pipeline_controller.detect_silence", return_value=[]),
+            patch("stream2video.pipeline_controller.save_silence_cache"),
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=None),
+            patch(
+                "stream2video.pipeline_controller.cut_and_concat",
+                side_effect=fake_cut_and_concat,
+            ),
+            patch(
+                "stream2video.pipeline_controller.generate_keep_segments",
+                return_value=[(0.0, 1.0)],
+            ),
+            patch("stream2video.pipeline_controller.get_video_duration", return_value=10.0),
+        ):
+            assert lock_path.exists() is False
+            controller.run()
+
+        # Locks were released in run()'s finally — the file is gone and
+        # the name is free for the next run.
+        assert not lock_path.exists()
+        assert not list(tmp_path.glob(".s2v_*")), "no project lock files may remain"
+        lp = acquire_lock_file(lock_path, what="URL")
+        release_output_lock(lp)
+
+    def test_alias_urls_serialize_on_video_id_lock(self, tmp_path: Path):
+        """Two DIFFERENT URLs of the same video (alias URLs hash
+        differently) collide on the post-download video-id lock — the
+        url-hash lock alone cannot see the alias (audit round 24 P4)."""
+        import threading
+
+        from stream2video.concat.output_lock import acquire_lock_file, release_output_lock
+        from stream2video.download import DownloadResult
+        from stream2video.pipeline_controller import PipelineError
+
+        url = "https://youtu.be/abc123"
+        cfg = _valid_config(output_dir=tmp_path, input_raw=url)
+        cb, calls = _make_callbacks()
+        controller = PipelineController(cfg=cfg, cb=cb, cancel_event=threading.Event())
+        fake_video = tmp_path / "vid123-1755000000-a1b2c3d4.mp4"
+        fake_video.write_bytes(b"dummy")
+        # Another run already holds the project lock for video id
+        # "vid123" (its URL hash would be different).
+        holder = acquire_lock_file(tmp_path / ".s2v_project_vid123.lock", what="project")
+
+        def fake_download(url, out_dir, **kwargs):
+            return DownloadResult(path=fake_video, is_downloaded=True)
+
+        try:
+            with (
+                patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+                patch.object(PipelineController, "_PROJECT_LOCK_TIMEOUT_SECONDS", 0.2),
+                pytest.raises(PipelineError, match="project lock"),
+            ):
+                controller.run()
+            assert any("Another run is processing this video" in m for m in calls["log"])
+        finally:
+            release_output_lock(holder)
+
+    def test_local_source_lock_keyed_on_artifact_stem(self, tmp_path: Path):
+        """A local-file run takes its project lock keyed on the artifact
+        stem (the stable project identity for local sources)."""
+        import threading
+
+        from stream2video.concat.output_lock import acquire_lock_file, release_output_lock
+        from stream2video.paths import artifact_stem
+        from stream2video.pipeline_controller import PipelineError
+
+        src = tmp_path / "clip.mp4"
+        src.write_bytes(b"dummy")
+        cfg = _valid_config(output_dir=tmp_path, input_raw=str(src))
+        cb, _ = _make_callbacks()
+        controller = PipelineController(cfg=cfg, cb=cb, cancel_event=threading.Event())
+        holder = acquire_lock_file(tmp_path / f".s2v_{artifact_stem(src)}.lock", what="source")
+        try:
+            with (
+                patch.object(PipelineController, "_PROJECT_LOCK_TIMEOUT_SECONDS", 0.2),
+                pytest.raises(PipelineError, match="source lock"),
+            ):
+                controller.run()
+        finally:
+            release_output_lock(holder)
+
+    def test_output_lock_handle_passed_to_cut_and_concat(self, tmp_path: Path):
+        """The controller takes the OUTPUT lock in the concat phase and
+        hands the handle to cut_and_concat (so a DIRECT api caller sees
+        the same exclusion); run()'s finally releases it and removes the
+        lock file."""
+        import threading
+
+        from stream2video.concat.output_lock import lock_path_for
+        from stream2video.download import DownloadResult
+        from stream2video.paths import artifact_stem
+
+        cfg = _valid_config(output_dir=tmp_path, input_raw=str(tmp_path / "src.mp4"))
+        cb, _ = _make_callbacks()
+        controller = PipelineController(cfg=cfg, cb=cb, cancel_event=threading.Event())
+        fake_video = tmp_path / "src.mp4"
+        fake_video.write_bytes(b"dummy")
+        captured: dict = {}
+
+        def fake_download(url, out_dir, **kwargs):
+            return DownloadResult(path=fake_video, is_downloaded=False)
+
+        def fake_cut_and_concat(*args, **kwargs):
+            captured["lock"] = kwargs.get("lock")
+            args[2].write_bytes(b"output")
+
+        output_path = (
+            tmp_path / artifact_stem(fake_video) / f"{artifact_stem(fake_video)}_compressed.mp4"
+        )
+        with (
+            patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+            patch("stream2video.pipeline_controller.detect_silence", return_value=[]),
+            patch("stream2video.pipeline_controller.save_silence_cache"),
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=None),
+            patch(
+                "stream2video.pipeline_controller.cut_and_concat",
+                side_effect=fake_cut_and_concat,
+            ),
+            patch(
+                "stream2video.pipeline_controller.generate_keep_segments",
+                return_value=[(0.0, 1.0)],
+            ),
+            patch("stream2video.pipeline_controller.get_video_duration", return_value=10.0),
+        ):
+            result = controller.run()
+
+        assert isinstance(result, PipelineResult)
+        lock = captured["lock"]
+        assert lock is not None, "cut_and_concat must receive the output lock handle"
+        assert lock.path == lock_path_for(output_path)
+        assert lock.fd == -1, "the handle must already be released by run()'s finally"
+        assert not lock_path_for(output_path).exists()
+        assert not list(tmp_path.glob(".s2v_*")), "no project lock files may remain"
+
+
 class TestPipelineControllerTkIsolation:
     """Ни одного Tk call из worker thread.
 
@@ -999,7 +1202,7 @@ class TestCleanupIncompleteOnClose:
         return cb, calls
 
     def _controller_with_paths(self, tmp_path: Path):
-        cb, calls = self._make_callbacks()
+        cb, calls = _make_callbacks()
         cfg = _valid_config(output_dir=tmp_path, input_raw=str(tmp_path / "src.mp4"))
         controller = PipelineController(
             cfg=cfg, cb=cb, cancel_event=__import__("threading").Event()

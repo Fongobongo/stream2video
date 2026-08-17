@@ -684,6 +684,55 @@ class TestDoctorConfigValidation:
             '"status": "fail"' in line and "Config file" in line for line in out.splitlines()
         )
 
+    def test_doctor_pipeline_level_stall_pair_fails(self, tmp_path: Path, monkeypatch):
+        """Audit round 24 P7: the loader validates every value in
+        isolation but NOT the cross-field stall pair — a YAML whose
+        warning >= kill used to be blessed by the doctor while the run
+        would fail its pre-flight validation at startup. The doctor must
+        run the same pipeline-level validation."""
+        from stream2video import cli
+
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("stall_warning_timeout: 300\nstall_kill_timeout: 300\n", encoding="utf-8")
+        self._isolated_defaults(tmp_path, monkeypatch)
+        assert cli._doctor_impl(cfg) is False
+
+    def test_doctor_valid_stall_pair_ok(self, tmp_path: Path, monkeypatch):
+        from stream2video import cli
+
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("stall_warning_timeout: 120\nstall_kill_timeout: 300\n", encoding="utf-8")
+        self._isolated_defaults(tmp_path, monkeypatch)
+        assert cli._doctor_impl(cfg) is True
+
+    def test_doctor_user_defaults_unknown_and_rejected_keys_warn(self, tmp_path: Path, monkeypatch):
+        """Audit round 24 P8: a syntactically valid user_defaults.json
+        can be semantically dead — load_user_defaults silently drops
+        unknown keys and rejected values, so the saved defaults are only
+        partially in effect. The doctor must say so (warning, not
+        critical: the CLI still runs on the remaining defaults)."""
+        from stream2video import cli
+
+        monkeypatch.setattr(
+            "stream2video.config.user_defaults_path", lambda: tmp_path / "user_defaults.json"
+        )
+        (tmp_path / "user_defaults.json").write_text(
+            '{"nonsense_key": 1, "threshold": "abc", "download_timeout": 3600}',
+            encoding="utf-8",
+        )
+        assert cli._doctor_impl(None) is True
+
+    def test_doctor_user_defaults_all_valid_ok(self, tmp_path: Path, monkeypatch):
+        from stream2video import cli
+
+        monkeypatch.setattr(
+            "stream2video.config.user_defaults_path", lambda: tmp_path / "user_defaults.json"
+        )
+        (tmp_path / "user_defaults.json").write_text(
+            '{"download_timeout": 3600, "force": true}', encoding="utf-8"
+        )
+        assert cli._doctor_impl(None) is True
+
 
 class TestSliderClampVsCliRejectContract:
     """Audit round 23 P8: the GUI CLAMPS out-of-range typed slider
@@ -1072,6 +1121,108 @@ class TestValidateAdvancedWidgets:
         assert "encoder_threads" in validate_advanced_widgets(raw)
         parsed = parse_advanced_widgets(raw, current={"encoder_threads": "auto"})
         assert parsed["encoder_threads"] == "auto"  # the fallback value
+
+    def test_advanced_specs_derive_type_and_choices_from_param_specs(self):
+        """Audit round 24 P11: the widget table must not restate
+        ``valid`` / ``value_type`` — the combo choices and the entry
+        parse type come from PARAM_SPECS (the single tunable table the
+        CLI resolver uses), so a tunable's spec lives in exactly one
+        place and cannot drift."""
+        from stream2video.param_specs import PARAM_SPECS
+        from stream2video.settings_io import (
+            ADVANCED_WIDGET_SPECS,
+            _advanced_spec_is_auto_or_int,
+            _advanced_spec_valid,
+        )
+
+        for key, spec in ADVANCED_WIDGET_SPECS.items():
+            assert "valid" not in spec, f"{key} must not restate choices"
+            assert "value_type" not in spec, f"{key} must not restate the type"
+            assert key in PARAM_SPECS
+            if spec["kind"] == "combo":
+                assert PARAM_SPECS[key]["kind"] == "enum", key
+                assert tuple(_advanced_spec_valid(key)) == tuple(PARAM_SPECS[key]["valid"])
+            else:
+                assert PARAM_SPECS[key]["kind"] in ("int", "auto_or_int"), key
+                assert _advanced_spec_is_auto_or_int(key) == (
+                    PARAM_SPECS[key]["kind"] == "auto_or_int"
+                )
+
+
+class TestAdvancedWidgetCrossFieldGate:
+    """Audit round 24 P10: per-key widget validation cannot catch the
+    cross-field stall pair (warning >= kill makes the warning
+    unreachable) — the Start / Copy CLI / Save-defaults gates must run
+    the same pipeline-level validation the worker's pre-flight enforces,
+    keyed to the offending Advanced widget."""
+
+    @staticmethod
+    def _fake_gui(raw: dict[str, str], stall_warning: int, stall_kill: int) -> object:
+        from stream2video.config import effective_defaults
+        from stream2video.gui_advanced import AdvancedSettingsMixin
+
+        class _Entry:
+            def __init__(self, value: str) -> None:
+                self._value = value
+
+            def get(self) -> str:
+                return self._value
+
+        class Fake(AdvancedSettingsMixin):
+            def __init__(self) -> None:
+                self.entry_input = _Entry("https://example.com/v")
+                self.entry_output = _Entry("./processed_videos")
+                self.settings = effective_defaults()
+
+            def _raw_advanced_widget_values(self) -> dict[str, str]:
+                return dict(raw)
+
+            def _read_widget_values(self) -> dict[str, object]:
+                values = effective_defaults()
+                values["stall_warning_timeout"] = stall_warning
+                values["stall_kill_timeout"] = stall_kill
+                return values
+
+        return Fake()
+
+    def test_stall_pair_caught_by_advanced_gate(self):
+        from stream2video.settings_io import validate_advanced_widgets
+
+        raw = {"stall_warning_timeout": "300", "stall_kill_timeout": "300"}
+        # Per-key validation passes — both values are in range; only the
+        # pipeline-level check can see the contradiction.
+        assert validate_advanced_widgets(raw) == {}
+        errors = self._fake_gui(raw, 300, 300)._advanced_widget_errors()
+        assert "stall_warning_timeout" in errors
+        assert "must be lower than stall_kill_timeout" in errors["stall_warning_timeout"]
+
+    def test_valid_stall_pair_passes_gate(self):
+        errors = self._fake_gui({}, 120, 300)._advanced_widget_errors()
+        assert errors == {}
+
+    def test_gate_is_fail_open_on_broken_settings(self):
+        """A settings shape that cannot build a PipelineConfig must not
+        block Start — the worker's own pre-flight reports it."""
+        from stream2video.config import effective_defaults
+        from stream2video.gui_advanced import AdvancedSettingsMixin
+
+        class _Entry:
+            def get(self) -> str:
+                return "x"
+
+        class Broken(AdvancedSettingsMixin):
+            def __init__(self) -> None:
+                self.entry_input = _Entry()
+                self.entry_output = _Entry()
+                self.settings = effective_defaults()
+
+            def _raw_advanced_widget_values(self) -> dict[str, str]:
+                return {}
+
+            def _read_widget_values(self) -> dict[str, object]:
+                raise RuntimeError("settings corrupt")
+
+        assert Broken()._advanced_widget_errors() == {}
 
 
 class TestLoggingSessionThreadSerialization:

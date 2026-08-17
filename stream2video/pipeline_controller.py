@@ -23,8 +23,10 @@ separately by ``tests/test_media_correctness.py``).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
+import os
 import threading
 import time
 from collections.abc import Callable
@@ -36,6 +38,12 @@ from stream2video.concat import (
     ConcatError,
     cut_and_concat,
     generate_keep_segments,
+)
+from stream2video.concat.output_lock import (
+    LockHandle,
+    acquire_lock_file,
+    acquire_output_lock,
+    release_output_lock,
 )
 from stream2video.config import (
     AUTO_OR_INT_KEYS,
@@ -64,7 +72,7 @@ from stream2video.download import (
 from stream2video.formatters import fmt_size, fmt_time
 from stream2video.gui_helpers import build_silence_info_line
 from stream2video.memory import check_memory_reserve
-from stream2video.paths import apply_per_video_dir, artifact_stem
+from stream2video.paths import _epochless, apply_per_video_dir, artifact_stem
 from stream2video.silence import (
     SilenceCancelledError,
     SilenceDetectionError,
@@ -552,6 +560,18 @@ class PipelineController:
     _pipeline_start: float = field(default=0.0, init=False)
     _progress_plan: ProgressPlan = field(default_factory=ProgressPlan, init=False)
     _src_duration: float | None = field(default=None, init=False)
+    # Project-level OS locks held for the whole run (acquired in
+    # _run_download_phase, released in run()'s finally). Serialise
+    # same-URL / same-source runs across the download → move → cache →
+    # concat phases; see _acquire_project_locks.
+    _project_locks: list[LockHandle] = field(default_factory=list, init=False)
+
+    # How long a run may wait for a concurrent same-project run to
+    # finish before failing with a clear "another run holds this" error.
+    # A generous ceiling: a legit run can last hours (final-concat
+    # timeouts reach 24 h), and the waiting run has already announced
+    # itself via on_wait before the countdown matters.
+    _PROJECT_LOCK_TIMEOUT_SECONDS = 3600.0
 
     def _set_status(self, text: str, *, force: bool = False) -> None:
         self.cb.on_status(text, force=force)
@@ -780,8 +800,81 @@ class PipelineController:
             self._cleanup_download_path(partial_only=True)
             self._cleanup_partial_output()
             raise PipelineUnexpectedError(str(e)) from e
+        finally:
+            # Project locks are held for the whole run; every exit path
+            # (success, error, cancel) releases them here. A leaked lock
+            # would block the next run of the same URL until the timeout.
+            self._release_project_locks()
 
     # ── Phase 1: Download / resolve ──────────────────────────────
+
+    def _acquire_project_locks(self) -> list[LockHandle]:
+        """Serialise the whole run per source identity (audit round 24 P4).
+
+        The output lock inside ``cut_and_concat`` is taken too late to
+        protect the download / move / cache phases: two runs of the
+        same URL share the project source path (a per-run
+        ``<id>-<epoch>-<token>`` download is renamed into the SAME
+        stable ``<id>/<id>.ext``), the WAV / silence / resume caches
+        and the output name long before concat. These OS locks are
+        held for the entire run (released in ``run()``'s finally):
+
+        * a URL run takes a per-URL-hash lock BEFORE the download (two
+          same-URL runs cannot collide on .part files or the cache
+          writes) plus a per-video-id lock AFTER the download, before
+          the source is moved into the stable project dir — two ALIAS
+          URLs (``youtu.be/x`` vs ``youtube.com/watch?v=x``) hash
+          differently but resolve to the same id, and the hash lock
+          alone cannot see that;
+        * a local-file run takes one lock keyed on the artifact stem —
+          the stable project identity for local sources (``<stem>_<
+          path-hash>``).
+
+        Lock files live in the top-level output dir (``.s2v_*``) so
+        both per_video_dir modes share the same rendezvous.
+        """
+        out_dir = self.cfg.output_dir
+        # os.makedirs (not Path.mkdir): controller tests monkeypatch
+        # ``Path.stat`` globally, which breaks mkdir's exist_ok check.
+        os.makedirs(out_dir, exist_ok=True)
+        raw = self.cfg.input_raw
+
+        def _on_wait() -> None:
+            self.cb.on_log(
+                f"Another run is processing this source ({raw[:80]}) — waiting for it to finish..."
+            )
+
+        locks: list[LockHandle] = []
+        if raw.startswith(("http://", "https://")):
+            url_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
+            locks.append(
+                acquire_lock_file(
+                    out_dir / f".s2v_url_{url_hash}.lock",
+                    what="URL",
+                    timeout=self._PROJECT_LOCK_TIMEOUT_SECONDS,
+                    on_wait=_on_wait,
+                )
+            )
+        else:
+            stem = artifact_stem(Path(raw))
+            locks.append(
+                acquire_lock_file(
+                    out_dir / f".s2v_{stem}.lock",
+                    what="source",
+                    timeout=self._PROJECT_LOCK_TIMEOUT_SECONDS,
+                    on_wait=_on_wait,
+                )
+            )
+        return locks
+
+    def _release_project_locks(self) -> None:
+        """Release every held project lock (reverse order), never raises."""
+        while self._project_locks:
+            handle = self._project_locks.pop()
+            try:
+                release_output_lock(handle)
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning("Could not release project lock %s: %s", handle.path, e)
 
     def _run_download_phase(self) -> tuple[Path, int, float | None]:
         """Download the URL (or passthrough local file).
@@ -794,6 +887,12 @@ class PipelineController:
         self._set_phase_progress(0.0)
         self._set_status("Step 1/4: Resolving input...", force=True)
         self.cb.on_log("Step 1/4: Downloading / resolving video...")
+
+        # Project-level lock(s) BEFORE any download/cache/move work —
+        # the output lock inside cut_and_concat is taken too late to
+        # serialise runs that share the project source and caches (see
+        # _acquire_project_locks). Released in run()'s finally.
+        self._project_locks = self._acquire_project_locks()
 
         try:
             download_result = download(
@@ -826,6 +925,26 @@ class PipelineController:
             raise PipelineDownloadError(str(e)) from e
 
         video_path = download_result.path
+        if download_result.is_downloaded:
+            # Second project lock for URL runs: keyed on the video id,
+            # NOT the URL hash — two alias URLs of the same video (or
+            # two different URLs the site resolves to the same id) land
+            # in the same project dir and must be serialised there.
+            # Taken BEFORE apply_per_video_dir's atomic replace of the
+            # stable source path and before any cache phase touches the
+            # project dir (audit round 24 P4).
+            project_id = _epochless(video_path.stem)
+            self._project_locks.append(
+                acquire_lock_file(
+                    self.cfg.output_dir / f".s2v_project_{project_id}.lock",
+                    what="project",
+                    timeout=self._PROJECT_LOCK_TIMEOUT_SECONDS,
+                    on_wait=lambda: self.cb.on_log(
+                        f"Another run is processing this video (id={project_id}) — "
+                        "waiting for it to finish..."
+                    ),
+                )
+            )
         # Per-video project directory (the function honours
         # per_video_dir itself).
         output_dir, video_path = apply_per_video_dir(
@@ -1063,6 +1182,13 @@ class PipelineController:
         # overwrite each other's output even in a flat output dir.
         output_path = output_dir / f"{artifact_stem(video_path)}_{output_suffix}"
         self._output_path = output_path
+        # The project locks serialise same-project runs; the output lock
+        # additionally excludes a DIRECT concat API caller that bypasses
+        # the pipeline and only takes the output lock itself. Held via
+        # run()'s finally (appended last → released first). Passed into
+        # cut_and_concat as ``lock=`` so it isn't re-acquired inside
+        # (which would risk a lock-order inversion with such a caller).
+        self._project_locks.append(acquire_output_lock(output_path))
 
         # Pre-flight disk space estimate (warning only — does not cancel,
         # matches memory_reserve warning semantics). Shared estimator also
@@ -1238,6 +1364,7 @@ class PipelineController:
             batch_chunk_size=self.cfg.batch_chunk_size,
             min_part_bytes=self.cfg.min_part_bytes,
             fallback_consent=self.on_fallback_consent,
+            lock=self._project_locks[-1] if self._project_locks else None,
         )
 
         self._set_phase_progress(1.0)

@@ -393,6 +393,25 @@ class TestDownloadedEpochStripping:
         assert _epochless("my-clip-1755000000") == "my-clip"
         assert _epochless("-1755000000") == "-1755000000"  # id empty after strip → keep
 
+    def test_epochless_strips_run_token_suffix(self):
+        """Audit round 24 P2: the outtmpl gained a per-run token
+        (``<id>-<epoch>-<token>``, 8 lowercase hex); the identity strip
+        must remove both suffixes. Non-hex / wrong-length tokens are not
+        stripped."""
+        from stream2video.paths import _epochless
+
+        assert _epochless("vid123-1755000000-a1b2c3d4") == "vid123"
+        assert _epochless("vid123-1755000000-abcdef01") == "vid123"
+        # Legacy single-suffix names still strip.
+        assert _epochless("vid123-1755000000") == "vid123"
+        # Token with non-hex chars / wrong length → keep whole name.
+        assert _epochless("vid123-1755000000-zzzzzzzz") == "vid123-1755000000-zzzzzzzz"
+        assert _epochless("vid123-1755000000-a1b2c3d4e5") == "vid123-1755000000-a1b2c3d4e5"
+        # Uppercase hex is not the token format we generate → keep.
+        assert _epochless("vid123-1755000000-A1B2C3D4") == "vid123-1755000000-A1B2C3D4"
+        # Empty id after strip → keep.
+        assert _epochless("-1755000000-a1b2c3d4") == "-1755000000-a1b2c3d4"
+
     def test_apply_per_video_dir_moves_download_to_epochless_name(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -440,6 +459,63 @@ class TestDownloadedEpochStripping:
             assert out_a != out_b
             assert out_a.name.startswith("clip_")
             assert out_b.name.startswith("clip_")
+
+    def test_flat_mode_renames_download_to_epochless_name(self):
+        """Audit round 24 P6: per_video_dir=False must still give a
+        downloaded source its stable epochless name — the artifact stem
+        and every cache key on the RAW filename, so a per-run
+        ``<id>-<epoch>-<token>`` name would fork the identity on every
+        re-download even in flat mode."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "vid123-1755000000-a1b2c3d4.mp4"
+            src.write_text("data")
+            out = root / "out"
+            out.mkdir()
+            project, moved = apply_per_video_dir(out, src, is_downloaded=True, per_video_dir=False)
+            assert project == out
+            assert moved == out / "vid123.mp4"
+            assert moved.read_text() == "data"
+            assert not src.exists()
+
+    def test_flat_mode_renames_legacy_epoch_name_too(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "vid123-1755000000.mp4"
+            src.write_text("data")
+            out = root / "out"
+            out.mkdir()
+            project, moved = apply_per_video_dir(out, src, is_downloaded=True, per_video_dir=False)
+            assert project == out
+            assert moved == out / "vid123.mp4"
+            assert moved.read_text() == "data"
+            assert not src.exists()
+
+    def test_flat_mode_keeps_local_files_untouched(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "clip.mp4"
+            src.write_text("data")
+            out = root / "out"
+            out.mkdir()
+            project, moved = apply_per_video_dir(out, src, is_downloaded=False, per_video_dir=False)
+            assert project == out
+            assert moved == src
+            assert src.exists()
+
+    def test_flat_mode_epochless_name_is_idempotent(self):
+        """A download that already landed under its epochless name must
+        not be moved again (guard ``video_path != dest``)."""
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "out"
+            out.mkdir()
+            src = out / "vid123.mp4"
+            src.write_text("data")
+            project, moved = apply_per_video_dir(out, src, is_downloaded=True, per_video_dir=False)
+            assert project == out
+            assert moved == src
+            assert (out / "vid123.mp4").read_text() == "data"
 
 
 class TestProjectMarker:

@@ -38,6 +38,7 @@ from stream2video.config import (
     CONFIG_DEFAULTS,
     DEFAULT_PRESET,
     apply_preset,
+    coerce_typed_value,
 )
 from stream2video.download import (
     DiskSpaceError,
@@ -61,6 +62,7 @@ from stream2video.pipeline_controller import (
     build_pipeline_config,
     validate_pipeline_config,
 )
+from stream2video.pipeline_worker import PipelineWorkerParams, build_pipeline_config_from_snapshot
 from stream2video.tools import run_with_retry
 
 # Module-level flag toggled by --log-format json. When True the human-
@@ -425,16 +427,62 @@ def _doctor_impl(config_file: Path | None = None) -> bool:
             )
         else:
             try:
-                _load_config_impl(
+                loaded = _load_config_impl(
                     config_file,
                     console if not _JSON_LOG_MODE else _NullConsole(),
                 )
-                _row(
-                    "[green]✓[/green]",
-                    "ok",
-                    f"Config file: {config_file} (loaded and validated)",
-                    f"Config file: {config_file} (loaded and validated)",
+                # (audit round 24 P7) The loader validates every value
+                # in isolation, but not the PIPELINE-level contract the
+                # run enforces (cross-field stall pair, enum combos).
+                # Rebuild the exact PipelineConfig the run would use
+                # (same factory as the CLI resolver and the GUI worker)
+                # and run the same validator — a YAML that only fails
+                # there used to be blessed by the doctor as "loaded and
+                # validated", so a run doomed to fail at startup passed
+                # the doctor's config check. ``input_raw`` is a
+                # placeholder: the doctor has no input, and
+                # validate_pipeline_config only requires it non-empty.
+                params = PipelineWorkerParams(
+                    input_raw="doctor",
+                    output_dir=Path(str(loaded.get("output_dir") or ".")),
+                    method=str(loaded.get("method") or CONFIG_DEFAULTS["method"]),
+                    encoder=str(loaded.get("encoder") or CONFIG_DEFAULTS["encoder"]),
+                    video_quality=str(
+                        loaded.get("video_quality") or CONFIG_DEFAULTS["video_quality"]
+                    ),
+                    audio_quality=str(
+                        loaded.get("audio_quality") or CONFIG_DEFAULTS["audio_quality"]
+                    ),
+                    download_quality=str(
+                        loaded.get("download_quality") or CONFIG_DEFAULTS["download_quality"]
+                    ),
+                    force=bool(loaded.get("force") or CONFIG_DEFAULTS["force"]),
+                    per_video_dir=bool(
+                        loaded.get("per_video_dir") or CONFIG_DEFAULTS["per_video_dir"]
+                    ),
+                    delete_after=bool(
+                        loaded.get("delete_after") or CONFIG_DEFAULTS["delete_after"]
+                    ),
                 )
+                pipe_cfg = build_pipeline_config_from_snapshot(params, loaded)
+                pipe_errors = validate_pipeline_config(pipe_cfg)
+                if pipe_errors:
+                    _row(
+                        "[red]✗[/red]",
+                        "fail",
+                        f"Config file: {config_file} [red](pipeline validation: "
+                        f"{'; '.join(pipe_errors)})[/red]",
+                        f"Config file: {config_file} "
+                        f"(pipeline validation: {'; '.join(pipe_errors)})",
+                    )
+                    all_critical_ok = False
+                else:
+                    _row(
+                        "[green]✓[/green]",
+                        "ok",
+                        f"Config file: {config_file} (loaded and validated)",
+                        f"Config file: {config_file} (loaded and validated)",
+                    )
             except typer.Exit:
                 _row(
                     "[red]✗[/red]",
@@ -449,19 +497,52 @@ def _doctor_impl(config_file: Path | None = None) -> bool:
             import json as _user_json
 
             with open(user_cfg, encoding="utf-8") as _f:
-                _user_json.load(_f)
-            _row(
-                "[green]✓[/green]",
-                "ok",
-                f"User defaults: {user_cfg}",
-                f"User defaults: {user_cfg}",
+                _user = _user_json.load(_f)
+            if not isinstance(_user, dict):
+                raise ValueError("user defaults must be a dictionary")
+            # (audit round 24 P8) A syntactically valid file can still be
+            # semantically dead: load_user_defaults() silently DROPS keys
+            # that are unknown (not in CONFIG_DEFAULTS) or whose values
+            # coerce_typed_value rejects (wrong type, out of range), so
+            # the user's saved defaults are only partially in effect
+            # while the doctor's JSON.parse check implied "all good".
+            # Report both classes explicitly; non-critical — the run
+            # still works on the remaining defaults.
+            unknown_keys = sorted(str(k) for k in _user if k not in CONFIG_DEFAULTS)
+            rejected = sorted(
+                str(k)
+                for k, v in _user.items()
+                if k in CONFIG_DEFAULTS and coerce_typed_value(k, v) is None
             )
+            if unknown_keys or rejected:
+                parts = []
+                if unknown_keys:
+                    parts.append(f"unknown keys: {', '.join(unknown_keys)}")
+                if rejected:
+                    parts.append(f"rejected values: {', '.join(rejected)}")
+                detail = "; ".join(parts)
+                _row(
+                    "[yellow]![/yellow]",
+                    "warn",
+                    f"User defaults: {user_cfg} [yellow](partially ignored — "
+                    f"{detail} — stock defaults are used for those)[/yellow]",
+                    f"User defaults: {user_cfg} (partially ignored — {detail} — "
+                    f"stock defaults are used for those)",
+                )
+            else:
+                _row(
+                    "[green]✓[/green]",
+                    "ok",
+                    f"User defaults: {user_cfg}",
+                    f"User defaults: {user_cfg}",
+                )
         except (OSError, ValueError) as _e:
             # A corrupt user_defaults.json is silently ignored by
             # load_user_defaults (the run falls back to stock
             # defaults) — the doctor should say so instead of implying
             # the user's saved defaults are in effect (audit round 23
-            # P6). Non-critical: the CLI still runs.
+            # P6). Non-critical: the CLI still runs. Same for a file
+            # that parses but isn't a dict (audit round 24 P8).
             _row(
                 "[yellow]![/yellow]",
                 "warn",

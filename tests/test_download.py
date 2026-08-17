@@ -1,6 +1,8 @@
 """Tests for download module."""
 
+import os
 import sys
+import time
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -662,50 +664,67 @@ class TestSweepPartialFragments:
     The download loop raises ``DownloadCancelledError(partial=True)`` before
     stdout→path resolution, so the controller's cleanup never learns the
     partial's path. ``_sweep_partial_fragments`` runs in the finally block of
-    ``download()`` — the one place that knows both the directory and the
-    activity window of the attempt.
+    ``download()`` — the one place that knows the directory and the run token
+    of the attempt.
+
+    The sweep deletes ONLY fragments whose name carries THIS run's token
+    (audit round 24 P3): with concurrent sibling downloads into the same
+    directory, an mtime/snapshot heuristic misclassifies a sibling's
+    fragment created after our snapshot as ours — deleting another run's
+    live download. Age is irrelevant: an old token-bearing fragment IS
+    ours (tokens are per-invocation, a rerun regenerates a fresh token).
     """
 
-    def test_deletes_fresh_part_fragments(self):
-        import time
-
+    def test_deletes_fragments_carrying_this_runs_token(self):
         with TemporaryDirectory() as tmp:
             out = Path(tmp)
-            fragment = out / "vid-12345.webm.part"
+            fragment = out / "vid-12345-a1b2c3d4.webm.part"
             fragment.write_bytes(b"partial data")
-            # mtime now → definitely newer than the sweep's start window.
-            now = time.time()
-            os_utime = fragment.stat().st_mtime
-            assert now - os_utime < 1.0  # sanity: file is fresh
-
-            _sweep_partial_fragments(out, time.monotonic() - 10.0)
+            # mtime NOW → exactly the class of fragment the old
+            # mtime-window heuristic misclassified as "ours" when a
+            # sibling download wrote it after our snapshot; the token
+            # filter must not care about age.
+            _sweep_partial_fragments(out, "a1b2c3d4")
             assert not fragment.exists()
 
-    def test_keeps_old_fragments(self):
-        import time
-
+    def test_deletes_old_token_fragments(self):
+        """A token-bearing fragment from a PREVIOUS cancelled attempt of
+        the same URL is ours too: it carries OUR token only because a
+        rerun regenerates tokens — this file belongs to an older run of
+        this same invocation lineage. (Tokens are unique per download()
+        call, so this file can only be the orphan of an attempt whose
+        sweep never ran.)"""
         with TemporaryDirectory() as tmp:
             out = Path(tmp)
-            old = out / "old-12345.webm.part"
+            old = out / "vid-12345-deadbeef.webm.part"
             old.write_bytes(b"old")
-            # Backdate the mtime so it predates the sweep's start window.
             old_time = time.time() - 3600.0
-            import os
-
             os.utime(old, (old_time, old_time))
+            _sweep_partial_fragments(out, "deadbeef")
+            assert not old.exists()
 
-            _sweep_partial_fragments(out, time.monotonic() - 10.0)
-            assert old.exists()
+    def test_keeps_fragments_without_this_runs_token(self):
+        """A sibling download's fragment (different token) must NEVER be
+        touched — deleting it would kill another live run (audit round
+        24 P3). Same for a pre-existing fragment from an unrelated run.
+        """
+        with TemporaryDirectory() as tmp:
+            out = Path(tmp)
+            sibling = out / "vid-12345-ffffffff.webm.part"
+            sibling.write_bytes(b"sibling's live download")
+            unrelated = out / "other-12345.webm.part"
+            unrelated.write_bytes(b"unrelated run, no token era")
+            _sweep_partial_fragments(out, "a1b2c3d4")
+            assert sibling.exists()
+            assert unrelated.exists()
 
     def test_keeps_non_fragment_files(self):
-        import time
-
         with TemporaryDirectory() as tmp:
             out = Path(tmp)
             keep = out / "finished.mp4"
             keep.write_bytes(b"complete")
-            _sweep_partial_fragments(out, time.monotonic() - 10.0)
+            _sweep_partial_fragments(out, "a1b2c3d4")
             assert keep.exists()
 
     def test_missing_dir_is_noop(self):
-        _sweep_partial_fragments(Path("does-not-exist-xyz"), 0.0)
+        _sweep_partial_fragments(Path("does-not-exist-xyz"), "a1b2c3d4")
