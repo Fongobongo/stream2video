@@ -25,6 +25,7 @@ judge it stale and delete a live lock):
   re-taken by another run is never deleted out from under it.
 """
 
+import contextlib
 import logging
 import os
 import secrets
@@ -151,6 +152,62 @@ def _owner_is_alive(pid: int, create_time: float | None) -> bool:
         return True
 
 
+def _reclaim_stale_lock(lock_path: Path, observed_text: str) -> bool:
+    """Atomically move a judged-stale lock aside and delete it — but
+    only the exact file that was judged (audit round 23 P5).
+
+    Reclaiming via ``unlink()`` is a classic TOCTOU: between judging
+    "stale" and the unlink, another process may have deleted the stale
+    lock and created its own LIVE lock at the same path — the unlink
+    would then delete a live lock and let two runs write the same
+    output. Instead the lock is renamed to a unique quarantine name
+    (atomic on every filesystem) and the moved file is verified to
+    still be the one that was judged — same inode AND same content. A
+    mismatch means a concurrent re-acquire raced us: the moved file is
+    put back (best-effort — if a third process already took the name
+    again, the quarantine copy stays behind as a diagnostic artifact)
+    and the caller re-reads the path.
+
+    Returns True when the stale lock is gone (the path is now free),
+    False when the caller must re-read the lock file and retry.
+    """
+    try:
+        before = lock_path.stat()
+    except FileNotFoundError:
+        return True  # already gone (another reclaim won the race)
+    except OSError as e:
+        raise ConcatLockError(f"Stale lock {lock_path} could not be inspected ({e})") from None
+    quarantine = lock_path.with_name(
+        f"{lock_path.name}.reclaim-{os.getpid()}-{secrets.token_hex(4)}"
+    )
+    try:
+        os.rename(lock_path, quarantine)
+    except FileNotFoundError:
+        return True  # already gone between the stat and the rename
+    except OSError as e:
+        raise ConcatLockError(f"Stale lock {lock_path} could not be removed ({e})") from None
+    try:
+        moved = quarantine.stat()
+        if (
+            getattr(moved, "st_ino", None) != getattr(before, "st_ino", None)
+            or _lock_text_from_content(quarantine) != observed_text
+        ):
+            # We moved a DIFFERENT file than the one we judged: another
+            # run reclaimed and re-created its own lock in the gap. Put
+            # it back and let the caller re-read it.
+            with contextlib.suppress(OSError):
+                os.rename(quarantine, lock_path)
+            return False
+        quarantine.unlink(missing_ok=True)
+        return True
+    except OSError as e:
+        # Cannot verify — the moved file must not be destroyed blindly:
+        # put it back and let the caller retry.
+        with contextlib.suppress(OSError):
+            os.rename(quarantine, lock_path)
+        raise ConcatLockError(f"Stale lock {lock_path} could not be reclaimed ({e})") from None
+
+
 def acquire_output_lock(output_path: Path) -> LockHandle:
     """Create ``<output>.lock`` atomically; raise if another run holds it.
 
@@ -216,12 +273,12 @@ def acquire_output_lock(output_path: Path) -> LockHandle:
                     f"If that run crashed, delete the .lock file and retry."
                 ) from None
             logger.warning(f"Output lock {lock_path} is stale (pid={pid}) — reclaiming it")
-            try:
-                lock_path.unlink(missing_ok=True)
-            except OSError as e:
-                raise ConcatLockError(
-                    f"Stale lock {lock_path} could not be removed ({e})"
-                ) from None
+            _reclaim_stale_lock(lock_path, text)
+            # Whether the reclaim won (True) or lost the race to a
+            # concurrent re-acquire (False — the path was restored with
+            # a different lock), the next iteration re-reads the path
+            # from scratch: a fresh live lock is refused, a free path
+            # is taken with O_EXCL.
             continue
         except PermissionError as e:
             # Windows: an open handle (another process mid-write) can
@@ -233,6 +290,7 @@ def acquire_output_lock(output_path: Path) -> LockHandle:
             f"(no pid recorded after {_ACQUIRE_GRACE_SECONDS:.0f}s). "
             f"If that run crashed, delete the .lock file and retry."
         ) from None
+    write_error: OSError | None = None
     try:
         owner_fields = f"pid={os.getpid()}"
         if create_time is not None:
@@ -248,8 +306,28 @@ def acquire_output_lock(output_path: Path) -> LockHandle:
             if written <= 0:
                 raise OSError("output lock write stalled")
             view = view[written:]
+    except OSError as e:
+        write_error = e
     finally:
         os.close(fd)
+    if write_error is not None:
+        # A half-written (or unwritten) lock is worse than no lock:
+        # left in place it would force the NEXT acquirer to wait out
+        # the full grace window before reclaiming it, and the raw
+        # OSError leaks an implementation detail. Remove our own fresh
+        # lock and fail fast with the pipeline's own error type (audit
+        # round 23 P4). The fd must be closed first (Windows refuses
+        # to delete an open file), and a path-level unlink is safe
+        # here — unlike the reclaim path (P5) there is no TOCTOU to
+        # defend against: the file was created O_EXCL milliseconds
+        # ago, so any other process that could replace it would first
+        # have to judge it stale, which the 30s acquire-grace window
+        # forbids for a fresh pid-less lock.
+        with contextlib.suppress(OSError):
+            lock_path.unlink(missing_ok=True)
+        raise ConcatLockError(
+            f"Output lock {lock_path} could not be written ({write_error}) — refusing to run"
+        ) from None
     # Verify the record round-trips: a lock whose own token/pid cannot
     # be parsed back is a correctness failure, not a diagnostic nicety
     # — refuse to run with an unverifiable lock rather than risk a

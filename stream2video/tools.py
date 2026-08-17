@@ -459,7 +459,12 @@ def _createprocess_probe(exe: str) -> str:
             kernel32.UpdateProcThreadAttribute.argtypes = [
                 wintypes.LPVOID,
                 wintypes.DWORD,
-                wintypes.DWORD,
+                # Attribute is DWORD_PTR/ULONG_PTR, not DWORD (audit
+                # round 23 P2): the current attribute constant fits in
+                # 32 bits, but a pointer-sized ctypes argument is what
+                # the real ABI declares — a future attribute constant
+                # beyond 32 bits would otherwise be truncated on x64.
+                ctypes.c_size_t,
                 wintypes.LPVOID,
                 ctypes.c_size_t,
                 wintypes.LPVOID,
@@ -568,11 +573,9 @@ def _createprocess_probe(exe: str) -> str:
             kernel32.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(attr_list_size))
             attribute_list = ctypes.create_string_buffer(attr_list_size.value)
             job_handle_value = ctypes.c_void_p(job)
-            if not kernel32.InitializeProcThreadAttributeList(
+            if kernel32.InitializeProcThreadAttributeList(
                 attribute_list, 1, 0, ctypes.byref(attr_list_size)
             ):
-                attribute_list = None
-            else:
                 # The list is now INITIALIZED and owns kernel-side
                 # state — it MUST receive the paired Delete no matter
                 # what follows, so the flag is set before the update
@@ -594,8 +597,14 @@ def _createprocess_probe(exe: str) -> str:
         except Exception:
             # Attribute-list setup is the same best-effort plumbing as
             # the job itself: a broken list must not become "probe
-            # raised ..." — it degrades to the static skip below.
-            attribute_list = None
+            # raised ..." — it degrades to the static skip below. The
+            # buffer is deliberately NOT nulled here (audit round 23
+            # P3): once the Initialize above succeeded, the kernel
+            # state belongs to that buffer and the mandatory paired
+            # Delete below must receive it — the old ``attribute_list
+            # = None`` made a list initialized just before an Update
+            # exception unreleasable.
+            pass
         if not job_ok or not attribute_list_ok:
             if attribute_list_initialized:
                 try:

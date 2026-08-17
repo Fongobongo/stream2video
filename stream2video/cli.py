@@ -59,6 +59,7 @@ from stream2video.pipeline_controller import (
     PipelineSilenceError,
     PipelineUnexpectedError,
     build_pipeline_config,
+    validate_pipeline_config,
 )
 from stream2video.tools import run_with_retry
 
@@ -90,11 +91,24 @@ def normalize_log_format(value: str) -> str | None:
     return v if v in _VALID_LOG_FORMATS else None
 
 
+class _MissingOptionValue(ValueError):
+    """Raised by :func:`_scan_option_value` when a value-carrying option
+    appears without its value — bare at the end of argv or followed by
+    another option (``--doctor --log-format`` / ``-c --doctor``). The
+    eager doctor path used to silently ignore such an option and run
+    with the default, while a normal run of the same argv rejects it
+    ("option requires an argument") — parity says the doctor must too
+    (audit round 23 P7)."""
+
+
 def _scan_option_value(argv: list[str], *option_names: str) -> str | None:
     """Return the value of the LAST of ``option_names`` found in argv.
 
     Covers both ``--opt X`` / ``-c X`` and ``--opt=X`` / ``-c=X``
-    spellings; a value that looks like another flag is not consumed.
+    spellings; a value that looks like another flag is not consumed —
+    instead a bare option (nothing after it, or a flag next) raises
+    :class:`_MissingOptionValue`, exactly like Click's "option requires
+    an argument" (parity, audit round 23 P7).
 
     Last-wins (audit round 22 P5): Click/Typer scalar options resolve
     repeated flags to their LAST occurrence, so ``--doctor --log-format
@@ -106,7 +120,9 @@ def _scan_option_value(argv: list[str], *option_names: str) -> str | None:
     found: str | None = None
     for i, arg in enumerate(argv):
         for opt in option_names:
-            if arg == opt and i + 1 < len(argv) and not argv[i + 1].startswith("-"):
+            if arg == opt:
+                if i + 1 >= len(argv) or argv[i + 1].startswith("-"):
+                    raise _MissingOptionValue(f"Option '{opt}' requires an argument.")
                 found = argv[i + 1]
             if arg.startswith(f"{opt}="):
                 found = arg.split("=", 1)[1]
@@ -173,18 +189,27 @@ def _doctor_callback(ctx: typer.Context, param: Any, value: bool) -> bool:
         # ``--`` ends option parsing (everything after is positional):
         # never treat a post-``--`` token as a flag value.
         argv = argv[: argv.index("--")] if "--" in argv else argv
-        cfg_raw = _scan_option_value(argv, "--config", "-c")
+        # A bare option (--log-format at the end of argv, or -c followed
+        # by another flag) raises _MissingOptionValue — parity with
+        # Click's "requires an argument" on the non-doctor run (audit
+        # round 23 P7). The eager path used to silently ignore such an
+        # option and run with the default.
+        try:
+            cfg_raw = _scan_option_value(argv, "--config", "-c")
+            log_format_raw = _scan_option_value(argv, "--log-format")
+            log_level_raw = _scan_option_value(argv, "--log-level")
+        except _MissingOptionValue as e:
+            console.print(f"[red]Error:[/red] {e}")
+            raise typer.Exit(1) from None
         cfg = Path(cfg_raw) if cfg_raw is not None else None
         # Validate --log-format/--log-level with the SAME shared
         # validators main() uses (audit round 21 P2: the eager path used
         # to skip validation entirely, so `--doctor --log-format garbage`
         # ran the diagnostics instead of rejecting the flag). Defaults
         # match main()'s own option defaults.
-        log_format_raw = _scan_option_value(argv, "--log-format")
         log_format_lower = (
             _validate_log_format(log_format_raw) if log_format_raw is not None else "rich"
         )
-        log_level_raw = _scan_option_value(argv, "--log-level")
         log_level = _validate_log_level(log_level_raw) if log_level_raw is not None else "INFO"
 
         def _set_json_mode(value: bool) -> None:
@@ -247,6 +272,19 @@ def _run_doctor(config_file: Path | None = None) -> bool:
                 _reconfigure(encoding=_encoding, errors=_errors)
             except (ValueError, OSError):
                 pass
+
+
+class _NullConsole:
+    """Console stand-in whose ``print`` swallows everything.
+
+    Used by :func:`_doctor_impl` to run the config loader in JSON mode:
+    the loader prints its error lines via ``console.print``, and in
+    ``--log-format json`` those would corrupt the line-per-record
+    doctor stream — the fail record already carries the verdict.
+    """
+
+    def print(self, *args: Any, **kwargs: Any) -> None:
+        return None
 
 
 def _doctor_impl(config_file: Path | None = None) -> bool:
@@ -369,24 +407,68 @@ def _doctor_impl(config_file: Path | None = None) -> bool:
 
     # Config file (YAML or user_defaults.json)
     if config_file is not None:
-        # User explicitly passed --config: report whether it loaded.
-        if config_file.exists():
-            _row(
-                "[green]✓[/green]",
-                "ok",
-                f"Config file: {config_file}",
-                f"Config file: {config_file}",
-            )
-        else:
+        # User explicitly passed --config: report whether it actually
+        # LOADS. Existence alone is not enough (audit round 23 P6): a
+        # malformed YAML or an out-of-range value would be rejected by
+        # the real run, but the doctor used to bless the file with a
+        # green check and a "the run will fail at startup" surprise.
+        # Run the SAME loader the run uses; a rejected config is a
+        # critical doctor failure. In JSON mode the loader's own error
+        # lines would corrupt the line-per-record stream, so they are
+        # swallowed there — the fail record carries the verdict.
+        if not config_file.exists():
             _row(
                 "[yellow]![/yellow]",
                 "warn",
                 f"Config file: {config_file} [yellow](not found — using defaults)[/yellow]",
                 f"Config file: {config_file} (not found — using defaults)",
             )
+        else:
+            try:
+                _load_config_impl(
+                    config_file,
+                    console if not _JSON_LOG_MODE else _NullConsole(),
+                )
+                _row(
+                    "[green]✓[/green]",
+                    "ok",
+                    f"Config file: {config_file} (loaded and validated)",
+                    f"Config file: {config_file} (loaded and validated)",
+                )
+            except typer.Exit:
+                _row(
+                    "[red]✗[/red]",
+                    "fail",
+                    f"Config file: {config_file} [red](invalid — rejected on load)[/red]",
+                    f"Config file: {config_file} (invalid — rejected on load)",
+                )
+                all_critical_ok = False
     user_cfg = user_defaults_path()
     if user_cfg.exists():
-        _row("[green]✓[/green]", "ok", f"User defaults: {user_cfg}", f"User defaults: {user_cfg}")
+        try:
+            import json as _user_json
+
+            with open(user_cfg, encoding="utf-8") as _f:
+                _user_json.load(_f)
+            _row(
+                "[green]✓[/green]",
+                "ok",
+                f"User defaults: {user_cfg}",
+                f"User defaults: {user_cfg}",
+            )
+        except (OSError, ValueError) as _e:
+            # A corrupt user_defaults.json is silently ignored by
+            # load_user_defaults (the run falls back to stock
+            # defaults) — the doctor should say so instead of implying
+            # the user's saved defaults are in effect (audit round 23
+            # P6). Non-critical: the CLI still runs.
+            _row(
+                "[yellow]![/yellow]",
+                "warn",
+                f"User defaults: {user_cfg} [yellow](unreadable: {_e} — stock defaults "
+                f"are used instead)[/yellow]",
+                f"User defaults: {user_cfg} (unreadable: {_e} — stock defaults are used instead)",
+            )
     else:
         _row(
             "[dim]i[/dim]",
@@ -1083,10 +1165,15 @@ def main(
             # Assemble the immutable config snapshot the controller runs on.
             # Every value above was already validated: the resolver rejects
             # bad CLI flags (enum whitelists + CONFIG_RANGES bounds via
-            # PARAM_SPECS) and ``load_config`` rejected bad YAML, so no
-            # second validation pass is needed here (the GUI worker runs the
-            # same validator because its config arrives from hand-editable
-            # JSON, not from these two chokepoints).
+            # PARAM_SPECS) and ``load_config`` rejected bad YAML. The
+            # per-key checks cannot see the CROSS-FIELD constraint
+            # (stall_warning_timeout < stall_kill_timeout), which only
+            # ``validate_pipeline_config`` enforces — the GUI runs it, and
+            # the CLI used to skip it, so a contradictory flag pair
+            # (--stall-timeout 5 --stall-warning-timeout 10) ran in the
+            # CLI while the GUI rejected the same configuration (audit
+            # round 23 P1). Validate the assembled snapshot the same way
+            # the worker does.
             _pcfg = build_pipeline_config(
                 input_raw=input_video,
                 output_dir=output_dir,
@@ -1127,6 +1214,11 @@ def main(
                 batch_chunk_size=batch_chunk_size,
                 dry_run=dry_run,
             )
+            _cfg_errors = validate_pipeline_config(_pcfg)
+            if _cfg_errors:
+                for _err in _cfg_errors:
+                    console.print(f"[red]Error:[/red] {_err}")
+                raise typer.Exit(1)
 
             # P1: reify ``software_fallback="ask"``. The callback typer
             # confirms with (``--force``-style defaults can't short-circuit

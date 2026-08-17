@@ -1249,18 +1249,33 @@ class TestB11CliSanitization:
             for h in json_handlers_before:
                 cli.logger.addHandler(h)
 
-    def test_doctor_config_scan_skips_flag_like_value(self, monkeypatch):
+    def test_doctor_config_scan_rejects_flag_like_value(self, monkeypatch):
         # ``-c --doctor`` (value is another flag) must NOT become
-        # Path("--doctor"); the scan yields None and does not crash.
+        # Path("--doctor") — and must not silently run with the default
+        # either: a normal Click run of the same argv rejects "option
+        # requires an argument", so the doctor must exit 1 with the same
+        # parity error (audit round 23 P7).
         from stream2video import cli
 
         def fake_run_doctor(cfg):
-            assert cfg is None, f"expected no config path, got {cfg}"
-            return True
+            raise AssertionError("doctor must not run on a missing option value")
 
         monkeypatch.setattr(sys, "argv", ["stream2video", "-c", "--doctor", "--doctor"])
         monkeypatch.setattr(cli, "_run_doctor", fake_run_doctor)
         monkeypatch.setattr(cli, "_JSON_LOG_MODE", False)
         with pytest.raises(typer.Exit) as exc:
             cli._doctor_callback(None, None, True)
-        assert exc.value.exit_code == 0
+        assert exc.value.exit_code == 1
+
+    def test_doctor_scan_rejects_bare_last_option(self, monkeypatch):
+        # ``--doctor --log-format`` (option as the LAST token) has no
+        # value to scan — the doctor must exit 1 instead of running with
+        # the default (audit round 23 P7).
+        from stream2video import cli
+
+        monkeypatch.setattr(sys, "argv", ["stream2video", "--doctor", "--log-format"])
+        monkeypatch.setattr(cli, "_run_doctor", lambda cfg: True)
+        monkeypatch.setattr(cli, "_JSON_LOG_MODE", False)
+        with pytest.raises(typer.Exit) as exc:
+            cli._doctor_callback(None, None, True)
+        assert exc.value.exit_code == 1

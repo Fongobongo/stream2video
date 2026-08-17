@@ -422,6 +422,63 @@ class TestCreateProcessProbe:
         closes = [c for c in calls if isinstance(c, tuple) and c[0] == "CloseHandle"]
         assert len(closes) == 1  # the job handle
 
+    def test_probe_attribute_list_update_exception_still_deletes_list(self):
+        """Audit round 23 P3: when UpdateProcThreadAttribute RAISES
+        after a successful Initialize, the initialized list must still
+        receive its paired Delete — and with the REAL buffer, not None.
+        The old ``except Exception: attribute_list = None`` made an
+        Update exception leak the kernel-side list state (the Delete was
+        skipped or called on NULL)."""
+        calls: list[tuple | str] = []
+
+        class _ExplodingUpdateKernel32:
+            def __init__(self, name, use_last_error=False):
+                pass
+
+            def CreateJobObjectW(self, *a, **k):
+                calls.append("CreateJobObjectW")
+                return 123
+
+            def SetInformationJobObject(self, job, cls, info, size):
+                calls.append(("SetInformationJobObject", cls))
+                return True
+
+            def InitializeProcThreadAttributeList(self, attr_list, count, flags, size_ptr):
+                calls.append(("InitializeProcThreadAttributeList", attr_list is None))
+                if attr_list is None:
+                    size_ptr._obj.value = 64
+                return True
+
+            def UpdateProcThreadAttribute(self, attr_list, flags, attr, value, size, prev, retsize):
+                calls.append(("UpdateProcThreadAttribute", attr))
+                raise OSError("kernel32 exploded")
+
+            def DeleteProcThreadAttributeList(self, attr_list):
+                calls.append(("DeleteProcThreadAttributeList", attr_list is None))
+
+            def CloseHandle(self, handle):
+                calls.append(("CloseHandle", handle))
+
+        result = self._probe_with_fake(_ExplodingUpdateKernel32)
+        assert "CreateProcessW probe skipped (job object unavailable)" in result
+        assert "probe raised" not in result
+        assert "CreateProcessW" not in calls
+        # The list WAS initialized (the second call carries the buffer)
+        # before the Update explosion — the Delete must run with the
+        # actual buffer, never with None.
+        initialized_buffers = [
+            c for c in calls if isinstance(c, tuple) and c[0] == "InitializeProcThreadAttributeList"
+        ]
+        assert ("InitializeProcThreadAttributeList", False) in initialized_buffers
+        deletes = [
+            c for c in calls if isinstance(c, tuple) and c[0] == "DeleteProcThreadAttributeList"
+        ]
+        assert deletes == [("DeleteProcThreadAttributeList", False)], (
+            "Delete must receive the real buffer after an Update exception"
+        )
+        closes = [c for c in calls if isinstance(c, tuple) and c[0] == "CloseHandle"]
+        assert len(closes) == 1  # the job handle
+
     def test_probe_signatures_declared(self):
         """Audit round 21 P1: without restype declarations ctypes
         defaults to c_int, so CreateJobObjectW's HANDLE (pointer-sized
@@ -493,6 +550,12 @@ class TestCreateProcessProbe:
         )
         assert k32.UpdateProcThreadAttribute.restype is wintypes.BOOL
         assert k32.UpdateProcThreadAttribute.argtypes is not None
+        # The Attribute parameter is DWORD_PTR/ULONG_PTR, not DWORD
+        # (audit round 23 P2): the current attribute constant fits in 32
+        # bits, but the ABI declares a pointer-sized argument — pin the
+        # real type so a future 64-bit attribute constant isn't
+        # truncated on x64.
+        assert k32.UpdateProcThreadAttribute.argtypes[2] == _ctypes_mod.c_size_t
         assert k32.DeleteProcThreadAttributeList.argtypes is not None
 
     def test_large_job_handle_survives_at_full_width(self):

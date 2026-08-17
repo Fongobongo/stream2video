@@ -491,6 +491,95 @@ class TestOutputLock:
         release_output_lock(lp)
         assert not lock.exists()
 
+    def test_write_failure_removes_fresh_lock_and_raises_lock_error(self, tmp_path: Path):
+        """Audit round 23 P4: an os.write failure mid-acquire must not
+        leave a fresh pid-less lock behind (the next run would burn the
+        full grace window waiting for a pid that never arrives) and must
+        surface as ConcatLockError, not a raw OSError."""
+        import stream2video.concat.output_lock as ol
+
+        out = tmp_path / "x.mp4"
+        lock = lock_path_for(out)
+
+        def exploding_write(fd, data):
+            raise OSError("disk on fire")
+
+        with (
+            patch.object(ol.os, "write", side_effect=exploding_write),
+            pytest.raises(ConcatLockError, match="could not be written"),
+        ):
+            acquire_output_lock(out)
+        assert not lock.exists(), "failed acquire must not leave its fresh lock behind"
+
+    def test_zero_byte_write_removes_fresh_lock_and_raises_lock_error(self, tmp_path: Path):
+        """Audit round 23 P4: a write that reports zero bytes (the
+        stalled-write guard inside the loop) takes the same cleanup
+        path as a raising write."""
+        import stream2video.concat.output_lock as ol
+
+        out = tmp_path / "x.mp4"
+        lock = lock_path_for(out)
+
+        def stalled_write(fd, data):
+            return 0
+
+        with (
+            patch.object(ol.os, "write", side_effect=stalled_write),
+            pytest.raises(ConcatLockError, match="could not be written"),
+        ):
+            acquire_output_lock(out)
+        assert not lock.exists()
+
+    def test_reclaim_restores_lock_replaced_during_reclaim(self, tmp_path: Path):
+        """Audit round 23 P5: the stale-reclaim TOCTOU — between the
+        acquire reading the stale lock and unlinking it, a concurrent
+        run deletes it and creates its OWN live lock at the same path.
+        The reclaim must move the file aside atomically, notice it is no
+        longer the judged file, put it back, and report False so the
+        caller re-reads (and refuses the live lock)."""
+        import stream2video.concat.output_lock as ol
+
+        out = tmp_path / "x.mp4"
+        lock = lock_path_for(out)
+        STALE_TEXT = "token=stale pid=999999 output=x.mp4\n"
+        LIVE_TEXT = "token=live pid=999999 output=x.mp4\n"
+        lock.write_text(STALE_TEXT, encoding="utf-8")
+        old = time.time() - 60 * 60 - 60
+        os.utime(lock, (old, old))
+
+        real_rename = ol.os.rename
+
+        def sneaky_rename(src, dst):
+            if src == lock:
+                # Concurrent re-acquire: the stale lock dies and a new
+                # live lock takes its place right before our rename.
+                lock.unlink(missing_ok=True)
+                lock.write_text(LIVE_TEXT, encoding="utf-8")
+            return real_rename(src, dst)
+
+        with patch.object(ol.os, "rename", side_effect=sneaky_rename):
+            reclaimed = ol._reclaim_stale_lock(lock, STALE_TEXT)
+        assert reclaimed is False, "the reclaim must refuse to destroy the replacement lock"
+        assert lock.read_text(encoding="utf-8") == LIVE_TEXT, (
+            "the concurrent run's live lock must be restored in place"
+        )
+
+    def test_reclaim_deletes_exact_stale_file(self, tmp_path: Path):
+        """Audit round 23 P5: the happy path — the judged stale lock is
+        still the file on disk when the reclaim runs, so it is moved
+        aside, verified and deleted; the path is left free."""
+        import stream2video.concat.output_lock as ol
+
+        out = tmp_path / "x.mp4"
+        lock = lock_path_for(out)
+        STALE_TEXT = "token=stale pid=999999 output=x.mp4\n"
+        lock.write_text(STALE_TEXT, encoding="utf-8")
+        assert ol._reclaim_stale_lock(lock, STALE_TEXT) is True
+        assert not lock.exists()
+        # No quarantine artifacts left behind.
+        leftovers = [p for p in lock.parent.iterdir() if ".reclaim-" in p.name]
+        assert leftovers == []
+
     def test_lock_released_on_pipeline_error(self, tmp_path: Path):
         """#6: a pipeline that raises still releases the lock."""
         video = tmp_path / "src.mp4"

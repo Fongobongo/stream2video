@@ -51,6 +51,19 @@ class TestSaveSettingsKeys:
         ):
             assert k in SAVE_SETTINGS_KEYS
 
+    def test_tunables_derived_from_param_specs(self):
+        """Audit round 23 P9: SAVE_SETTINGS_KEYS is DERIVED from the
+        single tunable table (PARAM_SPECS) — every tunable there except
+        the slider floats (carried by ``self.settings``) is saved, and
+        nothing extra may creep in. Adding a tunable to PARAM_SPECS
+        without it appearing here now fails loudly instead of silently
+        dropping from settings.json."""
+        from stream2video.param_specs import PARAM_SPECS
+
+        slider_floats = {"threshold", "min_silence", "margin"}
+        session_keys = {"input_path", "output_dir", "theme", "window_geometry"}
+        assert set(SAVE_SETTINGS_KEYS) == session_keys | (set(PARAM_SPECS) - slider_floats)
+
 
 class TestUserDefaultsKeys:
     def test_session_state_keys_absent(self):
@@ -88,49 +101,21 @@ class TestUserDefaultsKeys:
 class TestBuildSaveSettingsSnapshot:
     def test_returns_dict_with_canonical_keys(self):
         # Pin SAVE_SETTINGS_KEYS so a future addition is visible here.
-        assert SAVE_SETTINGS_KEYS == (
+        # The tunable block follows PARAM_SPECS order (audit round 23
+        # P9: the list is DERIVED from that table — session keys and
+        # the slider floats, carried by ``self.settings``, are the only
+        # exceptions).
+        from stream2video.param_specs import PARAM_SPECS
+
+        slider_floats = ("threshold", "min_silence", "margin")
+        expected_keys = (
             "input_path",
             "output_dir",
-            "method",
-            "encoder",
-            "video_quality",
-            "audio_quality",
-            "download_quality",
-            "output_format",
-            "force",
-            "delete_after",
-            "per_video_dir",
-            "completion_sound",
-            "x264_low_memory",
-            "use_crf",
-            "gapless_concat",
-            "low_process_priority",
-            "preset",
+            *tuple(k for k in PARAM_SPECS if k not in slider_floats),
             "theme",
-            "proxy",
-            "proxy_active",
-            # The 18 advanced tunables (previously CLI-only; the audit's
-            # GUI-widget gap).
-            "software_fallback",
-            "x264_preset",
-            "encoder_threads",
-            "output_fps",
-            "memory_limit_mb",
-            "memory_reserve_mb",
-            "rlimit_as_mb",
-            "download_timeout",
-            "connect_timeout",
-            "no_progress_timeout",
-            "segment_encode_timeout",
-            "final_concat_timeout",
-            "silence_timeout",
-            "stall_kill_timeout",
-            "stall_warning_timeout",
-            "waveform_timeout",
-            "batch_chunk_size",
-            "min_part_bytes",
             "window_geometry",
         )
+        assert expected_keys == SAVE_SETTINGS_KEYS
         # Use a sentinel dict so the test catches a missing / extra key
         # in ``SAVE_SETTINGS_KEYS`` (snapshot would KeyError or expand).
         widgets = {key: f"value-{key}" for key in SAVE_SETTINGS_KEYS}

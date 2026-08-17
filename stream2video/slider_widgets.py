@@ -66,6 +66,16 @@ def parse_slider_entry_value(text: str, min_v: float, max_v: float) -> float | N
       * On parse failure (empty / non-numeric / extra chars), return
         ``None``. The caller falls back to the slider's current value.
 
+    Deliberate contract divergence (audit round 23 P8): the GUI CLAMPS
+    an out-of-range typed value to the nearest bound — an interactive
+    slider must never leave the user stuck on an error — while the CLI
+    REJECTS the same out-of-range flag (cli_resolver) and the YAML
+    loader rejects the same config value (cli_config): the two surfaces
+    serve different humans, and the GUI's clamped result is always a
+    valid config, so the copied CLI command derived from it can never
+    carry the rejected value. Keep it that way — do not "unify" by
+    making the GUI reject.
+
     Pure: no I/O, no widget reads.
     """
     try:

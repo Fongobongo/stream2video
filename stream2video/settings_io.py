@@ -30,56 +30,25 @@ from stream2video.config import (
     VALID_SOFTWARE_FALLBACKS,
     VALID_X264_PRESETS,
 )
+from stream2video.param_specs import PARAM_SPECS
 
 # Canonical key order for ``settings.json``. Session-only state
-# (``input_path``, ``output_dir``, ``window_geometry``) is included;
-# ``recent_projects`` is NOT — it lives on the GUI's ``self.settings``
-# and is written alongside via the whole-dict save path. Pure tunables
-# (threshold / min_silence / margin) come from ``self.settings``
-# (slider floats) not from individual widget reads.
+# (``input_path``, ``output_dir``, ``theme``, ``window_geometry``) is
+# explicit; every TUNable key is derived from the single tunable table
+# (``PARAM_SPECS``), so adding a tunable there automatically persists
+# it everywhere — a hand-maintained twin list here is what drifted
+# before (audit round 23 P9). ``recent_projects`` is NOT included: it
+# lives on the GUI's ``self.settings`` and is written alongside via
+# the whole-dict save path. The three slider floats (threshold /
+# min_silence / margin) are also carried by ``self.settings`` (slider
+# floats) rather than by individual widget reads, so they stay out of
+# this widget-driven save.
+_SLIDER_FLOAT_KEYS = ("threshold", "min_silence", "margin")
 SAVE_SETTINGS_KEYS: tuple[str, ...] = (
     "input_path",
     "output_dir",
-    "method",
-    "encoder",
-    "video_quality",
-    "audio_quality",
-    "download_quality",
-    "output_format",
-    "force",
-    "delete_after",
-    "per_video_dir",
-    "completion_sound",
-    "x264_low_memory",
-    "use_crf",
-    "gapless_concat",
-    "low_process_priority",
-    "preset",
+    *tuple(k for k in PARAM_SPECS if k not in _SLIDER_FLOAT_KEYS),
     "theme",
-    "proxy",
-    "proxy_active",
-    # The 18 advanced tunables that previously had no GUI widget (they
-    # were CLI-only; the audit found the GUI silently ran with config
-    # values the widgets couldn't express). They are plain settings keys
-    # like the rest, so a hand-edited settings.json keeps working.
-    "software_fallback",
-    "x264_preset",
-    "encoder_threads",
-    "output_fps",
-    "memory_limit_mb",
-    "memory_reserve_mb",
-    "rlimit_as_mb",
-    "download_timeout",
-    "connect_timeout",
-    "no_progress_timeout",
-    "segment_encode_timeout",
-    "final_concat_timeout",
-    "silence_timeout",
-    "stall_kill_timeout",
-    "stall_warning_timeout",
-    "waveform_timeout",
-    "batch_chunk_size",
-    "min_part_bytes",
     "window_geometry",
 )
 

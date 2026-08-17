@@ -664,6 +664,16 @@ class PipelineController:
         """
         self._pipeline_start = time.monotonic()
         try:
+            # Pre-flight validation (audit round 23 P1): the CLI now
+            # validates right after build_pipeline_config and the GUI
+            # worker validates before constructing this controller, but
+            # a direct API host can hand run() an arbitrary snapshot —
+            # never start a pipeline on a config that fails the
+            # cross-field constraints (stall warning < kill etc.) that
+            # per-key resolution cannot see.
+            _cfg_errors = validate_pipeline_config(self.cfg)
+            if _cfg_errors:
+                raise PipelineError("Invalid configuration: " + "; ".join(_cfg_errors))
             video_path, src_size_bytes, src_duration = self._run_download_phase()
             if self.cancel_event.is_set():
                 raise PipelineCancelled("cancelled between download and silence")

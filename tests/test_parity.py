@@ -600,6 +600,135 @@ class TestJsonLogStateIsolation:
         assert fake_err.encoding == "cp1251" and fake_err.errors == "strict"
 
 
+class TestDoctorConfigValidation:
+    """Audit round 23 P6: the doctor used to bless ``--config`` on
+    existence alone — a malformed YAML or an out-of-range value passed
+    the doctor while the real run would reject it at startup. The doctor
+    must run the SAME loader the run uses, and a rejected config must
+    fail the critical verdict."""
+
+    def _isolated_defaults(self, tmp_path: Path, monkeypatch) -> None:
+        import stream2video.config as config_mod
+
+        monkeypatch.setattr(
+            config_mod, "user_defaults_path", lambda: tmp_path / "user_defaults.json"
+        )
+
+    def test_doctor_valid_config_ok(self, tmp_path: Path, monkeypatch):
+        from stream2video import cli
+
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("stall_kill_timeout: 300\n", encoding="utf-8")
+        self._isolated_defaults(tmp_path, monkeypatch)
+        assert cli._doctor_impl(cfg) is True
+
+    def test_doctor_malformed_config_fails(self, tmp_path: Path, monkeypatch):
+        from stream2video import cli
+
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("stall_kill_timeout: [unclosed\n", encoding="utf-8")
+        self._isolated_defaults(tmp_path, monkeypatch)
+        assert cli._doctor_impl(cfg) is False
+
+    def test_doctor_out_of_range_config_fails(self, tmp_path: Path, monkeypatch):
+        from stream2video import cli
+
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("stall_kill_timeout: 999999\n", encoding="utf-8")
+        self._isolated_defaults(tmp_path, monkeypatch)
+        assert cli._doctor_impl(cfg) is False
+
+    def test_doctor_missing_config_is_warning_not_failure(self, tmp_path: Path, monkeypatch):
+        from stream2video import cli
+
+        self._isolated_defaults(tmp_path, monkeypatch)
+        # A missing --config path only degrades to defaults at run time —
+        # the doctor keeps it a warning, not a critical failure.
+        assert cli._doctor_impl(tmp_path / "nope.yaml") is True
+
+    def test_doctor_malformed_user_defaults_warns_but_not_fatal(self, tmp_path: Path, monkeypatch):
+        from stream2video import cli
+
+        monkeypatch.setattr(
+            "stream2video.config.user_defaults_path", lambda: tmp_path / "user_defaults.json"
+        )
+        (tmp_path / "user_defaults.json").write_text("{not json", encoding="utf-8")
+        # The run silently falls back to stock defaults, so the doctor
+        # warns — but the CLI still works, so the verdict stays green.
+        assert cli._doctor_impl(None) is True
+
+    def test_doctor_json_mode_malformed_config_stays_clean_json(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """In --log-format json the config loader's own error lines must
+        NOT leak into the line-per-record stream — the fail record is
+        the only signal a downstream consumer sees."""
+        import json as _json
+
+        from stream2video import cli
+
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("stall_kill_timeout: [oops\n", encoding="utf-8")
+        self._isolated_defaults(tmp_path, monkeypatch)
+        monkeypatch.setattr(cli, "_JSON_LOG_MODE", True)
+        try:
+            ok = cli._doctor_impl(cfg)
+        finally:
+            monkeypatch.setattr(cli, "_JSON_LOG_MODE", False)
+        assert ok is False
+        out = capsys.readouterr().out
+        assert '"doctor": "end", "ok": false' in out
+        for line in out.splitlines():
+            _json.loads(line)  # every record must parse cleanly
+        assert any(
+            '"status": "fail"' in line and "Config file" in line for line in out.splitlines()
+        )
+
+
+class TestSliderClampVsCliRejectContract:
+    """Audit round 23 P8: the GUI CLAMPS out-of-range typed slider
+    values to the nearest bound — an interactive entry must never
+    strand the user on an error — while the CLI flag path and the YAML
+    loader REJECT the same value. The divergence is deliberate (the
+    GUI's clamped result is always a valid config, so a copied command
+    can never carry the rejected value) and pinned here so nobody
+    "unifies" the two surfaces by accident."""
+
+    def test_gui_clamps_out_of_range_typed_value(self):
+        from stream2video.config import CONFIG_RANGES
+        from stream2video.slider_widgets import parse_slider_entry_value
+
+        lo, hi = CONFIG_RANGES["min_silence"]
+        assert parse_slider_entry_value("999", lo, hi) == hi
+        assert parse_slider_entry_value("-999", lo, hi) == lo
+
+    def test_cli_resolver_rejects_the_same_value(self):
+        from stream2video.cli_resolver import make_resolver
+        from stream2video.config import CONFIG_RANGES
+
+        class _QuietConsole:
+            def print(self, *a, **kw):
+                pass
+
+        _, hi = CONFIG_RANGES["min_silence"]
+        with pytest.raises(typer.Exit) as exc:
+            make_resolver(None, {"min_silence": hi * 2}, _QuietConsole()).resolve(
+                "min_silence", None
+            )
+        assert exc.value.exit_code == 1
+
+    def test_yaml_loader_rejects_the_same_value(self, tmp_path):
+        from rich.console import Console
+
+        from stream2video.cli_config import load_config
+
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("min_silence: 999\n", encoding="utf-8")
+        with pytest.raises(typer.Exit) as exc:
+            load_config(cfg, Console())
+        assert exc.value.exit_code == 1
+
+
 class TestEarlyExitLoggingRestore:
     """The logging-state restore must run on EVERY exit, including the
     early ones (missing ffmpeg, bad --log-level). Previously the
