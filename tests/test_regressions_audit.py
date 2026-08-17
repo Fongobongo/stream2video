@@ -381,8 +381,13 @@ class TestOutputLock:
         a_result: dict[str, object] = {}
 
         def slow_write(fd, data):
-            opened.set()
-            time.sleep(0.15)
+            # The Windows placeholder write (one NUL byte, before the
+            # lock is held) must not signal "A is writing its record" —
+            # only the owner-record write (post-lock) does. Otherwise
+            # B can legitimately win the pre-lock window.
+            if len(data) > 1:
+                opened.set()
+                time.sleep(0.15)
             return real_write(fd, data)
 
         def acquire_a():
