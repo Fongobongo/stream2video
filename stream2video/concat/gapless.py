@@ -322,8 +322,12 @@ def _run_gapless_segment_concat(
                 # only runs on sources with audio, so both streams must
                 # probe cleanly before we reuse the file.
                 try:
-                    _audio_ok = _ffprobe_is_valid_media(inter, stream_type="a")
-                    _video_ok = _ffprobe_is_valid_media(inter, stream_type="v")
+                    _audio_ok = _ffprobe_is_valid_media(
+                        inter, stream_type="a", cancel_callback=cancel_callback
+                    )
+                    _video_ok = _ffprobe_is_valid_media(
+                        inter, stream_type="v", cancel_callback=cancel_callback
+                    )
                     if not (_video_ok and _audio_ok):
                         logger.warning(
                             f"gapless tree L{level}: intermediate {inter.name} "

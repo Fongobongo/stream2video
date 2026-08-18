@@ -142,14 +142,18 @@ class TestDirectCallAtomicPublish:
         )
         assert not list(tmp_path.glob(".*s2v_partial*")), "partial must be unlinked on failure"
 
-    def test_controller_lock_path_writes_target_directly(self, tmp_path: Path):
-        """The pipeline passes a pre-acquired lock and its own staging
-        target — no second partial layer is added there."""
+    def test_controller_lock_path_publishes_atomically_too(self, tmp_path: Path):
+        """Audit round 33 P0: the atomic publish is NOT tied to who owns
+        the lock. A caller passing a pre-acquired ``lock=`` (the
+        pipeline's project lock) still encodes into the partial and the
+        result still reaches the given target via ``os.replace`` — one
+        contract for every caller."""
         from stream2video.concat import acquire_output_lock, release_output_lock
 
         video = tmp_path / "src.mp4"
         video.write_bytes(b"source")
         output = tmp_path / "out.mp4"
+        output.write_bytes(b"previous good result")
         lock = acquire_output_lock(output)
         targets: list[Path] = []
 
@@ -164,10 +168,42 @@ class TestDirectCallAtomicPublish:
                 patch("stream2video.concat.has_audio_stream", return_value=True),
                 patch("stream2video.concat._run_with_fallback", side_effect=encode),
             ):
+                result = cut_and_concat(video, [], output, lock=lock)
+        finally:
+            release_output_lock(lock)
+        assert targets[0].name == ".out.mp4.s2v_partial.mp4", (
+            "lock-holder callers must still encode into the partial, not the stable path"
+        )
+        assert result == output and output.read_bytes() == b"staged"
+        assert not list(tmp_path.glob(".*s2v_partial*"))
+
+    def test_controller_lock_path_failure_preserves_previous_output(self, tmp_path: Path):
+        """Same lock= path, failing encode: the previous version of the
+        target must survive (the round-32 hole this locks shut)."""
+        from stream2video.concat import ConcatError, acquire_output_lock, release_output_lock
+
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"source")
+        output = tmp_path / "out.mp4"
+        output.write_bytes(b"previous good result")
+        lock = acquire_output_lock(output)
+
+        def failing_encode(*args, **kwargs):
+            Path(args[2]).write_bytes(b"partial garbage")
+            raise ConcatError("encode fail")
+
+        try:
+            with (
+                patch("stream2video.concat.generate_keep_segments", return_value=[(0.0, 1.0)]),
+                patch("stream2video.concat.get_video_encoder", return_value=("libx264", [])),
+                patch("stream2video.concat.has_audio_stream", return_value=True),
+                patch("stream2video.concat._run_with_fallback", side_effect=failing_encode),
+                pytest.raises(ConcatError, match="encode fail"),
+            ):
                 cut_and_concat(video, [], output, lock=lock)
         finally:
             release_output_lock(lock)
-        assert targets == [output], "lock-holder callers write straight to the given target"
+        assert output.read_bytes() == b"previous good result"
         assert not list(tmp_path.glob(".*s2v_partial*"))
 
 
@@ -319,14 +355,16 @@ class TestFfprobeDurationOkFailClosed:
 
         exc = raise_exc
 
-        def _run(cmd, **kwargs):
+        def _run(args, **kwargs):
             if exc is not None:
                 raise exc("ffprobe", 30)
-            return result
+            # The probe helper returns (returncode, stdout) after the
+            # round-33 cancellable rewrite.
+            return result.returncode, result.stdout
 
         with (
             patch("stream2video.concat.probing.ffprobe_path", return_value="ffprobe"),
-            patch("stream2video.concat.probing.run_with_retry", side_effect=_run),
+            patch("stream2video.concat.probing._run_ffprobe", side_effect=_run),
         ):
             return _ffprobe_duration_ok(tmp_path / "part.mp4", expected_seconds=10.0)
 
@@ -553,7 +591,7 @@ class TestMediaIsValid:
         def fake_decode(path, stream_type="v", **kw):
             return decode
 
-        def fake_dur(path, t):
+        def fake_dur(path, t, **kw):
             return durations[0] if t == "v" else durations[1]
 
         with (
@@ -573,7 +611,7 @@ class TestMediaIsValid:
 
         probed: list[str] = []
 
-        def record(path, stream_type="v"):
+        def record(path, stream_type="v", **kw):
             probed.append(stream_type)
             return True
 
@@ -593,7 +631,7 @@ class TestMediaIsValid:
 
         probed: list[str] = []
 
-        def record(path, stream_type="v"):
+        def record(path, stream_type="v", **kw):
             probed.append(stream_type)
             return True
 
@@ -615,6 +653,36 @@ class TestMediaIsValid:
 
     def test_matching_durations_pass(self):
         assert self._call(require_video=True, require_audio=True, durations=(12.0, 11.8)) is True
+
+    def test_short_truncated_audio_rejected(self):
+        """Audit round 33 P1 counterexample: a 1.8 s video carrying a
+        0.1 s audio track lost nearly the whole audio body — the fixed
+        2 s tolerance accepted it. The bounded tolerance (min 0.1 s,
+        max 2 s, 2 % in between) must reject it."""
+        assert self._call(require_video=True, require_audio=True, durations=(1.8, 0.1)) is False
+
+    def test_short_healthy_file_passes_within_floor(self):
+        """Very short clips have genuine codec-level drift (AAC priming,
+        frame rounding) — the 0.1 s floor keeps a healthy 1 s file with
+        a ~50 ms stream offset valid."""
+        assert self._call(require_video=True, require_audio=True, durations=(1.0, 0.95)) is True
+
+    def test_long_file_allows_capped_drift(self):
+        """A six-hour encode's legitimate mux/flush drift stays capped at
+        2 s (the ceiling), not the uncapped 2 % (~13 min)."""
+        six_hours = 6 * 3600.0
+        assert (
+            self._call(
+                require_video=True, require_audio=True, durations=(six_hours, six_hours - 1.9)
+            )
+            is True
+        )
+        assert (
+            self._call(
+                require_video=True, require_audio=True, durations=(six_hours, six_hours - 2.1)
+            )
+            is False
+        )
 
     def test_codec_probe_failure_rejects(self):
         assert self._call(require_video=True, require_audio=False, codec=False) is False
@@ -679,6 +747,129 @@ class TestMediaIsValid:
                 )
                 is False
             )
+
+    def test_duration_probe_fault_raises_by_default(self):
+        """Audit round 33 P1-1: a transient DURATION-probe fault must
+        raise like the codec probe — round 32 covered only the codec
+        one, so a hiccup here fell into the fail-closed branch and the
+        controller deleted a completed download."""
+        import subprocess
+
+        import pytest
+
+        from stream2video.concat import probing
+
+        for exc in (subprocess.TimeoutExpired("ffprobe", 10.0), FileNotFoundError, OSError):
+            with (
+                patch("stream2video.concat.probing._ffprobe_is_valid_media", return_value=True),
+                patch("stream2video.concat.probing._ffmpeg_full_decode", return_value=True),
+                patch("stream2video.concat.probing._ffprobe_stream_duration", side_effect=exc),
+                pytest.raises((subprocess.TimeoutExpired, FileNotFoundError, OSError)),
+            ):
+                probing._media_is_valid(Path("x.mp4"), require_video=True, require_audio=False)
+
+    def test_duration_probe_fault_is_fail_safe_for_resume(self):
+        """fail_safe covers BOTH metadata probes uniformly."""
+        import subprocess
+
+        from stream2video.concat import probing
+
+        with (
+            patch("stream2video.concat.probing._ffprobe_is_valid_media", return_value=True),
+            patch("stream2video.concat.probing._ffmpeg_full_decode", return_value=True),
+            patch(
+                "stream2video.concat.probing._ffprobe_stream_duration",
+                side_effect=subprocess.TimeoutExpired("ffprobe", 10.0),
+            ),
+        ):
+            assert (
+                probing._media_is_valid(
+                    Path("x.mp4"),
+                    require_video=True,
+                    require_audio=False,
+                    fail_safe=True,
+                )
+                is False
+            )
+
+
+class TestRunFfprobe:
+    """Audit round 33 P2: every metadata probe runs through ONE
+    cancellable, bounded popen loop — a cancel fires within the poll
+    cadence, not after the 10 s ceiling."""
+
+    def test_cancel_aborts_promptly(self):
+        from subprocess import TimeoutExpired
+
+        import pytest
+
+        from stream2video.concat import probing
+
+        class _FakeProc:
+            def __init__(self):
+                import io
+
+                self.stdout = io.StringIO("")
+                self._waits = 10_000_000
+                self._killed = False
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                if self._waits > 0:
+                    self._waits -= 1
+                    raise TimeoutExpired("ffprobe", timeout or 0)
+                return 0
+
+            def kill(self):
+                self._killed = True
+                self.returncode = 1
+
+        proc = _FakeProc()
+        with (
+            patch("stream2video.concat.probing.popen_with_retry", return_value=proc),
+            pytest.raises(probing.CancelledError),
+        ):
+            probing._run_ffprobe(["ffprobe", "x.mp4"], cancel_callback=lambda: True)
+        assert proc._killed, "a cancelled probe must kill the child immediately"
+        assert proc.poll() is not None, "the killed probe must be reaped"
+        assert proc.stdout.closed, "the stdout pipe must be closed on every exit path"
+
+    def test_timeout_propagates_and_kills(self):
+        from subprocess import TimeoutExpired
+
+        import pytest
+
+        from stream2video.concat import probing
+
+        class _FakeProc:
+            def __init__(self):
+                import io
+
+                self.stdout = io.StringIO("")
+                self._killed = False
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                raise TimeoutExpired("ffprobe", timeout or 0)
+
+            def kill(self):
+                self._killed = True
+                self.returncode = 1
+
+        proc = _FakeProc()
+        with (
+            patch("stream2video.concat.probing.popen_with_retry", return_value=proc),
+            pytest.raises(TimeoutExpired),
+        ):
+            probing._run_ffprobe(["ffprobe", "x.mp4"], timeout=0.01)
+        assert proc._killed
+        assert proc.poll() is not None
 
 
 class TestMakePhaseProgress:

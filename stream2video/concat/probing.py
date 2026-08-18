@@ -9,7 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from stream2video.concat.errors import CancelledError
-from stream2video.tools import ffmpeg_path, ffprobe_path, popen_with_retry, run_with_retry
+from stream2video.tools import ffmpeg_path, ffprobe_path, popen_with_retry
 from stream2video.utils import (
     drain_stderr_lines,
     kill_and_reap,
@@ -41,8 +41,78 @@ _TRUNCATION_MARKERS = (
 # any sane local read and far below a visibly frozen GUI.
 _PROBE_TIMEOUT = 10.0
 
+# Poll cadence of the cancellable probe loop (audit round 33 P2).
+_PROBE_POLL_SECONDS = 0.2
 
-def _ffprobe_is_valid_media(path: Path, stream_type: str = "v") -> bool:
+
+def _run_ffprobe(
+    args: list[str],
+    *,
+    timeout: float = _PROBE_TIMEOUT,
+    cancel_callback: "Callable[[], bool] | None" = None,
+) -> tuple[int, str]:
+    """Run ONE metadata ffprobe: cancellable, bounded, torn down on
+    every exit path (audit round 33 P2).
+
+    The old shape — a blocking ``subprocess`` run call with a flat
+    timeout — noticed a user cancel only AFTER the timeout expired: a probe
+    stalled on a wedged source (network share, broken container) held
+    the GUI's Cancel for up to the whole ceiling even though a cancel
+    check ran between probes. One small popen loop instead (same
+    teardown shape as ``_ffmpeg_full_decode``, lighter — probe stdout
+    goes through the shared ring-bounded drain, so even a
+    stream-spamming container can neither wedge the pipe nor grow the
+    sink unboundedly): poll ``cancel_callback`` every 0.2 s, bounded
+    by ``timeout``.
+
+    Returns ``(returncode, stdout)``. Infrastructure faults PROPAGATE:
+    ``CancelledError`` on cancel, ``subprocess.TimeoutExpired`` on the
+    deadline, spawn faults out of ``popen_with_retry`` — "validation
+    unavailable" must reach the caller's fail-safe logic, never become
+    a verdict here.
+    """
+    proc = popen_with_retry(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        **no_window_kwargs(),
+    )
+    stdout_lines: list[str] = []
+    assert proc.stdout is not None
+    wait_for_drain = drain_stderr_lines(proc.stdout, stdout_lines)
+    deadline = time.monotonic() + timeout
+    rc: int | None = None
+    with registered_process(proc):
+        try:
+            while True:
+                try:
+                    rc = proc.wait(timeout=_PROBE_POLL_SECONDS)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                if cancel_callback is not None and cancel_callback():
+                    raise CancelledError("metadata probe cancelled") from None
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(args, timeout) from None
+        finally:
+            # Unconditional child teardown on EVERY exit path (normal
+            # completion, cancel, timeout — audit round 31 P1-1 shape).
+            if proc.poll() is None:
+                with contextlib.suppress(OSError):
+                    kill_and_reap(proc, timeout=5.0)
+            with contextlib.suppress(OSError, ValueError):
+                proc.stdout.close()
+            wait_for_drain(2.0)
+    assert rc is not None
+    return rc, "".join(stdout_lines)
+
+
+def _ffprobe_is_valid_media(
+    path: Path, stream_type: str = "v", cancel_callback: "Callable[[], bool] | None" = None
+) -> bool:
     """Quick validity check: ffprobe can read codec + duration for the
     requested stream type.
 
@@ -69,9 +139,11 @@ def _ffprobe_is_valid_media(path: Path, stream_type: str = "v") -> bool:
     download gate already had this contract; the secondary-stream probe
     inside the unified gate did not). Callers that want the fail-safe
     re-encode fallback (resume gates, the gapless tree) catch around
-    the call themselves.
+    the call themselves. ``cancel_callback`` reaches the probe loop —
+    a cancel fires immediately instead of after the 10 s ceiling
+    (audit round 33 P2).
     """
-    r = run_with_retry(
+    rc, stdout = _run_ffprobe(
         [
             ffprobe_path(),
             "-v",
@@ -84,15 +156,14 @@ def _ffprobe_is_valid_media(path: Path, stream_type: str = "v") -> bool:
             "default=noprint_wrappers=1:nokey=1",
             str(path),
         ],
-        capture_output=True,
-        text=True,
-        timeout=_PROBE_TIMEOUT,
-        **no_window_kwargs(),
+        cancel_callback=cancel_callback,
     )
-    return r.returncode == 0 and bool(r.stdout.strip())
+    return rc == 0 and bool(stdout.strip())
 
 
-def _ffprobe_media_complete(path: Path, stream_type: str = "v") -> bool:
+def _ffprobe_media_complete(
+    path: Path, stream_type: str = "v", cancel_callback: "Callable[[], bool] | None" = None
+) -> bool:
     """Strict freshness check for a file about to be PUBLISHED as the
     stable source (audit round 27 P2): ``_ffprobe_is_valid_media``
     proves only that the requested stream has a readable codec name —
@@ -103,14 +174,15 @@ def _ffprobe_media_complete(path: Path, stream_type: str = "v") -> bool:
     (ffprobe reads the duration from the actual media, not from a
     header field alone).
 
-    Fail-closed like its sibling: spawn faults, timeouts and
+    Fail-closed like its sibling: non-zero rc, empty output and
     unparseable output all return False — the caller must then refuse
     to publish. Exceptions of the "ffprobe cannot run at all" kind
-    (transient spawn failure) are NOT swallowed here: they re-raise so
-    the caller can distinguish "invalid media" from "validation
-    unavailable" and must not delete the download (audit round 27 P1).
+    (transient spawn failure, a hung probe hitting the ceiling) are NOT
+    swallowed here: they re-raise so the caller can distinguish
+    "invalid media" from "validation unavailable" and must not delete
+    the download (audit round 27 P1).
     """
-    r = run_with_retry(
+    rc, stdout = _run_ffprobe(
         [
             ffprobe_path(),
             "-v",
@@ -122,15 +194,11 @@ def _ffprobe_media_complete(path: Path, stream_type: str = "v") -> bool:
             "-of",
             "default=noprint_wrappers=1:nokey=1",
             str(path),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=_PROBE_TIMEOUT,
-        **no_window_kwargs(),
+        ]
     )
-    if r.returncode != 0:
+    if rc != 0:
         return False
-    lines = [line.strip() for line in r.stdout.splitlines() if line.strip()]
+    lines = [line.strip() for line in stdout.splitlines() if line.strip()]
     if not lines or not lines[0]:
         return False
     duration: float | None = None
@@ -145,9 +213,13 @@ def _ffprobe_media_complete(path: Path, stream_type: str = "v") -> bool:
     return duration is not None
 
 
-def _ffprobe_stream_duration(path: Path, stream_type: str) -> float | None:
+def _ffprobe_stream_duration(
+    path: Path,
+    stream_type: str,
+    cancel_callback: "Callable[[], bool] | None" = None,
+) -> float | None:
     """Duration of the FIRST stream of the requested type (v/a), or
-    None when unreadable (audit round 32 P1).
+    None for a genuine negative verdict (audit rounds 32/33 P1).
 
     Container duration cannot detect an audio track truncated much
     earlier than the video (audit round 30 P5): the stream-level
@@ -160,33 +232,38 @@ def _ffprobe_stream_duration(path: Path, stream_type: str) -> float | None:
     track, ``float(r.stdout.strip())`` failed to parse, and the
     resulting ``None`` let the duration mismatch check silently pass.
     ``-select_streams a:0`` also makes the probe agree with the decode
-    gate, which ``-map``s ``0:v:0`` / ``0:a:0``. A missing / ``N/A``
-    stream duration likewise returns ``None`` — callers that REQUIRE a
-    stream treat that as invalid instead of skipping the comparison.
+    gate, which ``-map``s ``0:v:0`` / ``0:a:0``.
+
+    Error contract (audit round 33 P1): ``None`` is ONLY a normal
+    ffprobe verdict — non-zero rc, an empty / ``N/A`` / non-numeric
+    duration. Infrastructure faults (timeout, spawn failure, cancel)
+    PROPAGATE, exactly like the codec probe: a transient ffprobe hiccup
+    returning ``None`` here once fell into the fail-closed branch of
+    ``_media_is_valid`` and made the controller delete a fully
+    downloaded multi-GB file — "validation unavailable" must never be
+    mistaken for "invalid media". ``_media_is_valid``'s ``fail_safe``
+    covers this probe the same way it covers the codec probe.
     """
+    rc, stdout = _run_ffprobe(
+        [
+            ffprobe_path(),
+            "-v",
+            "error",
+            "-select_streams",
+            f"{stream_type}:0",
+            "-show_entries",
+            "stream=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        cancel_callback=cancel_callback,
+    )
+    if rc != 0:
+        return None
     try:
-        r = run_with_retry(
-            [
-                ffprobe_path(),
-                "-v",
-                "error",
-                "-select_streams",
-                f"{stream_type}:0",
-                "-show_entries",
-                "stream=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                str(path),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=_PROBE_TIMEOUT,
-            **no_window_kwargs(),
-        )
-        if r.returncode != 0:
-            return None
-        value = float(r.stdout.strip())
-    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+        value = float(stdout.strip())
+    except ValueError:
         return None
     return value if math.isfinite(value) else None
 
@@ -296,6 +373,31 @@ def _ffmpeg_full_decode(
     return not any(marker in stderr for marker in _TRUNCATION_MARKERS)
 
 
+# A/V stream-duration drift allowed between the two REQUIRED streams
+# (audit round 33 P1). Fixed 2 s was a huge hole for short media:
+# a 1.8 s video carrying a 0.1 s audio track (nearly the whole audio
+# body lost) passed the gate. The allowance is now bounded BOTH ways:
+#   * never above 2 s (a six-hour encode's legitimate mux/flush drift
+#     stays accepted — audit round 30 P5's counterexample),
+#   * never below 100 ms (AAC priming + frame rounding on very short
+#     clips — a healthy 1 fps/short encode routinely reports a few
+#     frames of stream-duration offset),
+#   * and 2 % of the longer stream in between (proportional to the
+#     amount of content that could actually be missing).
+_DRIFT_FLOOR_SECONDS = 0.10
+_DRIFT_CEILING_SECONDS = 2.0
+_DRIFT_RELATIVE = 0.02
+
+
+def _allowed_stream_drift(video_dur: float, audio_dur: float) -> float:
+    """Bounded absolute+relative tolerance for the v/a duration match
+    (audit round 33 P1) — see the constants above for the rationale."""
+    return min(
+        _DRIFT_CEILING_SECONDS,
+        max(_DRIFT_FLOOR_SECONDS, max(video_dur, audio_dur) * _DRIFT_RELATIVE),
+    )
+
+
 def _media_is_valid(
     path: Path,
     *,
@@ -315,25 +417,27 @@ def _media_is_valid(
     concat facade — resume part reuse. Per required stream: the stream
     must exist (codec probe) and fully decode into the null sink; when
     BOTH streams are required, their stream-level durations must agree
-    within 2 s (a 12 s video carrying a 2 s audio track is a truncated
-    audio body, not media — audit round 30 P5).
+    within a bounded tolerance (a 12 s video carrying a 2 s audio
+    track is a truncated audio body, not media — audit round 30 P5;
+    a 1.8 s video carrying a 0.1 s audio track must ALSO fail — audit
+    round 33 P1, ``_allowed_stream_drift``).
 
     ``require_video`` / ``require_audio`` are chosen by the caller:
       * audio-only output → audio only;
       * video output from an audio-carrying source → both;
       * a genuinely video-only source → video only.
 
-    Error contract (audit round 32 P1): a codec-probe infrastructure
-    fault (ffprobe timeout / spawn failure) RAISES instead of returning
-    False — "validation unavailable" must never be mistaken for
-    "invalid media" (a transient ffprobe hiccup once made the fresh-
-    download gate delete a multi-GB completed download). Callers that
-    want the fail-safe re-encode fallback — the resume-reuse gates,
-    where an unverifiable part should simply be re-encoded, not abort
-    the whole run — pass ``fail_safe=True``: infrastructure faults then
-    return False instead of propagating. Decode cancellations / phase
-    timeouts and spawn faults out of ``_ffmpeg_full_decode`` always
-    propagate regardless of ``fail_safe``.
+    Error contract (audit rounds 32/33 P1): a METADATA-PROBE
+    infrastructure fault (ffprobe timeout / spawn failure) RAISES
+    instead of returning False — "validation unavailable" must never
+    be mistaken for "invalid media" (a transient ffprobe hiccup once
+    made the fresh-download gate delete a multi-GB completed
+    download). The ``fail_safe`` fallback covers BOTH metadata probes
+    uniformly — the codec probe AND the duration probe (round 32 only
+    covered the codec one, so a transient duration-probe fault still
+    fell into the fail-closed branch and deleted the download) — while
+    decode cancellations / phase timeouts and spawn faults out of
+    ``_ffmpeg_full_decode`` always propagate regardless of it.
     """
     if not require_video and not require_audio:
         return True
@@ -345,7 +449,9 @@ def _media_is_valid(
         if cancel_callback is not None and cancel_callback():
             raise CancelledError("media validation cancelled")
         try:
-            if not _ffprobe_is_valid_media(path, stream_type=stream_type):
+            if not _ffprobe_is_valid_media(
+                path, stream_type=stream_type, cancel_callback=cancel_callback
+            ):
                 return False
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             if not fail_safe:
@@ -362,22 +468,37 @@ def _media_is_valid(
             return False
         if cancel_callback is not None and cancel_callback():
             raise CancelledError("media validation cancelled")
+        try:
+            stream_dur = _ffprobe_stream_duration(
+                path, stream_type, cancel_callback=cancel_callback
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            if not fail_safe:
+                raise
+            return False
         if stream_type == "v":
-            video_dur = _ffprobe_stream_duration(path, "v")
+            video_dur = stream_dur
         else:
-            audio_dur = _ffprobe_stream_duration(path, "a")
+            audio_dur = stream_dur
     if require_video and require_audio:
         # FAIL-CLOSED: a required stream whose duration cannot be read
         # is NOT valid media (audit round 32 P1) — and a mismatch
-        # (>2 s) is a truncated secondary track (audit round 30 P5).
+        # beyond the bounded tolerance is a truncated secondary track
+        # (audit rounds 30 P5 / 33 P1).
         if video_dur is None or audio_dur is None:
             return False
-        if abs(video_dur - audio_dur) > 2.0:
+        if abs(video_dur - audio_dur) > _allowed_stream_drift(video_dur, audio_dur):
             return False
     return True
 
 
-def _ffprobe_duration_ok(path: Path, expected_seconds: float, *, slack: float = 1.0) -> bool:
+def _ffprobe_duration_ok(
+    path: Path,
+    expected_seconds: float,
+    *,
+    slack: float = 1.0,
+    cancel_callback: "Callable[[], bool] | None" = None,
+) -> bool:
     """Check that a resume part's ffprobe duration is close to the expected value.
 
     ffmpeg killed mid-write can leave a valid moov atom (the file passes
@@ -388,14 +509,18 @@ def _ffprobe_duration_ok(path: Path, expected_seconds: float, *, slack: float = 
     jitter and ffmpeg's own rounding without accepting truncated outputs.
 
     When ffprobe cannot determine the duration (corrupt file, timeout,
-    non-media data), returns ``False`` — fail-closed so a resume part
-    whose integrity cannot be verified is re-encoded instead of silently
-    accepted. The historical behaviour returned ``True`` (deferring to the
-    caller's codec check), which let a truncated-but-readable resume part
-    pass the integrity gate and inject a hole into the final output.
+    non-media data, transient spawn fault), returns ``False`` — fail-closed
+    so a resume part whose integrity cannot be verified is re-encoded
+    instead of silently accepted (audit round 32 P1-3: the historical
+    behaviour returned ``True``, which let a truncated-but-readable resume
+    part pass the integrity gate and inject a hole into the final output).
+
+    Cancel is the one exception that PROPAGATES rather than returning
+    False: a user cancel during resume must stop the whole run, not just
+    cause every remaining part to be re-encoded (audit round 33 P2).
     """
     try:
-        r = run_with_retry(
+        rc, stdout = _run_ffprobe(
             [
                 ffprobe_path(),
                 "-v",
@@ -406,17 +531,17 @@ def _ffprobe_duration_ok(path: Path, expected_seconds: float, *, slack: float = 
                 "default=noprint_wrappers=1:nokey=1",
                 str(path),
             ],
-            capture_output=True,
-            text=True,
-            timeout=_PROBE_TIMEOUT,
-            **no_window_kwargs(),
+            cancel_callback=cancel_callback,
         )
-        if r.returncode != 0:
-            return False  # duration unreadable — do not trust the part
-        duration_str = r.stdout.strip()
-        if not duration_str:
-            return False
-        actual = float(duration_str)
-    except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return False  # duration unreadable — do not trust the part
+    if rc != 0:
+        return False
+    duration_str = stdout.strip()
+    if not duration_str:
+        return False
+    try:
+        actual = float(duration_str)
+    except ValueError:
+        return False  # N/A or garbage — do not trust the part
     return abs(actual - expected_seconds) <= slack

@@ -154,7 +154,9 @@ def _run_batch_concat(
             if (
                 chunk_path.exists()
                 and chunk_path.stat().st_size >= options.min_part_bytes
-                and _c._ffprobe_duration_ok(chunk_path, sum(e - s for s, e in chunk))
+                and _c._ffprobe_duration_ok(
+                    chunk_path, sum(e - s for s, e in chunk), cancel_callback=cancel_callback
+                )
                 and _c._media_is_valid(
                     chunk_path,
                     require_video=True,

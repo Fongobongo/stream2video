@@ -170,7 +170,7 @@ def _run_cut_then_encode(
             if (
                 cut_path.exists()
                 and cut_path.stat().st_size >= options.min_part_bytes
-                and _c._ffprobe_duration_ok(cut_path, dur)
+                and _c._ffprobe_duration_ok(cut_path, dur, cancel_callback=cancel_callback)
                 and _c._media_is_valid(
                     cut_path,
                     require_video=True,
@@ -329,7 +329,9 @@ def _run_cut_then_encode(
         if not (
             raw_concat_path.exists()
             and raw_concat_path.stat().st_size >= options.min_part_bytes
-            and _c._ffprobe_duration_ok(raw_concat_path, total_duration)
+            and _c._ffprobe_duration_ok(
+                raw_concat_path, total_duration, cancel_callback=cancel_callback
+            )
             and _c._media_is_valid(
                 raw_concat_path,
                 require_video=True,

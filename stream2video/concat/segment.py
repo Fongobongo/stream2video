@@ -113,7 +113,7 @@ def _run_segment_concat(
             if (
                 seg_path.exists()
                 and seg_path.stat().st_size >= options.min_part_bytes
-                and _c._ffprobe_duration_ok(seg_path, dur)
+                and _c._ffprobe_duration_ok(seg_path, dur, cancel_callback=cancel_callback)
                 and _c._media_is_valid(
                     seg_path,
                     require_video=True,

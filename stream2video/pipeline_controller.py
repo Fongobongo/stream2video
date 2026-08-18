@@ -663,7 +663,9 @@ class PipelineController:
         )
 
         primary = "v" if require_video else "a"
-        return _ffprobe_media_complete(path, stream_type=primary) and _media_is_valid(
+        return _ffprobe_media_complete(
+            path, stream_type=primary, cancel_callback=lambda: self.cancel_event.is_set()
+        ) and _media_is_valid(
             path,
             require_video=require_video,
             require_audio=require_audio,
@@ -776,8 +778,9 @@ class PipelineController:
         output file is deleted; the work dirs survive the failure, and
         a stale or incompatible set is still rejected by the manifest
         machinery on the next attempt. Success deletes the whole staging
-        dir (``_finish``), and ``--force`` wipes the cache explicitly —
-        no extra cleanup policy needed.
+        dir (``_finish``). ``--force`` touches only the silence-detection
+        checkpoints (cache + .inuse); the concat work dirs are refreshed
+        exclusively via manifest mismatch — never by a flag.
         """
         if self._staging_dir is not None:
             staged_output = Path(self._output_path.name) if self._output_path is not None else None
