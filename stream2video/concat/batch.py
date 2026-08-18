@@ -138,41 +138,31 @@ def _run_batch_concat(
             chunk_path = batch_dir / f"chunk_{ci:04d}.mp4"
 
             # Resume: skip already encoded chunks. Require both a minimum
-            # size AND a successful ffprobe read so a crash artifact
-            # (missing moov atom) doesn't get reused and produce a
-            # corrupt chunk in the middle of the file. When the source
-            # has audio, probe the audio stream too — a chunk killed
-            # after the moov write but before the AAC body validates as
-            # video-but-not-audio and would inject a broken track into
-            # the final concat (mirrors the cut_encode.py audio check).
-            # FULL decode (audit round 29 P4): mid-body corruption
-            # passes every header-level probe; only a whole-stream
-            # decode reads every packet. Cancellable + segment-timeout
-            # bounded (audit round 30 P7); the AUDIO body is decoded
-            # too when the source has audio (audit round 30 P6).
+            # size AND a duration probe so a crash artifact (missing moov
+            # atom) doesn't get reused and produce a corrupt chunk in the
+            # middle of the file.
+            #
+            # Unified media gate (audit round 31 P1-4): ``_media_is_valid``
+            # checks the expected stream set — video always, and the
+            # AUDIO body too when the source has audio (a chunk killed
+            # after the moov write but before the AAC body injects a
+            # broken track into the final concat). Mid-body corruption
+            # passes every header-level probe; the whole-stream decode
+            # reads every packet. Cancellable + segment-timeout bounded
+            # (audit round 30 P7), honours the caller's resource policy
+            # (audit round 31 P1-3).
             if (
                 chunk_path.exists()
                 and chunk_path.stat().st_size >= options.min_part_bytes
-                and _c._ffprobe_is_valid_mp4(chunk_path)
-                and (
-                    not options.source_has_audio
-                    or _c._ffprobe_is_valid_media(chunk_path, stream_type="a")
-                )
                 and _c._ffprobe_duration_ok(chunk_path, sum(e - s for s, e in chunk))
-                and _c._ffmpeg_full_decode(
+                and _c._media_is_valid(
                     chunk_path,
-                    stream_type="v",
+                    require_video=True,
+                    require_audio=options.source_has_audio,
                     timeout=float(options.segment_encode_timeout),
                     cancel_callback=cancel_callback,
-                )
-                and (
-                    not options.source_has_audio
-                    or _c._ffmpeg_full_decode(
-                        chunk_path,
-                        stream_type="a",
-                        timeout=float(options.segment_encode_timeout),
-                        cancel_callback=cancel_callback,
-                    )
+                    low_process_priority=options.low_process_priority,
+                    rlimit_as_mb=options.rlimit_as_mb,
                 )
             ):
                 skipped += 1

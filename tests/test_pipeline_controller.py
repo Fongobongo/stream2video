@@ -1193,7 +1193,7 @@ class TestProjectLocks:
 
     def test_audio_output_validates_audio_stream(self, tmp_path: Path):
         """An audio-only source is a valid input for audio outputs —
-        the fresh-download probe must select the AUDIO stream when
+        the fresh-download probe must require the AUDIO stream when
         output_format is mp3/opus/aac/wav/flac (audit round 27 P6)."""
         import threading
 
@@ -1209,8 +1209,9 @@ class TestProjectLocks:
         fake_video.write_bytes(b"dummy")
         probed: dict = {}
 
-        def fake_probe(path, *, stream_type="v"):
-            probed["stream_type"] = stream_type
+        def fake_probe(path, *, require_video, require_audio):
+            probed["require_video"] = require_video
+            probed["require_audio"] = require_audio
             return False
 
         def fake_download(url, out_dir, **kwargs):
@@ -1222,7 +1223,8 @@ class TestProjectLocks:
             pytest.raises(PipelineDownloadError, match="failed media validation"),
         ):
             controller.run()
-        assert probed["stream_type"] == "a"
+        assert probed["require_audio"] is True
+        assert probed["require_video"] is False
 
     def test_video_output_validates_video_stream(self, tmp_path: Path):
         import threading
@@ -1237,8 +1239,9 @@ class TestProjectLocks:
         fake_video.write_bytes(b"dummy")
         probed: dict = {}
 
-        def fake_probe(path, *, stream_type="v"):
-            probed["stream_type"] = stream_type
+        def fake_probe(path, *, require_video, require_audio):
+            probed["require_video"] = require_video
+            probed["require_audio"] = require_audio
             return False
 
         def fake_download(url, out_dir, **kwargs):
@@ -1250,7 +1253,83 @@ class TestProjectLocks:
             pytest.raises(PipelineDownloadError, match="failed media validation"),
         ):
             controller.run()
-        assert probed["stream_type"] == "v"
+        assert probed["require_video"] is True
+
+    def test_fresh_download_truncated_audio_body_rejected(self, tmp_path: Path):
+        """Audit round 31 P1-4: a fresh video download with a healthy
+        video track but a truncated audio body (12 s video / 2 s audio)
+        must fail the fresh-download gate BEFORE the stable source is
+        replaced. The download phase now requires BOTH streams whenever
+        the source carries audio (``has_audio_stream``), and the unified
+        ``_media_is_valid`` gate rejects the video/audio duration
+        mismatch — so a corrupted audio body can never publish as the
+        source."""
+        import threading
+
+        from stream2video.download import DownloadResult
+        from stream2video.pipeline_controller import PipelineDownloadError
+
+        cfg = _valid_config(output_dir=tmp_path, input_raw="https://example.com/v")
+        cb, _ = _make_callbacks()
+        controller = PipelineController(cfg=cfg, cb=cb, cancel_event=threading.Event())
+        fake_video = tmp_path / "vid123-1755000000-a1b2c3d4.mp4"
+        fake_video.write_bytes(b"dummy")
+
+        def fake_download(url, out_dir, **kwargs):
+            return DownloadResult(path=fake_video, is_downloaded=True)
+
+        with (
+            patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+            # The source carries an audio track → the gate must check both.
+            patch("stream2video.pipeline_controller.has_audio_stream", return_value=True),
+            # Run the REAL validators; only the probe seams are mocked.
+            # Durations 12 s video / 2 s audio → unified gate rejects.
+            patch("stream2video.concat.probing._ffprobe_media_complete", return_value=True),
+            patch("stream2video.concat.probing._ffprobe_is_valid_media", return_value=True),
+            patch("stream2video.concat.probing._ffmpeg_full_decode", return_value=True),
+            patch(
+                "stream2video.concat.probing._ffprobe_stream_duration",
+                side_effect=lambda p, t: 12.0 if t == "v" else 2.0,
+            ),
+            pytest.raises(PipelineDownloadError, match="failed media validation"),
+        ):
+            controller.run()
+
+    def test_fresh_download_video_only_source_needs_no_audio(self, tmp_path: Path):
+        """A video-only source (``has_audio_stream`` False) is validated
+        on the video stream ALONE — the fresh-download gate must not
+        demand an audio track (audit round 31 P1-4 third bullet)."""
+        import threading
+
+        from stream2video.download import DownloadResult
+        from stream2video.pipeline_controller import PipelineDownloadError
+
+        cfg = _valid_config(output_dir=tmp_path, input_raw="https://example.com/v")
+        cb, _ = _make_callbacks()
+        controller = PipelineController(cfg=cfg, cb=cb, cancel_event=threading.Event())
+        fake_video = tmp_path / "vid123-1755000000-a1b2c3d4.mp4"
+        fake_video.write_bytes(b"dummy")
+        probed: dict = {}
+
+        def record(path, *, require_video, require_audio):
+            probed["require_video"] = require_video
+            probed["require_audio"] = require_audio
+            return False  # reject so we can assert the flags without a full run
+
+        def fake_download(url, out_dir, **kwargs):
+            return DownloadResult(path=fake_video, is_downloaded=True)
+
+        with (
+            patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+            patch("stream2video.pipeline_controller.has_audio_stream", return_value=False),
+            patch.object(PipelineController, "_downloaded_media_is_valid", side_effect=record),
+            pytest.raises(PipelineDownloadError, match="failed media validation"),
+        ):
+            controller.run()
+        assert probed["require_video"] is True
+        assert probed["require_audio"] is False, (
+            "a video-only source must not require an audio track"
+        )
 
     def test_legacy_project_dir_offered_opt_in_rename(self, tmp_path: Path):
         """A legacy pre-namespace project dir (``<id>/``) is detected,
@@ -1581,7 +1660,7 @@ class TestOutputAtomicPublish:
         controller, _ = self._controller(tmp_path)
         path = Path("out.mp4")
 
-        def ok_probe(p, *, stream_type="v", timeout=43200, cancel_callback=None):
+        def ok_probe(p, stream_type="v", **kw):
             return True
 
         with (
@@ -1614,7 +1693,7 @@ class TestOutputAtomicPublish:
             # Video-only source → audio not required.
             decoded: dict = {}
 
-            def rec(p, *, stream_type="v", timeout=43200, cancel_callback=None):
+            def rec(p, stream_type="v", **kw):
                 decoded.setdefault(stream_type, 0)
                 decoded[stream_type] += 1
                 return True

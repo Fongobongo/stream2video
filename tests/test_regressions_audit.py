@@ -159,9 +159,9 @@ class TestSegmentResumeDuration:
         with (
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_encode),
             patch("stream2video.concat._run_final_concat"),
-            patch("stream2video.concat._ffprobe_is_valid_mp4", return_value=True),
-            patch("stream2video.concat._ffprobe_is_valid_media", return_value=True),
-            # Duration probe says "wrong length" → must NOT reuse.
+            # Unified media gate accepts the part; the DURATION gate
+            # says "wrong length" → must NOT reuse.
+            patch("stream2video.concat._media_is_valid", return_value=True),
             patch("stream2video.concat._ffprobe_duration_ok", return_value=False),
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
@@ -179,10 +179,9 @@ class TestSegmentResumeDuration:
         assert len(cut_calls) == 1, "wrong-duration segment was reused, not re-encoded"
 
     def test_decode_failure_part_is_reencoded(self, tmp_path: Path):
-        """A part that passes EVERY header-level check (codec, audio,
-        duration) but fails the whole-stream decode has a corrupt
-        middle (audit round 29 P4) — it must be re-encoded, not
-        declared 'ready'."""
+        """A part that passes the duration check but fails the unified
+        media gate has a corrupt middle (audit round 29 P4) — it must
+        be re-encoded, not declared 'ready'."""
         video = tmp_path / "src.mp4"
         video.write_bytes(b"source")
         output = tmp_path / "out.mp4"
@@ -201,10 +200,10 @@ class TestSegmentResumeDuration:
         with (
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_encode),
             patch("stream2video.concat._run_final_concat"),
-            patch("stream2video.concat._ffprobe_is_valid_mp4", return_value=True),
-            patch("stream2video.concat._ffprobe_is_valid_media", return_value=True),
             patch("stream2video.concat._ffprobe_duration_ok", return_value=True),
-            patch("stream2video.concat._ffmpeg_full_decode", return_value=False),
+            # Unified gate (codec probe + whole-stream decode, audit
+            # round 31 P1-4) rejects the part → re-encode.
+            patch("stream2video.concat._media_is_valid", return_value=False),
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
             _run_segment_concat(
@@ -221,9 +220,11 @@ class TestSegmentResumeDuration:
         assert len(cut_calls) == 1, "decode-failing part was reused, not re-encoded"
 
     def test_resume_decode_checks_audio_stream_too(self, tmp_path: Path):
-        """When the source has audio, a resumed part must decode BOTH
-        streams (audit round 30 P6): a video-valid part can still carry
-        a truncated audio body, and a video-only decode would pass it."""
+        """When the source has audio, a resumed part must be validated
+        with BOTH streams (audit round 30 P6, unified gate round 31
+        P1-4): a video-valid part can still carry a truncated audio
+        body, and a video-only check would pass it. The assertion is
+        the require flags handed to the unified gate."""
         video = tmp_path / "src.mp4"
         video.write_bytes(b"source")
         output = tmp_path / "out.mp4"
@@ -235,22 +236,20 @@ class TestSegmentResumeDuration:
         from stream2video.concat import _run_segment_concat
 
         cut_calls: list[list[str]] = []
-        decoded_streams: list[str] = []
+        gates: list[dict] = []
 
         def fake_encode(cmd, **kw):
             cut_calls.append(list(cmd))
 
-        def fake_decode(path, *, stream_type="v", timeout=43200, cancel_callback=None):
-            decoded_streams.append(stream_type)
+        def fake_gate(path, **kw):
+            gates.append(kw)
             return True
 
         with (
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_encode),
             patch("stream2video.concat._run_final_concat"),
-            patch("stream2video.concat._ffprobe_is_valid_mp4", return_value=True),
-            patch("stream2video.concat._ffprobe_is_valid_media", return_value=True),
             patch("stream2video.concat._ffprobe_duration_ok", return_value=True),
-            patch("stream2video.concat._ffmpeg_full_decode", side_effect=fake_decode),
+            patch("stream2video.concat._media_is_valid", side_effect=fake_gate),
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
             _run_segment_concat(
@@ -265,7 +264,11 @@ class TestSegmentResumeDuration:
                 source_has_audio=True,
             )
         assert cut_calls == [], "fully valid part must be reused"
-        assert decoded_streams == ["v", "a"], "a source-with-audio part must decode both streams"
+        assert len(gates) == 1
+        assert gates[0]["require_video"] is True
+        assert gates[0]["require_audio"] is True, (
+            "a source-with-audio part must be validated on BOTH streams"
+        )
 
 
 # ── #5 ── cut_encode resume: truncated part is re-cut, not reused ──────
@@ -288,9 +291,9 @@ class TestCutEncodeResumeDuration:
         with (
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_cut),
             patch("stream2video.concat._run_final_concat"),
-            patch("stream2video.concat._ffprobe_is_valid_mp4", return_value=True),
-            patch("stream2video.concat._ffprobe_is_valid_media", return_value=True),
-            # Duration probe says "wrong length" → must NOT reuse.
+            # Unified gate accepts, but the duration probe says
+            # "wrong length" → must NOT reuse.
+            patch("stream2video.concat._media_is_valid", return_value=True),
             patch("stream2video.concat._ffprobe_duration_ok", return_value=False),
             patch("stream2video.concat._run_subprocess_cmd"),
             patch("stream2video.concat._ensure_fresh_work_dir"),

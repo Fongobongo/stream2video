@@ -55,7 +55,10 @@ def _run_and_capture(
     with (
         patch("stream2video.concat._run_subprocess_cmd"),
         patch("stream2video.concat._run_final_concat"),
-        patch("stream2video.concat._ffprobe_is_valid_mp4", return_value=True),
+        # The unified resume gate rejects every part → each keep
+        # segment runs through the cut encode under test.
+        patch("stream2video.concat._media_is_valid", return_value=False),
+        patch("stream2video.concat._ffprobe_duration_ok", return_value=True),
         patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
         patch("stream2video.concat._ensure_fresh_work_dir"),
     ):

@@ -99,7 +99,7 @@ from stream2video.concat.probing import (
     _ffmpeg_full_decode,
     _ffprobe_duration_ok,
     _ffprobe_is_valid_media,
-    _ffprobe_is_valid_mp4,
+    _media_is_valid,
 )
 from stream2video.concat.runner import (
     _run_ffmpeg,
@@ -198,12 +198,12 @@ __all__ = [
     "_ffmpeg_full_decode",
     "_ffprobe_duration_ok",
     "_ffprobe_is_valid_media",
-    "_ffprobe_is_valid_mp4",
     "_fps_filter_chain",
     "_fps_vf_option",
     "_load_manifest",
     "_make_memory_monitor_factory",
     "_manifest_path",
+    "_media_is_valid",
     "_memory_budget_mb",
     "_new_memory_monitor",
     "_quote_concat_path",

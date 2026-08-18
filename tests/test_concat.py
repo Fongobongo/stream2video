@@ -282,70 +282,14 @@ class TestFfprobeDurationOkFailClosed:
         assert self._probe(tmp_path, result) is False
 
 
-class TestFfmpegDecodeProbe:
-    """The publish-gate decode probe must fail CLOSED on truncation.
-
-    A truncated payload does not always fail the ffmpeg process: with
-    a moov-at-start file it warns ``partial file`` on stderr and still
-    exits 0 (observed live, audit round 28 P1). The probe treats every
-    truncation marker on stderr as a failed decode — a healthy file
-    decodes with a clean stderr under ``-v error``."""
-
-    def _probe(self, result, *, raise_exc=None):
-        from stream2video.concat.probing import _ffmpeg_decode_probe
-
-        exc = raise_exc
-
-        def _run(cmd, **kwargs):
-            if exc is not None:
-                raise exc("ffmpeg", 60)
-            return result
-
-        with (
-            patch("stream2video.concat.probing.ffmpeg_path", return_value="ffmpeg"),
-            patch("stream2video.concat.probing.run_with_retry", side_effect=_run),
-        ):
-            return _ffmpeg_decode_probe(Path("part.mp4"), 5.0, "v")
-
-    def test_clean_decode_accepted(self):
-        from subprocess import CompletedProcess
-
-        result = CompletedProcess(args=[], returncode=0, stdout="", stderr="")
-        assert self._probe(result) is True
-
-    def test_rc_nonzero_rejected(self):
-        from subprocess import CompletedProcess
-
-        result = CompletedProcess(args=[], returncode=1, stdout="", stderr="")
-        assert self._probe(result) is False
-
-    def test_partial_file_marker_rejected(self):
-        from subprocess import CompletedProcess
-
-        result = CompletedProcess(
-            args=[], returncode=0, stdout="", stderr="stream 0, offset 0x24a7: partial file"
-        )
-        assert self._probe(result) is False
-
-    def test_packet_corrupt_marker_rejected(self):
-        from subprocess import CompletedProcess
-
-        result = CompletedProcess(args=[], returncode=0, stdout="", stderr="[mov] packet corrupt")
-        assert self._probe(result) is False
-
-    def test_spawn_fault_propagates(self):
-        import pytest
-
-        with pytest.raises(FileNotFoundError):
-            self._probe(None, raise_exc=FileNotFoundError)
-
-
 class TestFfmpegFullDecode:
-    """The whole-stream decode gate (audit round 29 P3/P4 / 30 P7/P8)
-    — the only check that reads every packet, used by the fresh-download
-    publish, every resume-reuse decision and the final-output
-    validation. Runs through a cancellable Popen with a ring-bounded
-    stderr drain, ``-xerror``, and a caller-supplied timeout."""
+    """The whole-stream decode gate (audit round 29 P3/P4 / 30 P7/P8 /
+    31 P1) — the only check that reads every packet, used by the
+    fresh-download publish, every resume-reuse decision and the
+    final-output validation. Runs through a cancellable Popen with a
+    ring-bounded stderr drain, ``-xerror``, and a caller-supplied
+    timeout — and tears the child down (kill + bounded reap + pipe
+    close + drain join) on EVERY exit path."""
 
     class _FakeProc:
         def __init__(self, rc: int, stderr_text: str, waits_before_exit: int = 0):
@@ -353,24 +297,25 @@ class TestFfmpegFullDecode:
 
             self.returncode: int | None = None
             self._rc = rc
-            self._stderr_text = stderr_text
             self._waits = waits_before_exit
             self._killed = False
-            if stderr_text:
-                self.stderr = io.StringIO(stderr_text)
-            else:
-                self.stderr = io.StringIO()
+            self.stderr = io.StringIO(stderr_text)
+
+        def poll(self):
+            return self.returncode
 
         def wait(self, timeout=None):
             if self._waits > 0:
                 self._waits -= 1
                 raise TimeoutExpired("ffmpeg", timeout or 0)
-            self.returncode = self._rc
-            return self._rc
+            if self.returncode is None:
+                self.returncode = self._rc
+            return self.returncode
 
         def kill(self):
             self._killed = True
-            self.returncode = 1
+            if self.returncode is None:
+                self.returncode = 1
 
     def _probe(self, proc, *, cancel_callback=None, timeout=60.0):
         from stream2video.concat.probing import _ffmpeg_full_decode
@@ -402,6 +347,7 @@ class TestFfmpegFullDecode:
         with pytest.raises(CancelledError):
             self._probe(proc, cancel_callback=lambda: True)
         assert proc._killed, "cancel must kill ffmpeg instead of waiting"
+        assert proc.poll() is not None, "the killed child must be reaped before propagating"
 
     def test_timeout_kills_decode(self):
         from subprocess import TimeoutExpired
@@ -418,6 +364,82 @@ class TestFfmpegFullDecode:
         with pytest.raises(TimeoutExpired):
             self._probe(proc, timeout=0.01)
         assert proc._killed
+        assert proc.poll() is not None, "the timed-out child must be reaped before propagating"
+
+    def test_cancel_callback_exception_still_kills_child(self):
+        """Audit round 31 P1-2: if the cancel CALLBACK itself raises,
+        the unconditional finally must still kill + reap the child —
+        the pipeline errors out, but no ffmpeg survives the failure."""
+        import pytest
+
+        from stream2video.concat import probing
+
+        proc = self._FakeProc(0, "", waits_before_exit=1000)
+
+        def boom():
+            raise RuntimeError("callback exploded")
+
+        with (
+            patch("stream2video.concat.probing.ffmpeg_path", return_value="ffmpeg"),
+            patch("stream2video.concat.probing.popen_with_retry", return_value=proc),
+            pytest.raises(RuntimeError, match="callback exploded"),
+        ):
+            probing._ffmpeg_full_decode(Path("part.mp4"), "v", timeout=60, cancel_callback=boom)
+        assert proc._killed, "a raising callback must not leave the child running"
+        assert proc.poll() is not None
+        assert proc.stderr.closed, "the stderr pipe must be closed on every exit path"
+
+    def test_resource_policy_is_passed_to_spawn(self):
+        """Audit round 31 P1-3: the validation decode must honour the
+        caller's low_process_priority / rlimit_as_mb — the main encode
+        respects them, so the decode before/after it must not run with
+        a different resource contract."""
+        import stream2video.utils as utils
+        from stream2video.concat import probing
+
+        proc = self._FakeProc(0, "")
+        seen: list[tuple[bool, int]] = []
+
+        def spy(low_priority=False, rlimit_as_mb=0):
+            seen.append((low_priority, rlimit_as_mb))
+            return utils.no_window_kwargs()
+
+        with (
+            patch("stream2video.concat.probing.ffmpeg_path", return_value="ffmpeg"),
+            patch("stream2video.concat.probing.popen_with_retry", return_value=proc),
+            patch("stream2video.concat.probing.subprocess_kwargs", side_effect=spy),
+        ):
+            probing._ffmpeg_full_decode(
+                Path("part.mp4"),
+                "v",
+                low_process_priority=True,
+                rlimit_as_mb=1024,
+            )
+        assert seen == [(True, 1024)]
+
+    def test_process_is_registered_and_unregistered(self):
+        """Audit round 31 P1-3: the decode child joins the shared
+        process registry (so the shutdown kill covers it) and leaves it
+        on every exit path."""
+        from stream2video import utils
+        from stream2video.concat import probing
+
+        proc = self._FakeProc(0, "")
+        registered_during: list[bool] = []
+
+        def wait_then_record(timeout=None):
+            registered_during.append(proc in utils._proc_registry.get("default", []))
+            proc.returncode = 0
+            return 0
+
+        proc.wait = wait_then_record
+        with (
+            patch("stream2video.concat.probing.ffmpeg_path", return_value="ffmpeg"),
+            patch("stream2video.concat.probing.popen_with_retry", return_value=proc),
+        ):
+            probing._ffmpeg_full_decode(Path("part.mp4"), "v")
+        assert registered_during == [True], "the child must be registered while running"
+        assert proc not in utils._proc_registry.get("default", [])
 
     def test_spawn_fault_propagates(self):
         import pytest
@@ -433,6 +455,88 @@ class TestFfmpegFullDecode:
             from stream2video.concat.probing import _ffmpeg_full_decode
 
             _ffmpeg_full_decode(Path("part.mp4"), "v")
+
+
+class TestMediaIsValid:
+    """The unified stream-set gate (audit round 31 P1-4) shared by the
+    fresh-download publish, the final staged output and every resume
+    part: per required stream a codec probe + full decode, and a v/a
+    duration comparison when both are required."""
+
+    def _call(self, *, require_video, require_audio, codec=True, decode=True, durations=(5.0, 5.0)):
+        from stream2video.concat import probing
+
+        def fake_decode(path, stream_type="v", **kw):
+            return decode
+
+        def fake_dur(path, t):
+            return durations[0] if t == "v" else durations[1]
+
+        with (
+            patch("stream2video.concat.probing._ffprobe_is_valid_media", return_value=codec),
+            patch("stream2video.concat.probing._ffmpeg_full_decode", side_effect=fake_decode),
+            patch("stream2video.concat.probing._ffprobe_stream_duration", side_effect=fake_dur),
+        ):
+            return probing._media_is_valid(
+                Path("out.mp4"),
+                require_video=require_video,
+                require_audio=require_audio,
+            )
+
+    def test_video_only_source_passes_without_audio(self):
+        """require_audio=False must never probe the audio stream."""
+        from stream2video.concat import probing
+
+        probed: list[str] = []
+
+        def record(path, stream_type="v"):
+            probed.append(stream_type)
+            return True
+
+        with (
+            patch("stream2video.concat.probing._ffprobe_is_valid_media", side_effect=record),
+            patch("stream2video.concat.probing._ffmpeg_full_decode", return_value=True),
+            patch("stream2video.concat.probing._ffprobe_stream_duration", return_value=5.0),
+        ):
+            assert (
+                probing._media_is_valid(Path("x.mp4"), require_video=True, require_audio=False)
+                is True
+            )
+        assert "a" not in probed, "video-only validation must not touch the audio stream"
+
+    def test_audio_only_output_requires_only_audio(self):
+        from stream2video.concat import probing
+
+        probed: list[str] = []
+
+        def record(path, stream_type="v"):
+            probed.append(stream_type)
+            return True
+
+        with (
+            patch("stream2video.concat.probing._ffprobe_is_valid_media", side_effect=record),
+            patch("stream2video.concat.probing._ffmpeg_full_decode", return_value=True),
+            patch("stream2video.concat.probing._ffprobe_stream_duration", return_value=5.0),
+        ):
+            assert (
+                probing._media_is_valid(Path("x.mp4"), require_video=False, require_audio=True)
+                is True
+            )
+        assert "v" not in probed
+
+    def test_truncated_audio_body_rejected(self):
+        """12 s video + 2 s audio (audit counterexample): both streams
+        exist and decode, but the duration mismatch must fail the gate."""
+        assert self._call(require_video=True, require_audio=True, durations=(12.0, 2.0)) is False
+
+    def test_matching_durations_pass(self):
+        assert self._call(require_video=True, require_audio=True, durations=(12.0, 11.8)) is True
+
+    def test_codec_probe_failure_rejects(self):
+        assert self._call(require_video=True, require_audio=False, codec=False) is False
+
+    def test_decode_failure_rejects(self):
+        assert self._call(require_video=True, require_audio=False, decode=False) is False
 
 
 class TestMakePhaseProgress:

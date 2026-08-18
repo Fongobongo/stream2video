@@ -614,7 +614,9 @@ class PipelineController:
         """
         return float("inf")
 
-    def _downloaded_media_is_valid(self, path: Path, *, stream_type: str = "v") -> bool:
+    def _downloaded_media_is_valid(
+        self, path: Path, *, require_video: bool, require_audio: bool
+    ) -> bool:
         """Strict integrity check for a FRESH download.
 
         yt-dlp's rc=0 + a non-zero file size do not prove the file
@@ -624,37 +626,51 @@ class PipelineController:
         good copy with garbage (audit round 26 P4 / 27 P2 / 28 P1 /
         29 P3). Gates before publish:
 
-          1. ffprobe: a readable codec name for the required stream
-             (``stream_type``: audio outputs validate the audio
-             stream, video outputs the video stream — audit round
-             27 P6);
-          2. a finite, non-zero container duration;
-          3. a FULL decode of the whole stream into the null sink.
-             Head+tail one-second probes were replaced (audit round
-             29 P3): zeroing 256 bytes in the MIDDLE of an MP4 leaves
-             the header, head probe and tail probe all clean, and
-             only a whole-stream decode reads every packet. The cost
-             is bounded — the pipeline fully decodes the file during
-             silence detection anyway.
+          1. ``_ffprobe_media_complete`` for the primary required
+             stream: a readable codec name AND a finite, non-zero
+             container duration;
+          2. the unified ``_media_is_valid`` gate (audit round 31
+             P1-4) for the EXPECTED stream set: per required stream a
+             codec probe + a FULL decode into the null sink, and —
+             when both streams are required — a stream-level
+             video-vs-audio duration match. Head+tail one-second
+             probes were replaced (audit round 29 P3): zeroing 256
+             bytes in the MIDDLE of an MP4 leaves the header, head
+             probe and tail probe all clean, and only a whole-stream
+             decode reads every packet. The cost is bounded — the
+             pipeline fully decodes the file during silence detection
+             anyway.
+
+        The expected stream set follows ``output_format`` and the
+        SOURCE itself (audit round 31 P1-4): audio outputs require
+        the audio stream; video outputs require the video stream and,
+        when the source carries audio, the audio body too — a healthy
+        video track with a truncated audio track would otherwise
+        publish as the stable source and fail later in silence
+        detection / concat.
 
         Exceptions are NOT converted to False: a transient ffprobe/
         ffmpeg spawn fault (WinGet shim / AV filter) means "validation
         unavailable", not "media invalid" — the caller must keep the
         file and report a retryable error instead of deleting a
         multi-GB good download (audit round 27 P1). The decode is
-        cancellable and bounded by the caller's phase timeout (audit
-        round 30 P7).
+        cancellable, bounded by ``download_timeout`` and honours the
+        caller's resource policy (audit round 30 P7 / 31 P1-3).
         """
         from stream2video.concat.probing import (
-            _ffmpeg_full_decode,
             _ffprobe_media_complete,
+            _media_is_valid,
         )
 
-        return _ffprobe_media_complete(path, stream_type=stream_type) and _ffmpeg_full_decode(
+        primary = "v" if require_video else "a"
+        return _ffprobe_media_complete(path, stream_type=primary) and _media_is_valid(
             path,
-            stream_type=stream_type,
+            require_video=require_video,
+            require_audio=require_audio,
             timeout=self.cfg.download_timeout,
             cancel_callback=lambda: self.cancel_event.is_set(),
+            low_process_priority=self.cfg.low_process_priority,
+            rlimit_as_mb=self.cfg.rlimit_as_mb,
         )
 
     def _output_media_is_valid(
@@ -671,52 +687,34 @@ class PipelineController:
         ``_finish`` used to bless any non-empty file (audit round
         29 P0-2): a corrupt container, a header-only file or a wrong
         stream set was declared success — and with ``delete_after``
-        the source was then deleted. Now the staged output must have
-        the required stream and fully decode into the null sink:
+        the source was then deleted. Now the staged output must
+        decode into the null sink through the shared
+        ``_media_is_valid`` gate (audit round 31 P1-4):
 
-          * video output → the video stream must be present and fully
-            decodable; when the SOURCE had audio (``expect_audio``),
-            the audio track must also be present, fully decodable and
-            its duration reasonably close to the video's (audit round
-            30 P5 — a 12 s video carrying a 2 s audio track passes a
+          * video output → ``require_video=True``; when the SOURCE
+            had audio (``expect_audio``), audio is required too, and
+            the two stream durations must agree (audit round 30 P5 —
+            a 12 s video carrying a 2 s audio track passes a
             video-only probe);
-          * audio output → the audio stream must be fully decodable.
+          * audio output → ``require_audio=True``.
 
         The decode is cancellable and bounded by the caller's phase
-        timeout (audit round 30 P7); exceptions (spawn fault, timeout,
-        cancel) propagate — the caller restores/keeps the previous
+        timeout (audit round 30 P7) and honours the caller's resource
+        policy (audit round 31 P1-3); exceptions (spawn fault,
+        timeout, cancel) propagate — the caller keeps the previous
         result instead of accepting an unverified file.
         """
-        from stream2video.concat.probing import (
-            _ffmpeg_full_decode,
-            _ffprobe_is_valid_media,
-            _ffprobe_stream_duration,
-        )
+        from stream2video.concat.probing import _media_is_valid
 
-        if not _ffprobe_is_valid_media(path, stream_type=stream_type):
-            return False
-        if not _ffmpeg_full_decode(
+        return _media_is_valid(
             path,
-            stream_type=stream_type,
+            require_video=stream_type == "v",
+            require_audio=(stream_type == "a") or expect_audio,
             timeout=timeout,
             cancel_callback=cancel_callback,
-        ):
-            return False
-        if expect_audio:
-            if not _ffprobe_is_valid_media(path, stream_type="a"):
-                return False
-            if not _ffmpeg_full_decode(
-                path,
-                stream_type="a",
-                timeout=timeout,
-                cancel_callback=cancel_callback,
-            ):
-                return False
-            video_dur = _ffprobe_stream_duration(path, "v")
-            audio_dur = _ffprobe_stream_duration(path, "a")
-            if video_dur is not None and audio_dur is not None and abs(video_dur - audio_dur) > 2.0:
-                return False
-        return True
+            low_process_priority=self.cfg.low_process_priority,
+            rlimit_as_mb=self.cfg.rlimit_as_mb,
+        )
 
     def _set_phase_progress(self, fraction: float) -> None:
         """Dispatch the per-phase bar update (no-op when the callback
@@ -1112,11 +1110,30 @@ class PipelineController:
             # (audit round 27 P1): the file is kept (was-real stays
             # True — the cleanup announces and preserves it) and the
             # error message says retry.
+            #
+            # Expected stream set (audit round 31 P1-4): audio outputs
+            # require the AUDIO stream; video outputs require the video
+            # stream and — when the source carries audio — the AUDIO
+            # body too. A healthy video track with a truncated audio
+            # track would otherwise publish as the stable source and
+            # only fail later in silence detection / concat.
             from stream2video.config import OUTPUT_FORMAT_SPECS
 
-            stream_type = "a" if self.cfg.output_format in OUTPUT_FORMAT_SPECS else "v"
+            if self.cfg.output_format in OUTPUT_FORMAT_SPECS:
+                require_video, require_audio = False, True
+            else:
+                require_video = True
+                try:
+                    require_audio = has_audio_stream(video_path)
+                except Exception:
+                    logger.debug("has_audio_stream failed", exc_info=True)
+                    require_audio = False
             try:
-                media_ok = self._downloaded_media_is_valid(video_path, stream_type=stream_type)
+                media_ok = self._downloaded_media_is_valid(
+                    video_path,
+                    require_video=require_video,
+                    require_audio=require_audio,
+                )
             except Exception as e:
                 raise PipelineDownloadError(
                     f"Download completed but media validation could not run "
@@ -1468,12 +1485,16 @@ class PipelineController:
             acquire_output_lock(output_path, cancel_callback=lambda: self.cancel_event.is_set())
         )
 
-        # Staged publish (audit round 30 P0): the concat writes into a
-        # STAGING directory, not into the stable ``*_compressed.*``
-        # path. The previous good output stays intact and visible for
-        # the whole run — no backup/restore protocol, no partial file
-        # under the user's filename, no stale-backup rollback on the
-        # next run. The staging dir name is STABLE per output (not
+        # Staged publish (audit round 30 P0, audit round 31 detail
+        # check): the concat writes into a STAGING directory, not into
+        # the stable ``*_compressed.*`` path. The staging dir lives
+        # INSIDE ``output_path.parent`` — the same filesystem, so the
+        # final ``os.replace`` is a single atomic rename (a staging dir
+        # elsewhere would downgrade it to copy+unlink and break
+        # atomicity). The previous good output stays intact and visible
+        # for the whole run — no backup/restore protocol, no partial
+        # file under the user's filename, no stale-backup rollback on
+        # the next run. The staging dir name is STABLE per output (not
         # per-run) so the resume work dirs and manifests inside it
         # survive across reruns; after validation the finished file is
         # published with one ``os.replace``. On failure the staging dir

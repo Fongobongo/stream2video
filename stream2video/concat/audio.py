@@ -197,22 +197,27 @@ def _run_audio_extract(
 
             # Resume: skip already encoded segments. Same dual check as
             # _run_segment_concat: minimum size + ffprobe validity.
-            # Audio segments use stream_type="a" — a video-stream probe
+            # Audio segments use the audio stream — a video-stream probe
             # would reject any valid mp3/opus/aac/wav/flac chunk because
             # it has no video stream, defeating resume (P0 audit v0.3).
-            # FULL decode (audit round 29 P4): header-level checks
-            # cannot see mid-body corruption. Cancellable +
-            # segment-timeout bounded (audit round 30 P7).
+            # Unified ``_media_is_valid`` gate (audit round 31 P1-4):
+            # the audio stream must exist and FULLY decode —
+            # header-level checks cannot see mid-body corruption.
+            # Cancellable + segment-timeout bounded (audit round 30
+            # P7), honours the caller's resource policy (audit round
+            # 31 P1-3).
             if (
                 seg_path.exists()
                 and seg_path.stat().st_size >= options.min_part_bytes
-                and _c._ffprobe_is_valid_media(seg_path, stream_type="a")
                 and _c._ffprobe_duration_ok(seg_path, dur)
-                and _c._ffmpeg_full_decode(
+                and _c._media_is_valid(
                     seg_path,
-                    stream_type="a",
+                    require_video=False,
+                    require_audio=True,
                     timeout=float(options.segment_encode_timeout),
                     cancel_callback=cancel_callback,
+                    low_process_priority=options.low_process_priority,
+                    rlimit_as_mb=options.rlimit_as_mb,
                 )
             ):
                 skipped += 1

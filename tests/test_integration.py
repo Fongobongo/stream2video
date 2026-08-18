@@ -14,7 +14,6 @@ from stream2video.concat import (
     ConcatError,
     _build_manifest,
     _ffprobe_is_valid_media,
-    _ffprobe_is_valid_mp4,
     _manifest_path,
     _run_ffmpeg,
     _source_identity,
@@ -1105,8 +1104,12 @@ class TestSourceIdentity:
         assert ident_a != ident_b
 
 
-class TestFfprobeIsValidMp4:
-    """_ffprobe_is_valid_mp4 — corrupt/missing-moov detection.
+class TestFfprobeIsValidMediaVideoCorruptMoov:
+    """_ffprobe_is_valid_media(path, stream_type="v") — corrupt/missing-moov detection.
+
+    (The old ``_ffprobe_is_valid_mp4`` alias — a thin wrapper around
+    ``_ffprobe_is_valid_media(..., "v")`` — was removed in audit round
+    31 P2; the probe it exercised remains the resume-skip codec gate.)
 
     Skipped when ffprobe isn't on PATH so the suite still runs in
     environments without ffmpeg installed.
@@ -1119,7 +1122,7 @@ class TestFfprobeIsValidMp4:
 
     def test_missing_file_is_invalid(self, tmp_path: Path):
         # Non-existent path → False (ffprobe can't open it).
-        assert _ffprobe_is_valid_mp4(tmp_path / "does_not_exist.mp4") is False
+        assert _ffprobe_is_valid_media(tmp_path / "does_not_exist.mp4", stream_type="v") is False
 
     def test_truncated_file_is_invalid(self, tmp_path: Path):
         # A few random bytes are not a valid MP4 — ffprobe fails to
@@ -1130,7 +1133,7 @@ class TestFfprobeIsValidMp4:
             pytest.skip("ffprobe not available")
         corrupt = tmp_path / "truncated.mp4"
         corrupt.write_bytes(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00")
-        assert _ffprobe_is_valid_mp4(corrupt) is False
+        assert _ffprobe_is_valid_media(corrupt, stream_type="v") is False
 
     def test_random_bytes_is_invalid(self, tmp_path: Path):
         # Pure noise — no MP4 structure at all.
@@ -1138,7 +1141,7 @@ class TestFfprobeIsValidMp4:
             pytest.skip("ffprobe not available")
         corrupt = tmp_path / "noise.mp4"
         corrupt.write_bytes(b"this is definitely not an mp4 file")
-        assert _ffprobe_is_valid_mp4(corrupt) is False
+        assert _ffprobe_is_valid_media(corrupt, stream_type="v") is False
 
 
 class TestFfprobeIsValidMedia:
@@ -1283,31 +1286,20 @@ class TestSegmentResumeSkipCrashArtifact:
             # First segment is corrupt (crash artifact), second is valid.
             return Path(path).name != "seg_000000.mp4"
 
-        # The resume check now also probes the audio stream for sources
-        # with audio (mirrors cut_encode.py). Return True so the extra
-        # probe doesn't re-encode "valid" segments; the test's intent is
-        # to exercise the video-stream gate, not ffmpeg detail probing.
-        def fake_ffprobe_any_stream(path, stream_type="v"):
+        # The resume integrity gate is the unified ``_media_is_valid``
+        # (audit round 31 P1-4) resolved through the concat facade, so
+        # patch it there: mirror the per-segment verdict so the corrupt
+        # part is rejected by the gate and re-encoded.
+        def fake_media_is_valid(path, **kw):
             return fake_ffprobe(path)
 
         with (
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
-            patch("stream2video.concat._ffprobe_is_valid_mp4", side_effect=fake_ffprobe),
-            patch(
-                "stream2video.concat._ffprobe_is_valid_media",
-                side_effect=fake_ffprobe_any_stream,
-            ),
+            patch("stream2video.concat._media_is_valid", side_effect=fake_media_is_valid),
             # Duration gate is patched out — this test exercises the
-            # codec gate; the fail-closed duration gate (unreadable
+            # media gate; the fail-closed duration gate (unreadable
             # duration → re-encode) is covered by its own tests.
             patch("stream2video.concat._ffprobe_duration_ok", return_value=True),
-            # The full-decode reuse gate (audit round 29 P4) needs real
-            # media; this test runs without ffmpeg, so the decode seam
-            # mirrors the codec-gate verdict.
-            patch(
-                "stream2video.concat._ffmpeg_full_decode",
-                side_effect=lambda path, **kw: fake_ffprobe(path),
-            ),
             patch("stream2video.concat._run_final_concat"),
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
@@ -1357,17 +1349,13 @@ class TestSegmentResumeSkipCrashArtifact:
 
         with (
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
-            patch("stream2video.concat._ffprobe_is_valid_mp4", return_value=True),
-            # Resume check also probes the audio stream — stub it so
-            # valid-video segments still count as fully valid.
-            patch("stream2video.concat._ffprobe_is_valid_media", return_value=True),
+            # The unified resume gate (audit round 31 P1-4) accepts
+            # every part here.
+            patch("stream2video.concat._media_is_valid", return_value=True),
             # Duration gate is patched out — this test exercises the
-            # codec gate; the fail-closed duration gate (unreadable
+            # media gate; the fail-closed duration gate (unreadable
             # duration → re-encode) is covered by its own tests.
             patch("stream2video.concat._ffprobe_duration_ok", return_value=True),
-            # Full-decode reuse gate (audit round 29 P4): no real
-            # ffmpeg here — the decode seam mirrors the codec verdict.
-            patch("stream2video.concat._ffmpeg_full_decode", return_value=True),
             patch("stream2video.concat._run_final_concat"),
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
@@ -1415,7 +1403,7 @@ class TestSegmentResumeSkipCrashArtifact:
 
         with (
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
-            patch("stream2video.concat._ffprobe_is_valid_mp4", return_value=True),
+            patch("stream2video.concat._media_is_valid", return_value=True),
             patch("stream2video.concat._run_final_concat"),
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
@@ -1432,7 +1420,7 @@ class TestSegmentResumeSkipCrashArtifact:
             )
 
         # The tiny file was below min_part_bytes → re-encoded despite
-        # ffprobe returning True (the size check fires before ffprobe).
+        # the media gate accepting it (the size check fires first).
         assert len(encode_calls) == 1, (
             f"Expected 1 re-encode (file below min_part_bytes), got {len(encode_calls)}"
         )
@@ -1470,12 +1458,13 @@ class TestBatchResumeSkipCrashArtifact:
                 Path(out).write_bytes(b"re-encoded valid mp4")
             return None
 
-        def fake_ffprobe(path):
+        def fake_chunk(path, **kw):
             return Path(path).name != "chunk_0000.mp4"
 
         with (
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
-            patch("stream2video.concat._ffprobe_is_valid_mp4", side_effect=fake_ffprobe),
+            patch("stream2video.concat._media_is_valid", side_effect=fake_chunk),
+            patch("stream2video.concat._ffprobe_duration_ok", return_value=True),
             patch("stream2video.concat._run_final_concat"),
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
@@ -1541,15 +1530,13 @@ class TestAudioExtractResumeStreamType:
 
         with (
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
-            # Pretend the probe accepts every chunk (valid audio).
-            patch("stream2video.concat._ffprobe_is_valid_media", return_value=True),
+            # The unified resume gate (audit round 31 P1-4) accepts
+            # every audio chunk here.
+            patch("stream2video.concat._media_is_valid", return_value=True),
             # Duration gate is patched out — this test exercises the
-            # codec gate; the fail-closed duration gate (unreadable
+            # media gate; the fail-closed duration gate (unreadable
             # duration → re-encode) is covered by its own tests.
             patch("stream2video.concat._ffprobe_duration_ok", return_value=True),
-            # Full-decode reuse gate (audit round 29 P4): no real
-            # ffmpeg here — the decode seam mirrors the codec verdict.
-            patch("stream2video.concat._ffmpeg_full_decode", return_value=True),
             patch("stream2video.concat._run_audio_concat_filter") as m_acf,
             patch("stream2video.concat._run_final_concat") as m_fc,
             patch("stream2video.concat._ensure_fresh_work_dir"),
@@ -1721,8 +1708,9 @@ class TestCutThenEncodeCutPhaseProtection:
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_ffmpeg_helper),
             patch("stream2video.concat._run_subprocess_cmd"),
             patch("stream2video.concat._run_final_concat"),
-            patch("stream2video.concat._ffprobe_is_valid_mp4", return_value=True),
-            patch("stream2video.concat._ffprobe_is_valid_media", return_value=True),
+            # The unified resume gate (audit round 31 P1-4) rejects
+            # every part → each keep segment must be re-cut/encoded.
+            patch("stream2video.concat._media_is_valid", return_value=False),
             patch("stream2video.concat._ffprobe_duration_ok", return_value=True),
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):

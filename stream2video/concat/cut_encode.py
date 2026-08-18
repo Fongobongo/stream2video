@@ -147,14 +147,14 @@ def _run_cut_then_encode(
             # Resume skip: if the file exists, is large enough, and
             # passes ffprobe validation, reuse it.
             #
-            # Validate BOTH streams (when the source has audio): the cut
-            # phase runs ``-c copy`` on video AND audio, so an ffmpeg kill
-            # between flushes can leave a chunk with a readable video track
-            # but a truncated audio one. The plain video-stream validity
-            # check would accept that file, and the lossless phase-2 concat
-            # would then splice a broken audio track into the middle of the
-            # output. Match ``_ffprobe_is_valid_media(..., "a")`` here the
-            # same way ``audio.py:extract`` already does for its segments.
+            # Unified media gate (audit round 31 P1-4): the cut phase
+            # runs the chosen codec on video AND audio, so an ffmpeg
+            # kill between flushes can leave a chunk with a readable
+            # video track but a truncated audio one. ``_media_is_valid``
+            # checks the expected stream set — video always, audio body
+            # included when the source has audio; the lossless phase-2
+            # concat would otherwise splice a broken audio track into
+            # the middle of the output.
             #
             # Duration check (P2 audit): phase 1 now re-encodes each
             # segment with the chosen codec + input-side ``-ss start``
@@ -170,26 +170,15 @@ def _run_cut_then_encode(
             if (
                 cut_path.exists()
                 and cut_path.stat().st_size >= options.min_part_bytes
-                and _c._ffprobe_is_valid_mp4(cut_path)
-                and (
-                    not options.source_has_audio
-                    or _c._ffprobe_is_valid_media(cut_path, stream_type="a")
-                )
                 and _c._ffprobe_duration_ok(cut_path, dur)
-                and _c._ffmpeg_full_decode(
+                and _c._media_is_valid(
                     cut_path,
-                    stream_type="v",
+                    require_video=True,
+                    require_audio=options.source_has_audio,
                     timeout=float(options.segment_encode_timeout),
                     cancel_callback=cancel_callback,
-                )
-                and (
-                    not options.source_has_audio
-                    or _c._ffmpeg_full_decode(
-                        cut_path,
-                        stream_type="a",
-                        timeout=float(options.segment_encode_timeout),
-                        cancel_callback=cancel_callback,
-                    )
+                    low_process_priority=options.low_process_priority,
+                    rlimit_as_mb=options.rlimit_as_mb,
                 )
             ):
                 logger.debug(f"cut_then_encode: reusing cut_{i:06d}.mp4")
@@ -320,14 +309,13 @@ def _run_cut_then_encode(
         # Reuse _run_final_concat but point it at raw_concat.mp4 instead
         # of the final output. The progress span for this step is small
         # (0.4..0.5) because it's a stream copy.
-        # Resume gate: validate BOTH streams, not just video. Phase-2 is a
-        # stream-copy join of video+audio; a crash between the AAC body
-        # write and the moov finalize leaves a file whose video validates
-        # but whose audio is truncated/absent — and the final encode below
-        # would silently swallow it, producing an out.mp4 with no sound.
-        # segment.py / batch.py already do the dual probe for their parts;
-        # this is the same check for the raw concat (mirrors the audio
-        # probe on the cut parts earlier in this function).
+        # Resume gate: unified ``_media_is_valid`` (audit round 31
+        # P1-4) validates the expected stream set, not just video.
+        # Phase-2 is a stream-copy join of video+audio; a crash between
+        # the AAC body write and the moov finalize leaves a file whose
+        # video validates but whose audio is truncated/absent — and the
+        # final encode below would silently swallow it, producing an
+        # out.mp4 with no sound.
         #
         # Duration check (audit): a moov-bearing but body-truncated
         # raw_concat.mp4 (ffmpeg killed mid phase-2 write) passes the
@@ -340,26 +328,15 @@ def _run_cut_then_encode(
         if not (
             raw_concat_path.exists()
             and raw_concat_path.stat().st_size >= options.min_part_bytes
-            and _c._ffprobe_is_valid_mp4(raw_concat_path)
-            and (
-                not options.source_has_audio
-                or _c._ffprobe_is_valid_media(raw_concat_path, stream_type="a")
-            )
             and _c._ffprobe_duration_ok(raw_concat_path, total_duration)
-            and _c._ffmpeg_full_decode(
+            and _c._media_is_valid(
                 raw_concat_path,
-                stream_type="v",
+                require_video=True,
+                require_audio=options.source_has_audio,
                 timeout=float(options.final_concat_timeout),
                 cancel_callback=cancel_callback,
-            )
-            and (
-                not options.source_has_audio
-                or _c._ffmpeg_full_decode(
-                    raw_concat_path,
-                    stream_type="a",
-                    timeout=float(options.final_concat_timeout),
-                    cancel_callback=cancel_callback,
-                )
+                low_process_priority=options.low_process_priority,
+                rlimit_as_mb=options.rlimit_as_mb,
             )
         ):
             _c._run_final_concat(

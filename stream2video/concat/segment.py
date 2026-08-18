@@ -102,37 +102,26 @@ def _run_segment_concat(
             # drop the missing tail. Mirrors ``batch.py`` (slack=1.0)
             # and ``cut_encode.py`` (slack=1.0 after the P2 audit).
             #
-            # FULL decode (audit round 29 P4): a header can carry the
-            # PLANNED duration while the middle of the body is corrupt
-            # — neither the codec probe nor the duration check sees
-            # that. Only a whole-stream decode reads every packet. The
-            # decode is cancellable and bounded by the segment timeout
-            # (audit round 30 P7), and when the source has audio the
-            # AUDIO body is decoded too — a video-valid part can still
-            # carry a truncated audio track (audit round 30 P6).
+            # Unified media gate (audit round 31 P1-4): ``_media_is_valid``
+            # runs the codec probe + whole-stream decode (``-xerror``)
+            # for the expected stream set — video always, and the AUDIO
+            # body too when the source has audio (a video-valid part
+            # can still carry a truncated audio track, audit round 30
+            # P6). Cancellable, segment-timeout bounded (audit round
+            # 30 P7) and honours the caller's resource policy (audit
+            # round 31 P1-3).
             if (
                 seg_path.exists()
                 and seg_path.stat().st_size >= options.min_part_bytes
-                and _c._ffprobe_is_valid_mp4(seg_path)
-                and (
-                    not options.source_has_audio
-                    or _c._ffprobe_is_valid_media(seg_path, stream_type="a")
-                )
                 and _c._ffprobe_duration_ok(seg_path, dur)
-                and _c._ffmpeg_full_decode(
+                and _c._media_is_valid(
                     seg_path,
-                    stream_type="v",
+                    require_video=True,
+                    require_audio=options.source_has_audio,
                     timeout=float(options.segment_encode_timeout),
                     cancel_callback=cancel_callback,
-                )
-                and (
-                    not options.source_has_audio
-                    or _c._ffmpeg_full_decode(
-                        seg_path,
-                        stream_type="a",
-                        timeout=float(options.segment_encode_timeout),
-                        cancel_callback=cancel_callback,
-                    )
+                    low_process_priority=options.low_process_priority,
+                    rlimit_as_mb=options.rlimit_as_mb,
                 )
             ):
                 skipped += 1
