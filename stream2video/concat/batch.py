@@ -147,7 +147,9 @@ def _run_batch_concat(
             # the final concat (mirrors the cut_encode.py audio check).
             # FULL decode (audit round 29 P4): mid-body corruption
             # passes every header-level probe; only a whole-stream
-            # decode reads every packet.
+            # decode reads every packet. Cancellable + segment-timeout
+            # bounded (audit round 30 P7); the AUDIO body is decoded
+            # too when the source has audio (audit round 30 P6).
             if (
                 chunk_path.exists()
                 and chunk_path.stat().st_size >= options.min_part_bytes
@@ -157,7 +159,21 @@ def _run_batch_concat(
                     or _c._ffprobe_is_valid_media(chunk_path, stream_type="a")
                 )
                 and _c._ffprobe_duration_ok(chunk_path, sum(e - s for s, e in chunk))
-                and _c._ffmpeg_full_decode(chunk_path, stream_type="v")
+                and _c._ffmpeg_full_decode(
+                    chunk_path,
+                    stream_type="v",
+                    timeout=float(options.segment_encode_timeout),
+                    cancel_callback=cancel_callback,
+                )
+                and (
+                    not options.source_has_audio
+                    or _c._ffmpeg_full_decode(
+                        chunk_path,
+                        stream_type="a",
+                        timeout=float(options.segment_encode_timeout),
+                        cancel_callback=cancel_callback,
+                    )
+                )
             ):
                 skipped += 1
                 encoded_duration += sum(e - s for s, e in chunk)

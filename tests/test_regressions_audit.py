@@ -220,6 +220,53 @@ class TestSegmentResumeDuration:
             )
         assert len(cut_calls) == 1, "decode-failing part was reused, not re-encoded"
 
+    def test_resume_decode_checks_audio_stream_too(self, tmp_path: Path):
+        """When the source has audio, a resumed part must decode BOTH
+        streams (audit round 30 P6): a video-valid part can still carry
+        a truncated audio body, and a video-only decode would pass it."""
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"source")
+        output = tmp_path / "out.mp4"
+        keep = [(0.0, 5.0)]
+        seg_dir = output.parent / "_out_segments"
+        seg_dir.mkdir(parents=True)
+        (seg_dir / "seg_000000.mp4").write_bytes(b"\x00" * 2048)
+
+        from stream2video.concat import _run_segment_concat
+
+        cut_calls: list[list[str]] = []
+        decoded_streams: list[str] = []
+
+        def fake_encode(cmd, **kw):
+            cut_calls.append(list(cmd))
+
+        def fake_decode(path, *, stream_type="v", timeout=43200, cancel_callback=None):
+            decoded_streams.append(stream_type)
+            return True
+
+        with (
+            patch("stream2video.concat._run_ffmpeg", side_effect=fake_encode),
+            patch("stream2video.concat._run_final_concat"),
+            patch("stream2video.concat._ffprobe_is_valid_mp4", return_value=True),
+            patch("stream2video.concat._ffprobe_is_valid_media", return_value=True),
+            patch("stream2video.concat._ffprobe_duration_ok", return_value=True),
+            patch("stream2video.concat._ffmpeg_full_decode", side_effect=fake_decode),
+            patch("stream2video.concat._ensure_fresh_work_dir"),
+        ):
+            _run_segment_concat(
+                video,
+                keep,
+                output,
+                "libx264",
+                ["-preset", "medium"],
+                None,
+                None,
+                encoder="libx264",
+                source_has_audio=True,
+            )
+        assert cut_calls == [], "fully valid part must be reused"
+        assert decoded_streams == ["v", "a"], "a source-with-audio part must decode both streams"
+
 
 # ── #5 ── cut_encode resume: truncated part is re-cut, not reused ──────
 class TestCutEncodeResumeDuration:

@@ -176,7 +176,21 @@ def _run_cut_then_encode(
                     or _c._ffprobe_is_valid_media(cut_path, stream_type="a")
                 )
                 and _c._ffprobe_duration_ok(cut_path, dur)
-                and _c._ffmpeg_full_decode(cut_path, stream_type="v")
+                and _c._ffmpeg_full_decode(
+                    cut_path,
+                    stream_type="v",
+                    timeout=float(options.segment_encode_timeout),
+                    cancel_callback=cancel_callback,
+                )
+                and (
+                    not options.source_has_audio
+                    or _c._ffmpeg_full_decode(
+                        cut_path,
+                        stream_type="a",
+                        timeout=float(options.segment_encode_timeout),
+                        cancel_callback=cancel_callback,
+                    )
+                )
             ):
                 logger.debug(f"cut_then_encode: reusing cut_{i:06d}.mp4")
                 encoded_keep += dur
@@ -332,7 +346,21 @@ def _run_cut_then_encode(
                 or _c._ffprobe_is_valid_media(raw_concat_path, stream_type="a")
             )
             and _c._ffprobe_duration_ok(raw_concat_path, total_duration)
-            and _c._ffmpeg_full_decode(raw_concat_path, stream_type="v")
+            and _c._ffmpeg_full_decode(
+                raw_concat_path,
+                stream_type="v",
+                timeout=float(options.final_concat_timeout),
+                cancel_callback=cancel_callback,
+            )
+            and (
+                not options.source_has_audio
+                or _c._ffmpeg_full_decode(
+                    raw_concat_path,
+                    stream_type="a",
+                    timeout=float(options.final_concat_timeout),
+                    cancel_callback=cancel_callback,
+                )
+            )
         ):
             _c._run_final_concat(
                 cut_dir,

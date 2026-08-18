@@ -201,13 +201,19 @@ def _run_audio_extract(
             # would reject any valid mp3/opus/aac/wav/flac chunk because
             # it has no video stream, defeating resume (P0 audit v0.3).
             # FULL decode (audit round 29 P4): header-level checks
-            # cannot see mid-body corruption.
+            # cannot see mid-body corruption. Cancellable +
+            # segment-timeout bounded (audit round 30 P7).
             if (
                 seg_path.exists()
                 and seg_path.stat().st_size >= options.min_part_bytes
                 and _c._ffprobe_is_valid_media(seg_path, stream_type="a")
                 and _c._ffprobe_duration_ok(seg_path, dur)
-                and _c._ffmpeg_full_decode(seg_path, stream_type="a")
+                and _c._ffmpeg_full_decode(
+                    seg_path,
+                    stream_type="a",
+                    timeout=float(options.segment_encode_timeout),
+                    cancel_callback=cancel_callback,
+                )
             ):
                 skipped += 1
                 encoded_keep += dur

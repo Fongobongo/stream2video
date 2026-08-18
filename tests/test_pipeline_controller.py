@@ -32,6 +32,14 @@ from stream2video.pipeline_controller import (
     validate_pipeline_config,
 )
 
+# The autouse conftest fixture replaces _output_media_is_valid with a
+# dummy True-returning patch for the whole suite (the dummy-output
+# tests would otherwise all fail the real ffmpeg gate). Tests that
+# exercise the REAL seam logic capture the genuine implementation
+# here — at import time, before any fixture runs — and re-install it
+# with patch.object.
+_REAL_OUTPUT_MEDIA_IS_VALID = PipelineController._output_media_is_valid
+
 
 def _valid_config(**overrides) -> PipelineConfig:
     """Build a valid PipelineConfig with optional field overrides."""
@@ -406,12 +414,20 @@ class TestPipelineControllerRun:
 
             return DownloadResult(path=fake_video, is_downloaded=False)
 
+        def fake_cut_and_concat(*args, **kwargs):
+            # Staged publish (audit round 30 P0): concat writes into the
+            # STAGING path (3rd positional arg), not the stable output.
+            Path(args[2]).write_text("output")
+
         with (
             patch("stream2video.pipeline_controller.download", side_effect=fake_download),
             patch("stream2video.pipeline_controller.detect_silence", return_value=[]),
             patch("stream2video.pipeline_controller.save_silence_cache"),
             patch("stream2video.pipeline_controller.load_silence_cache", return_value=None),
-            patch("stream2video.pipeline_controller.cut_and_concat"),
+            patch(
+                "stream2video.pipeline_controller.cut_and_concat",
+                side_effect=fake_cut_and_concat,
+            ),
             patch(
                 "stream2video.pipeline_controller.generate_keep_segments", return_value=[(0.0, 1.0)]
             ),
@@ -421,12 +437,7 @@ class TestPipelineControllerRun:
                 return_value=(tmp_path, fake_video),
             ),
         ):
-            # Create a fake output file so .stat().st_size works
-            output_file = tmp_path / "src_compressed.mp4"
-            output_file.write_text("output")
-            with patch.object(Path, "stat") as mock_stat:
-                mock_stat.return_value = MagicMock(st_size=100)
-                result = controller.run()
+            result = controller.run()
 
         assert isinstance(result, PipelineResult)
         assert result.video_path == fake_video
@@ -647,7 +658,9 @@ class TestPipelineControllerRun:
         # *_compressed.mp4 on disk (the runner kills ffmpeg mid-encode,
         # but nothing unlinked the in-progress output). The user then saw
         # a "finished-looking" file that is actually truncated.
-        # The controller must delete the partial output on error.
+        # With staged publish (audit round 30 P0) the partial lives in
+        # the STAGING dir — the stable path is never touched — and the
+        # controller must delete the staging dir on error.
         cfg = _valid_config(output_dir=tmp_path, input_raw=str(tmp_path / "src.mp4"))
         cb, _calls = self._make_callbacks()
         cancel = __import__("threading").Event()
@@ -657,7 +670,9 @@ class TestPipelineControllerRun:
         fake_video.write_text("dummy")
         from stream2video.paths import artifact_stem
 
-        partial_output = tmp_path / f"{artifact_stem(fake_video)}_compressed.mp4"
+        stem = artifact_stem(fake_video)
+        stable_output = tmp_path / f"{stem}_compressed.mp4"
+        staging_dir = tmp_path / f".{stem}_compressed.mp4.s2v_staging"
 
         def fake_download(url, out_dir, **kwargs):
             from stream2video.download import DownloadResult
@@ -667,10 +682,10 @@ class TestPipelineControllerRun:
         from stream2video.concat import ConcatError
 
         def fake_cut_and_concat(*args, **kwargs):
-            # The concat phase stamps _output_path before running ffmpeg
-            # (it must, so the GUI's Cancel button knows what to delete).
-            # Simulate ffmpeg writing a partial file then dying.
-            partial_output.write_text("partial")
+            # Staged publish: the concat phase writes into the staging
+            # path (3rd positional arg). Simulate ffmpeg writing a
+            # partial file into staging then dying mid-encode.
+            Path(args[2]).write_text("partial")
             raise ConcatError("encode fail")
 
         with (
@@ -690,13 +705,15 @@ class TestPipelineControllerRun:
                 "stream2video.pipeline_controller.apply_per_video_dir",
                 return_value=(tmp_path, fake_video),
             ),
-            patch.object(Path, "stat", return_value=MagicMock(st_size=100)),
             pytest.raises(PipelineConcatError, match="encode fail"),
         ):
             controller.run()
 
-        assert not partial_output.exists(), (
-            "partial output file left on disk after PipelineConcatError"
+        # The partial went into staging — the stable output was never created.
+        assert not stable_output.exists(), "stable output must never exist after a failed encode"
+        # The staging dir (with the partial inside) is removed on failure.
+        assert not staging_dir.exists(), (
+            "staging dir with partial output left on disk after PipelineConcatError"
         )
 
     def test_cancel_before_silence_raises_pipeline_cancelled(self, tmp_path: Path):
@@ -823,7 +840,9 @@ class TestPipelineControllerRun:
         controller2 = PipelineController(cfg=cfg, cb=cb, cancel_event=cancel2)
 
         def fake_cut_and_concat_success(*args, **kwargs):
-            return tmp_path / "out.mp4"
+            # Staged publish (audit round 30 P0): write to the staging
+            # path (3rd positional arg), not the stable output.
+            Path(args[2]).write_bytes(b"output")
 
         with (
             patch("stream2video.pipeline_controller.download", side_effect=fake_download),
@@ -1336,10 +1355,11 @@ class TestProjectLocks:
 
 
 class TestOutputAtomicPublish:
-    """Audit round 29 P0-1/P0-2: a failed rerun must never destroy the
-    previous GOOD result — the old output is moved to a backup sibling
-    before the encode, restored on failure, deleted on success — and a
-    "success" requires full media validation, not just a non-zero size."""
+    """Audit round 30 P0: the concat writes into a STAGING dir and the
+    stable output is published with one os.replace AFTER validation —
+    a failed rerun can never destroy the previous good result, no
+    partial ever appears under the user's filename, and a "success"
+    requires full media validation, not just a non-zero size."""
 
     def _controller(self, tmp_path: Path, **kw):
         import threading
@@ -1392,9 +1412,13 @@ class TestOutputAtomicPublish:
         )
         return stack
 
-    def test_failed_rerun_restores_previous_output(self, tmp_path: Path):
+    def _stable_output(self, tmp_path: Path) -> Path:
+        return next(p for p in tmp_path.iterdir() if p.suffix == ".mp4" and "compressed" in p.name)
+
+    def test_failed_rerun_keeps_previous_output(self, tmp_path: Path):
         """First run succeeds; the second run's encode fails mid-write
-        — the previous good output must come back (audit round 29 P0-1)."""
+        in STAGING — the previous good output at the stable path was
+        never touched (audit round 30 P0)."""
         from stream2video.pipeline_controller import PipelineError
 
         controller, _ = self._controller(tmp_path)
@@ -1405,9 +1429,9 @@ class TestOutputAtomicPublish:
 
         with self._patches(tmp_path, first_cut):
             controller.run()
-        out = next(p for p in tmp_path.iterdir() if p.suffix == ".mp4" and "compressed" in p.name)
+        out = self._stable_output(tmp_path)
         assert out.read_bytes() == good
-        assert not list(tmp_path.glob(".*.s2v_bak")), "success must remove the backup"
+        assert not list(tmp_path.glob(".*.s2v_staging")), "success removes the staging dir"
 
         def failing_cut(source, silence_segments, output_video, **kwargs):
             Path(output_video).write_bytes(b"partial garbage")
@@ -1415,14 +1439,16 @@ class TestOutputAtomicPublish:
 
         with self._patches(tmp_path, failing_cut), pytest.raises(PipelineError):
             controller.run()
-        assert out.read_bytes() == good, "failed rerun must restore the previous output"
+        assert out.read_bytes() == good, "failed rerun must leave the previous output intact"
+        assert not list(tmp_path.glob(".*.s2v_staging")), "failure removes the staging dir"
 
-    def test_invalid_output_restores_previous_result(self, tmp_path: Path):
-        """A finished-but-invalid output (media validation fails) must
-        restore the previous good result too (audit round 29 P0-2)."""
+    def test_invalid_output_keeps_previous_result(self, tmp_path: Path):
+        """A finished-but-invalid staged output (media validation
+        fails) is discarded — the previous good result at the stable
+        path stays (audit round 29 P0-2 / 30 P0)."""
         from stream2video.pipeline_controller import PipelineError
 
-        controller, calls = self._controller(tmp_path)
+        controller, _ = self._controller(tmp_path)
         good = b"previous good result"
 
         def first_cut(source, silence_segments, output_video, **kwargs):
@@ -1430,7 +1456,7 @@ class TestOutputAtomicPublish:
 
         with self._patches(tmp_path, first_cut):
             controller.run()
-        out = next(p for p in tmp_path.iterdir() if p.suffix == ".mp4" and "compressed" in p.name)
+        out = self._stable_output(tmp_path)
 
         def bad_cut(source, silence_segments, output_video, **kwargs):
             Path(output_video).write_bytes(b"corrupt bytes")
@@ -1442,9 +1468,9 @@ class TestOutputAtomicPublish:
         ):
             controller.run()
         assert out.read_bytes() == good
-        assert any("Restored previous output after failure" in m for m in calls["log"])
+        assert not list(tmp_path.glob(".*.s2v_staging"))
 
-    def test_backup_removed_on_success(self, tmp_path: Path):
+    def test_staging_removed_on_success(self, tmp_path: Path):
         controller, _ = self._controller(tmp_path)
 
         def cut(source, silence_segments, output_video, **kwargs):
@@ -1452,32 +1478,153 @@ class TestOutputAtomicPublish:
 
         with self._patches(tmp_path, cut):
             controller.run()
-        assert not list(tmp_path.glob(".*.s2v_bak"))
+        assert not list(tmp_path.glob(".*.s2v_staging"))
+        assert self._stable_output(tmp_path).read_bytes() == b"fresh result"
 
-    def test_stale_backup_restored_before_new_run(self, tmp_path: Path):
-        """A crashed run leaves backup + partial; the NEXT run restores
-        the backup before re-backing it up."""
-        controller, calls = self._controller(tmp_path)
-        good = b"interrupted good result"
+    def test_stale_staging_from_crash_does_not_block_next_run(self, tmp_path: Path):
+        """A crashed run leaves the staging dir behind; the NEXT run
+        reuses it (stable staging name) and still publishes — the
+        stable output is never rolled back to a stale version because
+        there is no backup protocol (audit round 30 P0-3)."""
+        controller, _ = self._controller(tmp_path)
+        good = b"previous good result"
+
+        def first_cut(source, silence_segments, output_video, **kwargs):
+            Path(output_video).write_bytes(good)
+
+        with self._patches(tmp_path, first_cut):
+            controller.run()
+        out = self._stable_output(tmp_path)
+
+        # Simulate crash residue: a staging dir with garbage inside.
+        from stream2video.paths import artifact_stem
+
+        stem = artifact_stem(Path(tmp_path / "src.mp4"))
+        staging = tmp_path / f".{stem}_compressed.mp4.s2v_staging"
+        staging.mkdir(exist_ok=True)
+        (staging / "junk.partial").write_bytes(b"junk")
 
         def cut(source, silence_segments, output_video, **kwargs):
             Path(output_video).write_bytes(b"fresh result")
 
-        # Simulate the crash residue: backup exists, stable path has a
-        # partial (the restore path must replace it).
-        from stream2video.paths import artifact_stem
-
-        stem = artifact_stem(Path(tmp_path / "src.mp4"))
-        out = tmp_path / f"{stem}_compressed.mp4"
-        out.write_bytes(b"partial")
-        backup = tmp_path / f".{out.name}.s2v_bak"
-        backup.write_bytes(good)
-
         with self._patches(tmp_path, cut):
             controller.run()
-        assert out.read_bytes() == b"fresh result", "new run produces a fresh output"
-        assert not list(tmp_path.glob(".*.s2v_bak")), "success removes the backup"
-        assert any("Restored output from an interrupted run" in m for m in calls["log"])
+        assert out.read_bytes() == b"fresh result", "new run publishes a fresh output"
+        assert not list(tmp_path.glob(".*.s2v_staging")), "success removes the staging dir"
+
+    def test_final_validation_is_called_on_staged_output_before_publish(self, tmp_path: Path):
+        """The autouse conftest fixture swaps ``_output_media_is_valid``
+        for a dummy True-returning mock suite-wide. Restore the seam here
+        and verify the wiring the fixture hides: final validation must
+        run on the STAGED file (not the stable output) before publish,
+        and a rejection must block the ``os.replace`` publish."""
+        controller, _ = self._controller(tmp_path)
+        validated: list[Path] = []
+
+        def recording(self, path, **kw):
+            validated.append(path)
+            return True
+
+        def cut(source, silence_segments, output_video, **kwargs):
+            Path(output_video).write_bytes(b"fresh result")
+
+        with (
+            self._patches(tmp_path, cut),
+            patch.object(PipelineController, "_output_media_is_valid", recording),
+        ):
+            controller.run()
+
+        assert len(validated) == 1, "final validation must run exactly once on the output"
+        staged = validated[0]
+        assert staged.name == self._stable_output(tmp_path).name
+        assert ".s2v_staging" in staged.parent.name, (
+            "final validation must run on the STAGED file, not the stable output"
+        )
+        assert self._stable_output(tmp_path).read_bytes() == b"fresh result"
+
+    def test_final_validation_rejection_blocks_publish(self, tmp_path: Path):
+        """A rejected staged output must never be moved to the stable
+        path (and the previous good result stays intact)."""
+        from stream2video.pipeline_controller import PipelineError
+
+        controller, _ = self._controller(tmp_path)
+        good = b"previous good result"
+
+        def first_cut(source, silence_segments, output_video, **kwargs):
+            Path(output_video).write_bytes(good)
+
+        with self._patches(tmp_path, first_cut):
+            controller.run()
+        out = self._stable_output(tmp_path)
+
+        def cut(source, silence_segments, output_video, **kwargs):
+            Path(output_video).write_bytes(b"corrupt bytes")
+
+        with (
+            self._patches(tmp_path, cut),
+            patch.object(
+                PipelineController,
+                "_output_media_is_valid",
+                lambda self, path, **kw: False,
+            ),
+            pytest.raises(PipelineError, match="failed media validation"),
+        ):
+            controller.run()
+        assert out.read_bytes() == good, "rejected output must not reach the stable path"
+        assert not list(tmp_path.glob(".*.s2v_staging"))
+
+    def test_output_validation_stream_set_and_audio_duration(self, tmp_path: Path):
+        """Audit round 30 P5: a video output whose source had audio must
+        carry a fully decodable audio track whose duration is close to
+        the video's — a 12 s video with a 2 s audio track passes a
+        video-only probe and must NOT pass the publish gate."""
+        controller, _ = self._controller(tmp_path)
+        path = Path("out.mp4")
+
+        def ok_probe(p, *, stream_type="v", timeout=43200, cancel_callback=None):
+            return True
+
+        with (
+            patch.object(
+                PipelineController,
+                "_output_media_is_valid",
+                _REAL_OUTPUT_MEDIA_IS_VALID,
+            ),
+            patch("stream2video.concat.probing._ffprobe_is_valid_media", return_value=True),
+            patch("stream2video.concat.probing._ffmpeg_full_decode", side_effect=ok_probe),
+        ):
+            # Durations mismatch → invalid.
+            with patch(
+                "stream2video.concat.probing._ffprobe_stream_duration",
+                side_effect=lambda p, t: 12.0 if t == "v" else 2.0,
+            ):
+                assert (
+                    controller._output_media_is_valid(path, stream_type="v", expect_audio=True)
+                    is False
+                )
+            # Close durations → valid.
+            with patch(
+                "stream2video.concat.probing._ffprobe_stream_duration",
+                side_effect=lambda p, t: 12.0 if t == "v" else 11.8,
+            ):
+                assert (
+                    controller._output_media_is_valid(path, stream_type="v", expect_audio=True)
+                    is True
+                )
+            # Video-only source → audio not required.
+            decoded: dict = {}
+
+            def rec(p, *, stream_type="v", timeout=43200, cancel_callback=None):
+                decoded.setdefault(stream_type, 0)
+                decoded[stream_type] += 1
+                return True
+
+            with patch("stream2video.concat.probing._ffmpeg_full_decode", side_effect=rec):
+                assert (
+                    controller._output_media_is_valid(path, stream_type="v", expect_audio=False)
+                    is True
+                )
+            assert decoded == {"v": 1}, "video-only validation must not decode audio"
 
     def test_local_source_lock_keyed_on_artifact_stem(self, tmp_path: Path):
         """A local-file run takes its project lock keyed on the artifact
@@ -1555,6 +1702,121 @@ class TestOutputAtomicPublish:
         assert lock.fd == -1, "the handle must already be released by run()'s finally"
         assert not lock_path_for(output_path).exists()
         assert not list(tmp_path.glob(".s2v_*")), "no project lock files may remain"
+
+
+class TestFinalValidationEndToEnd:
+    """Audit round 30 test blind spot: the autouse conftest fixture
+    stubs ``_output_media_is_valid`` to True for the whole suite, so
+    the default pipeline tests never prove the final gate is wired to
+    the REAL validator. These tests opt OUT of the stub and exercise
+    the real seam end-to-end through ``run()``."""
+
+    @staticmethod
+    def _make_real_video(out_path: Path, duration: int = 1) -> None:
+        import shutil
+        import subprocess
+
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            pytest.skip("ffmpeg not available")
+        subprocess.run(
+            [
+                ffmpeg,
+                "-y",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                f"sine=frequency=1000:duration={duration}",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=160x120:r=10",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-t",
+                str(duration),
+                str(out_path),
+            ],
+            check=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            timeout=60,
+        )
+
+    def _run_pipeline(self, tmp_path: Path, cut, *, write_src: bytes | None):
+        """Full ``run()`` with the non-media seams mocked (download /
+        silence / concat) but the REAL output validator installed."""
+        import threading
+
+        from stream2video.download import DownloadResult
+
+        cfg = _valid_config(output_dir=tmp_path, input_raw=str(tmp_path / "src.mp4"))
+        cb, _ = _make_callbacks()
+        controller = PipelineController(cfg=cfg, cb=cb, cancel_event=threading.Event())
+        src = tmp_path / "src.mp4"
+        if write_src is not None:
+            src.write_bytes(write_src)
+
+        with (
+            patch(
+                "stream2video.pipeline_controller.download",
+                return_value=DownloadResult(src, is_downloaded=False),
+            ),
+            patch("stream2video.pipeline_controller.detect_silence", return_value=[]),
+            patch("stream2video.pipeline_controller.save_silence_cache"),
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=None),
+            patch(
+                "stream2video.pipeline_controller.generate_keep_segments",
+                return_value=[(0.0, 1.0)],
+            ),
+            patch(
+                "stream2video.pipeline_controller.apply_per_video_dir",
+                side_effect=lambda o, v, d, per_video_dir=False, namespace=None: (o, v),
+            ),
+            patch("stream2video.pipeline_controller.cut_and_concat", side_effect=cut),
+            # Opt out of the autouse True-stub: the REAL validator runs,
+            # with real ffmpeg/ffprobe behind it.
+            patch.object(
+                PipelineController,
+                "_output_media_is_valid",
+                _REAL_OUTPUT_MEDIA_IS_VALID,
+            ),
+        ):
+            return controller.run()
+
+    def test_e2e_valid_output_passes_real_gate_and_publishes(self, tmp_path: Path):
+        """A genuinely decodable staged output passes the REAL gate
+        (video full decode + audio full decode + duration match, since
+        the real source has audio) and is atomically published."""
+        src = tmp_path / "src.mp4"
+        self._make_real_video(src, duration=1)
+
+        def cut(source, silence_segments, output_video, **kwargs):
+            Path(output_video).write_bytes(src.read_bytes())
+
+        result = self._run_pipeline(tmp_path, cut, write_src=None)
+        assert isinstance(result, PipelineResult)
+        assert result.output_path.read_bytes() == src.read_bytes()
+        assert not list(tmp_path.glob(".*.s2v_staging")), "success removes the staging dir"
+
+    def test_e2e_dummy_output_fails_real_gate_and_is_not_published(self, tmp_path: Path):
+        """Dummy bytes fail the REAL validator — the run refuses and no
+        ``*_compressed.mp4`` ever appears at the stable path."""
+
+        def cut(source, silence_segments, output_video, **kwargs):
+            Path(output_video).write_bytes(b"this is not media")
+
+        with pytest.raises(PipelineConcatError, match="media validation"):
+            self._run_pipeline(tmp_path, cut, write_src=b"src placeholder")
+        assert not list(tmp_path.glob("*_compressed.mp4"))
+        assert not list(tmp_path.glob(".*.s2v_staging"))
 
 
 class TestPipelineControllerTkIsolation:
@@ -1710,18 +1972,25 @@ class TestCleanupIncompleteOnClose:
         partial.write_bytes(b"partial data")
         controller._download_path = partial
         controller._download_was_real = True
-        output = tmp_path / "out_compressed.mp4"
+        # Staged publish (audit round 30 P0): the concat phase writes
+        # into a STAGING dir — the truncated output lives there, and
+        # the stable path is never touched.
+        staging = tmp_path / ".out_compressed.mp4.s2v_staging"
+        staging.mkdir()
+        output = staging / "out_compressed.mp4"
         output.write_bytes(b"output header only")
+        controller._staging_dir = staging
         controller._output_path = output
-        return controller, calls, partial, output
+        return controller, calls, partial, staging
 
     def test_removes_truncated_output_and_clears_slots(self, tmp_path: Path):
-        controller, calls, partial, output = self._controller_with_paths(tmp_path)
+        controller, calls, partial, staging = self._controller_with_paths(tmp_path)
 
         controller.cleanup_incomplete_on_close()
 
-        # The truncated output sink is a genuine artifact — removed.
-        assert not output.exists(), "truncated output survived on-close cleanup"
+        # The staging dir (with the truncated sink inside) is removed;
+        # the stable output was never created in the first place.
+        assert not staging.exists(), "staging with truncated output survived on-close cleanup"
         # A completed download is KEPT for reuse (partial_only design —
         # mid-download fragments are handled by download()'s own sweep,
         # which _on_close triggers via the cancel event).
@@ -1732,7 +2001,7 @@ class TestCleanupIncompleteOnClose:
         assert any("Deleted incomplete output" in m for m in calls["log"])
 
     def test_keeps_completed_download_for_reuse(self, tmp_path: Path):
-        controller, calls, partial, output = self._controller_with_paths(tmp_path)
+        controller, calls, partial, staging = self._controller_with_paths(tmp_path)
         # Download phase finished successfully — the source is complete;
         # on close (mid concat) we must NOT delete a usable file the user
         # may want to reuse on the next run.
@@ -1741,7 +2010,7 @@ class TestCleanupIncompleteOnClose:
         controller.cleanup_incomplete_on_close()
 
         assert partial.exists(), "completed download was deleted on close"
-        assert not output.exists(), "truncated output survived on-close cleanup"
+        assert not staging.exists(), "staging with truncated output survived on-close cleanup"
         assert any("Keeping completed download" in m for m in calls["log"])
 
     def test_never_raises_on_cleanup_failure(self, tmp_path: Path):
@@ -1801,6 +2070,12 @@ class TestFinishOutputValidation:
         source.write_bytes(b"source data")
         output = tmp_path / "out.mp4"  # never created
         controller._download_path = source
+        # Staged publish (audit round 30 P0): concat writes into the
+        # staging dir; simulate a run that reached _finish with no
+        # staged file at all.
+        staging = tmp_path / ".out.mp4.s2v_staging"
+        staging.mkdir()
+        controller._staging_dir = staging
 
         with pytest.raises(PipelineConcatError, match="missing"):
             controller._finish(
@@ -1818,8 +2093,11 @@ class TestFinishOutputValidation:
         source = tmp_path / "src.mp4"
         source.write_bytes(b"source data")
         output = tmp_path / "out.mp4"
-        output.write_bytes(b"")  # zero bytes
+        staging = tmp_path / ".out.mp4.s2v_staging"
+        staging.mkdir()
+        (staging / "out.mp4").write_bytes(b"")  # zero bytes
         controller._download_path = source
+        controller._staging_dir = staging
 
         with pytest.raises(PipelineConcatError, match="empty"):
             controller._finish(
@@ -1837,9 +2115,13 @@ class TestFinishOutputValidation:
         source = tmp_path / "src.mp4"
         source.write_bytes(b"source data")
         output = tmp_path / "out.mp4"
-        output.write_bytes(b"0123456789")
+        staging = tmp_path / ".out.mp4.s2v_staging"
+        staging.mkdir()
+        staged = staging / "out.mp4"
+        staged.write_bytes(b"0123456789")
         controller._download_path = source
-        controller._output_path = output
+        controller._staging_dir = staging
+        controller._output_path = staged
 
         result = controller._finish(
             video_path=source,
@@ -1849,6 +2131,10 @@ class TestFinishOutputValidation:
             keep_dur=10.0,
         )
         assert result.dst_size_bytes == 10
+        # Staged publish: the validated file was atomically moved to the
+        # stable path, and the staging dir was removed.
+        assert output.read_bytes() == b"0123456789"
+        assert not staging.exists()
         assert len(completed) == 1
         assert completed[0]["dst_size_bytes"] == 10
         # The output is no longer considered an incomplete artifact.

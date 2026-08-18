@@ -862,18 +862,29 @@ class TestPipelineWorkerRun:
         source.write_bytes(b"data")
         output = tmp_path / "out" / "video_compressed.mp4"
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(b"out")
 
         from stream2video.pipeline_controller import PipelineController
 
         class _FinishingController(PipelineController):
             """Mimic a controller that already reached the finish
             phase: seed the download path + the (post-finish) None so
-            the real ``_finish`` path runs the unlink."""
+            the real ``_finish`` path runs the unlink.
+
+            Staged publish (audit round 30 P0): ``_finish`` reads the
+            finished file from the STAGING dir and publishes it with
+            ``os.replace``, so seed ``_staging_dir`` with a staged
+            output before delegating."""
 
             _download_path: Path | None = source  # type: ignore[misc]
 
             def run(self) -> None:
+                # Simulate the concat phase having finished into the
+                # staging dir.
+                staging = output.parent / f".{output.name}.s2v_staging"
+                staging.mkdir(exist_ok=True)
+                (staging / output.name).write_bytes(b"out")
+                self._staging_dir = staging
+                self._output_path = staging / output.name
                 # Skip the full pipeline; just exercise _finish, which
                 # is the real owner of the delete-after unlink.
                 self._finish(

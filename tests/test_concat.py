@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
+from subprocess import TimeoutExpired
 from typing import ClassVar
 from unittest.mock import patch
 
@@ -340,44 +341,98 @@ class TestFfmpegDecodeProbe:
 
 
 class TestFfmpegFullDecode:
-    """The whole-stream decode gate (audit round 29 P3/P4) — the only
-    check that reads every packet, used by the fresh-download publish
-    and every resume-reuse decision."""
+    """The whole-stream decode gate (audit round 29 P3/P4 / 30 P7/P8)
+    — the only check that reads every packet, used by the fresh-download
+    publish, every resume-reuse decision and the final-output
+    validation. Runs through a cancellable Popen with a ring-bounded
+    stderr drain, ``-xerror``, and a caller-supplied timeout."""
 
-    def _probe(self, result, *, raise_exc=None):
+    class _FakeProc:
+        def __init__(self, rc: int, stderr_text: str, waits_before_exit: int = 0):
+            import io
+
+            self.returncode: int | None = None
+            self._rc = rc
+            self._stderr_text = stderr_text
+            self._waits = waits_before_exit
+            self._killed = False
+            if stderr_text:
+                self.stderr = io.StringIO(stderr_text)
+            else:
+                self.stderr = io.StringIO()
+
+        def wait(self, timeout=None):
+            if self._waits > 0:
+                self._waits -= 1
+                raise TimeoutExpired("ffmpeg", timeout or 0)
+            self.returncode = self._rc
+            return self._rc
+
+        def kill(self):
+            self._killed = True
+            self.returncode = 1
+
+    def _probe(self, proc, *, cancel_callback=None, timeout=60.0):
         from stream2video.concat.probing import _ffmpeg_full_decode
-
-        exc = raise_exc
-
-        def _run(cmd, **kwargs):
-            if exc is not None:
-                raise exc("ffmpeg", 60)
-            return result
 
         with (
             patch("stream2video.concat.probing.ffmpeg_path", return_value="ffmpeg"),
-            patch("stream2video.concat.probing.run_with_retry", side_effect=_run),
+            patch("stream2video.concat.probing.popen_with_retry", return_value=proc),
         ):
-            return _ffmpeg_full_decode(Path("part.mp4"), "v")
+            return _ffmpeg_full_decode(
+                Path("part.mp4"), "v", timeout=timeout, cancel_callback=cancel_callback
+            )
 
     def test_clean_decode_accepted(self):
-        from subprocess import CompletedProcess
-
-        result = CompletedProcess(args=[], returncode=0, stdout="", stderr="")
-        assert self._probe(result) is True
+        assert self._probe(self._FakeProc(0, "")) is True
 
     def test_rc_nonzero_rejected(self):
-        from subprocess import CompletedProcess
-
-        result = CompletedProcess(args=[], returncode=1, stdout="", stderr="")
-        assert self._probe(result) is False
+        assert self._probe(self._FakeProc(1, "")) is False
 
     def test_truncation_markers_rejected(self):
-        from subprocess import CompletedProcess
-
         for marker in ("partial file", "packet corrupt", "moov atom not found"):
-            result = CompletedProcess(args=[], returncode=0, stdout="", stderr=f"[mov] {marker}")
-            assert self._probe(result) is False, marker
+            assert self._probe(self._FakeProc(0, f"[mov] {marker}")) is False, marker
+
+    def test_cancel_kills_decode(self):
+        import pytest
+
+        from stream2video.concat.errors import CancelledError
+
+        proc = self._FakeProc(0, "", waits_before_exit=1000)
+        with pytest.raises(CancelledError):
+            self._probe(proc, cancel_callback=lambda: True)
+        assert proc._killed, "cancel must kill ffmpeg instead of waiting"
+
+    def test_timeout_kills_decode(self):
+        from subprocess import TimeoutExpired
+
+        import pytest
+
+        # waits_before_exit must be effectively unbounded: the deadline
+        # check (time.monotonic >= start + timeout) is the ONLY thing that
+        # must fire. If the fake proc could "finish" within the 0.01 s
+        # window, the loop would break on proc.wait() and the test would
+        # flakily return True. 10M waits >> any iteration count possible
+        # in 10 ms, so the deadline always wins.
+        proc = self._FakeProc(0, "", waits_before_exit=10_000_000)
+        with pytest.raises(TimeoutExpired):
+            self._probe(proc, timeout=0.01)
+        assert proc._killed
+
+    def test_spawn_fault_propagates(self):
+        import pytest
+
+        with (
+            patch("stream2video.concat.probing.ffmpeg_path", return_value="ffmpeg"),
+            patch(
+                "stream2video.concat.probing.popen_with_retry",
+                side_effect=FileNotFoundError,
+            ),
+            pytest.raises(FileNotFoundError),
+        ):
+            from stream2video.concat.probing import _ffmpeg_full_decode
+
+            _ffmpeg_full_decode(Path("part.mp4"), "v")
 
 
 class TestMakePhaseProgress:
