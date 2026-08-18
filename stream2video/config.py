@@ -1,4 +1,24 @@
-"""Shared configuration defaults and validation ranges."""
+"""Shared configuration defaults and validation ranges.
+
+Audit round 31 P3: the tunable metadata used to live TWICE — the
+defaults / ranges / enum whitelists below AND inside
+``param_specs.PARAM_SPECS`` — and the two tables had to be kept in
+sync by hand. ``param_specs`` is now the single source of truth for
+every pipeline parameter (default, type, bounds, choices, CLI flag),
+and this module derives its public views from it:
+
+  * ``CONFIG_DEFAULTS``  = PARAM_SPECS defaults + session-only keys;
+  * ``CONFIG_RANGES``    = PARAM_SPECS min/max column;
+  * ``ENUM_VALIDATORS``  = PARAM_SPECS enum choices (+ the GUI theme).
+
+Old consumers keep working unchanged — the derived views carry the
+exact same names, shapes and values. Only the duplication is gone.
+
+What stays EXPLICIT here (deliberately, audit "what not to touch"):
+the PipelineConfig dataclass fields, the session/GUI state keys
+(``output_dir`` / ``theme`` / ``recent_projects`` are NOT pipeline
+parameters), ``OUTPUT_FORMAT_SPECS`` and the loader/coercion logic.
+"""
 
 import json
 import logging
@@ -7,211 +27,133 @@ import os
 from pathlib import Path
 from typing import Any
 
+from stream2video.param_specs import (
+    DEFAULT_PRESET,
+    PRESET_NAMES,
+    PRESETS,
+    SPEC_DEFAULTS,
+    SPEC_ENUM_CHOICES,
+    SPEC_RANGES,
+    VALID_DOWNLOAD_QUALITIES,
+    VALID_ENCODERS,
+    VALID_METHODS,
+    VALID_OUTPUT_FORMATS,
+    VALID_OUTPUT_FPS,
+    VALID_QUALITIES,
+    VALID_SOFTWARE_FALLBACKS,
+    VALID_THEMES,
+    VALID_X264_PRESETS,
+)
+
+# Re-exported so existing ``from stream2video.config import ...``
+# consumers (GUI modules, encoders, the pipeline validator) keep
+# working after the param_specs consolidation. Do not add NEW imports
+# of these names via config — import them from param_specs.
+__all__ = [
+    "AUTO_OR_INT_KEYS",
+    "CONFIG_DEFAULTS",
+    "CONFIG_RANGES",
+    "DEFAULT_PRESET",
+    "ENUM_VALIDATORS",
+    "OUTPUT_FORMAT_SPECS",
+    "PRESETS",
+    "PRESET_NAMES",
+    "USER_DEFAULT_KEYS",
+    "VALID_DOWNLOAD_QUALITIES",
+    "VALID_ENCODERS",
+    "VALID_METHODS",
+    "VALID_OUTPUT_FORMATS",
+    "VALID_OUTPUT_FPS",
+    "VALID_QUALITIES",
+    "VALID_SOFTWARE_FALLBACKS",
+    "VALID_THEMES",
+    "VALID_X264_PRESETS",
+    "apply_preset",
+    "coerce_typed_value",
+    "effective_defaults",
+    "load_user_defaults",
+    "save_user_defaults",
+    "settings_path",
+    "user_defaults_path",
+]
+
 logger = logging.getLogger(__name__)
 
+# Meaning of the non-obvious defaults (the values themselves live in
+# ``param_specs.PARAM_SPECS`` — see the ``default`` column there):
+#
+#   * encoder_threads="auto": let ffmpeg decide (-threads 0, usually
+#     one per logical core); an int caps it. ``auto`` preserves the
+#     historical behaviour (no thread hint).
+#   * output_fps="source": preserve the input's frame cadence — no
+#     -r / -fps_mode is added, so a 30 FPS source comes out at 30 FPS
+#     without frame duplication. Integer values force a CFR conversion
+#     via the ``fps`` filter (docs warn about the size/quality cost of
+#     duplicated frames).
+#   * memory_limit_mb="auto": 60% of total RAM at the start of the
+#     run; a positive int is a MB cap; 0/None disables the budget
+#     check (only the OS reserve remains).
+#   * memory_reserve_mb=2048: warning floor for available RAM. A
+#     pre-flight check or the encode-time monitor logs below it but
+#     does NOT cancel running work — cancelling a multi-minute encode
+#     on a transient system-wide dip would lose the work already done,
+#     and Windows recovers from memory pressure by trimming standby /
+#     paging long before a real failure. Only the ffmpeg process's own
+#     RSS budget cancels a running encode. The pre-flight still refuses
+#     to START a new heavy phase below the floor.
+#   * x264_low_memory=False: when True, adds
+#     ``-x264-params rc-lookahead=10:ref=1:bframes=0`` — slightly worse
+#     compression for significantly lower peak RAM (4-8 GB machines).
+#   * use_crf=False: quality-fixed video encoding instead of
+#     bitrate-fixed targets (libx264 CRF, NVENC/AMF CQ/QP, MF quality
+#     mode). False preserves bitrate parity (10M/7M/3.5M or source).
+#   * gapless_concat=True: the segment path's final join uses the
+#     ``concat`` filter (re-encode) instead of the demuxer (stream
+#     copy) — per-segment AAC priming (~21 ms at 48 kHz) accumulates
+#     as A/V drift on multi-segment outputs; the filter adds priming
+#     once. ``cut_then_encode`` already achieves this but sacrifices
+#     frame accuracy (-c copy snaps to keyframes); ``gapless_concat``
+#     keeps frame accuracy AND gapless audio.
+#   * low_process_priority=False: when True, ffmpeg subprocesses are
+#     spawned at BELOW_NORMAL_PRIORITY_CLASS on Windows and nice +10
+#     on POSIX so a long encode doesn't starve interactive apps.
+#   * rlimit_as_mb=0: RLIMIT_AS cap for ffmpeg subprocesses
+#     (POSIX-only). malloc/mmap return ENOMEM before the OS swaps or
+#     the OOM killer kicks in — a hard kernel-enforced cap
+#     complementing the in-process ``memory_limit_mb`` pre-flight.
+#     No-op on Windows.
+#   * download/connect/no_progress timeouts: absolute ceiling +
+#     two-stage watchdog so a stalled connection doesn't wait the full
+#     ceiling.
+#   * proxy=""/proxy_active=False: the proxy address is always kept
+#     (so it isn't lost when temporarily disabled); only when the gate
+#     is on is it passed to yt-dlp as --proxy.
+#   * output_format="video": the audio-only values produce a standalone
+#     audio file (video stream dropped) using the codec that matches
+#     the container's conventional codec choice — see
+#     OUTPUT_FORMAT_SPECS for the mapping. ``audio_quality`` controls
+#     the bitrate for lossy formats; lossless formats (wav, flac)
+#     ignore it. ``source`` omits the bitrate and the -ar/-ac policy
+#     so ffmpeg keeps the native sample rate/channel layout.
 CONFIG_DEFAULTS: dict[str, Any] = {
-    "threshold": -30.0,
-    "min_silence": 2.0,
-    "margin": 0.5,
-    "method": "segment",
-    "encoder": "h264_mf",
-    "video_quality": "source",
-    "audio_quality": "source",
-    "download_quality": "best",
-    "software_fallback": "ask",
-    "x264_preset": "medium",
-    # Encoder thread budget. ``auto`` = let ffmpeg decide (-threads 0,
-    # which usually picks one per logical core); an int caps it. ``auto``
-    # preserves the historical behaviour (no thread hint) so an upgrade
-    # doesn't quietly change the load profile of an existing user.
-    "encoder_threads": "auto",
-    # Output FPS policy. ``source`` (default) preserves the
-    # input's frame cadence — no -r / -fps_mode is added to the encoder
-    # command, so a 30 FPS source comes out at 30 FPS without frame
-    # duplication. ``24`` / ``25`` / ``30`` / ``50`` / ``60`` force a
-    # CFR conversion via the ``fps`` filter; the docs warn about the
-    # size/quality cost of duplicated frames.
-    "output_fps": "source",
-    # RAM budget. ``auto`` = 60% of total RAM at the
-    # start of the run; a positive int is taken as a MB cap. ``None`` /
-    # ``0`` disables the budget check (only the OS reserve remains).
-    "memory_limit_mb": "auto",
-    # Warning floor for available RAM. When a pre-flight check or the
-    # encode-time monitor sees available RAM below this, it logs a
-    # warning but does NOT cancel running work — cancelling a
-    # multi-minute encode on a transient system-wide dip would lose the
-    # work already done, and Windows recovers from memory pressure by
-    # trimming standby / paging long before a real failure. Only the
-    # ffmpeg process's own RSS budget (``memory_limit_mb``) cancels a
-    # running encode. The pre-flight check still refuses to START a new
-    # heavy phase below this floor. 2 GB matches the default Windows
-    # commit limit behaviour for the System process; raise it on
-    # memory-constrained laptops.
-    "memory_reserve_mb": 2048,
-    # Reduce x264 frame-buffer footprint when True. Adds
-    # ``-x264-params rc-lookahead=10:ref=1:bframes=0`` to the encoder
-    # command, which trades slightly worse compression for significantly
-    # lower peak RAM during encode. Useful on memory-constrained machines
-    # (4-8 GB RAM) where a long libx264 encode would otherwise push the
-    # process into swap.
-    "x264_low_memory": False,
-    # Use quality-fixed video encoding instead of bitrate-fixed targets.
-    # libx264 uses CRF, NVENC/AMF use CQ/QP-style modes, and MF uses its
-    # quality rate-control mode. Default False preserves bitrate parity
-    # across encoders (10M/7M/3.5M or source bitrate).
-    "use_crf": False,
-    # Gapless concat (AAC priming fix). When True, the segment path's
-    # final join uses the ``concat`` filter (re-encode) instead of the
-    # concat demuxer (stream copy). The concat demuxer preserves per-
-    # segment AAC priming (~21ms per segment at 48kHz), which
-    # accumulates as A/V drift on multi-segment outputs — 10 segments
-    # drift ~170ms. The concat filter re-encodes through a single PCM
-    # pipeline so priming is added only once (not per-segment), giving
-    # gapless output at the cost of one extra audio encode pass.
-    # ``cut_then_encode`` already achieves this (one encode pass total),
-    # but it sacrifices frame accuracy (-c copy snaps to keyframes);
-    # ``gapless_concat`` keeps frame accuracy AND gapless audio. Default
-    # True: per-segment AAC priming (~21ms at 48kHz) accumulates
-    # as A/V drift on multi-segment outputs — the gapless concat filter
-    # adds priming only once. Users who want the old (faster, concat
-    # demuxer) behaviour can flip it off.
-    "gapless_concat": True,
-    # Lower ffmpeg scheduling priority (opt-in). When True, ffmpeg
-    # subprocesses are spawned at BELOW_NORMAL_PRIORITY_CLASS on Windows
-    # and nice +10 on POSIX so a long-running encode doesn't starve
-    # interactive applications. Useful for unattended batch processing
-    # on shared/desktop machines. Default False preserves the historical
-    # behaviour (normal priority, faster encoding).
-    "low_process_priority": False,
-    # RLIMIT_AS cap for ffmpeg subprocesses (POSIX-only, opt-in).
-    # When > 0, every spawned ffmpeg subprocess is forked with
-    # ``resource.setrlimit(RLIMIT_AS, (cap, cap))`` in preexec_fn so
-    # it cannot allocate more than this many MiB of virtual address
-    # space. malloc / mmap return ENOMEM (and ffmpeg bails) before the
-    # OS swaps or the Linux OOM killer kicks in. This is a hard,
-    # kernel-enforced cap complementing the in-process
-    # ``memory_limit_mb`` pre-flight check (which only samples RSS
-    # *between* wall-clock polls and can miss a fast spike). No-op on
-    # Windows (no portable equivalent; ``memory_limit_mb`` remains the
-    # only memory door there). 0 disables the cap (default) and
-    # preserves the historical behaviour.
-    "rlimit_as_mb": 0,
-    # Download watchdog timeouts. Absolute ceiling + two-stage
-    # watchdog so a stalled connection doesn't wait the full ceiling.
-    # Exposed via --download-timeout / --connect-timeout /
-    # --no-progress-timeout in the CLI; the GUI uses these defaults.
-    "download_timeout": 28800,  # 8h
-    "connect_timeout": 300,  # 5 min pre-first-byte
-    "no_progress_timeout": 1800,  # 30 min mid-download stall
-    # Proxy server used for downloads, e.g. "http://127.0.0.1:8080" or
-    # "socks5://user:pass@host:1080". Empty string = no proxy address.
-    # Passed to yt-dlp as --proxy when "proxy_active" is enabled.
-    "proxy": "",
-    # Whether the configured proxy is actually used for downloads. The
-    # address in "proxy" is always kept (so it's not lost when the proxy
-    # is temporarily disabled; the dialog re-opens prefilled).
-    "proxy_active": False,
-    # Pipeline phase timeouts. Exposed via CLI flags
-    # (--segment-timeout / --final-concat-timeout / --silence-timeout
-    # / --stall-timeout) and plumbed through PipelineConfig; module-
-    # level constants in concat.py / silence.py remain as fallbacks
-    # for direct callers that don't pass config-derived values.
-    "segment_encode_timeout": 600,  # 10 min per segment encode
-    "final_concat_timeout": 86400,  # 24h absolute ceiling on final concat
-    "silence_timeout": 36000,  # 10h silence detection ceiling
-    "stall_kill_timeout": 300,  # 5 min no-progress -> kill ffmpeg
-    "stall_warning_timeout": 120,  # 2 min no-progress -> warn
-    # Waveform preview decode timeout. Bounds the ffmpeg
-    # invocation that reads peaks for the popup.
-    "waveform_timeout": 300,  # 5 min
-    # Batch chunk size. Number of keep-segments per batch
-    # filter invocation; scaled down dynamically for large counts.
-    "batch_chunk_size": 40,
-    # Minimum bytes for a resumed part file to be considered valid.
-    # Smaller files are treated as corrupt and re-encoded.
-    "min_part_bytes": 1024,
-    "preset": "balanced",
-    "force": False,
-    "delete_after": False,
-    "per_video_dir": True,
-    "completion_sound": True,
+    # Every PARAM_SPECS entry carries its own default (derived view —
+    # audit round 31 P3): adding a tunable to the spec table adds its
+    # default here automatically.
+    **SPEC_DEFAULTS,
+    # Session-only / GUI-state keys — deliberately OUTSIDE PARAM_SPECS
+    # (not pipeline parameters, no CLI flags, not validated as config):
     "output_dir": "",
-    # Output container / codec policy. ``video`` (default) preserves the
-    # historical behaviour: H.264 video + AAC stereo audio muxed into
-    # MP4. The audio-only values produce a standalone audio file (the
-    # video stream is dropped) using the codec that matches the
-    # container's conventional codec choice:
-    #   * ``mp3``  → .mp3 + libmp3lame
-    #   * ``opus`` → .opus + libopus
-    #   * ``aac``  → .m4a + aac (native ffmpeg encoder, AAC-LC)
-    #   * ``wav``  → .wav + pcm_s16le (lossless, 48 kHz / 16-bit)
-    #   * ``flac`` → .flac + flac (lossless, compressed)
-    # ``audio_quality`` controls the bitrate for lossy formats; lossless
-    # formats (wav, flac) ignore it. ``source`` omits the bitrate and
-    # ``-ar 48000 -ac 2`` policy so ffmpeg keeps the decoded stream's
-    # native sample rate/channel layout where the output codec allows it.
-    "output_format": "video",
     "theme": "dark",
     "recent_projects": [],
 }
 
 # ---------------------------------------------------------------------------
-# Resource presets. Bundle existing tunables (x264_low_memory,
-# memory_limit_mb, memory_reserve_mb, batch_chunk_size, low_process_priority,
-# encoder_threads) into three named profiles so a user can pick a goal at a
-# glance instead of toggling six flags. ``balanced`` is the empty identity
-# preset — applying it changes nothing, so a user's config (YAML values,
-# GUI checkbox choices) survives untouched.
-# Each preset overrides only the tunables listed below — pipeline-only
-# settings (method, encoder, *_quality, threshold, min_silence, margin,
-# timeouts, gapless_concat) always come from the user's existing config and
-# are *never* touched by apply_preset.
-#
-# ``low_memory`` trades speed for stability on 4-8 GB machines:
-#   * x264_low_memory=True → rc-lookahead=10 / ref=1 / bframes=0 (smaller
-#     frame-buffer footprint, slightly larger files).
-#   * batch_chunk_size=20 (was 40) → smaller filter graphs → fewer
-#     decoded frames in RAM per batch invocation.
-#   * low_process_priority=True → ffmpeg doesn't compete with the OS / GUI.
-#
-# ``low_cpu`` minimizes CPU usage for background/unattended encoding:
-#   * x264_preset="ultrafast" → fastest encode, larger files.
-#   * encoder_threads=2 → limits parallel frame processing.
-#   * x264_low_memory=True → further reduces frame-buffer footprint.
-#   * low_process_priority=True → ffmpeg runs at below-normal priority.
-#
-# ``maximum_performance`` trades RAM for throughput:
-#   * x264_low_memory=False → full x264 defaults (larger frame buffer).
-#   * memory_limit_mb=0 → disables the in-process pre-flight memory budget
-#     (the OS reserve is still honoured). Only safe on machines that
-#     won't swap; otherwise the Low memory preset is more appropriate.
-#   * batch_chunk_size=80 (was 40) → larger batch chunks → fewer filter
-#     invocations → less per-chunk startup overhead on long sources.
-PRESETS: dict[str, dict[str, Any]] = {
-    "low_memory": {
-        "x264_low_memory": True,
-        "batch_chunk_size": 20,
-        "low_process_priority": True,
-    },
-    "low_cpu": {
-        "x264_preset": "ultrafast",
-        "encoder_threads": 2,
-        "x264_low_memory": True,
-        "low_process_priority": True,
-    },
-    # balanced: identity preset — applies no overrides, so a user's YAML
-    # (``x264_low_memory: true`` etc.) and the GUI's checkbox choices are
-    # never silently overwritten by the default preset.
-    "balanced": {},
-    "maximum_performance": {
-        "x264_low_memory": False,
-        "memory_limit_mb": 0,
-        "batch_chunk_size": 80,
-    },
-}
-
-PRESET_NAMES = tuple(PRESETS.keys())
-DEFAULT_PRESET = "balanced"
+# Resource presets (low_memory / low_cpu / balanced /
+# maximum_performance): see ``param_specs.PRESETS`` for the tunable
+# rationale — the table moved there in audit round 31 P3 so it lives
+# next to the spec entries it overrides; ``apply_preset`` stays here
+# because it is a config-layer transform.
+# ---------------------------------------------------------------------------
 
 
 def apply_preset(
@@ -252,40 +194,21 @@ def apply_preset(
     return out
 
 
-CONFIG_RANGES = {
-    "threshold": (-60, -5),
-    "min_silence": (0.1, 60),
-    "margin": (-3, 5),
-    # Pipeline phase timeouts. Lower bound 1s rejects typos /
-    # accidental zero; upper bound 7 days accommodates pathological
-    # long-running encodes without making the watchdog effectively
-    # disabled.
-    "segment_encode_timeout": (1, 604800),
-    "final_concat_timeout": (1, 604800),
-    "silence_timeout": (1, 604800),
-    "stall_kill_timeout": (10, 3600),
-    "stall_warning_timeout": (5, 1800),
-    "waveform_timeout": (10, 3600),
-    "batch_chunk_size": (1, 500),
-    "min_part_bytes": (1, 10485760),
-    # Download watchdogs: same "1s floor / sane ceiling"
-    # contract as the phase timeouts, mirrored by PARAM_SPECS so the
-    # CLI rejects what YAML rejects.
-    "download_timeout": (1, 604800),
-    "connect_timeout": (1, 3600),
-    "no_progress_timeout": (1, 86400),
-    # Memory budgets in MiB. 0 disables the cap; the ceiling is a pure
-    # overflow guard, far beyond any real machine.
-    "memory_reserve_mb": (0, 1048576),
-    "rlimit_as_mb": (0, 1048576),
-    # Encoder thread budget. ``auto`` (ffmpeg decides) or 1..1024
-    # threads; the ceiling is a typo guard — a stray digit (e.g.
-    # ``-threads 10000``) would spawn a thread storm on any real box.
-    "encoder_threads": (1, 1024),
-    # RAM budget in MiB. 0 disables the in-process check; ``auto``
-    # (60% of total RAM) and the ceiling mirror the other memory caps.
-    "memory_limit_mb": (0, 1048576),
-}
+# Numeric bounds, derived from the PARAM_SPECS min/max column (audit
+# round 31 P3). The old hand-maintained table carried one bound entry
+# per key; the spec table now owns them, so this view CANNOT drift.
+# Semantic notes that belonged to the bounds:
+#
+#   * phase timeouts: 1 s floor rejects typos / accidental zero; the
+#     7-day ceiling accommodates pathological long-running encodes
+#     without disabling the watchdog;
+#   * stall_kill/stall_warning floors: a typo'd sub-floor timeout would
+#     turn the watchdog into a kill-on-startup on slow media;
+#   * memory budgets: 0 disables the cap, the ceiling is a pure
+#     overflow guard, far beyond any real machine;
+#   * encoder_threads: the 1024 ceiling is a typo guard — a stray digit
+#     would spawn a thread storm on any real box.
+CONFIG_RANGES: dict[str, tuple[float, float]] = dict(SPEC_RANGES)
 
 # Keys whose value may be the literal ``"auto"`` instead of a number —
 # the numeric ``CONFIG_RANGES`` bound only applies to the int form.
@@ -295,48 +218,9 @@ CONFIG_RANGES = {
 # .validate_pipeline_config`` (the loop over CONFIG_RANGES), and the GUI.
 AUTO_OR_INT_KEYS: frozenset[str] = frozenset({"encoder_threads", "memory_limit_mb"})
 
-VALID_METHODS: list[str] = ["segment", "batch", "cut_then_encode"]
-
-VALID_ENCODERS: list[str] = ["h264_nvenc", "h264_amf", "h264_mf", "libx264"]
-
-VALID_QUALITIES: list[str] = ["source", "high", "medium", "low"]
-
-VALID_DOWNLOAD_QUALITIES: list[str] = ["best", "1080p", "720p", "480p", "360p"]
-
-VALID_THEMES: list[str] = ["dark", "light", "system"]
-
-# Encoder fallback policy when the user-selected HW encoder (AMF/NVENC/MF)
-# is unavailable or fails mid-run. ``ask`` (default) refuses silent
-# fallback to libx264 — heavy CPU workload can overload an overclocked
-# machine, so the user must explicitly confirm. ``disabled`` raises
-# immediately. ``enabled`` preserves the legacy silent-fallback behaviour
-# for users running on a known-stable CPU.
-VALID_SOFTWARE_FALLBACKS: list[str] = ["ask", "disabled", "enabled"]
-
-# x264 preset ladder. Kept narrow: ffmpeg accepts ultrafast..placebo but
-# we only expose the slice that matches a CPU quality/speed/size trade-off
-# the user can reason about. The CLI/GUI passes one of these verbatim to
-# ffmpeg ``-preset``.
-VALID_X264_PRESETS: list[str] = [
-    "ultrafast",
-    "superfast",
-    "veryfast",
-    "faster",
-    "fast",
-    "medium",
-    "slow",
-    "slower",
-]
-
-# Output FPS policy. ``source`` preserves the input's frame
-# cadence; the integer values force a CFR conversion.
-VALID_OUTPUT_FPS: list[str] = ["source", "24", "25", "30", "50", "60"]
-
-# Output container/codec policy. ``video`` keeps the historical
-# H.264 + AAC MP4 behaviour; the other values produce standalone
-# audio files (video stream dropped). See CONFIG_DEFAULTS for the
-# codec/container mapping.
-VALID_OUTPUT_FORMATS: list[str] = ["video", "mp3", "opus", "aac", "wav", "flac"]
+# All VALID_* whitelists moved to ``param_specs`` in audit round 31 P3
+# and are re-exported at the top of this module — see the import list
+# there. They live next to the PARAM_SPECS entries that reference them.
 
 # Per-format encoder/container spec used by the audio-extract path in
 # concat.py. Keys mirror the entries in ``VALID_OUTPUT_FORMATS``
@@ -602,20 +486,13 @@ def coerce_typed_value(key: str, value: Any) -> Any:
 _LIST_ELEMENT_TYPES: dict[str, type] = {"recent_projects": str}
 
 # Enum-valued string keys validated by coerce_typed_value against their
-# VALID_* whitelists. Keys WITHOUT an entry keep the historical
-# type-only check. This is the single source of truth; the CLI derives
-# its config-file enum checks from it (see cli_config.load_config,
-# which drops the GUI-only ``theme`` key).
+# whitelists. Keys WITHOUT an entry keep the historical type-only check.
+# Derived from the PARAM_SPECS enum column (audit round 31 P3), plus the
+# GUI-only ``theme`` key (session state, deliberately not a PARAM_SPECS
+# entry). The CLI derives its config-file enum checks from this view
+# (see cli_config.load_config, which drops the ``theme`` key).
 ENUM_VALIDATORS: dict[str, tuple[str, ...]] = {
-    "method": tuple(VALID_METHODS),
-    "encoder": tuple(VALID_ENCODERS),
-    "video_quality": tuple(VALID_QUALITIES),
-    "audio_quality": tuple(VALID_QUALITIES),
-    "download_quality": tuple(VALID_DOWNLOAD_QUALITIES),
-    "software_fallback": tuple(VALID_SOFTWARE_FALLBACKS),
-    "x264_preset": tuple(VALID_X264_PRESETS),
-    "output_fps": tuple(VALID_OUTPUT_FPS),
-    "output_format": tuple(VALID_OUTPUT_FORMATS),
+    **SPEC_ENUM_CHOICES,
     "theme": tuple(VALID_THEMES),
 }
 

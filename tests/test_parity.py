@@ -1639,3 +1639,56 @@ class TestLoggingSessionThreadSerialization:
             assert "another embedded CLI session is active" in result.output
             assert "Traceback" not in result.output
             assert "LoggingSessionBusyError" not in result.output
+
+
+class TestMetadataSingleSource:
+    """Audit round 31 P3: PARAM_SPECS is the single source of truth for
+    tunable defaults / ranges / enum choices, and config.py's public
+    views are DERIVED from it. These tests pin the derivation so a spec
+    entry that silently loses a column fails the suite instead of
+    drifting a validator at runtime."""
+
+    def test_config_defaults_derived_from_param_specs(self):
+        from stream2video.config import CONFIG_DEFAULTS
+
+        for key, spec in PARAM_SPECS.items():
+            assert key in CONFIG_DEFAULTS, f"{key} missing from CONFIG_DEFAULTS"
+            assert CONFIG_DEFAULTS[key] == spec["default"], key
+        # Session-only keys are NOT tunables — they must not leak into
+        # PARAM_SPECS (and keep their explicit defaults).
+        for key in ("output_dir", "theme", "recent_projects"):
+            assert key in CONFIG_DEFAULTS
+            assert key not in PARAM_SPECS, f"session key {key} is not a pipeline parameter"
+
+    def test_config_ranges_derived_from_param_specs(self):
+        from stream2video.config import CONFIG_RANGES
+
+        for key, spec in PARAM_SPECS.items():
+            if "min" in spec or "max" in spec:
+                assert key in CONFIG_RANGES, key
+                lo, hi = CONFIG_RANGES[key]
+                assert lo == spec.get("min", lo), key
+                assert hi == spec.get("max", hi), key
+        # Every range entry must come from a spec — no orphan bounds.
+        for key in CONFIG_RANGES:
+            assert key in PARAM_SPECS, f"orphan range entry {key}"
+
+    def test_enum_validators_derived_from_param_specs(self):
+        from stream2video.config import ENUM_VALIDATORS
+
+        for key, spec in PARAM_SPECS.items():
+            if spec.get("kind") == "enum":
+                assert key in ENUM_VALIDATORS, key
+                assert tuple(ENUM_VALIDATORS[key]) == tuple(spec["valid"]), key
+        # The GUI theme is session state: validated, but not a tunable.
+        assert "theme" in ENUM_VALIDATORS
+        assert set(ENUM_VALIDATORS) - set(PARAM_SPECS) == {"theme"}
+
+    def test_spec_defaults_are_exactly_38(self):
+        """CLI/GUI parity contract (audit rounds 29-31): the spec table
+        stays at the 38 pipeline parameters; PARAM_SPECS count == the
+        derived defaults column count."""
+        from stream2video.param_specs import SPEC_DEFAULTS
+
+        assert len(PARAM_SPECS) == 38
+        assert set(SPEC_DEFAULTS) == set(PARAM_SPECS)
