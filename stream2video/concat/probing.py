@@ -32,44 +32,63 @@ _TRUNCATION_MARKERS = (
     "truncated",
 )
 
+# Hard ceiling for a single metadata probe (audit round 32 P2). ffprobe
+# on a readable container answers in well under a second; a probe that
+# hangs for the old 30 s ceiling is almost always stalled on a wedged
+# source (network path, broken pipe). The whole-stream decode is the
+# expensive step and has its own caller-bounded timeout; probes must not
+# be the thing that keeps a cancelled run alive. Ten seconds is far above
+# any sane local read and far below a visibly frozen GUI.
+_PROBE_TIMEOUT = 10.0
+
 
 def _ffprobe_is_valid_media(path: Path, stream_type: str = "v") -> bool:
     """Quick validity check: ffprobe can read codec + duration for the
     requested stream type.
 
-    Used by resume-skip to reject a chunk that exists and is large enough
-    but is internally corrupt (e.g. ffmpeg crashed mid-write and the
-    moov atom is missing). Without this, the concat demuxer would accept
-    the file but emit a broken segment in the middle of the output.
+    Used by the unified media gate to reject a chunk that exists and is
+    large enough but is internally corrupt (e.g. ffmpeg crashed
+    mid-write and the moov atom is missing). Without this, the concat
+    demuxer would accept the file but emit a broken segment in the
+    middle of the output.
 
-    ``stream_type`` selects the ffprobe ``-select_streams`` filter: ``"v"``
-    for video segments (the historical default, used by the concat
-    segment/cut/raw paths) and ``"a"`` for audio segments (audio-extract
-    resume — an audio-only file has no video stream and would otherwise
-    fail video validation → resume always re-encoded everything, see
-    the P0 audit in the v0.3 release plan).
+    ``stream_type`` selects the ffprobe ``-select_streams`` filter:
+    ``"v"`` for video segments (the historical default, used by the
+    concat segment/cut/raw paths) and ``"a"`` for audio segments
+    (audio-extract resume — an audio-only file has no video stream and
+    would otherwise fail video validation → resume always re-encoded
+    everything, see the P0 audit in the v0.3 release plan).
+
+    Error contract (audit round 32 P1): only a normal ffprobe VERDICT is
+    turned into a bool — ``returncode != 0`` or an empty stream list
+    means invalid media. Infrastructure faults (timeout, spawn failure)
+    PROPAGATE instead of becoming ``False``: "validation unavailable"
+    must never be mistaken for "invalid media" — turning a transient
+    ffprobe hiccup into ``False`` once made the controller delete a
+    fully downloaded multi-GB file (the ``_ffprobe_media_complete`` /
+    download gate already had this contract; the secondary-stream probe
+    inside the unified gate did not). Callers that want the fail-safe
+    re-encode fallback (resume gates, the gapless tree) catch around
+    the call themselves.
     """
-    try:
-        r = run_with_retry(
-            [
-                ffprobe_path(),
-                "-v",
-                "error",
-                "-select_streams",
-                stream_type,
-                "-show_entries",
-                "stream=codec_name",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                str(path),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            **no_window_kwargs(),
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return False
+    r = run_with_retry(
+        [
+            ffprobe_path(),
+            "-v",
+            "error",
+            "-select_streams",
+            stream_type,
+            "-show_entries",
+            "stream=codec_name",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=_PROBE_TIMEOUT,
+        **no_window_kwargs(),
+    )
     return r.returncode == 0 and bool(r.stdout.strip())
 
 
@@ -106,7 +125,7 @@ def _ffprobe_media_complete(path: Path, stream_type: str = "v") -> bool:
         ],
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=_PROBE_TIMEOUT,
         **no_window_kwargs(),
     )
     if r.returncode != 0:
@@ -127,12 +146,23 @@ def _ffprobe_media_complete(path: Path, stream_type: str = "v") -> bool:
 
 
 def _ffprobe_stream_duration(path: Path, stream_type: str) -> float | None:
-    """Duration of ONE stream type (v/a), or None when unreadable.
+    """Duration of the FIRST stream of the requested type (v/a), or
+    None when unreadable (audit round 32 P1).
 
     Container duration cannot detect an audio track truncated much
     earlier than the video (audit round 30 P5): the stream-level
     comparison between video and audio durations is what catches a
     12 s video carrying a 2 s audio track.
+
+    Fail-closed on ambiguity (audit round 32 P1): the selector is
+    ``<type>:0`` so exactly ONE duration is returned — a multi-track
+    container previously made ``-select_streams a`` emit one value per
+    track, ``float(r.stdout.strip())`` failed to parse, and the
+    resulting ``None`` let the duration mismatch check silently pass.
+    ``-select_streams a:0`` also makes the probe agree with the decode
+    gate, which ``-map``s ``0:v:0`` / ``0:a:0``. A missing / ``N/A``
+    stream duration likewise returns ``None`` — callers that REQUIRE a
+    stream treat that as invalid instead of skipping the comparison.
     """
     try:
         r = run_with_retry(
@@ -141,7 +171,7 @@ def _ffprobe_stream_duration(path: Path, stream_type: str) -> float | None:
                 "-v",
                 "error",
                 "-select_streams",
-                stream_type,
+                f"{stream_type}:0",
                 "-show_entries",
                 "stream=duration",
                 "-of",
@@ -150,7 +180,7 @@ def _ffprobe_stream_duration(path: Path, stream_type: str) -> float | None:
             ],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=_PROBE_TIMEOUT,
             **no_window_kwargs(),
         )
         if r.returncode != 0:
@@ -275,6 +305,7 @@ def _media_is_valid(
     cancel_callback: "Callable[[], bool] | None" = None,
     low_process_priority: bool = False,
     rlimit_as_mb: int = 0,
+    fail_safe: bool = False,
 ) -> bool:
     """Unified integrity gate for the EXPECTED stream set of ``path``.
 
@@ -292,9 +323,17 @@ def _media_is_valid(
       * video output from an audio-carrying source → both;
       * a genuinely video-only source → video only.
 
-    Fail-closed like every probe: False means "invalid media". Spawn
-    faults / timeouts / cancels re-raise from the decode —
-    "validation unavailable" must be reported, not treated as invalid.
+    Error contract (audit round 32 P1): a codec-probe infrastructure
+    fault (ffprobe timeout / spawn failure) RAISES instead of returning
+    False — "validation unavailable" must never be mistaken for
+    "invalid media" (a transient ffprobe hiccup once made the fresh-
+    download gate delete a multi-GB completed download). Callers that
+    want the fail-safe re-encode fallback — the resume-reuse gates,
+    where an unverifiable part should simply be re-encoded, not abort
+    the whole run — pass ``fail_safe=True``: infrastructure faults then
+    return False instead of propagating. Decode cancellations / phase
+    timeouts and spawn faults out of ``_ffmpeg_full_decode`` always
+    propagate regardless of ``fail_safe``.
     """
     if not require_video and not require_audio:
         return True
@@ -303,7 +342,14 @@ def _media_is_valid(
     for stream_type, required in (("v", require_video), ("a", require_audio)):
         if not required:
             continue
-        if not _ffprobe_is_valid_media(path, stream_type=stream_type):
+        if cancel_callback is not None and cancel_callback():
+            raise CancelledError("media validation cancelled")
+        try:
+            if not _ffprobe_is_valid_media(path, stream_type=stream_type):
+                return False
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            if not fail_safe:
+                raise
             return False
         if not _ffmpeg_full_decode(
             path,
@@ -314,19 +360,21 @@ def _media_is_valid(
             rlimit_as_mb=rlimit_as_mb,
         ):
             return False
+        if cancel_callback is not None and cancel_callback():
+            raise CancelledError("media validation cancelled")
         if stream_type == "v":
             video_dur = _ffprobe_stream_duration(path, "v")
         else:
             audio_dur = _ffprobe_stream_duration(path, "a")
-    # Both durations unknown → the codec+decode checks already passed;
-    # don't fail on an unreadable duration field alone.
-    return not (
-        require_video
-        and require_audio
-        and video_dur is not None
-        and audio_dur is not None
-        and abs(video_dur - audio_dur) > 2.0
-    )
+    if require_video and require_audio:
+        # FAIL-CLOSED: a required stream whose duration cannot be read
+        # is NOT valid media (audit round 32 P1) — and a mismatch
+        # (>2 s) is a truncated secondary track (audit round 30 P5).
+        if video_dur is None or audio_dur is None:
+            return False
+        if abs(video_dur - audio_dur) > 2.0:
+            return False
+    return True
 
 
 def _ffprobe_duration_ok(path: Path, expected_seconds: float, *, slack: float = 1.0) -> bool:
@@ -360,7 +408,7 @@ def _ffprobe_duration_ok(path: Path, expected_seconds: float, *, slack: float = 
             ],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=_PROBE_TIMEOUT,
             **no_window_kwargs(),
         )
         if r.returncode != 0:

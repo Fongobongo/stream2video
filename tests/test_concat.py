@@ -71,6 +71,10 @@ def test_cut_and_concat_builds_memory_monitor_factory(tmp_path: Path):
 
     def fake_run_with_fallback(*args, **kwargs):
         received.update(kwargs)
+        # The direct-call path publishes a ``.s2v_partial`` sibling via
+        # ``os.replace`` (audit round 32 P0); simulate what the real
+        # encoder does — write the file it was asked to write.
+        Path(args[2]).write_bytes(b"output")
 
     with (
         patch("stream2video.concat.generate_keep_segments", return_value=[(0.0, 1.0)]),
@@ -85,6 +89,86 @@ def test_cut_and_concat_builds_memory_monitor_factory(tmp_path: Path):
     assert monitor is not None
     assert monitor.memory_limit_mb == 1024
     assert monitor.memory_reserve_mb == 512
+
+
+class TestDirectCallAtomicPublish:
+    """Audit round 32 P0: a DIRECT ``cut_and_concat`` caller (no
+    pipeline lock) takes the output lock but previously wrote straight
+    into the user's output path — a failed rerun destroyed the previous
+    good result. The encode now runs into a ``.s2v_partial`` sibling
+    and publishes with ONE ``os.replace``."""
+
+    def _run(self, video: Path, output: Path, encode_side_effect):
+        with (
+            patch("stream2video.concat.generate_keep_segments", return_value=[(0.0, 1.0)]),
+            patch("stream2video.concat.get_video_encoder", return_value=("libx264", [])),
+            patch("stream2video.concat.has_audio_stream", return_value=True),
+            patch("stream2video.concat._run_with_fallback", side_effect=encode_side_effect),
+        ):
+            return cut_and_concat(video, [], output)
+
+    def test_success_publishes_via_replace_without_partial_residue(self, tmp_path: Path):
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"source")
+        output = tmp_path / "out.mp4"
+
+        def encode(video_path, keep, target, *args, **kwargs):
+            # The body must see the PARTIAL path, never the stable one.
+            assert target.name == ".out.mp4.s2v_partial.mp4"
+            Path(target).write_bytes(b"result")
+
+        result = self._run(video, output, encode)
+        assert result == output
+        assert output.read_bytes() == b"result"
+        assert not list(tmp_path.glob(".*s2v_partial*")), "partial must be gone after publish"
+
+    def test_failure_keeps_previous_output_and_removes_partial(self, tmp_path: Path):
+        from stream2video.concat import ConcatError
+
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"source")
+        output = tmp_path / "out.mp4"
+        output.write_bytes(b"previous good result")
+
+        def failing_encode(*args, **kwargs):
+            # Simulate a mid-write crash: partial exists, then error.
+            Path(args[2]).write_bytes(b"partial garbage")
+            raise ConcatError("encode fail")
+
+        with pytest.raises(ConcatError, match="encode fail"):
+            self._run(video, output, failing_encode)
+        assert output.read_bytes() == b"previous good result", (
+            "a failed rerun must not touch the previous good output"
+        )
+        assert not list(tmp_path.glob(".*s2v_partial*")), "partial must be unlinked on failure"
+
+    def test_controller_lock_path_writes_target_directly(self, tmp_path: Path):
+        """The pipeline passes a pre-acquired lock and its own staging
+        target — no second partial layer is added there."""
+        from stream2video.concat import acquire_output_lock, release_output_lock
+
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"source")
+        output = tmp_path / "out.mp4"
+        lock = acquire_output_lock(output)
+        targets: list[Path] = []
+
+        def encode(video_path, keep, target, *args, **kwargs):
+            targets.append(Path(target))
+            Path(target).write_bytes(b"staged")
+
+        try:
+            with (
+                patch("stream2video.concat.generate_keep_segments", return_value=[(0.0, 1.0)]),
+                patch("stream2video.concat.get_video_encoder", return_value=("libx264", [])),
+                patch("stream2video.concat.has_audio_stream", return_value=True),
+                patch("stream2video.concat._run_with_fallback", side_effect=encode),
+            ):
+                cut_and_concat(video, [], output, lock=lock)
+        finally:
+            release_output_lock(lock)
+        assert targets == [output], "lock-holder callers write straight to the given target"
+        assert not list(tmp_path.glob(".*s2v_partial*"))
 
 
 def test_run_subprocess_cmd_waits_for_stderr_drain_before_oom_classification():
@@ -537,6 +621,64 @@ class TestMediaIsValid:
 
     def test_decode_failure_rejects(self):
         assert self._call(require_video=True, require_audio=False, decode=False) is False
+
+    def test_unknown_duration_is_fail_closed_when_both_required(self):
+        """Audit round 32 P1: when both streams are required, an
+        unreadable duration on EITHER side must reject the file (the
+        pre-fix behaviour compared only when both values were known, so
+        a ``None`` — multi-track container or N/A stream duration —
+        skipped the check entirely and a truncated first audio track
+        passed)."""
+        assert self._call(require_video=True, require_audio=True, durations=(12.0, None)) is False
+        assert self._call(require_video=True, require_audio=True, durations=(None, 12.0)) is False
+
+    def test_unknown_duration_allowed_for_single_stream(self):
+        """A video-only / audio-only gate does NOT depend on the
+        duration comparison — an unreadable duration field must not
+        reject a file that probed and decoded cleanly."""
+        assert self._call(require_video=True, require_audio=False, durations=(None, None)) is True
+        assert self._call(require_video=False, require_audio=True, durations=(None, None)) is True
+
+    def test_probe_infra_fault_raises_by_default(self):
+        """Audit round 32 P1: a transient ffprobe timeout / spawn fault
+        must RAISE (validation unavailable), not become False — False
+        would make the controller delete a completed download."""
+        import subprocess
+
+        import pytest
+
+        from stream2video.concat import probing
+
+        for exc in (subprocess.TimeoutExpired("ffprobe", 10.0), FileNotFoundError, OSError):
+            with (
+                patch(
+                    "stream2video.concat.probing._ffprobe_is_valid_media",
+                    side_effect=exc,
+                ),
+                pytest.raises((subprocess.TimeoutExpired, FileNotFoundError, OSError)),
+            ):
+                probing._media_is_valid(Path("x.mp4"), require_video=True, require_audio=False)
+
+    def test_probe_infra_fault_is_fail_safe_for_resume(self):
+        """Resume gates pass fail_safe=True: an unprobed part is simply
+        re-encoded (False) instead of aborting the whole run."""
+        import subprocess
+
+        from stream2video.concat import probing
+
+        with patch(
+            "stream2video.concat.probing._ffprobe_is_valid_media",
+            side_effect=subprocess.TimeoutExpired("ffprobe", 10.0),
+        ):
+            assert (
+                probing._media_is_valid(
+                    Path("x.mp4"),
+                    require_video=True,
+                    require_audio=False,
+                    fail_safe=True,
+                )
+                is False
+            )
 
 
 class TestMakePhaseProgress:

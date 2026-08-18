@@ -1655,6 +1655,10 @@ class TestAudioQualityParametric:
 
         def fake_run_with_fallback(*args, **kwargs):
             seen.append(kwargs["options"].audio_quality)
+            # The direct-call path publishes a ``.s2v_partial`` sibling
+            # via ``os.replace`` (audit round 32 P0); simulate what the
+            # real encoder does — write the file it was asked to write.
+            Path(args[2]).write_bytes(b"output")
 
         with (
             patch("stream2video.concat.get_video_duration", return_value=2.0),

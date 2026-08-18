@@ -218,6 +218,7 @@ def _run_audio_extract(
                     cancel_callback=cancel_callback,
                     low_process_priority=options.low_process_priority,
                     rlimit_as_mb=options.rlimit_as_mb,
+                    fail_safe=True,
                 )
             ):
                 skipped += 1

@@ -759,24 +759,37 @@ class PipelineController:
         self._download_path = None
 
     def _cleanup_partial_output(self) -> None:
-        """Remove a partially-written output on failure/cancel.
+        """Remove a partially-written output on failure/cancel — but KEEP
+        the resume artifacts around it (audit round 32 P1).
 
-        The concat writes into a STAGING dir (audit round 30 P0): the
-        stable ``*_compressed.*`` path is never touched before a fully
-        validated ``os.replace``, so the previous good result survives
-        every failure path without any backup/restore protocol. This
-        cleanup just removes the staging dir (work dirs, partials,
-        manifests) — the stable output needs no restoring.
+        The concat phase writes into a STAGING dir (audit round 30 P0):
+        the stable ``*_compressed.*`` path is never touched before a
+        fully validated ``os.replace``, so the previous good result
+        survives every failure path without any backup/restore protocol.
+
+        Before round 32 this cleanup removed the WHOLE staging dir,
+        which made the concat methods' "segments kept for resume on
+        next run" message a lie: the segment/chunk/cut work dirs and
+        their manifests live inside the same staging dir, and the next
+        run's resume logic (``_ensure_fresh_work_dir`` + manifest check)
+        is exactly what makes them trustworthy. Now only the staged
+        output file is deleted; the work dirs survive the failure, and
+        a stale or incompatible set is still rejected by the manifest
+        machinery on the next attempt. Success deletes the whole staging
+        dir (``_finish``), and ``--force`` wipes the cache explicitly —
+        no extra cleanup policy needed.
         """
         if self._staging_dir is not None:
-            if self._staging_dir.exists():
+            staged_output = Path(self._output_path.name) if self._output_path is not None else None
+            staged_path = self._staging_dir / staged_output if staged_output is not None else None
+            if staged_path is not None and staged_path.exists():
                 try:
-                    shutil.rmtree(self._staging_dir)
-                    self.cb.on_log(f"Deleted incomplete output staging: {self._staging_dir}")
+                    staged_path.unlink()
+                    self.cb.on_log(f"Deleted incomplete output staging: {staged_path}")
                 except OSError as e:
-                    self.cb.on_log(
-                        f"[WARN] Could not delete output staging {self._staging_dir} ({e})"
-                    )
+                    self.cb.on_log(f"[WARN] Could not delete output staging {staged_path} ({e})")
+            if self._staging_dir.exists():
+                self.cb.on_log(f"Resume parts kept in {self._staging_dir} for the next run")
             self._staging_dir = None
         # Always clear the slot so a subsequent run (or the GUI's
         # on-close cleanup) can't chase a stale path.
@@ -1501,7 +1514,13 @@ class PipelineController:
         # is removed and the stable output was never touched.
         self._staging_dir = output_path.parent / f".{output_path.name}.s2v_staging"
         try:
-            self._staging_dir.mkdir(parents=True, exist_ok=True)
+            # os.makedirs (not Path.mkdir): the staging dir now SURVIVES
+            # failed runs (audit round 32 P1-1), so every rerun takes the
+            # exists-ok path — Path.mkdir(exist_ok=True) re-probes with
+            # Path.stat()/is_dir(), which hosts and the test suite
+            # monkeypatch; the plain os call is immune (same reason the
+            # lock code uses os.* directly).
+            os.makedirs(self._staging_dir, exist_ok=True)
         except OSError as e:
             raise PipelineConcatError(
                 f"Could not create staging directory {self._staging_dir} ({e})"

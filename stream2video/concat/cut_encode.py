@@ -179,6 +179,7 @@ def _run_cut_then_encode(
                     cancel_callback=cancel_callback,
                     low_process_priority=options.low_process_priority,
                     rlimit_as_mb=options.rlimit_as_mb,
+                    fail_safe=True,
                 )
             ):
                 logger.debug(f"cut_then_encode: reusing cut_{i:06d}.mp4")
@@ -337,6 +338,7 @@ def _run_cut_then_encode(
                 cancel_callback=cancel_callback,
                 low_process_priority=options.low_process_priority,
                 rlimit_as_mb=options.rlimit_as_mb,
+                fail_safe=True,
             )
         ):
             _c._run_final_concat(

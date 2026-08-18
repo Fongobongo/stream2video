@@ -1,6 +1,8 @@
 """``cut_and_concat`` — top-level entry point dispatched by CLI / GUI."""
 
+import contextlib
 import logging
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -150,11 +152,11 @@ def cut_and_concat(
     # makes GUI+CLI collisions look "stuck" during the other run's pre-
     # ambles. All body code below is inside the try/finally that drops
     # the lock on every exit path.
-    def _locked_body() -> Path:
+    def _locked_body(target: Path) -> Path:
         return _run_locked(
             video_path=video_path,
             silence_segments=silence_segments,
-            output_path=output_path,
+            output_path=target,
             progress_callback=progress_callback,
             on_phase=on_phase,
             method=method,
@@ -184,14 +186,41 @@ def cut_and_concat(
         )
 
     if lock is not None:
-        return _locked_body()
+        # The pipeline controller passes a pre-acquired lock and already
+        # points ``output_path`` at its own sibling staging target (it
+        # publishes via ``os.replace`` after its own validation). No
+        # extra partial layer is needed there — adding one would just
+        # stage inside the staging dir.
+        return _locked_body(output_path)
     # Direct API callers take the output lock themselves; their
     # cancel_callback must reach the WAIT too (audit round 26 P5) — a
     # cancel during output-lock contention would otherwise be ignored
     # until the 60s timeout or the holder's release.
     _lock_path = acquire_output_lock(output_path, cancel_callback=cancel_callback)
+    # Atomic publish for DIRECT callers (audit round 32 P0): the encode
+    # used to write straight into ``output_path``, so a run that failed
+    # mid-write destroyed the previous good result even though the lock
+    # kept concurrent runs out (the lock serialises writers but cannot
+    # protect the PRIOR version of the file). Write into a fixed sibling
+    # partial instead and publish with ONE ``os.replace`` after the body
+    # returns — the previous good output is never touched, and a failed
+    # run only deletes the partial. This mirrors the controller's staged
+    # publish for the one caller (the pipeline) that can't rely on it.
+    # The partial keeps the output's own suffix AFTER the .s2v_partial
+    # marker (.out.mp4.s2v_partial.mp4): ffmpeg infers the muxer from
+    # the final extension, and a plain .s2v_partial tail makes it fail
+    # with "Unable to choose an output format".
+    _partial_path = output_path.with_name(f".{output_path.name}.s2v_partial{output_path.suffix}")
     try:
-        return _locked_body()
+        _locked_body(_partial_path)
+        os.replace(_partial_path, output_path)
+        return output_path
+    except BaseException:
+        # Only the partial is removed — the stable output (and any
+        # earlier good version of it) was never written to.
+        with contextlib.suppress(OSError):
+            _partial_path.unlink()
+        raise
     finally:
         release_output_lock(_lock_path)
 

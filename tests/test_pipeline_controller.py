@@ -660,7 +660,8 @@ class TestPipelineControllerRun:
         # a "finished-looking" file that is actually truncated.
         # With staged publish (audit round 30 P0) the partial lives in
         # the STAGING dir — the stable path is never touched — and the
-        # controller must delete the staging dir on error.
+        # cleanup removes the staged output file while KEEPING the
+        # staging dir so the next run can resume (audit round 32 P1-1).
         cfg = _valid_config(output_dir=tmp_path, input_raw=str(tmp_path / "src.mp4"))
         cb, _calls = self._make_callbacks()
         cancel = __import__("threading").Event()
@@ -711,10 +712,12 @@ class TestPipelineControllerRun:
 
         # The partial went into staging — the stable output was never created.
         assert not stable_output.exists(), "stable output must never exist after a failed encode"
-        # The staging dir (with the partial inside) is removed on failure.
-        assert not staging_dir.exists(), (
-            "staging dir with partial output left on disk after PipelineConcatError"
-        )
+        # The staged OUTPUT file is deleted, but the staging dir itself
+        # survives — its segment/chunk work dirs are the resume source
+        # for the next run (audit round 32 P1-1).
+        staged_partial = staging_dir / stable_output.name
+        assert not staged_partial.exists(), "staged partial output left on disk after failure"
+        assert staging_dir.exists(), "staging dir with resume parts must survive a failed encode"
 
     def test_cancel_before_silence_raises_pipeline_cancelled(self, tmp_path: Path):
         cfg = _valid_config(output_dir=tmp_path, input_raw=str(tmp_path / "src.mp4"))
@@ -1519,7 +1522,11 @@ class TestOutputAtomicPublish:
         with self._patches(tmp_path, failing_cut), pytest.raises(PipelineError):
             controller.run()
         assert out.read_bytes() == good, "failed rerun must leave the previous output intact"
-        assert not list(tmp_path.glob(".*.s2v_staging")), "failure removes the staging dir"
+        # The staged partial is gone, but the staging dir survives so
+        # the next run can resume from the completed parts (audit round
+        # 32 P1-1).
+        staging = next(tmp_path.glob(".*.s2v_staging"))
+        assert not (staging / out.name).exists(), "staged partial must be deleted"
 
     def test_invalid_output_keeps_previous_result(self, tmp_path: Path):
         """A finished-but-invalid staged output (media validation
@@ -1547,7 +1554,10 @@ class TestOutputAtomicPublish:
         ):
             controller.run()
         assert out.read_bytes() == good
-        assert not list(tmp_path.glob(".*.s2v_staging"))
+        # The rejected staged output is deleted; the staging dir
+        # survives for resume (audit round 32 P1-1).
+        staging = next(tmp_path.glob(".*.s2v_staging"))
+        assert not (staging / out.name).exists(), "rejected staged output must be deleted"
 
     def test_staging_removed_on_success(self, tmp_path: Path):
         controller, _ = self._controller(tmp_path)
@@ -1650,7 +1660,8 @@ class TestOutputAtomicPublish:
         ):
             controller.run()
         assert out.read_bytes() == good, "rejected output must not reach the stable path"
-        assert not list(tmp_path.glob(".*.s2v_staging"))
+        staging = next(tmp_path.glob(".*.s2v_staging"))
+        assert not (staging / out.name).exists(), "rejected staged output must be deleted"
 
     def test_output_validation_stream_set_and_audio_duration(self, tmp_path: Path):
         """Audit round 30 P5: a video output whose source had audio must
@@ -1895,7 +1906,10 @@ class TestFinalValidationEndToEnd:
         with pytest.raises(PipelineConcatError, match="media validation"):
             self._run_pipeline(tmp_path, cut, write_src=b"src placeholder")
         assert not list(tmp_path.glob("*_compressed.mp4"))
-        assert not list(tmp_path.glob(".*.s2v_staging"))
+        # The invalid staged output is deleted; the staging dir survives
+        # for resume (audit round 32 P1-1).
+        staging = next(tmp_path.glob(".*.s2v_staging"))
+        assert list(staging.glob("*_compressed.mp4")) == []
 
 
 class TestPipelineControllerTkIsolation:
@@ -2067,9 +2081,14 @@ class TestCleanupIncompleteOnClose:
 
         controller.cleanup_incomplete_on_close()
 
-        # The staging dir (with the truncated sink inside) is removed;
-        # the stable output was never created in the first place.
-        assert not staging.exists(), "staging with truncated output survived on-close cleanup"
+        # The staged OUTPUT file is removed; the staging dir survives —
+        # its work dirs are the resume source for the next run (audit
+        # round 32 P1-1). The stable output was never created in the
+        # first place.
+        assert staging.exists(), "staging dir with resume parts must survive on-close cleanup"
+        assert not (staging / "out_compressed.mp4").exists(), (
+            "staged truncated output survived on-close cleanup"
+        )
         # A completed download is KEPT for reuse (partial_only design —
         # mid-download fragments are handled by download()'s own sweep,
         # which _on_close triggers via the cancel event).
@@ -2089,7 +2108,10 @@ class TestCleanupIncompleteOnClose:
         controller.cleanup_incomplete_on_close()
 
         assert partial.exists(), "completed download was deleted on close"
-        assert not staging.exists(), "staging with truncated output survived on-close cleanup"
+        assert staging.exists(), "staging dir with resume parts must survive on-close cleanup"
+        assert not (staging / "out_compressed.mp4").exists(), (
+            "staged truncated output survived on-close cleanup"
+        )
         assert any("Keeping completed download" in m for m in calls["log"])
 
     def test_never_raises_on_cleanup_failure(self, tmp_path: Path):
