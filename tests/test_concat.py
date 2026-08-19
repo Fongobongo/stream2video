@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import io
+import shutil
+import subprocess
 from pathlib import Path
 from subprocess import TimeoutExpired
 from typing import ClassVar
@@ -282,6 +284,86 @@ def test_gapless_uses_tree_when_cmdline_would_exceed_windows_limit(tmp_path: Pat
     assert recorded_outputs[-1] == out
 
 
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="ffmpeg/ffprobe not on PATH",
+)
+def test_gapless_tree_reuse_rejects_corrupted_intermediate_body(tmp_path: Path, monkeypatch):
+    """Audit round 35 P1: the tree reuse gate validated only headers
+    (two codec probes) — a zeroed-middle MKV passed both while its full
+    audio decode failed (reproduced live), and the corrupted audio
+    track was reused into the next tree level. The reuse gate is now
+    the unified ``_media_is_valid`` (codec probe + WHOLE-STREAM decode
+    of every required stream), so an intermediate whose audio body
+    fails the decode must be re-encoded, never reused."""
+    from stream2video import concat as concat_mod
+
+    reencoded: list[str] = []
+
+    def fake_one_pass(part_paths, output_path, vcodec, vcodec_opts, **kwargs):
+        reencoded.append(Path(output_path).name)
+
+    def fake_decode(path, stream_type="v", **kwargs):
+        # The intermediate's audio BODY is damaged: the real codec probe
+        # passes, the whole-stream audio decode fails — the audit's
+        # zeroed-middle counterexample.
+        return stream_type != "a" or not Path(path).name.startswith("L0_")
+
+    monkeypatch.setattr(concat_mod, "_concat_filter_one_pass", fake_one_pass)
+    monkeypatch.setattr(concat_mod, "_GAPLESS_MAX_INPUTS_PER_CALL", 2)
+
+    parts = [tmp_path / f"seg_{i:06d}.mp4" for i in range(5)]
+    for p in parts:
+        p.write_bytes(b"\x00" * 2048)
+    out = tmp_path / "out.mp4"
+
+    # A REAL finished-looking intermediate: header probes pass (real
+    # ffmpeg), the (patched) full audio decode reports the body bad.
+    tree_dir = out.parent / f"_gapless_tree_{out.stem}"
+    tree_dir.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=0.5:size=320x240:rate=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=0.5:sample_rate=48000",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-shortest",
+            str(tree_dir / "L0_00000.mkv"),
+        ],
+        check=True,
+    )
+
+    with patch("stream2video.concat.probing._ffmpeg_full_decode", side_effect=fake_decode):
+        concat_mod._run_gapless_segment_concat(
+            out,
+            parts,
+            "libx264",
+            [],
+            audio_quality="medium",
+            total_duration=4.5,
+        )
+
+    assert "L0_00000.mkv" in reencoded, "the corrupted intermediate must be re-encoded, not reused"
+
+
 def test_gapless_real_ffmpeg_long_command_line_fails(tmp_path: Path):
     """Regression test: prove that ffmpeg's concat filter with N inputs and
     an inline filtergraph exceeds the Win32 32K cmdline limit for large N
@@ -394,7 +476,9 @@ class TestFfprobeDurationOkFailClosed:
     def test_matching_duration_is_accepted(self, tmp_path: Path):
         from subprocess import CompletedProcess
 
-        result = CompletedProcess(args=[], returncode=0, stdout="10.5\n", stderr="")
+        # 0.15 s off a 10 s part: inside the bounded tolerance
+        # min(1.0, max(0.10, 10.0 * 0.02)) = 0.2 s (audit round 35 P1).
+        result = CompletedProcess(args=[], returncode=0, stdout="10.15\n", stderr="")
         assert self._probe(tmp_path, result) is True
 
     def test_mismatched_duration_is_rejected(self, tmp_path: Path):
@@ -402,6 +486,50 @@ class TestFfprobeDurationOkFailClosed:
 
         result = CompletedProcess(args=[], returncode=0, stdout="4.0\n", stderr="")
         assert self._probe(tmp_path, result) is False
+
+
+class TestFfprobeDurationOkBoundedSlack:
+    """Audit round 35 P1: the resume-part duration gate used a FLAT
+    1 s slack — larger than the short speech islands it guarded. A
+    0.8 s part holding only 0.1 s passed with 87.5 % of the fragment
+    lost (reproduced on a real MP4). The tolerance is now bounded:
+    ``min(slack, max(100 ms floor, 2 % of the expected length))``.
+    """
+
+    def _probe(self, tmp_path: Path, actual: str, expected: float, slack: float = 1.0):
+        from stream2video.concat.probing import _ffprobe_duration_ok
+
+        with (
+            patch("stream2video.concat.probing.ffprobe_path", return_value="ffprobe"),
+            patch("stream2video.concat.probing._run_ffprobe", return_value=(0, actual)),
+        ):
+            return _ffprobe_duration_ok(
+                tmp_path / "part.mp4", expected_seconds=expected, slack=slack
+            )
+
+    def test_short_part_with_fraction_of_body_rejected(self, tmp_path: Path):
+        """The audit counterexample: expected 0.8 s, actual 0.1 s — the
+        flat 1 s slack accepted it, the bounded 0.1 s allowance must
+        reject it."""
+        assert self._probe(tmp_path, "0.1\n", 0.8) is False
+
+    def test_short_part_within_floor_accepted(self, tmp_path: Path):
+        """0.75 s vs 0.8 s expected: 50 ms off, inside the 100 ms floor."""
+        assert self._probe(tmp_path, "0.75\n", 0.8) is True
+
+    def test_long_part_keeps_caller_slack(self, tmp_path: Path):
+        """300 s part 0.8 s off: the caller's 1 s slack still applies
+        (2 % of 300 s would be 6 s — the slack ceiling binds)."""
+        assert self._probe(tmp_path, "299.2\n", 300.0) is True
+
+    def test_long_part_beyond_slack_rejected(self, tmp_path: Path):
+        """300 s part 1.2 s off: beyond the 1 s slack — rejected."""
+        assert self._probe(tmp_path, "298.8\n", 300.0) is False
+
+    def test_slack_ceiling_can_be_raised_by_caller(self, tmp_path: Path):
+        """The caller's slack stays the ceiling: slack=2 allows the
+        1.2 s offset the default 1 s rejected."""
+        assert self._probe(tmp_path, "298.8\n", 300.0, slack=2.0) is True
 
 
 class TestFfmpegFullDecode:
@@ -992,13 +1120,13 @@ def test_gapless_probe_cancel_propagates_instead_of_reencode(tmp_path: Path):
     def fake_one_pass(part_paths, output_path, vcodec, vcodec_opts, **kwargs):
         recorded.append(len(part_paths))
 
-    def cancelled_probe(path, stream_type="v", cancel_callback=None):
+    def cancelled_probe(path, **kwargs):
         raise CancelledError("cancelled during metadata probe")
 
     with (
         patch.object(concat_mod, "_concat_filter_one_pass", side_effect=fake_one_pass),
         patch.object(concat_mod, "_GAPLESS_MAX_INPUTS_PER_CALL", 2),
-        patch.object(concat_mod.gapless, "_ffprobe_is_valid_media", side_effect=cancelled_probe),
+        patch.object(concat_mod.gapless, "_media_is_valid", side_effect=cancelled_probe),
     ):
         parts = [tmp_path / f"seg_{i:06d}.mp4" for i in range(5)]
         for p in parts:

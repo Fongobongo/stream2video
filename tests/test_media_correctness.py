@@ -929,6 +929,99 @@ def test_non_aac_input_audio_normalized_to_aac(
 
 
 # ---------------------------------------------------------------------------
+# Matroska-family stream durations (audit round 35 P0).
+#
+# ffprobe reports Matroska/WebM stream-level duration as ``N/A`` — the
+# real value lives in the ``TAG:DURATION`` stream tag. The duration
+# probe previously returned ``None`` for these containers and the
+# unified gate then rejected HEALTHY video+audio files, which made the
+# fresh-download gate delete a fully downloaded multi-GB WebM.
+# ---------------------------------------------------------------------------
+
+
+def _make_healthy_matroska_family(
+    out: Path, *, video_codec: str, audio_codec: str, duration: float = 2.0
+) -> None:
+    """Healthy VP9+Opus (WebM) or H.264+AAC (MKV) video+audio file —
+    the container family whose stream duration ffprobe reports as
+    ``N/A`` while the stream ``TAG:DURATION`` carries the real value."""
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            f"testsrc=duration={duration}:size=320x240:rate=30",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=440:duration={duration}:sample_rate=48000",
+            "-c:v",
+            video_codec,
+            "-c:a",
+            audio_codec,
+            "-shortest",
+            str(out),
+        ],
+        check=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "video_codec,audio_codec,ext",
+    [
+        ("libvpx-vp9", "libopus", "webm"),
+        ("libx264", "aac", "mkv"),
+    ],
+)
+def test_media_is_valid_accepts_healthy_matroska_family(
+    video_codec: str, audio_codec: str, ext: str, tmp_path: Path
+):
+    """A healthy Matroska/WebM (video+audio) must pass the unified gate
+    — the audit round 35 P0 counterexample: both stream durations read
+    ``N/A``, the pre-fix gate returned False, and the fresh-download
+    gate deleted a fully downloaded file."""
+    from stream2video.concat import probing
+
+    _require_encoders(video_codec, audio_codec)
+    src = tmp_path / f"healthy_{video_codec}.{ext}"
+    _make_healthy_matroska_family(src, video_codec=video_codec, audio_codec=audio_codec)
+
+    # Sanity: this really is the N/A stream-duration shape — the tag
+    # fallback (not the primary field) must be the value the gate sees.
+    raw = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(src),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert raw.upper() == "N/A", f"expected N/A stream duration, got {raw!r}"
+
+    v_dur = probing._ffprobe_stream_duration(src, "v")
+    a_dur = probing._ffprobe_stream_duration(src, "a")
+    assert v_dur is not None and v_dur > 0, f"video TAG:DURATION not parsed: {v_dur}"
+    assert a_dur is not None and a_dur > 0, f"audio TAG:DURATION not parsed: {a_dur}"
+    assert abs(v_dur - a_dur) < 0.5, f"v/a durations diverge: {v_dur} vs {a_dur}"
+    assert probing._media_is_valid(src, require_video=True, require_audio=True) is True, (
+        "a healthy Matroska-family file must pass the unified gate"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Channel layout normalisation.
 #
 # ``-ac 2`` forces the output to stereo regardless of the input layout,

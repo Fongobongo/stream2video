@@ -231,6 +231,38 @@ def _ffprobe_media_complete(
     return duration is not None
 
 
+def _parse_ffprobe_duration(text: str) -> float | None:
+    """Parse one ffprobe duration line to seconds.
+
+    Two shapes arrive from ``-show_entries stream=duration:stream_tags=DURATION``:
+      * bare seconds — ``2.008`` (MP4/MOV stream durations);
+      * a Matroska/WebM ``TAG:DURATION`` — ``00:00:02.008000000``
+        (``HH:MM:SS.fraction``; the stream-level ``duration`` is ``N/A``
+        for these containers, so the tag is the only stream duration
+        source — audit round 35 P0).
+
+    Returns ``None`` for N/A / garbage / non-finite values — the same
+    negative-verdict contract as the pre-fallback parse.
+    """
+    text = text.strip()
+    if not text or text.upper() == "N/A":
+        return None
+    if ":" in text:
+        parts = text.split(":")
+        if len(parts) != 3:
+            return None
+        try:
+            seconds = float(parts[0]) * 3600 + float(parts[1]) * 60 + float(parts[2])
+        except ValueError:
+            return None
+    else:
+        try:
+            seconds = float(text)
+        except ValueError:
+            return None
+    return seconds if math.isfinite(seconds) else None
+
+
 def _ffprobe_stream_duration(
     path: Path,
     stream_type: str,
@@ -270,7 +302,7 @@ def _ffprobe_stream_duration(
             "-select_streams",
             f"{stream_type}:0",
             "-show_entries",
-            "stream=duration",
+            "stream=duration:stream_tags=DURATION",
             "-of",
             "default=noprint_wrappers=1:nokey=1",
             str(path),
@@ -279,11 +311,19 @@ def _ffprobe_stream_duration(
     )
     if rc != 0:
         return None
-    try:
-        value = float(stdout.strip())
-    except ValueError:
-        return None
-    return value if math.isfinite(value) else None
+    # Matroska/WebM report stream duration as ``N/A`` — the real value
+    # lives in the ``TAG:DURATION`` stream tag (``HH:MM:SS.fraction``,
+    # verified live: a healthy 2.008 s VP9+Opus WebM and a healthy
+    # H.264+AAC MKV both read ``N/A`` at stream level and
+    # ``00:00:02.008000000`` in the tag — audit round 35 P0). Prefer
+    # the numeric stream duration when present; fall back to the tag
+    # line, then ``None`` (genuine negative verdict, fail-closed for
+    # the both-streams gate).
+    for line in stdout.splitlines():
+        value = _parse_ffprobe_duration(line)
+        if value is not None:
+            return value
+    return None
 
 
 def _ffmpeg_full_decode(
@@ -397,17 +437,21 @@ def _ffmpeg_full_decode(
     return not any(marker in stderr for marker in _TRUNCATION_MARKERS)
 
 
-# A/V stream-duration drift allowed between the two REQUIRED streams
-# (audit round 33 P1). Fixed 2 s was a huge hole for short media:
-# a 1.8 s video carrying a 0.1 s audio track (nearly the whole audio
-# body lost) passed the gate. The allowance is now bounded BOTH ways:
+# Tolerance shared by the two duration gates below. Fixed 2 s was a
+# huge hole for short media: a 1.8 s video carrying a 0.1 s audio
+# track (nearly the whole audio body lost) passed the gate. The
+# allowance is now bounded BOTH ways:
 #   * never above 2 s (a six-hour encode's legitimate mux/flush drift
 #     stays accepted — audit round 30 P5's counterexample),
 #   * never below 100 ms (AAC priming + frame rounding on very short
 #     clips — a healthy 1 fps/short encode routinely reports a few
 #     frames of stream-duration offset),
-#   * and 2 % of the longer stream in between (proportional to the
-#     amount of content that could actually be missing).
+#   * and 2 % of the expected/longer duration in between (proportional
+#     to the amount of content that could actually be missing).
+# The A/V drift gate (audit rounds 30 P5 / 33 P1) and the resume-part
+# duration gate (audit round 35 P1 — a fixed 1 s slack accepted a
+# 0.8 s part holding only 0.1 s, losing 87.5 % of the fragment) both
+# derive their allowed offset from these constants.
 _DRIFT_FLOOR_SECONDS = 0.10
 _DRIFT_CEILING_SECONDS = 2.0
 _DRIFT_RELATIVE = 0.02
@@ -529,8 +573,11 @@ def _ffprobe_duration_ok(
     ``_ffprobe_is_valid_media``) but a truncated body — the duration read
     from the moov reflects the planned length, not the actual content. Comparing
     against the expected duration catches holes in the middle of the final
-    video. ``slack`` is the tolerance in seconds; 1.0s covers encoder flush
-    jitter and ffmpeg's own rounding without accepting truncated outputs.
+    video. ``slack`` is the caller's ceiling in seconds; the effective
+    tolerance is ``min(slack, max(0.10, expected * 0.02))`` — a flat 1 s
+    slack was larger than the short speech islands it guarded, and a
+    0.8 s part holding only 0.1 s passed the gate with 87.5 % of the
+    fragment lost (audit round 35 P1).
 
     When ffprobe cannot determine the duration (corrupt file, timeout,
     non-media data, transient spawn fault), returns ``False`` — fail-closed
@@ -568,4 +615,15 @@ def _ffprobe_duration_ok(
         actual = float(duration_str)
     except ValueError:
         return False  # N/A or garbage — do not trust the part
-    return abs(actual - expected_seconds) <= slack
+    # Bounded tolerance (audit round 35 P1): a flat 1 s slack accepted
+    # a resume part holding only a fraction of its expected length —
+    # expected 0.8 s / actual 0.1 s passed, silently dropping 87.5 % of
+    # the fragment (reproduced on a real MP4; short speech islands are
+    # real at small min_silence / aggressive margins). The allowance is
+    # now min(slack, max(100 ms floor, 2 % of the expected length)) —
+    # the same bounded shape as the A/V drift gate: long parts keep the
+    # caller's slack (encoder flush jitter), a part can never be
+    # accepted with more than 2 % of its own content missing, and the
+    # floor keeps tiny parts from being rejected by codec-level rounding.
+    allowed = min(slack, max(_DRIFT_FLOOR_SECONDS, expected_seconds * _DRIFT_RELATIVE))
+    return abs(actual - expected_seconds) <= allowed

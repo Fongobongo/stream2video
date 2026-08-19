@@ -14,7 +14,7 @@ from pathlib import Path
 
 from stream2video import concat as _c
 from stream2video.concat.options import ConcatOptions, coerce_options
-from stream2video.concat.probing import _ffprobe_is_valid_media
+from stream2video.concat.probing import _media_is_valid
 from stream2video.tools import ffmpeg_path
 
 logger = logging.getLogger(__name__)
@@ -316,25 +316,33 @@ def _run_gapless_segment_concat(
                 raise _c.CancelledError(f"gapless tree L{level} cancelled")
             reuse = inter.exists() and inter.stat().st_size >= options.min_part_bytes
             if reuse:
-                # Video-stream-only validation accepts an
-                # intermediate whose AUDIO track was truncated by a
-                # mid-write crash (moov-less audio body). The gapless path
-                # only runs on sources with audio, so both streams must
-                # probe cleanly before we reuse the file.
+                # The unified gate, exactly like every other resume
+                # path (audit round 35 P1): a header-only codec probe
+                # accepts an intermediate whose BODY is damaged — a
+                # zeroed-middle MKV passed both codec probes and its
+                # full audio decode failed (reproduced live), yet the
+                # corrupted audio track was reused into the next tree
+                # level. ``_media_is_valid`` runs the codec probe, a
+                # WHOLE-STREAM decode of every required stream and the
+                # v/a duration match; ``fail_safe=True`` keeps infra
+                # faults fail-closed (re-encode) and ``CancelledError``
+                # still propagates immediately below.
                 try:
-                    _audio_ok = _ffprobe_is_valid_media(
-                        inter, stream_type="a", cancel_callback=cancel_callback
+                    reuse = _media_is_valid(
+                        inter,
+                        require_video=True,
+                        require_audio=True,
+                        timeout=float(options.final_concat_timeout),
+                        cancel_callback=cancel_callback,
+                        low_process_priority=options.low_process_priority,
+                        rlimit_as_mb=options.rlimit_as_mb,
+                        fail_safe=True,
                     )
-                    _video_ok = _ffprobe_is_valid_media(
-                        inter, stream_type="v", cancel_callback=cancel_callback
-                    )
-                    if not (_video_ok and _audio_ok):
+                    if not reuse:
                         logger.warning(
                             f"gapless tree L{level}: intermediate {inter.name} "
-                            f"failed ffprobe validation "
-                            f"(video={_video_ok} audio={_audio_ok}); re-encoding group {g}"
+                            f"failed full validation; re-encoding group {g}"
                         )
-                        reuse = False
                 except _c.CancelledError:
                     # A user Cancel fired DURING the metadata probe
                     # (the probe is cancellable now — audit round 33
@@ -353,7 +361,7 @@ def _run_gapless_segment_concat(
                     # very hole the probe exists to close. Re-encode instead
                     # of silently trusting the size check.
                     logger.warning(
-                        f"gapless tree L{level}: ffprobe validation failed for {inter}; "
+                        f"gapless tree L{level}: validation failed for {inter}; "
                         f"re-encoding group {g} to be safe",
                         exc_info=True,
                     )
