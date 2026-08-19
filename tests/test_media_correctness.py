@@ -1032,8 +1032,10 @@ def test_media_is_valid_accepts_healthy_flv(tmp_path: Path):
     counterexample: FLV has NO stream-level duration and no
     Matroska-style tag (both tracks read N/A), and the pre-fix gate
     returned False, so the fresh-download gate deleted a fully
-    downloaded file. After both tracks decode cleanly, the positive
-    CONTAINER duration is the honest length signal."""
+    downloaded file. The DECODED track lengths (measured during the
+    full decode) take the place of the metadata durations — verified
+    live: healthy FLV decodes to ~2.033 s video / ~2.026 s audio
+    (audit round 37 P1)."""
     from stream2video.concat import probing
 
     _require_encoders("libx264", "aac")
@@ -1060,12 +1062,83 @@ def test_media_is_valid_accepts_healthy_flv(tmp_path: Path):
     assert "N/A" in raw, f"expected N/A stream timings in FLV probe, got {raw!r}"
     assert "DURATION" not in raw, f"expected no TAG:DURATION in FLV probe, got {raw!r}"
 
-    container_dur = probing._ffprobe_container_duration(src)
-    assert container_dur is not None and container_dur > 0, (
-        f"FLV container duration not read: {container_dur}"
+    # The decoded lengths really are measured, and they agree.
+    v_ok, v_measured = probing._ffmpeg_decode_timing(src, "v")
+    a_ok, a_measured = probing._ffmpeg_decode_timing(src, "a")
+    assert v_ok and a_ok
+    assert v_measured is not None and a_measured is not None
+    assert abs(v_measured - a_measured) <= 0.15, (
+        f"healthy FLV decoded lengths diverge: {v_measured} vs {a_measured}"
     )
     assert probing._media_is_valid(src, require_video=True, require_audio=True) is True, (
-        "a healthy FLV must pass the unified gate via its container duration"
+        "a healthy FLV must pass the unified gate via its decoded lengths"
+    )
+
+
+def test_media_is_valid_rejects_truncated_audio_flv(tmp_path: Path):
+    """Audit round 37 P1 counterexample: an FLV whose audio track is
+    0.1 s against 12 s of video — both tracks exist, each present
+    fragment decodes cleanly, and the container duration is positive;
+    the pre-fix container-duration fallback accepted it. The decoded
+    lengths expose the truncation and must reject it."""
+    from stream2video.concat import probing
+
+    _require_encoders("libx264", "aac")
+    src = tmp_path / "truncated_audio.flv"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=12:size=320x240:rate=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=0.1:sample_rate=48000",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            str(src),
+        ],
+        check=True,
+    )
+
+    # Sanity: this really is the N/A-everywhere shape.
+    raw = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=duration:stream_tags=DURATION",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(src),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "N/A" in raw, f"expected N/A stream durations in FLV probe, got {raw!r}"
+
+    # Both fragments decode cleanly — the metadata-level probes cannot
+    # tell healthy from truncated.
+    assert probing._ffprobe_is_valid_media(src, stream_type="v") is True
+    assert probing._ffprobe_is_valid_media(src, stream_type="a") is True
+    # The measured lengths must expose the truncation.
+    v_ok, v_measured = probing._ffmpeg_decode_timing(src, "v")
+    a_ok, a_measured = probing._ffmpeg_decode_timing(src, "a")
+    assert v_ok and a_ok
+    assert v_measured is not None and a_measured is not None
+    assert v_measured > 11.0, f"video decode should measure ~12 s, got {v_measured}"
+    assert a_measured < 1.0, f"audio decode should measure ~0.1 s, got {a_measured}"
+    assert probing._media_is_valid(src, require_video=True, require_audio=True) is False, (
+        "an FLV with a 0.1 s audio track against 12 s of video must be rejected"
     )
 
 

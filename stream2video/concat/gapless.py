@@ -290,7 +290,15 @@ def _run_gapless_segment_concat(
             d = _dur_cache.get(str(p))
             if d is None:
                 try:
-                    d = _c.get_video_duration(p) or 0.0
+                    # Cancellable probe (audit round 36 P2): with a
+                    # large gapless tree a stuck per-part probe would
+                    # hold the user's Cancel for up to the 10 s ceiling
+                    # PER PART (audit round 37 P2). A cancel must abort
+                    # the whole tree immediately — never become a 0.0
+                    # ETA no-op.
+                    d = _c.get_video_duration(p, cancel_callback=cancel_callback) or 0.0
+                except _c.CancelledError:
+                    raise
                 except Exception:
                     d = 0.0
                 _dur_cache[str(p)] = d

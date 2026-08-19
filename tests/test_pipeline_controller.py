@@ -1289,7 +1289,10 @@ class TestProjectLocks:
             # Durations 12 s video / 2 s audio → unified gate rejects.
             patch("stream2video.concat.probing._ffprobe_media_complete", return_value=True),
             patch("stream2video.concat.probing._ffprobe_is_valid_media", return_value=True),
-            patch("stream2video.concat.probing._ffmpeg_full_decode", return_value=True),
+            patch(
+                "stream2video.concat.probing._ffmpeg_decode_timing",
+                return_value=(True, 12.0),
+            ),
             patch(
                 "stream2video.concat.probing._ffprobe_stream_timing",
                 side_effect=lambda p, t, **kw: (0.0, 12.0) if t == "v" else (0.0, 2.0),
@@ -1672,7 +1675,7 @@ class TestOutputAtomicPublish:
         path = Path("out.mp4")
 
         def ok_probe(p, stream_type="v", **kw):
-            return True
+            return True, 12.0
 
         with (
             patch.object(
@@ -1681,7 +1684,10 @@ class TestOutputAtomicPublish:
                 _REAL_OUTPUT_MEDIA_IS_VALID,
             ),
             patch("stream2video.concat.probing._ffprobe_is_valid_media", return_value=True),
-            patch("stream2video.concat.probing._ffmpeg_full_decode", side_effect=ok_probe),
+            patch(
+                "stream2video.concat.probing._ffmpeg_decode_timing",
+                side_effect=ok_probe,
+            ),
         ):
             # Durations mismatch → invalid.
             with patch(
@@ -1707,9 +1713,9 @@ class TestOutputAtomicPublish:
             def rec(p, stream_type="v", **kw):
                 decoded.setdefault(stream_type, 0)
                 decoded[stream_type] += 1
-                return True
+                return True, 12.0
 
-            with patch("stream2video.concat.probing._ffmpeg_full_decode", side_effect=rec):
+            with patch("stream2video.concat.probing._ffmpeg_decode_timing", side_effect=rec):
                 assert (
                     controller._output_media_is_valid(path, stream_type="v", expect_audio=False)
                     is True

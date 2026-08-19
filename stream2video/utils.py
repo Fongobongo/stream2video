@@ -120,7 +120,7 @@ def _run_ffprobe(
     stalled on a wedged source (network share, broken container) held
     the GUI's Cancel for up to the whole ceiling even though a cancel
     check ran between probes. One small popen loop instead (same
-    teardown shape as ``_ffmpeg_full_decode``, lighter — probe stdout
+    teardown shape as ``_ffmpeg_decode_timing``, lighter — probe stdout
     goes through the shared ring-bounded drain, so even a
     stream-spamming container can neither wedge the pipe nor grow the
     sink unboundedly): poll ``cancel_callback`` every 0.2 s, bounded

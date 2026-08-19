@@ -263,39 +263,7 @@ def _ffprobe_stream_timing(
     return start, duration
 
 
-def _ffprobe_container_duration(
-    path: Path,
-    cancel_callback: "Callable[[], bool] | None" = None,
-) -> float | None:
-    """Container-level duration in seconds (``format=duration``), or
-    None for a genuine negative verdict.
-
-    The audit round 36 P0 fallback: FLV (and some other containers)
-    provide NO stream-level duration and no Matroska-style tag — the
-    only honest duration is the container's own. A positive container
-    duration is all the both-streams gate can ask for after both
-    tracks decoded cleanly. Error contract identical to
-    ``_ffprobe_stream_timing``: infrastructure faults PROPAGATE.
-    """
-    rc, stdout = _run_ffprobe(
-        [
-            ffprobe_path(),
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(path),
-        ],
-        cancel_callback=cancel_callback,
-    )
-    if rc != 0:
-        return None
-    return _parse_ffprobe_duration(stdout.strip())
-
-
-def _ffmpeg_full_decode(
+def _ffmpeg_decode_timing(
     path: Path,
     stream_type: str = "v",
     timeout: float = 43200,
@@ -303,8 +271,21 @@ def _ffmpeg_full_decode(
     *,
     low_process_priority: bool = False,
     rlimit_as_mb: int = 0,
-) -> bool:
-    """Decode the WHOLE requested stream into the null sink.
+) -> tuple[bool, float | None]:
+    """Decode the WHOLE requested stream into the null sink; return
+    ``(ok, decoded_seconds)``.
+
+    ``ok`` is the integrity verdict; ``decoded_seconds`` is the ACTUAL
+    amount of media the decoder consumed (last ``out_time_ms`` from
+    ``-progress pipe:1``), or None when it could not be measured. The
+    measured length is what the both-streams gate falls back to when
+    the container carries NO stream-level durations at all (FLV and
+    friends, audit round 37 P1): a container duration cannot
+    distinguish a healthy FLV from one whose audio track is 0.1 s
+    against 12 s of video — both tracks "exist" and each present
+    fragment decodes cleanly — but the DECODED lengths expose the
+    truncation (verified live: healthy FLV decodes to ~2.033 s video
+    / ~2.026 s audio; a truncated-audio FLV measures ~12 s vs ~0.1 s).
 
     Head+tail probes cannot prove body integrity: zeroing a 256-byte
     window in the MIDDLE of an MP4 leaves the header, head decode and
@@ -318,9 +299,10 @@ def _ffmpeg_full_decode(
       * ``-xerror`` — stop at the FIRST decode error instead of
         printing a per-packet error storm from a damaged multi-hour
         file;
-      * stderr goes through the shared ring-bounded drain
-        (``drain_stderr_lines``), never ``capture_output`` — the
-        integrity check itself must not be the OOM vector;
+      * stdout (the progress feed) and stderr both go through the
+        shared ring-bounded drain (``drain_stderr_lines``), never
+        ``capture_output`` — the integrity check itself must not be
+        the OOM vector;
       * the wait loop polls ``cancel_callback`` — a user Cancel kills
         ffmpeg immediately (raises ``CancelledError``) instead of
         holding the pipeline for up to the 12 h ceiling;
@@ -335,8 +317,8 @@ def _ffmpeg_full_decode(
         exit path — normal completion, cancel, timeout and an
         exception raised BY the cancel callback alike: kill-if-running
         via ``kill_and_reap`` (bounded reap — no lingering handles or
-        zombies), stderr pipe close, drain-thread join (audit round
-        31 P1-1/P1-2).
+        zombies), both pipes closed, drain-thread joins (audit round
+        31 P1-1/P1-2, round 34 P1-2).
 
     Spawn faults, timeout and cancellations re-raise: "validation
     unavailable" must never be mistaken for "invalid media".
@@ -353,19 +335,29 @@ def _ffmpeg_full_decode(
         "-f",
         "null",
         "-",
+        "-progress",
+        "pipe:1",
     ]
     proc = popen_with_retry(
         cmd,
-        stdout=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
         **subprocess_kwargs(low_process_priority, rlimit_as_mb),
     )
+    decoded_ms: list[str] = []
+
+    def _capture_out_time_ms(line: str) -> None:
+        if line.startswith("out_time_ms="):
+            decoded_ms.append(line.split("=", 1)[1].strip())
+
+    stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
-    assert proc.stderr is not None
-    wait_for_drain = drain_stderr_lines(proc.stderr, stderr_chunks)
+    assert proc.stdout is not None and proc.stderr is not None
+    wait_for_stdout = drain_stderr_lines(proc.stdout, stdout_chunks, on_line=_capture_out_time_ms)
+    wait_for_stderr = drain_stderr_lines(proc.stderr, stderr_chunks)
     deadline = time.monotonic() + timeout
     with registered_process(proc):
         try:
@@ -384,9 +376,9 @@ def _ffmpeg_full_decode(
             # no matter HOW we leave the loop — finished, cancelled,
             # timed out, or an exception from the cancel callback —
             # the child must be killed (if still alive), reaped, its
-            # stderr pipe closed and the drain thread joined. Only
-            # then can the exception propagate. The drain is joined to
-            # EOF BEFORE the pipe is closed (audit round 34 P1-2 — the
+            # pipes closed and the drain threads joined. Only then can
+            # the exception propagate. Each drain is joined to EOF
+            # BEFORE its pipe is closed (audit round 34 P1-2 — the
             # close raced the still-reading drain thread and lost
             # buffered output).
             if proc.poll() is None:
@@ -394,16 +386,27 @@ def _ffmpeg_full_decode(
                     kill_and_reap(proc, timeout=5.0)
                 if proc.poll() is None:
                     logger.warning("media validation process did not exit after kill: %s", path)
-            if not wait_for_drain(2.0):
+            for pipe, drain in (
+                (proc.stdout, wait_for_stdout),
+                (proc.stderr, wait_for_stderr),
+            ):
+                if not drain(2.0):
+                    with contextlib.suppress(OSError, ValueError):
+                        pipe.close()
+                    drain(0.5)
                 with contextlib.suppress(OSError, ValueError):
-                    proc.stderr.close()
-                wait_for_drain(0.5)
-            with contextlib.suppress(OSError, ValueError):
-                proc.stderr.close()
+                    pipe.close()
     if proc.returncode != 0:
-        return False
+        return False, None
     stderr = "".join(stderr_chunks).lower()
-    return not any(marker in stderr for marker in _TRUNCATION_MARKERS)
+    ok = not any(marker in stderr for marker in _TRUNCATION_MARKERS)
+    decoded_seconds: float | None = None
+    if decoded_ms:
+        try:
+            decoded_seconds = float(decoded_ms[-1]) / 1_000_000.0
+        except ValueError:
+            decoded_seconds = None
+    return ok, decoded_seconds
 
 
 # Tolerance shared by the two duration gates below. Fixed 2 s was a
@@ -467,7 +470,12 @@ def _media_is_valid(
     containers whose tracks start at different timestamps stay
     accepted because the muxer keeps ends aligned (audit round 36
     P1). Streams whose durations are genuinely N/A (FLV and friends)
-    are judged by the container duration instead (audit round 36 P0).
+    are compared by their DECODED lengths instead (audit round 37 P1):
+    the decode that already ran measures how much media each track
+    actually carries (``out_time``), and a container duration cannot
+    do that — a 12 s video with a 0.1 s audio track passes a codec
+    probe + per-fragment decode + positive-container check, but its
+    measured lengths expose the truncation.
 
     ``require_video`` / ``require_audio`` are chosen by the caller:
       * audio-only output → audio only;
@@ -479,18 +487,19 @@ def _media_is_valid(
     instead of returning False — "validation unavailable" must never
     be mistaken for "invalid media" (a transient ffprobe hiccup once
     made the fresh-download gate delete a multi-GB completed
-    download). The ``fail_safe`` fallback covers ALL THREE metadata
-    probes uniformly — the codec probe, the stream-timing probe and
-    the container-duration probe (round 32 only covered the codec
-    one, so a transient duration-probe fault still fell into the
-    fail-closed branch and deleted the download) — while decode
-    cancellations / phase timeouts and spawn faults out of
-    ``_ffmpeg_full_decode`` always propagate regardless of it.
+    download). The ``fail_safe`` fallback covers BOTH metadata probes
+    uniformly — the codec probe AND the stream-timing probe (round 32
+    only covered the codec one, so a transient duration-probe fault
+    still fell into the fail-closed branch and deleted the download) —
+    while decode cancellations / phase timeouts and spawn faults out
+    of ``_ffmpeg_decode_timing`` always propagate regardless of it.
     """
     if not require_video and not require_audio:
         return True
     video_dur: float | None = None
     audio_dur: float | None = None
+    video_measured: float | None = None
+    audio_measured: float | None = None
     if require_video:
         if cancel_callback is not None and cancel_callback():
             raise CancelledError("media validation cancelled")
@@ -501,14 +510,15 @@ def _media_is_valid(
             if not fail_safe:
                 raise
             return False
-        if not _ffmpeg_full_decode(
+        video_ok, video_measured = _ffmpeg_decode_timing(
             path,
             stream_type="v",
             timeout=timeout,
             cancel_callback=cancel_callback,
             low_process_priority=low_process_priority,
             rlimit_as_mb=rlimit_as_mb,
-        ):
+        )
+        if not video_ok:
             return False
         if cancel_callback is not None and cancel_callback():
             raise CancelledError("media validation cancelled")
@@ -530,14 +540,15 @@ def _media_is_valid(
             if not fail_safe:
                 raise
             return False
-        if not _ffmpeg_full_decode(
+        audio_ok, audio_measured = _ffmpeg_decode_timing(
             path,
             stream_type="a",
             timeout=timeout,
             cancel_callback=cancel_callback,
             low_process_priority=low_process_priority,
             rlimit_as_mb=rlimit_as_mb,
-        ):
+        )
+        if not audio_ok:
             return False
         if cancel_callback is not None and cancel_callback():
             raise CancelledError("media validation cancelled")
@@ -553,35 +564,42 @@ def _media_is_valid(
         # FAIL-CLOSED: a required stream whose timing cannot be read is
         # NOT valid media (audit round 32 P1) — except the one
         # LEGITIMATE negative-verdict gap: containers with no
-        # stream-level duration at all (FLV and friends, audit round 36
-        # P0) are judged by their container duration instead (below).
-        # A mismatch beyond the bounded tolerance is a truncated
-        # secondary track (audit rounds 30 P5 / 33 P1).
+        # stream-level duration at all (FLV and friends). For those,
+        # the DECODED lengths (measured during the full decode above)
+        # take the place of the metadata durations — the same end
+        # comparison, on the same tolerance (audit round 37 P1: a
+        # container duration cannot distinguish a healthy FLV from one
+        # with a 0.1 s audio track against 12 s of video — the decoded
+        # lengths can). A mismatch beyond the bounded tolerance is a
+        # truncated secondary track (audit rounds 30 P5 / 33 P1).
         if video_dur is None or audio_dur is None:
-            # One (or both) stream durations genuinely N/A: accept only
-            # when the container itself carries a positive duration —
-            # both tracks already decoded cleanly by now, so the
-            # container duration is the only honest length signal left
-            # (reproduced live: a healthy FLV reads N/A for BOTH stream
-            # durations and 2.021 s at container level).
-            try:
-                container_dur = _ffprobe_container_duration(path, cancel_callback=cancel_callback)
-            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-                if not fail_safe:
-                    raise
+            # Genuine N/A on at least one side: fall back to the
+            # measured lengths. Unmeasurable (None) or empty (<= 0)
+            # measured length on EITHER side stays fail-closed — a
+            # required track we cannot prove any length for is not
+            # valid media.
+            if (
+                video_measured is None
+                or audio_measured is None
+                or video_measured <= 0.0
+                or audio_measured <= 0.0
+            ):
                 return False
-            return container_dur is not None and container_dur > 0.0
-        # Compare track ENDS, not raw durations: MPEG-PS (and other
-        # multiplexed formats) legitimately start the audio track later
-        # than the video (reproduced live: a healthy 2.5 s MPEG-PS with
-        # video start 0.533 / audio start 1.112 carries a 532 ms
-        # DURATION difference yet ends within 47 ms of the video — a
-        # duration comparison falsely rejects it; the end comparison is
-        # what the muxer actually keeps aligned, audit round 36 P1).
-        # Any component missing falls back to the duration comparison,
-        # which is what the historical gate did.
-        video_end = video_start + video_dur if video_start is not None else video_dur
-        audio_end = audio_start + audio_dur if audio_start is not None else audio_dur
+            video_end = video_measured
+            audio_end = audio_measured
+        else:
+            # Compare track ENDS, not raw durations: MPEG-PS (and other
+            # multiplexed formats) legitimately start the audio track
+            # later than the video (reproduced live: a healthy 2.5 s
+            # MPEG-PS with video start 0.533 / audio start 1.112
+            # carries a 532 ms DURATION difference yet ends within 47
+            # ms of the video — a duration comparison falsely rejects
+            # it; the end comparison is what the muxer actually keeps
+            # aligned, audit round 36 P1). Any component missing falls
+            # back to the duration comparison, which is what the
+            # historical gate did.
+            video_end = video_start + video_dur if video_start is not None else video_dur
+            audio_end = audio_start + audio_dur if audio_start is not None else audio_dur
         if abs(video_end - audio_end) > _allowed_stream_drift(video_end, audio_end):
             return False
     return True

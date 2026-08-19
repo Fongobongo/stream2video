@@ -307,7 +307,7 @@ def test_gapless_tree_reuse_rejects_corrupted_intermediate_body(tmp_path: Path, 
         # The intermediate's audio BODY is damaged: the real codec probe
         # passes, the whole-stream audio decode fails — the audit's
         # zeroed-middle counterexample.
-        return stream_type != "a" or not Path(path).name.startswith("L0_")
+        return (stream_type != "a" or not Path(path).name.startswith("L0_")), None
 
     monkeypatch.setattr(concat_mod, "_concat_filter_one_pass", fake_one_pass)
     monkeypatch.setattr(concat_mod, "_GAPLESS_MAX_INPUTS_PER_CALL", 2)
@@ -351,7 +351,7 @@ def test_gapless_tree_reuse_rejects_corrupted_intermediate_body(tmp_path: Path, 
         check=True,
     )
 
-    with patch("stream2video.concat.probing._ffmpeg_full_decode", side_effect=fake_decode):
+    with patch("stream2video.concat.probing._ffmpeg_decode_timing", side_effect=fake_decode):
         concat_mod._run_gapless_segment_concat(
             out,
             parts,
@@ -532,14 +532,16 @@ class TestFfprobeDurationOkBoundedSlack:
         assert self._probe(tmp_path, "298.8\n", 300.0, slack=2.0) is True
 
 
-class TestFfmpegFullDecode:
+class TestFfmpegDecodeTiming:
     """The whole-stream decode gate (audit round 29 P3/P4 / 30 P7/P8 /
     31 P1) — the only check that reads every packet, used by the
     fresh-download publish, every resume-reuse decision and the
     final-output validation. Runs through a cancellable Popen with a
     ring-bounded stderr drain, ``-xerror``, and a caller-supplied
     timeout — and tears the child down (kill + bounded reap + pipe
-    close + drain join) on EVERY exit path."""
+    close + drain join) on EVERY exit path. Since audit round 37 P1 it
+    also measures the decoded length via ``-progress pipe:1``.
+    """
 
     class _FakeProc:
         def __init__(self, rc: int, stderr_text: str, waits_before_exit: int = 0):
@@ -550,6 +552,7 @@ class TestFfmpegFullDecode:
             self._waits = waits_before_exit
             self._killed = False
             self.stderr = io.StringIO(stderr_text)
+            self.stdout = io.StringIO("")
 
         def poll(self):
             return self.returncode
@@ -568,15 +571,16 @@ class TestFfmpegFullDecode:
                 self.returncode = 1
 
     def _probe(self, proc, *, cancel_callback=None, timeout=60.0):
-        from stream2video.concat.probing import _ffmpeg_full_decode
+        from stream2video.concat.probing import _ffmpeg_decode_timing
 
         with (
             patch("stream2video.concat.probing.ffmpeg_path", return_value="ffmpeg"),
             patch("stream2video.concat.probing.popen_with_retry", return_value=proc),
         ):
-            return _ffmpeg_full_decode(
+            ok, _ = _ffmpeg_decode_timing(
                 Path("part.mp4"), "v", timeout=timeout, cancel_callback=cancel_callback
             )
+            return ok
 
     def test_clean_decode_accepted(self):
         assert self._probe(self._FakeProc(0, "")) is True
@@ -634,7 +638,7 @@ class TestFfmpegFullDecode:
             patch("stream2video.concat.probing.popen_with_retry", return_value=proc),
             pytest.raises(RuntimeError, match="callback exploded"),
         ):
-            probing._ffmpeg_full_decode(Path("part.mp4"), "v", timeout=60, cancel_callback=boom)
+            probing._ffmpeg_decode_timing(Path("part.mp4"), "v", timeout=60, cancel_callback=boom)
         assert proc._killed, "a raising callback must not leave the child running"
         assert proc.poll() is not None
         assert proc.stderr.closed, "the stderr pipe must be closed on every exit path"
@@ -659,7 +663,7 @@ class TestFfmpegFullDecode:
             patch("stream2video.concat.probing.popen_with_retry", return_value=proc),
             patch("stream2video.concat.probing.subprocess_kwargs", side_effect=spy),
         ):
-            probing._ffmpeg_full_decode(
+            probing._ffmpeg_decode_timing(
                 Path("part.mp4"),
                 "v",
                 low_process_priority=True,
@@ -687,7 +691,7 @@ class TestFfmpegFullDecode:
             patch("stream2video.concat.probing.ffmpeg_path", return_value="ffmpeg"),
             patch("stream2video.concat.probing.popen_with_retry", return_value=proc),
         ):
-            probing._ffmpeg_full_decode(Path("part.mp4"), "v")
+            probing._ffmpeg_decode_timing(Path("part.mp4"), "v")
         assert registered_during == [True], "the child must be registered while running"
         assert proc not in utils._proc_registry.get("default", [])
 
@@ -702,9 +706,9 @@ class TestFfmpegFullDecode:
             ),
             pytest.raises(FileNotFoundError),
         ):
-            from stream2video.concat.probing import _ffmpeg_full_decode
+            from stream2video.concat.probing import _ffmpeg_decode_timing
 
-            _ffmpeg_full_decode(Path("part.mp4"), "v")
+            _ffmpeg_decode_timing(Path("part.mp4"), "v")
 
 
 class TestMediaIsValid:
@@ -725,12 +729,15 @@ class TestMediaIsValid:
         decode=True,
         durations=(5.0, 5.0),
         starts=(0.0, 0.0),
-        container=None,
+        measured=None,
     ):
         from stream2video.concat import probing
 
-        def fake_decode(path, stream_type="v", **kw):
-            return decode
+        def fake_decode_timing(path, stream_type="v", **kw):
+            idx = 0 if stream_type == "v" else 1
+            if not decode:
+                return False, None
+            return True, (measured or durations)[idx]
 
         def fake_timing(path, t, **kw):
             idx = 0 if t == "v" else 1
@@ -738,12 +745,11 @@ class TestMediaIsValid:
 
         with (
             patch("stream2video.concat.probing._ffprobe_is_valid_media", return_value=codec),
-            patch("stream2video.concat.probing._ffmpeg_full_decode", side_effect=fake_decode),
-            patch("stream2video.concat.probing._ffprobe_stream_timing", side_effect=fake_timing),
             patch(
-                "stream2video.concat.probing._ffprobe_container_duration",
-                return_value=container,
+                "stream2video.concat.probing._ffmpeg_decode_timing",
+                side_effect=fake_decode_timing,
             ),
+            patch("stream2video.concat.probing._ffprobe_stream_timing", side_effect=fake_timing),
         ):
             return probing._media_is_valid(
                 Path("out.mp4"),
@@ -763,7 +769,10 @@ class TestMediaIsValid:
 
         with (
             patch("stream2video.concat.probing._ffprobe_is_valid_media", side_effect=record),
-            patch("stream2video.concat.probing._ffmpeg_full_decode", return_value=True),
+            patch(
+                "stream2video.concat.probing._ffmpeg_decode_timing",
+                side_effect=lambda p, t="v", **kw: (True, 5.0),
+            ),
             patch("stream2video.concat.probing._ffprobe_stream_timing", return_value=(0.0, 5.0)),
         ):
             assert (
@@ -783,7 +792,10 @@ class TestMediaIsValid:
 
         with (
             patch("stream2video.concat.probing._ffprobe_is_valid_media", side_effect=record),
-            patch("stream2video.concat.probing._ffmpeg_full_decode", return_value=True),
+            patch(
+                "stream2video.concat.probing._ffmpeg_decode_timing",
+                side_effect=lambda p, t="v", **kw: (True, 5.0),
+            ),
             patch("stream2video.concat.probing._ffprobe_stream_timing", return_value=(0.0, 5.0)),
         ):
             assert (
@@ -837,31 +849,68 @@ class TestMediaIsValid:
         assert self._call(require_video=True, require_audio=False, decode=False) is False
 
     def test_unknown_duration_is_fail_closed_when_both_required(self):
-        """Audit round 32 P1 + round 36 P0: when both streams are
-        required, an unreadable duration on EITHER side must reject the
-        file — UNLESS the container itself carries a positive duration
-        (FLV and friends have NO stream-level duration and no
-        Matroska-style tag; a positive container duration after both
-        tracks decoded cleanly is the honest length signal — audit
-        round 36 P0). An unprobed container duration (None) stays
-        fail-closed."""
+        """Audit round 32 P1 + round 37 P1: when both streams are
+        required, an unreadable duration on EITHER side is fail-closed
+        UNLESS the DECODED lengths (measured during the full decode)
+        prove the tracks agree — a container duration cannot do that
+        (a 12 s video with a 0.1 s audio track decodes cleanly and has
+        a positive container duration; only the measured lengths
+        expose the truncation). Unmeasurable or empty measured lengths
+        stay fail-closed."""
         assert self._call(require_video=True, require_audio=True, durations=(12.0, None)) is False
         assert self._call(require_video=True, require_audio=True, durations=(None, 12.0)) is False
         assert (
             self._call(
-                require_video=True, require_audio=True, durations=(12.0, None), container=2.0
+                require_video=True,
+                require_audio=True,
+                durations=(12.0, None),
+                measured=(12.0, 12.0),
             )
             is True
         )
         assert (
             self._call(
-                require_video=True, require_audio=True, durations=(None, None), container=2.0
+                require_video=True, require_audio=True, durations=(None, None), measured=(2.0, 2.0)
             )
             is True
         )
         assert (
             self._call(
-                require_video=True, require_audio=True, durations=(None, None), container=None
+                require_video=True, require_audio=True, durations=(None, None), measured=(2.0, 0.5)
+            )
+            is False
+        )
+        assert (
+            self._call(
+                require_video=True,
+                require_audio=True,
+                durations=(None, None),
+                measured=(None, 2.0),
+            )
+            is False
+        )
+        assert (
+            self._call(
+                require_video=True,
+                require_audio=True,
+                durations=(None, None),
+                measured=(2.0, 0.0),
+            )
+            is False
+        )
+
+    def test_na_container_truncated_audio_rejected_by_measured_lengths(self):
+        """Audit round 37 P1 counterexample: a no-stream-duration
+        container (FLV) whose audio track is 0.1 s against 12 s of
+        video — both tracks exist, each decodes cleanly, and the
+        container duration is positive; the measured decoded lengths
+        must reject it (11.9 s of audio body missing)."""
+        assert (
+            self._call(
+                require_video=True,
+                require_audio=True,
+                durations=(None, None),
+                measured=(12.0, 0.1),
             )
             is False
         )
@@ -960,7 +1009,9 @@ class TestMediaIsValid:
         for exc in (subprocess.TimeoutExpired("ffprobe", 10.0), FileNotFoundError, OSError):
             with (
                 patch("stream2video.concat.probing._ffprobe_is_valid_media", return_value=True),
-                patch("stream2video.concat.probing._ffmpeg_full_decode", return_value=True),
+                patch(
+                    "stream2video.concat.probing._ffmpeg_decode_timing", return_value=(True, 5.0)
+                ),
                 patch("stream2video.concat.probing._ffprobe_stream_timing", side_effect=exc),
                 pytest.raises((subprocess.TimeoutExpired, FileNotFoundError, OSError)),
             ):
@@ -974,7 +1025,7 @@ class TestMediaIsValid:
 
         with (
             patch("stream2video.concat.probing._ffprobe_is_valid_media", return_value=True),
-            patch("stream2video.concat.probing._ffmpeg_full_decode", return_value=True),
+            patch("stream2video.concat.probing._ffmpeg_decode_timing", return_value=(True, 5.0)),
             patch(
                 "stream2video.concat.probing._ffprobe_stream_timing",
                 side_effect=subprocess.TimeoutExpired("ffprobe", 10.0),
@@ -1220,6 +1271,46 @@ def test_gapless_probe_cancel_propagates_instead_of_reencode(tmp_path: Path):
                 cancel_callback=lambda: False,
             )
     assert recorded == [], "a cancelled probe must never start a re-encode"
+
+
+def test_gapless_duration_cache_cancel_propagates(tmp_path: Path):
+    """Audit round 37 P2: the gapless tree's per-group duration cache
+    used the legacy sync probe WITHOUT a cancel callback, and the
+    surrounding ``except Exception`` swallowed a cancel into a 0.0 ETA
+    no-op. The cancellable probe must abort the whole tree immediately,
+    before any group encode starts."""
+    from stream2video import concat as concat_mod
+    from stream2video.concat.errors import CancelledError
+
+    recorded: list = []
+
+    def fake_one_pass(part_paths, output_path, vcodec, vcodec_opts, **kwargs):
+        recorded.append(len(part_paths))
+
+    def cancelled_dur(path, **kwargs):
+        raise CancelledError("cancelled during duration cache probe")
+
+    with (
+        patch.object(concat_mod, "_concat_filter_one_pass", side_effect=fake_one_pass),
+        patch.object(concat_mod, "_GAPLESS_MAX_INPUTS_PER_CALL", 2),
+        patch.object(concat_mod, "get_video_duration", side_effect=cancelled_dur),
+    ):
+        parts = [tmp_path / f"seg_{i:06d}.mp4" for i in range(5)]
+        for p in parts:
+            p.write_bytes(b"\x00" * 2048)
+        out = tmp_path / "out.mp4"
+
+        with pytest.raises(CancelledError):
+            concat_mod._run_gapless_segment_concat(
+                out,
+                parts,
+                "libx264",
+                [],
+                audio_quality="medium",
+                total_duration=4.5,
+                cancel_callback=lambda: False,
+            )
+    assert recorded == [], "a cancelled duration probe must never start a group encode"
 
 
 class TestMakePhaseProgress:
