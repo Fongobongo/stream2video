@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -361,6 +362,69 @@ class TestGetVideoStartTime:
         f = tmp_path / "not_a_video.txt"
         f.write_text("hello")
         assert get_video_start_time(f) == 0.0
+
+
+class TestLegacyHelpersCancellable:
+    """Audit round 36 P2: the legacy sync ffprobe helpers now run
+    through the shared cancellable runner — a user Cancel during the
+    probe must raise ``CancelledError`` IMMEDIATELY (the historical
+    swallow-paths returned None/0.0/True and held the GUI's Cancel for
+    the full 30 s ceiling), while other faults keep the historical
+    fallbacks."""
+
+    def test_cancel_callback_reaches_runner(self):
+        from stream2video import utils
+
+        seen: list = []
+        cb = lambda: False  # noqa: E731 — bare callback identity is the assertion
+
+        def fake_run(args, *, timeout=10.0, cancel_callback=None):
+            seen.append(cancel_callback)
+            return 0, "1280000\n"
+
+        for helper in (
+            utils.get_video_bitrate,
+            utils.get_video_duration,
+            utils.get_video_start_time,
+            utils.has_audio_stream,
+        ):
+            seen.clear()
+            with patch("stream2video.utils._run_ffprobe", side_effect=fake_run):
+                helper(Path("x.mp4"), cancel_callback=cb)
+            assert seen == [cb], f"{helper.__name__} must forward cancel_callback"
+
+    def test_cancelled_error_propagates_from_every_helper(self):
+        import pytest
+
+        from stream2video import utils
+        from stream2video.concat.errors import CancelledError
+
+        def cancelled_run(args, **kwargs):
+            raise CancelledError("metadata probe cancelled")
+
+        for helper in (
+            utils.get_video_bitrate,
+            utils.get_video_duration,
+            utils.get_video_start_time,
+            utils.has_audio_stream,
+        ):
+            with (
+                patch("stream2video.utils._run_ffprobe", side_effect=cancelled_run),
+                pytest.raises(CancelledError),
+            ):
+                helper(Path("x.mp4"), cancel_callback=lambda: True)
+
+    def test_other_faults_keep_historical_fallbacks(self):
+        from stream2video import utils
+
+        def failing_run(args, **kwargs):
+            return 1, ""
+
+        with patch("stream2video.utils._run_ffprobe", side_effect=failing_run):
+            assert utils.get_video_bitrate(Path("x.mp4")) is None
+            assert utils.get_video_duration(Path("x.mp4")) is None
+            assert utils.get_video_start_time(Path("x.mp4")) == 0.0
+            assert utils.has_audio_stream(Path("x.mp4")) is True
 
 
 class TestActiveProcess:

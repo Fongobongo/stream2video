@@ -1,20 +1,36 @@
 """Shared utility functions."""
 
+import contextlib
 import logging
 import queue
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import IO, Protocol
 
-from stream2video.tools import ffprobe_path, run_with_retry
+from stream2video.tools import ffprobe_path, popen_with_retry
 
 logger = logging.getLogger(__name__)
 
 CANCEL_POLL_INTERVAL = 0.5
+
+# Hard ceiling for a single metadata probe (audit round 32 P2). ffprobe
+# on a readable container answers in well under a second; a probe that
+# hangs for the old 30 s ceiling is almost always stalled on a wedged
+# source (network path, broken pipe). Ten seconds is far above any sane
+# local read and far below a visibly frozen GUI. Shared by the
+# cancellable probe runner AND the legacy sync helpers, so a Cancel can
+# never be held for more than one ceiling per helper (audit round 36
+# P2: the old sync helpers blocked for 30 s each without noticing a
+# cancel at all).
+_PROBE_TIMEOUT = 10.0
+
+# Poll cadence of the cancellable probe loop (audit round 33 P2).
+_PROBE_POLL_SECONDS = 0.2
 
 
 class WaitForDrain(Protocol):
@@ -89,8 +105,102 @@ def cancel_monitor(
         cancelled.set()
 
 
-def get_video_bitrate(video_path: Path) -> int | None:
-    """Probe video stream bit_rate in bits/s via ffprobe (None on failure)."""
+def _run_ffprobe(
+    args: list[str],
+    *,
+    timeout: float = _PROBE_TIMEOUT,
+    cancel_callback: "Callable[[], bool] | None" = None,
+) -> tuple[int, str]:
+    """Run ONE metadata ffprobe: cancellable, bounded, torn down on
+    every exit path (audit round 33 P2). Shared by the concat metadata
+    probes AND the legacy sync helpers (audit round 36 P2).
+
+    The old shape — a blocking ``subprocess`` run call with a flat
+    timeout — noticed a user cancel only AFTER the timeout expired: a probe
+    stalled on a wedged source (network share, broken container) held
+    the GUI's Cancel for up to the whole ceiling even though a cancel
+    check ran between probes. One small popen loop instead (same
+    teardown shape as ``_ffmpeg_full_decode``, lighter — probe stdout
+    goes through the shared ring-bounded drain, so even a
+    stream-spamming container can neither wedge the pipe nor grow the
+    sink unboundedly): poll ``cancel_callback`` every 0.2 s, bounded
+    by ``timeout``.
+
+    Returns ``(returncode, stdout)``. Infrastructure faults PROPAGATE:
+    ``CancelledError`` on cancel, ``subprocess.TimeoutExpired`` on the
+    deadline, spawn faults out of ``popen_with_retry`` — "validation
+    unavailable" must reach the caller's fail-safe logic, never become
+    a verdict here.
+    """
+    # Function-level import: utils is a shared leaf, and importing
+    # stream2video.concat.errors at module level would re-enter the
+    # concat package __init__ (which imports utils) when utils is
+    # imported directly — a circular-import trap (audit round 36 P2).
+    from stream2video.concat.errors import CancelledError
+
+    proc = popen_with_retry(
+        args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        **no_window_kwargs(),
+    )
+    stdout_lines: list[str] = []
+    assert proc.stdout is not None
+    wait_for_drain = drain_stderr_lines(proc.stdout, stdout_lines)
+    deadline = time.monotonic() + timeout
+    rc: int | None = None
+    with registered_process(proc):
+        try:
+            while True:
+                try:
+                    rc = proc.wait(timeout=_PROBE_POLL_SECONDS)
+                    break
+                except subprocess.TimeoutExpired:
+                    pass
+                if cancel_callback is not None and cancel_callback():
+                    raise CancelledError("metadata probe cancelled") from None
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(args, timeout) from None
+        finally:
+            # Unconditional child teardown on EVERY exit path (normal
+            # completion, cancel, timeout — audit round 31 P1-1 shape).
+            if proc.poll() is None:
+                with contextlib.suppress(OSError):
+                    kill_and_reap(proc, timeout=5.0)
+            # The child is exited/reaped now, so its stdout write end is
+            # closed and EOF is arriving on the pipe. Join the drain to
+            # EOF BEFORE closing the pipe (audit round 34 P1-2): the
+            # drain reads in a separate thread, and a close racing it
+            # loses whatever output is still buffered — the read then
+            # raises into the drain's swallowed-error path and a HEALTHY
+            # rc=0 probe turns into an empty stdout → false invalid
+            # verdict (reproduced live with a slow drain).
+            if not wait_for_drain(2.0):
+                # The drain did not reach EOF within the bound (e.g. a
+                # grandchild inherited the pipe handle): close the pipe
+                # to force EOF and give the drain one short extra grace
+                # period instead of leaving it on a live fd forever.
+                with contextlib.suppress(OSError, ValueError):
+                    proc.stdout.close()
+                wait_for_drain(0.5)
+            with contextlib.suppress(OSError, ValueError):
+                proc.stdout.close()
+    assert rc is not None
+    return rc, "".join(stdout_lines)
+
+
+def get_video_bitrate(
+    video_path: Path, cancel_callback: "Callable[[], bool] | None" = None
+) -> int | None:
+    """Probe video stream bit_rate in bits/s via ffprobe (None on failure).
+
+    Runs through the shared cancellable probe runner (audit round 36
+    P2): a Cancel during the probe raises ``CancelledError`` instead of
+    blocking for the timeout; other failures keep the historical None.
+    """
     cmd = [
         ffprobe_path(),
         "-v",
@@ -104,20 +214,14 @@ def get_video_bitrate(video_path: Path) -> int | None:
         str(video_path),
     ]
     try:
-        result = run_with_retry(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=True,
-            **no_window_kwargs(),
-        )
-        raw = result.stdout.strip()
+        rc, stdout = _run_ffprobe(cmd, cancel_callback=cancel_callback)
+        if rc != 0:
+            return None
+        raw = stdout.strip()
         if not raw or raw == "N/A":
             return None
         return int(float(raw))
     except (
-        subprocess.CalledProcessError,
         subprocess.TimeoutExpired,
         ValueError,
         FileNotFoundError,
@@ -127,8 +231,15 @@ def get_video_bitrate(video_path: Path) -> int | None:
         return None
 
 
-def get_video_duration(video_path: Path) -> float | None:
-    """Get video duration in seconds via ffprobe."""
+def get_video_duration(
+    video_path: Path, cancel_callback: "Callable[[], bool] | None" = None
+) -> float | None:
+    """Get video duration in seconds via ffprobe.
+
+    Runs through the shared cancellable probe runner (audit round 36
+    P2): a Cancel during the probe raises ``CancelledError``; other
+    failures keep the historical None.
+    """
     cmd = [
         ffprobe_path(),
         "-v",
@@ -140,17 +251,11 @@ def get_video_duration(video_path: Path) -> float | None:
         str(video_path),
     ]
     try:
-        result = run_with_retry(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=True,
-            **no_window_kwargs(),
-        )
-        return float(result.stdout.strip())
+        rc, stdout = _run_ffprobe(cmd, cancel_callback=cancel_callback)
+        if rc != 0:
+            return None
+        return float(stdout.strip())
     except (
-        subprocess.CalledProcessError,
         subprocess.TimeoutExpired,
         ValueError,
         FileNotFoundError,
@@ -160,7 +265,9 @@ def get_video_duration(video_path: Path) -> float | None:
         return None
 
 
-def get_video_start_time(video_path: Path) -> float:
+def get_video_start_time(
+    video_path: Path, cancel_callback: "Callable[[], bool] | None" = None
+) -> float:
     """Container-level ``start_time`` in seconds (0 for clean sources).
 
     Sources captured with tools that add ``-itsoffset`` (OBS streams,
@@ -176,7 +283,9 @@ def get_video_start_time(video_path: Path) -> float:
     Returns 0.0 when ffprobe cannot determine the start time rather
     than raising — a failed probe here shouldn't abort the whole
     encode because the segment path doesn't depend on this value and
-    most sources have start_time=0 anyway.
+    most sources have start_time=0 anyway. A Cancel during the probe
+    still raises ``CancelledError`` (audit round 36 P2) — a user
+    cancel must stop the run, not degrade into a 0.0 no-op.
     """
     cmd = [
         ffprobe_path(),
@@ -189,18 +298,12 @@ def get_video_start_time(video_path: Path) -> float:
         str(video_path),
     ]
     try:
-        result = run_with_retry(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=True,
-            **no_window_kwargs(),
-        )
-        out = result.stdout.strip()
+        rc, stdout = _run_ffprobe(cmd, cancel_callback=cancel_callback)
+        if rc != 0:
+            return 0.0
+        out = stdout.strip()
         return float(out) if out else 0.0
     except (
-        subprocess.CalledProcessError,
         subprocess.TimeoutExpired,
         ValueError,
         FileNotFoundError,
@@ -284,7 +387,7 @@ def resolve_disk_probe(path: Path) -> Path:
     return probe
 
 
-def has_audio_stream(video_path: Path) -> bool:
+def has_audio_stream(video_path: Path, cancel_callback: "Callable[[], bool] | None" = None) -> bool:
     """Return True if ``video_path`` has at least one audio stream.
 
     Used by the concat pipeline to decide whether to pass ``-c:a`` /
@@ -293,6 +396,11 @@ def has_audio_stream(video_path: Path) -> bool:
     requested). Probed once at the start of ``cut_and_concat`` so the
     per-segment encode can skip audio options entirely for audio-less
     sources.
+
+    Runs through the shared cancellable probe runner (audit round 36
+    P2): a Cancel during the probe raises ``CancelledError`` (the
+    historical swallow-path returned True, which would silently ignore
+    a user cancel); other failures keep the historical True.
     """
     cmd = [
         ffprobe_path(),
@@ -307,18 +415,13 @@ def has_audio_stream(video_path: Path) -> bool:
         str(video_path),
     ]
     try:
-        result = run_with_retry(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=True,
-            **no_window_kwargs(),
-        )
+        rc, stdout = _run_ffprobe(cmd, cancel_callback=cancel_callback)
+        if rc != 0:
+            return True
     except (
-        subprocess.CalledProcessError,
         subprocess.TimeoutExpired,
         FileNotFoundError,
+        OSError,
     ) as e:
         # If we can't probe, assume audio exists so the historical
         # command shape is preserved — the encoder will fail with a
@@ -327,7 +430,7 @@ def has_audio_stream(video_path: Path) -> bool:
         # didn't ask for.
         logger.warning(f"Could not probe audio streams in {video_path}: {e}")
         return True
-    return bool(result.stdout.strip())
+    return bool(stdout.strip())
 
 
 # Bound on stderr accumulation. A corrupt source can make ffmpeg spam

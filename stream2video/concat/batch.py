@@ -123,7 +123,7 @@ def _run_batch_concat(
     # windows early by |start_time|, cutting real content the user wants
     # to keep. ffmpeg's ``-avoid_negative_ts`` at the muxer level already
     # zeroes the DTS side; we just need to not double-compensate here.
-    start_time = get_video_start_time(video_path)
+    start_time = get_video_start_time(video_path, cancel_callback=cancel_callback)
     if start_time < 0.0:
         start_time = 0.0
 

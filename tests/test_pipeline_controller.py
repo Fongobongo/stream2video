@@ -1291,8 +1291,8 @@ class TestProjectLocks:
             patch("stream2video.concat.probing._ffprobe_is_valid_media", return_value=True),
             patch("stream2video.concat.probing._ffmpeg_full_decode", return_value=True),
             patch(
-                "stream2video.concat.probing._ffprobe_stream_duration",
-                side_effect=lambda p, t, **kw: 12.0 if t == "v" else 2.0,
+                "stream2video.concat.probing._ffprobe_stream_timing",
+                side_effect=lambda p, t, **kw: (0.0, 12.0) if t == "v" else (0.0, 2.0),
             ),
             pytest.raises(PipelineDownloadError, match="failed media validation"),
         ):
@@ -1685,8 +1685,8 @@ class TestOutputAtomicPublish:
         ):
             # Durations mismatch → invalid.
             with patch(
-                "stream2video.concat.probing._ffprobe_stream_duration",
-                side_effect=lambda p, t, **kw: 12.0 if t == "v" else 2.0,
+                "stream2video.concat.probing._ffprobe_stream_timing",
+                side_effect=lambda p, t, **kw: (0.0, 12.0) if t == "v" else (0.0, 2.0),
             ):
                 assert (
                     controller._output_media_is_valid(path, stream_type="v", expect_audio=True)
@@ -1694,8 +1694,8 @@ class TestOutputAtomicPublish:
                 )
             # Close durations → valid.
             with patch(
-                "stream2video.concat.probing._ffprobe_stream_duration",
-                side_effect=lambda p, t, **kw: 12.0 if t == "v" else 11.8,
+                "stream2video.concat.probing._ffprobe_stream_timing",
+                side_effect=lambda p, t, **kw: (0.0, 12.0) if t == "v" else (0.0, 11.8),
             ):
                 assert (
                     controller._output_media_is_valid(path, stream_type="v", expect_audio=True)

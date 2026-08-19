@@ -319,7 +319,7 @@ def _run_locked(
     # config.py for the codec/container mapping.
     # The output lock is held by the caller — no second acquire here.
     if output_format != "video":
-        source_has_audio = _c.has_audio_stream(video_path)
+        source_has_audio = _c.has_audio_stream(video_path, cancel_callback=cancel_callback)
         if not source_has_audio:
             raise _c.ConcatError(
                 f"Source {video_path.name} has no audio stream -- cannot "
@@ -355,11 +355,11 @@ def _run_locked(
             get_video_duration as _gvd,
         )
 
-        source_bitrate = _gvb(video_path)
+        source_bitrate = _gvb(video_path, cancel_callback=cancel_callback)
         if source_bitrate is None or source_bitrate <= 0:
             estimate: int | None = None
             try:
-                est_duration = _gvd(video_path)
+                est_duration = _gvd(video_path, cancel_callback=cancel_callback)
                 est_size = video_path.stat().st_size
                 if est_duration and est_duration > 0 and est_size > 0:
                     estimate = int(est_size * 8 / est_duration)
@@ -412,7 +412,7 @@ def _run_locked(
     # audio-less sources (otherwise ffmpeg fails with "Output file
     # does not contain any stream" when ``-map 0:a:0`` is requested
     # on a video-only input).
-    source_has_audio = _c.has_audio_stream(video_path)
+    source_has_audio = _c.has_audio_stream(video_path, cancel_callback=cancel_callback)
     if not source_has_audio:
         logger.info(f"Source {video_path.name} has no audio stream -- encoding video-only")
     options = options.replace(

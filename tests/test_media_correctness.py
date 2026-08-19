@@ -1011,13 +1011,92 @@ def test_media_is_valid_accepts_healthy_matroska_family(
     ).stdout.strip()
     assert raw.upper() == "N/A", f"expected N/A stream duration, got {raw!r}"
 
-    v_dur = probing._ffprobe_stream_duration(src, "v")
-    a_dur = probing._ffprobe_stream_duration(src, "a")
+    v_start, v_dur = probing._ffprobe_stream_timing(src, "v")
+    a_start, a_dur = probing._ffprobe_stream_timing(src, "a")
     assert v_dur is not None and v_dur > 0, f"video TAG:DURATION not parsed: {v_dur}"
     assert a_dur is not None and a_dur > 0, f"audio TAG:DURATION not parsed: {a_dur}"
     assert abs(v_dur - a_dur) < 0.5, f"v/a durations diverge: {v_dur} vs {a_dur}"
+    # The track-END comparison (audit round 36 P1) must also accept the
+    # healthy file: ends are what the muxer keeps aligned, so even a
+    # legitimate start offset must not reject it.
+    v_end = (v_start or 0.0) + v_dur
+    a_end = (a_start or 0.0) + a_dur
+    assert abs(v_end - a_end) < 0.5, f"v/a ends diverge: {v_end} vs {a_end}"
     assert probing._media_is_valid(src, require_video=True, require_audio=True) is True, (
         "a healthy Matroska-family file must pass the unified gate"
+    )
+
+
+def test_media_is_valid_accepts_healthy_flv(tmp_path: Path):
+    """A healthy FLV must pass the unified gate — the audit round 36 P0
+    counterexample: FLV has NO stream-level duration and no
+    Matroska-style tag (both tracks read N/A), and the pre-fix gate
+    returned False, so the fresh-download gate deleted a fully
+    downloaded file. After both tracks decode cleanly, the positive
+    CONTAINER duration is the honest length signal."""
+    from stream2video.concat import probing
+
+    _require_encoders("libx264", "aac")
+    src = tmp_path / "healthy.flv"
+    _make_healthy_matroska_family(src, video_codec="libx264", audio_codec="aac")
+
+    # Sanity: this really is the N/A-everywhere shape — no stream
+    # duration, no TAG:DURATION.
+    raw = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=start_time,duration:stream_tags=DURATION",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(src),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert "N/A" in raw, f"expected N/A stream timings in FLV probe, got {raw!r}"
+    assert "DURATION" not in raw, f"expected no TAG:DURATION in FLV probe, got {raw!r}"
+
+    container_dur = probing._ffprobe_container_duration(src)
+    assert container_dur is not None and container_dur > 0, (
+        f"FLV container duration not read: {container_dur}"
+    )
+    assert probing._media_is_valid(src, require_video=True, require_audio=True) is True, (
+        "a healthy FLV must pass the unified gate via its container duration"
+    )
+
+
+def test_media_is_valid_accepts_healthy_mpeg_ps(tmp_path: Path):
+    """A healthy MPEG-PS (MPG) must pass the unified gate — the audit
+    round 36 P1 counterexample: the audio track legitimately starts
+    later than the video (muxer timestamp layout), so their raw
+    durations differ by up to half a second while their ENDS stay
+    aligned. The pre-fix duration comparison rejected such files; the
+    end comparison (start + duration) accepts them."""
+    from stream2video.concat import probing
+
+    _require_encoders("mpeg2video", "mp2")
+    src = tmp_path / "healthy.mpg"
+    _make_healthy_matroska_family(src, video_codec="mpeg2video", audio_codec="mp2")
+
+    v_start, v_dur = probing._ffprobe_stream_timing(src, "v")
+    a_start, a_dur = probing._ffprobe_stream_timing(src, "a")
+    assert v_start is not None and v_dur is not None and v_dur > 0, (
+        f"video timing not read: {v_start=} {v_dur=}"
+    )
+    assert a_start is not None and a_dur is not None and a_dur > 0, (
+        f"audio timing not read: {a_start=} {a_dur=}"
+    )
+    v_end = v_start + v_dur
+    a_end = a_start + a_dur
+    # The ends must agree (within the gate's 150 ms floor); the raw
+    # durations may not — that is exactly the MPEG-PS shape.
+    assert abs(v_end - a_end) <= 0.15, f"MPEG-PS track ends diverge: {v_end} vs {a_end}"
+    assert probing._media_is_valid(src, require_video=True, require_audio=True) is True, (
+        "a healthy MPEG-PS file must pass the unified gate via end comparison"
     )
 
 

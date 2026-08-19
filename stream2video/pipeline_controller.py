@@ -1140,8 +1140,19 @@ class PipelineController:
             else:
                 require_video = True
                 try:
-                    require_audio = has_audio_stream(video_path)
-                except Exception:
+                    require_audio = has_audio_stream(
+                        video_path,
+                        cancel_callback=lambda: self.cancel_event.is_set(),
+                    )
+                except Exception as e:
+                    # CancelledError must NOT be swallowed here: a user
+                    # cancel during the probe is a cancel, not a probe
+                    # failure (audit round 36 P2 — the probe is now
+                    # cancellable).
+                    from stream2video.concat.errors import CancelledError
+
+                    if isinstance(e, CancelledError):
+                        raise
                     logger.debug("has_audio_stream failed", exc_info=True)
                     require_audio = False
             try:
@@ -1262,8 +1273,14 @@ class PipelineController:
         # final-output validation for video outputs is stricter when
         # it should have one (audit round 30 P5).
         try:
-            self._src_has_audio = has_audio_stream(video_path)
-        except Exception:
+            self._src_has_audio = has_audio_stream(
+                video_path, cancel_callback=lambda: self.cancel_event.is_set()
+            )
+        except Exception as e:
+            from stream2video.concat.errors import CancelledError
+
+            if isinstance(e, CancelledError):
+                raise
             logger.debug("has_audio_stream failed", exc_info=True)
             self._src_has_audio = False
 
@@ -1285,7 +1302,9 @@ class PipelineController:
             raise PipelineDownloadError(
                 f"Downloaded file is no longer readable: {video_path} ({e})"
             ) from e
-        src_duration = get_video_duration(video_path)
+        src_duration = get_video_duration(
+            video_path, cancel_callback=lambda: self.cancel_event.is_set()
+        )
         self._src_duration = src_duration
         self._progress_plan = _build_progress_plan(
             is_downloaded=download_result.is_downloaded,
