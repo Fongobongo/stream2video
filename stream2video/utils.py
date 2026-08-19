@@ -21,10 +21,14 @@ class WaitForDrain(Protocol):
     """Signature of the callable returned by ``drain_stderr_lines``.
 
     ``timeout`` bounds how long to block for the drain thread to finish;
-    omitting it uses the implementation's default.
+    omitting it uses the implementation's default. Returns ``True`` when
+    the drain thread actually finished within the bound (audit round 34
+    P1-2: callers that OWN the pipe must know whether the drain reached
+    EOF on its own — closing the pipe while the drain is still pending
+    races the drain's buffered output into a swallowed read error).
     """
 
-    def __call__(self, timeout: float | None = 30.0) -> None: ...
+    def __call__(self, timeout: float | None = 30.0) -> bool: ...
 
 
 @contextmanager
@@ -414,7 +418,7 @@ def drain_stderr_lines(
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
 
-    def _wait_for_drain(timeout: float | None = 30.0) -> None:
+    def _wait_for_drain(timeout: float | None = 30.0) -> bool:
         # 5s used to be the bound. On a stderr-spammy source (corrupt
         # input, "error while decoding MB" floods) the drain thread can
         # still be chewing through the pipe when the wait expires, so
@@ -424,7 +428,12 @@ def drain_stderr_lines(
         # The thread always finishes once the pipe closes
         # (process death), so 30s only stretches the bounded wait; it
         # never extends the subprocess lifetime.
-        stop_event.wait(timeout=timeout)
+        #
+        # Returns True iff the drain thread finished within the bound
+        # (audit round 34 P1-2): a pipe OWNER must join the drain to
+        # EOF BEFORE closing the pipe, or the close races the still-
+        # reading thread and loses whatever output was still buffered.
+        return stop_event.wait(timeout=timeout)
 
     return _wait_for_drain
 

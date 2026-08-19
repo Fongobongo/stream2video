@@ -871,6 +871,156 @@ class TestRunFfprobe:
         assert proc._killed
         assert proc.poll() is not None
 
+    def test_stdout_joined_before_pipe_close(self):
+        """Audit round 34 P1-2 regression: the drain thread must be
+        joined to EOF BEFORE the pipe is closed — the old order raced
+        the still-reading drain and lost buffered output, turning a
+        healthy rc=0 probe into an empty-stdout false INVALID verdict."""
+        from stream2video.concat import probing
+
+        calls: list[str] = []
+
+        class _FakePipe:
+            def close(self):
+                calls.append("close")
+
+            def readline(self):
+                return ""
+
+        class _FakeProc:
+            stdout = _FakePipe()
+            returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        def fake_drain(pipe, sink, on_line=None):
+            def wait_for_drain(timeout=None):
+                calls.append("drain")
+                sink.append("h264\n")
+                return True
+
+            return wait_for_drain
+
+        with (
+            patch("stream2video.concat.probing.popen_with_retry", return_value=_FakeProc()),
+            patch("stream2video.concat.probing.drain_stderr_lines", side_effect=fake_drain),
+        ):
+            rc, stdout = probing._run_ffprobe(["ffprobe", "x.mp4"])
+        assert rc == 0
+        assert stdout == "h264\n"
+        assert calls[0] == "drain", "the drain must be joined before the pipe close"
+        assert "close" in calls
+
+    def test_unfinished_drain_gets_pipe_close_and_short_grace(self):
+        """Audit round 34 P1-2 fallback: when the drain does not reach
+        EOF within the bound (a grandchild still holds the pipe), the
+        helper closes the pipe to force EOF and retries one short wait
+        instead of leaving the drain on a live fd forever."""
+        from stream2video.concat import probing
+
+        state = {"finished": False}
+
+        class _FakePipe:
+            def close(self):
+                pass
+
+            def readline(self):
+                return ""
+
+        class _FakeProc:
+            stdout = _FakePipe()
+            returncode = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.returncode
+
+        def fake_drain(pipe, sink, on_line=None):
+            def wait_for_drain(timeout=None):
+                if not state["finished"]:
+                    state["finished"] = True
+                    return False  # drain missed the bound on the first wait
+                return True
+
+            return wait_for_drain
+
+        with (
+            patch("stream2video.concat.probing.popen_with_retry", return_value=_FakeProc()),
+            patch("stream2video.concat.probing.drain_stderr_lines", side_effect=fake_drain),
+        ):
+            rc, _stdout = probing._run_ffprobe(["ffprobe", "x.mp4"])
+        assert rc == 0
+        assert state["finished"], "the second (grace) wait must have run"
+
+    def test_media_complete_forwards_cancel_callback(self):
+        """Audit round 34 P1-1: ``_ffprobe_media_complete`` ACCEPTED a
+        cancel callback but dropped it before the runner — a hung
+        primary probe waited out the full 10 s ceiling. Forwarding only."""
+        from stream2video.concat import probing
+
+        seen: list = []
+
+        def fake_run(args, *, timeout=10.0, cancel_callback=None):
+            seen.append(cancel_callback)
+            return 0, "h264\n5.0\n"
+
+        cb = lambda: False  # noqa: E731 — bare callback identity is the assertion
+        with (
+            patch("stream2video.concat.probing.ffprobe_path", return_value="ffprobe"),
+            patch("stream2video.concat.probing._run_ffprobe", side_effect=fake_run),
+        ):
+            assert probing._ffprobe_media_complete(Path("x.mp4"), cancel_callback=cb) is True
+        assert seen == [cb], "the callback must reach _run_ffprobe"
+
+
+def test_gapless_probe_cancel_propagates_instead_of_reencode(tmp_path: Path):
+    """Audit round 34 P1-3: the gapless tree's resume probe is
+    cancellable, but the surrounding ``except Exception`` swallowed a
+    CancelledError raised mid-probe into a warning + re-encode. The
+    user Cancel must escape IMMEDIATELY, before any re-encode runs."""
+    from stream2video import concat as concat_mod
+    from stream2video.concat.errors import CancelledError
+
+    recorded: list = []
+
+    def fake_one_pass(part_paths, output_path, vcodec, vcodec_opts, **kwargs):
+        recorded.append(len(part_paths))
+
+    def cancelled_probe(path, stream_type="v", cancel_callback=None):
+        raise CancelledError("cancelled during metadata probe")
+
+    with (
+        patch.object(concat_mod, "_concat_filter_one_pass", side_effect=fake_one_pass),
+        patch.object(concat_mod, "_GAPLESS_MAX_INPUTS_PER_CALL", 2),
+        patch.object(concat_mod.gapless, "_ffprobe_is_valid_media", side_effect=cancelled_probe),
+    ):
+        parts = [tmp_path / f"seg_{i:06d}.mp4" for i in range(5)]
+        for p in parts:
+            p.write_bytes(b"\x00" * 2048)
+        out = tmp_path / "out.mp4"
+        # Reuse gate: a finished-looking intermediate from a previous run.
+        tree_dir = out.parent / f"_gapless_tree_{out.stem}"
+        tree_dir.mkdir(parents=True, exist_ok=True)
+        (tree_dir / "L0_00000.mkv").write_bytes(b"\x00" * 2048)
+
+        with pytest.raises(CancelledError):
+            concat_mod._run_gapless_segment_concat(
+                out,
+                parts,
+                "libx264",
+                [],
+                audio_quality="medium",
+                total_duration=4.5,
+                cancel_callback=lambda: False,
+            )
+    assert recorded == [], "a cancelled probe must never start a re-encode"
+
 
 class TestMakePhaseProgress:
     """_make_phase_progress — the single shared progress funnel (audit

@@ -103,9 +103,24 @@ def _run_ffprobe(
             if proc.poll() is None:
                 with contextlib.suppress(OSError):
                     kill_and_reap(proc, timeout=5.0)
+            # The child is exited/reaped now, so its stdout write end is
+            # closed and EOF is arriving on the pipe. Join the drain to
+            # EOF BEFORE closing the pipe (audit round 34 P1-2): the
+            # drain reads in a separate thread, and a close racing it
+            # loses whatever output is still buffered — the read then
+            # raises into the drain's swallowed-error path and a HEALTHY
+            # rc=0 probe turns into an empty stdout → false invalid
+            # verdict (reproduced live with a slow drain).
+            if not wait_for_drain(2.0):
+                # The drain did not reach EOF within the bound (e.g. a
+                # grandchild inherited the pipe handle): close the pipe
+                # to force EOF and give the drain one short extra grace
+                # period instead of leaving it on a live fd forever.
+                with contextlib.suppress(OSError, ValueError):
+                    proc.stdout.close()
+                wait_for_drain(0.5)
             with contextlib.suppress(OSError, ValueError):
                 proc.stdout.close()
-            wait_for_drain(2.0)
     assert rc is not None
     return rc, "".join(stdout_lines)
 
@@ -180,7 +195,9 @@ def _ffprobe_media_complete(
     (transient spawn failure, a hung probe hitting the ceiling) are NOT
     swallowed here: they re-raise so the caller can distinguish
     "invalid media" from "validation unavailable" and must not delete
-    the download (audit round 27 P1).
+    the download (audit round 27 P1). ``cancel_callback`` reaches the
+    probe loop like the codec probe's (audit round 34 P1-1 — the
+    callback was accepted but dropped before the runner).
     """
     rc, stdout = _run_ffprobe(
         [
@@ -194,7 +211,8 @@ def _ffprobe_media_complete(
             "-of",
             "default=noprint_wrappers=1:nokey=1",
             str(path),
-        ]
+        ],
+        cancel_callback=cancel_callback,
     )
     if rc != 0:
         return False
@@ -358,15 +376,21 @@ def _ffmpeg_full_decode(
             # timed out, or an exception from the cancel callback —
             # the child must be killed (if still alive), reaped, its
             # stderr pipe closed and the drain thread joined. Only
-            # then can the exception propagate.
+            # then can the exception propagate. The drain is joined to
+            # EOF BEFORE the pipe is closed (audit round 34 P1-2 — the
+            # close raced the still-reading drain thread and lost
+            # buffered output).
             if proc.poll() is None:
                 with contextlib.suppress(OSError):
                     kill_and_reap(proc, timeout=5.0)
                 if proc.poll() is None:
                     logger.warning("media validation process did not exit after kill: %s", path)
+            if not wait_for_drain(2.0):
+                with contextlib.suppress(OSError, ValueError):
+                    proc.stderr.close()
+                wait_for_drain(0.5)
             with contextlib.suppress(OSError, ValueError):
                 proc.stderr.close()
-            wait_for_drain(2.0)
     if proc.returncode != 0:
         return False
     stderr = "".join(stderr_chunks).lower()

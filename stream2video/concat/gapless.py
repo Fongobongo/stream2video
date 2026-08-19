@@ -335,6 +335,15 @@ def _run_gapless_segment_concat(
                             f"(video={_video_ok} audio={_audio_ok}); re-encoding group {g}"
                         )
                         reuse = False
+                except _c.CancelledError:
+                    # A user Cancel fired DURING the metadata probe
+                    # (the probe is cancellable now — audit round 33
+                    # P2). It must propagate IMMEDIATELY — the generic
+                    # handler below would swallow it into a warning +
+                    # re-encode, delaying (and for edge-triggered
+                    # callbacks, losing) the cancellation (audit round
+                    # 34 P1-3).
+                    raise
                 except Exception:
                     # ffprobe missing / timed out / unexpected error — the
                     # file's integrity cannot be verified. A crash mid-write
