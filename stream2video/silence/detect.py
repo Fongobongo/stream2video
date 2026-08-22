@@ -575,6 +575,14 @@ def _run_silencedetect(
             drain_done = True
 
             if process.returncode != 0:
+                # Same guard the preview path has: an external kill
+                # (cancel_process / cancel_monitor) can land here between
+                # the drain loop's last cancelled.is_set() poll and this
+                # rc check — rc=-9 with empty stderr would otherwise be
+                # misread by looks_like_oom as "silencedetect OOM"
+                # instead of a clean cancel.
+                if (cancel_callback is not None and cancel_callback()) or cancelled.is_set():
+                    raise SilenceCancelledError("silence detection cancelled")
                 stderr_text = "".join(stderr_lines)
                 if looks_like_oom(process.returncode, stderr_text):
                     raise SilenceOutOfMemoryError(
@@ -770,6 +778,11 @@ def _extract_audio_wav(
             drain_done = True
 
             if process.returncode != 0:
+                # Same cancel-before-OOM guard as the silencedetect paths:
+                # an external kill landing in this window must surface as
+                # a clean cancel, not "ffmpeg extract OOM".
+                if (cancel_callback is not None and cancel_callback()) or cancelled.is_set():
+                    raise SilenceCancelledError("audio extraction cancelled")
                 stderr_text = "".join(stderr_lines)
                 if looks_like_oom(process.returncode, stderr_text):
                     wav_path.unlink(missing_ok=True)

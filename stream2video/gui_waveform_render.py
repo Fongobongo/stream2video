@@ -52,6 +52,7 @@ class WaveformRenderMixin:
         _waveform_output_dir: Path | None
         _waveform_last_segments: list[SilenceSegment]
         _waveform_render_token: int
+        _waveform_run_token: int
         _waveform_poll_token: int
         _waveform_running: bool
 
@@ -61,8 +62,12 @@ class WaveformRenderMixin:
 
         Runs on a background thread so the GUI stays responsive during
         the (potentially long) first decode. Re-runs are debounced by
-        ``_waveform_render_token`` — if the user clicks "Render" again
+        ``_waveform_run_token`` — if the user clicks "Render" again
         before the previous run finishes, the older one is invalidated.
+        This token is DISTINCT from ``_waveform_render_token``, which
+        ``_apply_view`` bumps on every view re-render (drag/zoom/pan):
+        view re-renders must never cancel or invalidate an in-flight
+        preview run — they only coalesce PIL work among themselves.
 
         Phase 1 streams the audio peaks directly from ffmpeg, stores
         them in self._waveform_peaks/duration, and shows the bare
@@ -102,21 +107,24 @@ class WaveformRenderMixin:
             self._log("Set an input video (local file) first")
             return
         in_path = Path(input_raw)
-        if not in_path.is_file():
-            self._log(
-                f"Input not a local file (downloads not previewable): {redact_input_url(input_raw)}"
-            )
-            return  # Normalise to the same form the pipeline_worker uses as the
-        # live-segments store key (resolved, symlinks forward). The
-        # store.put runs from the pipeline thread with a *resolved*
-        # path; a raw ``./video.mp4`` here would never match it, leaving
-        # the overlay permanently empty and the final "Waveform updated"
-        # log silent. Matches the pre-existing normalization in
-        # gui_waveform_window.py:81-84.
+        # Normalise BEFORE the is_file() check — and to the same form the
+        # pipeline_worker uses as the live-segments store key (expanded,
+        # resolved, symlinks forward). Resolving first means a ``~/``
+        # path is accepted exactly like the pipeline accepts it (the old
+        # order rejected every tilde path with "Input not a local file"),
+        # and a raw ``./video.mp4`` store key would never match the
+        # pipeline's *resolved* one, leaving the overlay permanently
+        # empty and the final "Waveform updated" log silent. Matches the
+        # pre-existing normalization in gui_waveform_window.py:81-84.
         try:
             in_path = in_path.expanduser().resolve()
         except OSError as e:
             self._log(f"Could not resolve input path ({e}); preview disabled")
+            return
+        if not in_path.is_file():
+            self._log(
+                f"Input not a local file (downloads not previewable): {redact_input_url(input_raw)}"
+            )
             return
 
         # Read current slider values (sync first in case FocusOut didn't fire).
@@ -138,8 +146,8 @@ class WaveformRenderMixin:
             # silence cache even for same-named sources in other folders.
             out_dir = out_dir / artifact_stem(in_path)
 
-        token = self._waveform_render_token + 1
-        self._waveform_render_token = token
+        token = self._waveform_run_token + 1
+        self._waveform_run_token = token
         # Start a new poller session: any previously-running live poller
         # (started by an earlier Render click) must retire — it would
         # otherwise keep re-rendering the overlay on top of this fresh
@@ -178,7 +186,7 @@ class WaveformRenderMixin:
                         target_buckets=800,
                         timeout=self.settings.get("waveform_timeout", 300),
                     )
-                if token != self._waveform_render_token:
+                if token != self._waveform_run_token:
                     return
                 if not peaks or duration <= 0:
                     self._tk_after(
@@ -204,7 +212,7 @@ class WaveformRenderMixin:
                     lambda: self._safe_status_set("Rendering peaks... (detecting silence)"),
                 )
                 self._tk_after(0, lambda: self._apply_view([]))
-                if token != self._waveform_render_token:
+                if token != self._waveform_run_token:
                     return
 
                 # Phase 2: pull silence segments.
@@ -249,7 +257,7 @@ class WaveformRenderMixin:
                             # kill surfaces as rc=-9 and the user sees
                             # "ffmpeg silencedetect OOM" instead of a
                             # clean cancel.
-                            cancel_callback=(lambda: token != self._waveform_render_token),
+                            cancel_callback=(lambda: token != self._waveform_run_token),
                         )
                     except SilenceDetectionError as e:
                         _logger.warning(f"Dry-run detect failed: {e}")
@@ -276,13 +284,13 @@ class WaveformRenderMixin:
                         f"(threshold={config['threshold']}dB, "
                         f"min_silence={config['min_silence']}s, margin={config['margin']}s)"
                     )
-                if token != self._waveform_render_token:
+                if token != self._waveform_run_token:
                     return
 
                 # Phase 3: render the overlay for the current view.
                 self._tk_after(0, lambda: self._safe_status_set("Rendering overlay..."))
                 self._tk_after(0, lambda: self._apply_view(segments))
-                if token != self._waveform_render_token:
+                if token != self._waveform_run_token:
                     return
                 self._log(
                     f"  Waveform ready: {len(segments)} silence segments, "
@@ -406,7 +414,7 @@ class WaveformRenderMixin:
                 return
 
             def _apply() -> None:
-                if token != self._waveform_render_token:
+                if token != self._waveform_run_token:
                     return
                 if self.lbl_wave_image is None or not self._wave_window_alive():
                     return

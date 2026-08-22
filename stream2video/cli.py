@@ -1291,19 +1291,13 @@ def main(
                 prev_handler = None
             _sigint_captured = True
 
-            # SIGINT drives the pipeline controller's cancel_event (the event half
-            # of the pair); the callback half exists for embedding hosts that
-            # want to poll it.
-            cancel_event, _cancel_cb = _make_sigint_cancel()
-            # When a host calls ``main()`` twice in the same process, the second
-            # invocation would otherwise read *our own* handler back via
-            # ``getsignal`` and then restore a stale cancel-event closure on exit.
-            # Marking the installed handler's owner lets the ``finally`` block
-            # detect that case and restore ``SIG_DFL`` instead, which is the only
-            # well-defined "previous" state a bare script had before the CLI ran.
-            # Identity check against the module-level reference in
-            # cli_helpers, not a name+module heuristic — a refactor that renamed
-            # the closure would break the old check silently.
+            # Detect "our own stale handler from a previous in-process
+            # main() call" BEFORE installing the new one: the install
+            # overwrites cli_helpers._installed_sigint_handler, so a
+            # comparison made after _make_sigint_cancel() would compare
+            # the OLD handler against the NEW reference and always be
+            # False — leaving a previous run's dead cancel-event closure
+            # to be restored on exit instead of SIG_DFL.
             import stream2video.cli_helpers as _ch
 
             _ours = prev_handler is not None and prev_handler is getattr(
@@ -1314,6 +1308,11 @@ def main(
                 # pre-CLI state as SIG_DFL rather than restoring our own stale
                 # closure (which would keep the old cancel event alive forever).
                 prev_handler = signal.SIG_DFL
+
+            # SIGINT drives the pipeline controller's cancel_event (the event half
+            # of the pair); the callback half exists for embedding hosts that
+            # want to poll it.
+            cancel_event, _cancel_cb = _make_sigint_cancel()
 
             # Load configuration. ``load_config`` strictly validates BOTH numeric
             # ranges (CONFIG_RANGES) AND enum keys (method/encoder/...), so a
@@ -1337,7 +1336,14 @@ def main(
             # default. The typer option's default stays as the fallback for
             # hosts that call main() with an explicit value.
             if not is_from_cli(ctx, "output_dir"):
-                output_dir = Path(config.get("output_dir", "./processed_videos"))
+                # CONFIG_DEFAULTS["output_dir"] is "" (= key not set): an
+                # empty/absent value must fall through to the historical
+                # ./processed_videos default. ``Path("")`` IS the cwd, so
+                # the old unconditional Path(config.get(...)) silently
+                # redirected outputs (and stream2video.log) into whatever
+                # directory the CLI was launched from.
+                _out_raw = str(config.get("output_dir") or "").strip()
+                output_dir = Path(_out_raw) if _out_raw else Path("./processed_videos")
                 # A RELATIVE output_dir written in the YAML is relative to
                 # the CONFIG FILE's directory (audit round 28 P8), not to
                 # the process cwd — the same config run from two different
@@ -1352,6 +1358,16 @@ def main(
                     and not output_dir.is_absolute()
                 ):
                     output_dir = config_file.parent / output_dir
+
+            # Expand ``~`` BEFORE mkdir / log-file wiring: the old late
+            # expansion (next to the input's) made `-o ~/x` create a
+            # literal ``~/`` folder in the cwd and write the run log
+            # there, while the pipeline wrote into the real home.
+            try:
+                output_dir = output_dir.expanduser()
+            except OSError as e:
+                console.print(f"[red]Invalid output directory:[/red] {output_dir} ({e})")
+                raise typer.Exit(1) from None
 
             # Ensure the output directory exists — deliberately AFTER config
             # load and resolution, so an invalid config aborts before any
@@ -1529,7 +1545,6 @@ def main(
             # inside signed URLs).
             if "~" in input_video and not _validate_url(input_video):
                 input_video = os.path.expanduser(input_video)
-            output_dir = Path(os.path.expanduser(str(output_dir)))
 
             _pcfg = build_pipeline_config(
                 input_raw=input_video,

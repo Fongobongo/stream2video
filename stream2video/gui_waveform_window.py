@@ -42,6 +42,7 @@ class WaveformWindowMixin:
         self.lbl_wave_status: ctk.CTkLabel | None = None
         self._waveform_ctk_image: ctk.CTkImage | None = None
         self._waveform_render_token = 0
+        self._waveform_run_token = 0
         # Live-poller session token: ``_apply_view`` bumps
         # ``_waveform_render_token`` on EVERY render to
         # invalidate in-flight PIL renders, so a live poller that checked
@@ -313,6 +314,7 @@ class WaveformWindowMixin:
         # they see the tokens move and return instead of touching the
         # destroyed widgets.
         self._waveform_render_token += 1
+        self._waveform_run_token += 1
         self._waveform_poll_token += 1
         wave_win = getattr(self, "_wave_window", None)
         if wave_win is not None:
@@ -436,8 +438,11 @@ class WaveformWindowMixin:
         if not self._waveform_peaks or self._waveform_duration <= 0:
             return
         # Cancel any in-flight render so its result doesn't overwrite
-        # the freshly-computed image.
+        # the freshly-computed image. The RUN token is bumped too: an
+        # in-flight preview whose Phase-3 overlay is based on the old
+        # threshold is just as stale as its PIL renders.
         self._waveform_render_token += 1
+        self._waveform_run_token += 1
         self._apply_view()
 
     def _safe_status_set(self, text: str) -> None:

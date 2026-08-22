@@ -171,10 +171,19 @@ def detect_silence(
     initial_segments: list[SilenceSegment] = []
     resume_from: float | None = None
     if resume_cache_path is not None:
-        # A leftover .inuse (crash mid-previous-run) takes precedence:
-        # it's the newest checkpoint the previous run consumed.
+        # Resume from the NEWEST existing checkpoint, not "`.inuse` if it
+        # exists". During a run fresh checkpoints stream into the
+        # CANONICAL path (``_maybe_save_resume``), so after a mid-run
+        # crash the canonical file is newer than the ``.inuse`` renamed
+        # at that run's START — preferring ``.inuse`` unconditionally
+        # rolled an interrupted run back to its starting point.
         inuse_path = _c.resume_inuse_path(resume_cache_path)
-        load_path = inuse_path if inuse_path.exists() else resume_cache_path
+        _candidates = [p for p in (resume_cache_path, inuse_path) if p.exists()]
+        load_path = (
+            max(_candidates, key=lambda p: p.stat().st_mtime)
+            if _candidates
+            else resume_cache_path
+        )
         loaded = _c._load_silence_cache_from_path(load_path, video_path, current_config)
         if loaded is not None:
             initial_segments = loaded
