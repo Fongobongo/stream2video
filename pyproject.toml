@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stream2video"
-version = "0.4"
+version = "0.3"
 description = "CLI tool to compress stream recordings by removing silence"
 readme = "README.md"
 license = {text = "MIT"}

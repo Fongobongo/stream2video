@@ -108,6 +108,13 @@ def reset_tool_cache() -> None:
 #   * anything else / unparseable  →  legacy ``-filter_complex_script``
 _FILTER_SCRIPT_MIN_MODERN = 7
 
+# Minimum supported ffmpeg (major.minor). Older builds still *run* most of
+# the pipeline, but the audio_quality presets do not encode as documented on
+# them (reproduced on 4.4 — the version Ubuntu 22.04's ``apt install ffmpeg``
+# still ships), so the README states this floor, ``--doctor`` warns below it,
+# and the pipeline logs a warning at startup. CI verifies against 8.x/9.x.
+FFMPEG_MIN_VERSION: tuple[int, int] = (5, 0)
+
 
 @cache
 def _ffmpeg_major_minor() -> tuple[int, int] | None:
@@ -144,6 +151,27 @@ def _ffmpeg_major_minor() -> tuple[int, int] | None:
         )
         return None
     return int(m.group(1)), int(m.group(2))
+
+
+def ffmpeg_min_version_warning() -> str | None:
+    """Warning line when the detected ffmpeg predates :data:`FFMPEG_MIN_VERSION`.
+
+    Returns None when the version is at or above the minimum OR the banner
+    could not be parsed — the same fail-open choice the filter-flag fork
+    above makes, so an unparseable banner (already logged by the probe)
+    never blocks or nags a run that may be perfectly fine. The probe is
+    cached per process and shared with ``filter_complex_script_args``.
+    """
+    ver = _ffmpeg_major_minor()
+    if ver is None or ver >= FFMPEG_MIN_VERSION:
+        return None
+    have = ".".join(str(part) for part in ver)
+    need = ".".join(str(part) for part in FFMPEG_MIN_VERSION)
+    return (
+        f"ffmpeg {have} is older than the supported minimum {need}: "
+        "the audio quality presets (high/medium/low) may not encode as "
+        "configured. Upgrade ffmpeg and re-run (--doctor shows the version)."
+    )
 
 
 def subprocess_kwargs_lowest() -> dict[str, Any]:

@@ -13,6 +13,7 @@ import pytest
 import stream2video
 from stream2video.tools import (
     _ffmpeg_major_minor,
+    ffmpeg_min_version_warning,
     filter_complex_script_args,
     reset_tool_cache,
 )
@@ -86,6 +87,56 @@ class TestFFmpegVersionProbe:
             ),
         ):
             assert _ffmpeg_major_minor() is None
+
+
+class TestFFmpegMinVersionWarning:
+    """ffmpeg_min_version_warning — the README's >= 5.0 floor. Older builds
+    still run, so the warning must fire exactly below (5, 0) and stay
+    silent on the floor itself and on an unparseable banner (fail-open,
+    the same choice the filter-flag fork makes)."""
+
+    @pytest.mark.parametrize(
+        ("banner", "warns"),
+        [
+            # 4.4 is what Ubuntu 22.04's apt still ships — the build the
+            # audio-quality presets were reproduced broken on.
+            ("ffmpeg version 4.4.2 Copyright", True),
+            ("ffmpeg version 4.4-full_build-www.gyan.dev Copyright", True),
+            ("ffmpeg version 2.8.17 Copyright", True),
+            ("ffmpeg version 5.0 Copyright", False),
+            ("ffmpeg version 5.1.6 Copyright", False),
+            ("ffmpeg version 9.0.1-essentials_build-www.gyan.dev Copyright", False),
+        ],
+    )
+    def test_floor(self, banner, warns):
+        with (
+            patch("stream2video.tools.ffmpeg_path", return_value="ffmpeg"),
+            patch("stream2video.tools.subprocess.run", side_effect=_version_run(banner)),
+        ):
+            msg = ffmpeg_min_version_warning()
+        if warns:
+            assert msg is not None
+            assert "5.0" in msg
+        else:
+            assert msg is None
+
+    def test_unparseable_banner_stays_silent(self):
+        with (
+            patch("stream2video.tools.ffmpeg_path", return_value="ffmpeg"),
+            patch("stream2video.tools.subprocess.run", side_effect=_version_run("garbage")),
+        ):
+            assert ffmpeg_min_version_warning() is None
+
+    def test_message_names_version_and_symptom(self):
+        banner = "ffmpeg version 4.4.2 Copyright"
+        with (
+            patch("stream2video.tools.ffmpeg_path", return_value="ffmpeg"),
+            patch("stream2video.tools.subprocess.run", side_effect=_version_run(banner)),
+        ):
+            msg = ffmpeg_min_version_warning()
+        assert msg is not None
+        assert "4.4" in msg
+        assert "audio quality presets" in msg
 
 
 class TestFilterComplexScriptArgs:

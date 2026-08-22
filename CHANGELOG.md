@@ -1,178 +1,263 @@
 # Changelog
 
-## [Unreleased]
+## [0.3] - 2026-08-22
 
 ### Breaking changes
 
 - **Project directories for downloads are now site-scoped** — a downloaded source moves into `{output_dir}/{site}_{id}/` (e.g. `youtube_VIDEO_ID/`) instead of `{output_dir}/{id}/`, so two different sites that happen to use the same video id no longer mix their files and caches. Existing `{id}/` directories are not migrated automatically: the next run of the same URL creates the new directory, and the old one can be deleted manually.
 
+- **Unknown YAML keys are rejected instead of silently ignored** — a typo (`threshhold`) or a non-tunable key (`log_format`, which is a CLI flag only) previously loaded without warning and never had any effect; `load_config` now exits with code 1 and names each bad key. **Migration:** if you followed the old README and kept `log_format: json` in your YAML, delete that line and pass `--log-format json` on the command line instead (the key never worked from YAML; it was always silently ignored).
+
 ### Added
 
 - **Concurrent runs of the same source now wait instead of colliding** — a second run (GUI or CLI) pointed at the same URL or file logs "Another run is processing this source" and waits for the first to finish; the wait can be cancelled from the GUI or with Ctrl+C. Variants of the same URL (different casing, default port, signed query parameters) are recognised as the same source.
+
 - **Fresh downloads are verified before they replace the previous copy** — a new download is checked with ffprobe (codec + duration) before it overwrites the existing stable source, so a corrupted download can no longer destroy a good one. Audio-only podcasts are validated against the audio track when the output format is mp3/opus/aac/wav/flac.
+
 - **`--doctor` validates your saved defaults end to end** — it now also reports cross-field errors in `user_defaults.json` (e.g. a stall warning timeout that is not lower than the kill timeout), the same check a real run performs at startup.
+
 - **CLI accepts `~` in paths** — `stream2video ~/video.mp4 -o ~/Videos` now works like in the GUI.
+
+- **`--proxy-active` / `--no-proxy-active` flags** — pin the proxy gate explicitly, overriding any `proxy_active: true` stored in `user_defaults.json` / config YAML. Copied GUI commands now emit `--no-proxy-active` when the GUI's proxy checkbox is off, so a paste can no longer silently re-enable a stored proxy.
+
+- **Parity contract tests** (`tests/test_parity.py`) — for every preset, bool toggle and default override, the GUI's run config and the copied command's CLI resolution are compared field-by-field on the resulting `PipelineConfig`.
+
+- **GUI validation gate** — Start and Copy CLI command now reject invalid Advanced-field content (garbage text, empty entries, out-of-range numbers, bad combo values) with an error dialog naming the fields, matching the CLI resolver's strictness instead of silently substituting the previous value.
+
+- **`--doctor` flag** — print an environment report (Python version, ffmpeg/ffprobe path and version, available encoders, RAM, config file location) and exit. Useful for filing bug reports or checking that everything is wired up before a long run. Works without an input file.
+
+- **`--dry-run` / `-n` flag** — run only silence detection and print a "what would be cut" summary (number of segments, total length removed, expected output duration) without encoding. Lets you tune `threshold` / `min_silence` / `margin` against a real video in seconds instead of waiting for a full encode.
+
+- **`--log-format json` flag** — emit every log line as a JSON object (one per line), for log aggregators like ELK / Splunk / Loki. The default `rich` format is unchanged.
+
+- **`--proxy` CLI flag** — pass an HTTP or SOCKS5 proxy for downloads, matching the existing GUI proxy dialog. `http://127.0.0.1:8080` or `socks5://user:pass@host:1080`.
+
+- **Shell completion** — `stream2video --install-completion` installs Bash / Zsh / Fish / PowerShell completion (powered by Typer). `--show-completion` prints the script for manual install.
+
+- **Docker image** — `Dockerfile` plus a CLI-only entrypoint, so you can run the pipeline in a container without a local python/ffmpeg install.
+
+- **`--stall-warning-timeout` flag** — no-progress *warning* timeout, mirroring the `stall_warning_timeout` YAML key (previously the key was config-only while every other pipeline timeout had a flag).
+
+- **`--completion-sound` / `--no-completion-sound` flag** — the CLI now plays the same completion chime as the GUI's "Sound when done" checkbox (default on, follows the config key), and a copied GUI command can pin it off with `--no-completion-sound`.
+
+- **`--no-force` / `--no-delete-after` flags** — a config file with `force: true` / `delete_after: true` can now be overridden from the command line (`-f` still works).
+
+- **CLI honours the config's `output_dir`** — `-o/--output` wins when passed; otherwise the YAML `output_dir` key is used (parity with the GUI worker). The directory is also created only *after* config load and validation, so an invalid config no longer litters a stray `./processed_videos`.
+
+- **Downloaded sources get a stable per-URL identity** — the yt-dlp `%(id)s-%(epoch)s.%(ext)s` epoch suffix is stripped when the file is moved into the per-video project dir (`{output_dir}/{id}/{id}.mp4`), so re-runs of the same URL reuse the project dir, WAV cache, silence cache and resume checkpoints instead of forking per download.
+
+- **New cutting method `cut_then_encode`** — the best-quality mode: silenced parts are removed losslessly (stream copy, keyframe-aligned) and the remaining pieces are encoded in a single pass at the end. One encoding generation, so the picture stays closest to the source.
+
+- **Quality presets** — pick how the output is encoded without editing bitrates by hand:
+  - `--video-quality` and `--audio-quality`: `high` / `medium` / `low`, plus `source` to keep the encoder's own defaults (the new default).
+  - `--download-quality`: `best` / `1080p` / `720p` / `480p` / `360p` to cap the resolution fetched from YouTube/Twitch.
+  All of the above are also in the GUI as dropdowns.
+
+- **Audio-only output** — `--output-format mp3|opus|aac|wav|flac` drops the video track and produces a standalone audio file (silence still removed). The output gets the matching file extension automatically.
+
+- **Gapless audio by default** — re-encodes audio in the final join pass so the tiny per-segment gap no longer accumulates as A/V drift on multi-segment outputs. Turn off with `--no-gapless-concat` if you prefer the faster stream-copy join. For lossless video + gapless audio in one pass, use `cut_then_encode` instead.
+
+- **Output FPS policy** — `--output-fps source` (default) preserves the input's frame rate without duplication; `24` / `25` / `30` / `50` / `60` force a constant frame rate when the source cadence causes playback issues.
+
+- **Resource presets (`--preset`)** — one switch for low-end or busy machines: `low_memory` (4–8 GB RAM, keeps the system responsive), `low_cpu` (background encode, caps thread count), `balanced` (default), `maximum_performance` (fastest if you have RAM to spare). Any explicit flag still overrides the preset on that key.
+
+- **Memory protection** — a background watchdog (requires the optional `psutil` dependency) cancels a runaway encode before the machine starts swapping, and the run refuses to start a heavy phase when free RAM is already below the safe reserve (`--memory-limit-mb`, `--memory-reserve-mb`). When ffmpeg is killed by the OS for running out of memory, the error now says so in plain words with tips on which settings to lower. On Linux/macOS, `--rlimit-as-mb` can additionally hard-cap ffmpeg's memory at the kernel level.
+
+- **Download health monitoring** — three timeouts catch a stuck download early: no first byte within 5 minutes, no progress for 30 minutes mid-stream, or 8 hours total (`--connect-timeout`, `--no-progress-timeout`, `--download-timeout`, all configurable).
+
+- **Download progress display** — both CLI and GUI now show live percent, size, speed, and ETA while downloading instead of a bare "Downloading video..." line.
+
+- **Waveform preview overhaul** — the preview shows peaks immediately and overlays detected silence regions on top as they are found, supports cursor-anchored zoom + horizontal pan, a time/dB tooltip under the cursor, and a dry-run detection when no cache exists yet. Opening it after a run reuses the saved cache instead of re-detecting.
+
+- **Resume after interruption** — silence detection checkpoints its progress roughly every 30 seconds, so a cancelled or crashed run continues from the last checkpoint instead of starting over. Partially encoded video segments are verified before reuse, and any artifacts left from a run with different settings are discarded automatically.
+
+- **Completion sound (GUI)** — optional short chime when the pipeline finishes, with a different tone on cancel/failure ("Sound when done" checkbox, on by default). Works on Windows and macOS out of the box; on Linux uses whatever player is installed (`paplay`, `aplay`, or `ffplay`).
+
+- **Finer encode control** — `--x264-preset` (speed/size trade-off for CPU encoding), `--encoder-threads` (cap CPU usage), `--x264-low-memory` (less RAM, slightly larger files), and `--low-process-priority` (ffmpeg stays in the background so the PC stays usable while you encode).
+
+- **Encoder fallback policy** — when the selected GPU encoder is missing or crashes, the run now asks before switching to slow CPU encoding (`--software-fallback ask`, the new default); `enabled` restores the old automatic behaviour, `disabled` fails fast.
+
+- **Smarter progress bar** — the GUI progress bar adapts its scale per run (a local file with cached silence detection jumps straight to encoding) and shows an explicit percentage next to the bar.
+
+- **Benchmark script** — `scripts/benchmark_presets.py` compares x264 speed presets on a synthetic clip so you can pick the fastest acceptable one for your hardware.
+
+- **Safer cancellation** — Cancel in the GUI (and Ctrl+C in the CLI) now reliably kills the running ffmpeg/yt-dlp process, including cases where it was stuck writing output.
+
+### Changed
+
+- **Minimum supported ffmpeg is now 5.0** — on older builds (e.g. the 4.4 that Ubuntu 22.04's `apt install ffmpeg` still ships) the audio quality presets do not encode as documented, so the README states the floor, `--doctor` prints a warning row below it, and every run logs one startup warning (the pipeline itself still runs — nothing is hard-blocked). CI verifies against 8.x/9.x.
+
+- **`--log-format` accepts any casing on every path** — `JSON` / `Json` now behave identically to `json` for both normal runs and the eager `--doctor` path, which used to do a case-sensitive comparison (doctor with `--log-format JSON` printed Rich while a normal run emitted JSON). Both surfaces share one spelling rule via `normalize_log_format`.
+
+- **`log_format` in YAML gets a migration hint, not a typo suggestion** — the unknown-key check used to suggest the nearest valid name, which for `log_format` meant `output_format` (a Levenshtein neighbour that tunes the container mp4/mp3/..., not logging). The rejection now tells you it is a CLI flag and to use `--log-format` instead of the config key.
+
+- **`PipelineConfig` has a single construction site** — the CLI and the GUI worker both build the pipeline config through the new shared `build_pipeline_config` factory (`pipeline_controller.py`); the GUI wrapper keeps its per-key default fallbacks for hand-edited settings. A new tunable is now added in one place instead of two.
+
+- **YAML bool-key validation derives from `PARAM_SPECS`** — the bool keys `load_config` strictly validates are no longer a second hand-maintained list; they come from the `kind == "bool"` entries in the shared parameter table the resolver already uses.
+
+- **CLI logging setup is now a context manager (`logging_session`)** — `main()` no longer hand-manages the logging snapshot and its `try/finally` restore; the per-run setup (JSON stdout handler or Rich console handler) and the teardown (close the run's log-file handler, restore handlers, `propagate`, `console.stderr`, `_JSON_LOG_MODE`, console level) live in one construct in `cli_helpers.py`. The restoring `try` starts immediately after the snapshot — the install branches (`install_json_handler`, `console.stderr = True`, the mode flag) are INSIDE it, so an exception mid-install restores the snapshot too. The old hand-written boundary is exactly what produced the audit's logging-leak bugs; a context manager cannot mis-place its own. `main()` shrank from 1203 to 1127 lines on this change; the SIGINT restore stays as the remaining `finally` (signal handlers are not logging state).
+
+- **Frame-accurate cutting** — both `segment` and `batch` methods were reworked so cuts land exactly on the requested timestamps. Previously each non-initial segment could lose ~0.5 seconds, and the `batch` method inserted a 1-second freeze where silence was removed. The batch method also no longer re-decodes the file from the start for every chunk — a 6-hour stream with 100 chunks used to decode 600 hours of video, now it decodes 6.
+
+- **Honest source bitrate on hardware encoders** — when `video_quality=source` is set, the actual source bitrate is probed via ffprobe and used as the encoder target; previously a hardcoded fallback was silently applied.
+
+- **Better default downloads** — `best` download quality now prefers separate best video + best audio tracks (often 1080p where the old logic grabbed a pre-merged 720p).
+
+- **No more audio downgrade** — audio is encoded at the quality you pick; a 256k+ source is no longer silently compressed to a lower bitrate.
+
+- **No more accumulated drift** — the 100 ms per-segment audio padding that added up to seconds of drift on very long videos is gone.
+
+- **GUI layout** — the main window defaults to 1280×720 and fits all controls without scrolling; input/output and quality pickers are tightened into two columns.
+
+- **GUI presets behave as expected** — switching the resource preset back to `balanced` actually restores the default tunables, and the selected preset is remembered across restarts.
+
+- **Python 3.13 is now the baseline.** Windows ARM64 is still supported; CI runs the full test suite on both Ubuntu and Windows.
 
 ### Fixed
 
 - **URL secrets no longer leak into logs and errors** — signed links, userinfo (`user:pass@`), query parameters, and yt-dlp error output that echoes the input or proxy URL are redacted in the log file, GUI log and error messages.
+
 - **Copy CLI command and Start require an input** — an empty input field used to produce a command the CLI rejected as a missing argument; the buttons now explain what to fix.
+
 - **Cancel during a lock wait stops the wait** — cancelling while another run is processing the same source used to idle until the wait timed out.
+
 - **GUI gates no longer silently accept invalid settings** — errors for settings without a dedicated widget row (method/encoder/qualities/output format) and unparseable text in the silence slider fields are now reported on Start / Copy CLI / Save defaults instead of quietly using the previous value.
+
 - **Interrupted-download cleanup is more precise** — multi-suffix fragments (`.f137.mp4.part`, `.webm.ytdl`) are removed, while files belonging to other runs are left alone.
+
 - **A transient ffprobe start failure no longer deletes a completed download** — a momentary antivirus/package-manager interference keeps the downloaded file and asks for a retry instead of discarding a multi-GB file.
 
-### Fixed
-
 - **`r_frame_rate` wrong on multi-segment output with ffmpeg 9.x** — after a concat-demuxer join of per-segment MP4 parts, ffprobe reported a bogus video rate (a 30 FPS source measured as `359/12`) on the ffmpeg 9.0.1 builds CI now installs. Root cause: each part's AAC track overshoots its window by the codec's ~21 ms priming (a `-t`-bound encode still writes the final AAC frame), so the join's total duration is stretched and ffmpeg re-derives the rate from it. The batch path was immune because it has always clamped audio to exactly the window (`apad,atrim=0:{dur}`); the segment and `cut_then_encode` paths now apply the same normalisation (verified: the joined output probes exactly `30/1` / 4.000 s / 120 frames on ffmpeg 9.0.1 and 8.1.1). `PIPELINE_VERSION` bumps 5 → 6 so resume never reuses old overshooting parts.
+
 - **Progress bar could run backwards** — ffmpeg's `out_time_us` stream is not strictly monotonic (the muxer's tail flush can emit a value slightly below the previous one); the GUI/CLI progress callback now goes through a high-water-mark clamp inside `cut_and_concat`, so every method (segment/batch/cut/audio-only) reports a non-decreasing bar.
+
 - **Cancel misreported as a failed encode** — when the cancel monitor kills ffmpeg at the same instant stdout reaches EOF, the reader loop can break on EOF before ever seeing the latched cancel flag, and the nonzero exit then surfaced as `FFmpegError: ffmpeg failed: unknown error (no stderr)` instead of `CancelledError` (observed consistently on the Windows CI runner). `_run_ffmpeg` now re-checks the cancel state before classifying a nonzero exit as a failure.
+
 - **CI test-portability fixes (no behaviour change)** — three tests that only ever encoded Windows-only semantics ran unguarded on Linux and failed there (`test_glob_fallback_windows_path` — a backslash path string is a legal relative filename on POSIX; `test_same_file_key_stable_across_casing_on_windows` — its guard was a tautology, so a case-sensitive FS compared two legitimately-distinct keys; the colon-filename test collided with pathlib parsing `://` at construction time). The two rlimit tests used virtual-address caps below the child's own startup needs (2 MiB < CPython's interpreter → SIGSEGV on 3.13.15) or below libx264's open (1024 MiB on ubuntu's apt ffmpeg) — caps raised to 512 MiB / 4 GiB.
+
 - **Batch pipeline works on ffmpeg 9.x** — the per-chunk encode fed its filter graph through `-filter_complex_script`, a flag the 9.x builds (now shipped by choco/apt CI installs) removed (`Unrecognized option 'filter_complex_script'` → every batch run failed). The pipeline now probes the ffmpeg version once and picks `-filter_complex_script` on ffmpeg < 7 or the equivalent `-/filter_complex <file>` on ≥ 7 (where that syntax landed); both keep the graph in a file so long keep-segment lists stay under Windows's 32K command-line limit.
+
 - **Recent-Projects delete guard no longer bypassed on Windows 8.3 paths** — `is_sensitive_delete_target` compared paths with `os.path.abspath` (which keeps 8.3 short names) against a blocklist built from `Path.resolve()`-normalised entries. A temp dir whose on-disk path is an 8.3 alias (e.g. `pytest-of-runneradmin` → `pytest-o~1`) slipped past the home-directory guard in CI. Both sides now normalise through `os.path.realpath`, and the home lookup goes through a patchable `_user_home()` seam (the old test's `Path.home` monkeypatch stopped intercepting on newer 3.13 patch releases, masking the bug).
+
 - **Ubuntu CI no longer crashes at pytest collection** — the `dev` extra pulled in `pytest-qt` + `PySide6` although no test consumes the `qtbot` fixture (`test_gui_qt.py` drives the Tk event loop directly); the pytest-qt *plugin* imported PySide6 at startup and aborted the whole session on headless runners (`ImportError: libEGL.so.1`). Both packages are gone (the `gui-test` extra is removed too), so CI's Qt dependency is gone and headless Docker/CLI runs collect cleanly. Tk GUI tests still skip on display-less environments via the conftest `TclError` guard.
+
 - **Explicit YAML keys beat the resource preset (was inverted)** — README promised explicit keys win per-key; the implementation applied the preset's overlay AFTER the YAML merge, so `preset: low_memory` + `batch_chunk_size: 50` ran `batch_chunk_size=20`. `load_config` now tags the returned config with the explicitly-written keys and `apply_preset` applies the preset as a baseline, then layers those explicit YAML keys back on top. Explicit CLI flags still beat both.
+
 - **GUI no longer destroys manual preset overrides on restart** — the startup `_sync_preset_on_load` replayed the preset whenever the stored values diverged from it, silently overwriting a hand tweak the user made after selecting the preset (`low_memory` + untick "Low process priority" was reset on every launch). The loaded widget values are now the source of truth; the preset is applied exactly once, at selection. `Copy CLI command` continues to pin divergences against the preset baseline with explicit flags.
+
 - **Fractional YAML values on integer settings are rejected, not truncated** — `download_timeout: 10.9` / `batch_chunk_size: 2.7` slipped through validation and the resolver silently ran `int(10.9)` → 10, while the GUI's Advanced fields already rejected the same input. All `PARAM_SPECS` integer (and auto-or-int) keys now reject a non-integral float in both `load_config` and the resolver, so YAML, CLI flag, and GUI agree: whole numbers only.
+
 - **Invalid `--log-level` no longer behaves differently with `--log-format json`** — the logging session was entered before the level was validated, and the JSON branch fed the raw value into `install_json_handler`, so a bogus level raised a `logging.ValueError` instead of the friendly "Invalid log level" message (rich mode worked fine). The level is now validated once, before the session runs on either path.
+
 - **Rich-mode logging works when a host already configured the root logger** — the session's rich path used `logging.basicConfig(handlers=[...])` WITHOUT `force`, which is a no-op on a preconfigured root: the console handler never attached, CLI records leaked into the host's own handlers, and `--log-level` tweaked a handler that wasn't wired up (one flag, three behaviours). The session now explicitly installs its handler on the root for the run's duration and restores the host's exact handler list on exit — intact, never closed, so one embedded CLI run can't break the host's logging.
 
-
-### Added
-
-- **`--proxy-active` / `--no-proxy-active` flags** — pin the proxy gate explicitly, overriding any `proxy_active: true` stored in `user_defaults.json` / config YAML. Copied GUI commands now emit `--no-proxy-active` when the GUI's proxy checkbox is off, so a paste can no longer silently re-enable a stored proxy.
-- **Parity contract tests** (`tests/test_parity.py`) — for every preset, bool toggle and default override, the GUI's run config and the copied command's CLI resolution are compared field-by-field on the resulting `PipelineConfig`.
-- **GUI validation gate** — Start and Copy CLI command now reject invalid Advanced-field content (garbage text, empty entries, out-of-range numbers, bad combo values) with an error dialog naming the fields, matching the CLI resolver's strictness instead of silently substituting the previous value.
-
-### Fixed
-
 - **Resource preset now actually applies in the GUI** — selecting `low_memory` / `low_cpu` / `maximum_performance` updates the widgets it manages immediately (checkboxes, x264 preset, thread count, RAM limit, batch chunk) and persists; previously the preset was applied to the run snapshot and then overwritten by the widget snapshot in the same function, while the copied command's `--preset` ran differently. `balanced` remains the identity preset.
+
 - **Copied CLI commands pin toggles in both directions** — bool flags are emitted whenever the GUI value diverges from what the CLI would otherwise resolve (user_defaults / preset baseline): `--gapless-concat`, `--per-video-dir`, `--completion-sound`, `--x264-low-memory` and friends now appear when the GUI flips them against stored defaults.
+
 - **Proxy checkbox ON with an empty address pins direct connection** — the copied command emits `--proxy ''` so a stale address in user defaults cannot sneak back in.
+
 - **JSON log mode no longer leaks between in-process CLI invocations** — `--log-format json` state (`_JSON_LOG_MODE`, `console.stderr`, logger handlers, `propagate`) is snapshotted at entry and restored in `finally`; the eager `--doctor --log-format json` path resets the flag before exiting. A JSON run followed by a rich run in the same process (embeds, tests) now behaves correctly.
+
 - **`validate_pipeline_config` reports wrong-typed values** — a string on a numeric key, a bool on an int slot, a non-bool on a toggle, or an int on a float slot is now a validation error instead of being silently skipped and crashing later.
+
 - **Quoted numbers in YAML for `encoder_threads` / `memory_limit_mb` now load correctly** — a config written as `encoder_threads: "8"` (quotes) previously slipped through validation as a float and was then rejected at startup with "must be 'auto' or an integer" for a value that IS an integer. Quoted numbers are now coerced to `int` like their unquoted / GUI / CLI-flag twins.
+
 - **`--dry-run` summary survives `python -O`** — the dry-run contract check was an `assert`, which vanishes in optimized mode and fed `None` into the summary formatter; it is now an explicit guard with a clear error message and exit code 1.
+
 - **Logging state no longer leaks on early CLI exit** — the restore (`try/finally`) now starts immediately after the logging snapshot, so a missing-ffmpeg or invalid `--log-level` exit also puts back the handlers, `propagate`, `console.stderr`, `_JSON_LOG_MODE` and the console-handler level (previously the try began after those checks and an early failure leaked the freshly installed logging state into a host process; the console-handler level was never restored even on the happy path).
 
-### Breaking changes
-
-- **Unknown YAML keys are rejected instead of silently ignored** — a typo (`threshhold`) or a non-tunable key (`log_format`, which is a CLI flag only) previously loaded without warning and never had any effect; `load_config` now exits with code 1 and names each bad key. **Migration:** if you followed the old README and kept `log_format: json` in your YAML, delete that line and pass `--log-format json` on the command line instead (the key never worked from YAML; it was always silently ignored).
-
-### Changed
-
-- **`--log-format` accepts any casing on every path** — `JSON` / `Json` now behave identically to `json` for both normal runs and the eager `--doctor` path, which used to do a case-sensitive comparison (doctor with `--log-format JSON` printed Rich while a normal run emitted JSON). Both surfaces share one spelling rule via `normalize_log_format`.
-- **`log_format` in YAML gets a migration hint, not a typo suggestion** — the unknown-key check used to suggest the nearest valid name, which for `log_format` meant `output_format` (a Levenshtein neighbour that tunes the container mp4/mp3/..., not logging). The rejection now tells you it is a CLI flag and to use `--log-format` instead of the config key.
-- **`PipelineConfig` has a single construction site** — the CLI and the GUI worker both build the pipeline config through the new shared `build_pipeline_config` factory (`pipeline_controller.py`); the GUI wrapper keeps its per-key default fallbacks for hand-edited settings. A new tunable is now added in one place instead of two.
-- **YAML bool-key validation derives from `PARAM_SPECS`** — the bool keys `load_config` strictly validates are no longer a second hand-maintained list; they come from the `kind == "bool"` entries in the shared parameter table the resolver already uses.
-- **CLI logging setup is now a context manager (`logging_session`)** — `main()` no longer hand-manages the logging snapshot and its `try/finally` restore; the per-run setup (JSON stdout handler or Rich console handler) and the teardown (close the run's log-file handler, restore handlers, `propagate`, `console.stderr`, `_JSON_LOG_MODE`, console level) live in one construct in `cli_helpers.py`. The restoring `try` starts immediately after the snapshot — the install branches (`install_json_handler`, `console.stderr = True`, the mode flag) are INSIDE it, so an exception mid-install restores the snapshot too. The old hand-written boundary is exactly what produced the audit's logging-leak bugs; a context manager cannot mis-place its own. `main()` shrank from 1203 to 1127 lines on this change; the SIGINT restore stays as the remaining `finally` (signal handlers are not logging state).
-
-
-### Added
-
-- **`--doctor` flag** — print an environment report (Python version, ffmpeg/ffprobe path and version, available encoders, RAM, config file location) and exit. Useful for filing bug reports or checking that everything is wired up before a long run. Works without an input file.
-- **`--dry-run` / `-n` flag** — run only silence detection and print a "what would be cut" summary (number of segments, total length removed, expected output duration) without encoding. Lets you tune `threshold` / `min_silence` / `margin` against a real video in seconds instead of waiting for a full encode.
-- **`--log-format json` flag** — emit every log line as a JSON object (one per line), for log aggregators like ELK / Splunk / Loki. The default `rich` format is unchanged.
-- **`--proxy` CLI flag** — pass an HTTP or SOCKS5 proxy for downloads, matching the existing GUI proxy dialog. `http://127.0.0.1:8080` or `socks5://user:pass@host:1080`.
-- **Shell completion** — `stream2video --install-completion` installs Bash / Zsh / Fish / PowerShell completion (powered by Typer). `--show-completion` prints the script for manual install.
-- **Docker image** — `Dockerfile` plus a CLI-only entrypoint, so you can run the pipeline in a container without a local python/ffmpeg install.
-- **`--stall-warning-timeout` flag** — no-progress *warning* timeout, mirroring the `stall_warning_timeout` YAML key (previously the key was config-only while every other pipeline timeout had a flag).
-- **`--completion-sound` / `--no-completion-sound` flag** — the CLI now plays the same completion chime as the GUI's "Sound when done" checkbox (default on, follows the config key), and a copied GUI command can pin it off with `--no-completion-sound`.
-- **`--no-force` / `--no-delete-after` flags** — a config file with `force: true` / `delete_after: true` can now be overridden from the command line (`-f` still works).
-- **CLI honours the config's `output_dir`** — `-o/--output` wins when passed; otherwise the YAML `output_dir` key is used (parity with the GUI worker). The directory is also created only *after* config load and validation, so an invalid config no longer litters a stray `./processed_videos`.
-- **Downloaded sources get a stable per-URL identity** — the yt-dlp `%(id)s-%(epoch)s.%(ext)s` epoch suffix is stripped when the file is moved into the per-video project dir (`{output_dir}/{id}/{id}.mp4`), so re-runs of the same URL reuse the project dir, WAV cache, silence cache and resume checkpoints instead of forking per download.
-
-### Fixed
-
 - **`cut_then_encode` progress bar no longer jumps around** — the cut phase reports a monotonic percentage across segments (cumulative encoded duration instead of restarting from 0 per segment), and the final remux now reports real progress through ffmpeg's `-progress pipe:1` instead of a dead callback.
+
 - **Output lock is never stolen from a live run** — a lock whose recorded pid is still alive is refused regardless of how old the lock file is (the mtime is never refreshed mid-run, so an old file just means a long run). Only a dead or pid-less lock is reclaimed.
+
 - **Gapless tree join is no longer Windows-only** — the intermediate tree path triggers whenever the estimated per-call command line exceeds the budget, on any platform.
+
 - **Log file no longer dies silently on a project-dir move failure** — the old file handler was closed but re-attached on rollback, which made `logging.handleError` swallow every subsequent record for the rest of the run. The handler is now reconstructed via `_make_file_handler` on the moved (or original) file.
+
 - **`cut_then_encode` resume gate validates the audio stream** of the intermediate `raw_concat.mp4`, not just video — a crash mid-write could previously reuse a video-valid-but-audio-truncated file and produce a silent-video output.
+
 - **Output lock now fires before any probe / encoder smoke-test**, so two concurrent runs (GUI + CLI) fail fast for the loser instead of each spawning ffprobe/ffmpeg first (`api.py`).
+
 - **Downloaded file is per-run unique** (`%(id)s-%(epoch)s.%(ext)s`) — two pipelines pointed at the same URL no longer write into the same yt-dlp output file.
+
 - **Bounded reaps after kills.** All `process.wait()` after `process.kill()` calls (concat runner, silencedetect, download timeout paths) now use a 30s ceiling; an unbounded `wait()` could hang the worker on a wedged Windows child.
+
 - **Pipeline cancellations keep a completed source file.** A Ctrl+C after the download phase no longer unlinks a fully-fetched multi-GB VOD — only a genuinely-partial download is removed.
+
 - **Stderr capture is ring-capped.** ffmpeg / yt-dlp spam from a corrupt source no longer grows into GBs between stall-checks (head+tail kept, middle dropped); the captured text is still enough for error classification.
+
 - **Sample-verify passes the clip duration to the parser** — a trailing `silence_start` inside the 60s sample window is no longer dropped, eliminating a false-positive "mismatch → full re-detect" fallback.
+
 - **GUI threads-safety fixes**:
   - Waveform live-overlay now uses the resolved path as the store key (previously a raw `./path` lookup always missed, so the overlay was dead).
   - Stale live-segments are dropped in a `finally:` on every pipeline exit path, not just success/cancel.
   - `messagebox` dialogs are given `parent=` so they can't hide behind the main window while blocking input.
   - Waveform-slider / pan epsilon-guard makes the CTkSlider readout ack no longer trigger redundant re-renders.
   - `_on_close`'s Quit dialog, file-info stat, rmtree of large project dirs, and the waveform preview's `cancel_process` no longer block the Tk main loop.
+
 - **`--log-format json` no longer double-prints** — `install_json_handler` sets `logger.propagate = False` before the root-handler attach.
+
 - **Docs:** `memory_reserve_mb` README corrected — the OS reserve is a warning floor mid-run (only the per-process RSS budget cancels); pre-flight still refuses a fresh heavy phase.
+
 - **GUI: waveform rendering no longer freezes the main window** when the preview opens on a long video — decoding now runs fully off the Tk event loop.
+
 - **Sample-verify on a re-extracted WAV** correctly clears the cached segments, so a re-detect after `--force` no longer reuses stale cut points.
+
 - **`--doctor` honours `--config`** for its config-file path; previously the flag was silently ignored by the diagnostics entry point.
+
 - **JSON mode keeps stdout line-per-JSON** — a stray banner or progress bar no longer breaks piping to `jq` / log aggregators.
+
 - **Gapless tree join** no longer blows up disk on long multi-segment outputs — intermediates now use a near-lossless libx264 pass instead of uncompressed ffv1, and the run refuses to start when free disk space is below the projected intermediate size.
+
 - **Subprocess hygiene**: registered processes are now reliably killed on GUI crash and on close-during-running; cancel no longer leaves a zombie ffmpeg holding the output file open (which used to trip `WinError 32` on the next cleanup).
+
 - **Dockerfile**: the test stage now copies `tests/` (previously `pytest -q` ran zero tests), stages are named (`test` / `cli`) so `docker build .` builds the documented default, and the comment about the `[gui]` extra matches reality (`[dev]` does pull it; headless import still skips cleanly).
+
 - **Doc strings / error messages aligned with behaviour**: gapless tree-intermediate docstring corrected (libx264 CRF 18 + PCM, not ffv1), `raw_concat.mkv` → `raw_concat.mp4` in the changelog, and the `_audio_opts` unknown-quality error lists the same `source/high/medium/low` set as `_audio_bitrate`.
+
 - **Validation now covers the full config surface**: `coerce_typed_value` rejects enum-key values outside their `VALID_*` lists (hand-edited settings / user_defaults can no longer smuggle a bogus `method` / `encoder` / `quality` / `theme` through), and `validate_pipeline_config` checks `download_quality`, `software_fallback`, `x264_preset`, `output_fps` and `encoder_threads` like the CLI's resolver already did. The segment path's fps filter now reuses the batch path's `_fps_vf_option` helper, so an invalid `output_fps` can't reach ffmpeg as `fps=bogus`.
+
 - **Lossless audio join no longer passes a bitrate knob** — `_run_audio_concat_filter` accepts a `lossless` flag and omits `-b:a` for flac/wav joins (the bitrate option was a silent no-op at best and misleading in the logged command line at worst).
+
 - **Keep segments are floored at 0.1s** — `generate_keep_segments` drops sub-100ms keeps (detector blips that would produce truncated MP4s) and merges keeps separated by a silence gap smaller than the floor.
+
 - **GUI defaults corrected** — the audio-quality fallback is `source` (was `medium`), and the `completion_sound` / `gapless_concat` widget fallbacks default True, matching `CONFIG_DEFAULTS`; the gapless tooltip no longer claims "Default off".
+
 - **Recent Projects removal is persisted immediately** — `_remove_recent_entry` now saves settings, so a removal wasn't lost if the app closed right after (previously only flushed by the next unrelated save).
+
 - **Silence-cache validation is a single shared gate** — the final-cache loader and the resume probe-position reader now run the same `_read_cache_meta` checks (freshness, source identity, config match) instead of two drifting copies.
+
 - **GUI state dict renamed `self.config` → `self.settings`** — the attribute no longer shadows the Tk `config()` method on the window (CustomTkinter never called it today, but a stray call would have been a silent no-op); tests updated to match.
+
 - **Dead code removed**: the `--doctor` branch inside `main()` (the eager `_doctor_callback` already handled it), the `pending_start` property on `SilenceSegment`, the duplicate `_download_complete` / `_download_was_real` fields, and the `force` parameter on the controller's phase callback.
+
 - **Test fix**: `test_copy_cli_command_logs_redacted_command` now patches `messagebox.askyesno` — the credential-carrying proxy made `_copy_cli_command` open a real dialog that hung the suite on machines with a display.
 
-## [0.3] - 2026-08-01
-
-### Added
-
-- **New cutting method `cut_then_encode`** — the best-quality mode: silenced parts are removed losslessly (stream copy, keyframe-aligned) and the remaining pieces are encoded in a single pass at the end. One encoding generation, so the picture stays closest to the source.
-- **Quality presets** — pick how the output is encoded without editing bitrates by hand:
-
-  - `--video-quality` and `--audio-quality`: `high` / `medium` / `low`, plus `source` to keep the encoder's own defaults (the new default).
-  - `--download-quality`: `best` / `1080p` / `720p` / `480p` / `360p` to cap the resolution fetched from YouTube/Twitch.
-
-  All of the above are also in the GUI as dropdowns.
-- **Audio-only output** — `--output-format mp3|opus|aac|wav|flac` drops the video track and produces a standalone audio file (silence still removed). The output gets the matching file extension automatically.
-- **Gapless audio by default** — re-encodes audio in the final join pass so the tiny per-segment gap no longer accumulates as A/V drift on multi-segment outputs. Turn off with `--no-gapless-concat` if you prefer the faster stream-copy join. For lossless video + gapless audio in one pass, use `cut_then_encode` instead.
-- **Output FPS policy** — `--output-fps source` (default) preserves the input's frame rate without duplication; `24` / `25` / `30` / `50` / `60` force a constant frame rate when the source cadence causes playback issues.
-- **Resource presets (`--preset`)** — one switch for low-end or busy machines: `low_memory` (4–8 GB RAM, keeps the system responsive), `low_cpu` (background encode, caps thread count), `balanced` (default), `maximum_performance` (fastest if you have RAM to spare). Any explicit flag still overrides the preset on that key.
-- **Memory protection** — a background watchdog (requires the optional `psutil` dependency) cancels a runaway encode before the machine starts swapping, and the run refuses to start a heavy phase when free RAM is already below the safe reserve (`--memory-limit-mb`, `--memory-reserve-mb`). When ffmpeg is killed by the OS for running out of memory, the error now says so in plain words with tips on which settings to lower. On Linux/macOS, `--rlimit-as-mb` can additionally hard-cap ffmpeg's memory at the kernel level.
-- **Download health monitoring** — three timeouts catch a stuck download early: no first byte within 5 minutes, no progress for 30 minutes mid-stream, or 8 hours total (`--connect-timeout`, `--no-progress-timeout`, `--download-timeout`, all configurable).
-- **Download progress display** — both CLI and GUI now show live percent, size, speed, and ETA while downloading instead of a bare "Downloading video..." line.
-- **Waveform preview overhaul** — the preview shows peaks immediately and overlays detected silence regions on top as they are found, supports cursor-anchored zoom + horizontal pan, a time/dB tooltip under the cursor, and a dry-run detection when no cache exists yet. Opening it after a run reuses the saved cache instead of re-detecting.
-- **Resume after interruption** — silence detection checkpoints its progress roughly every 30 seconds, so a cancelled or crashed run continues from the last checkpoint instead of starting over. Partially encoded video segments are verified before reuse, and any artifacts left from a run with different settings are discarded automatically.
-- **Completion sound (GUI)** — optional short chime when the pipeline finishes, with a different tone on cancel/failure ("Sound when done" checkbox, on by default). Works on Windows and macOS out of the box; on Linux uses whatever player is installed (`paplay`, `aplay`, or `ffplay`).
-- **Finer encode control** — `--x264-preset` (speed/size trade-off for CPU encoding), `--encoder-threads` (cap CPU usage), `--x264-low-memory` (less RAM, slightly larger files), and `--low-process-priority` (ffmpeg stays in the background so the PC stays usable while you encode).
-- **Encoder fallback policy** — when the selected GPU encoder is missing or crashes, the run now asks before switching to slow CPU encoding (`--software-fallback ask`, the new default); `enabled` restores the old automatic behaviour, `disabled` fails fast.
-- **Smarter progress bar** — the GUI progress bar adapts its scale per run (a local file with cached silence detection jumps straight to encoding) and shows an explicit percentage next to the bar.
-- **Benchmark script** — `scripts/benchmark_presets.py` compares x264 speed presets on a synthetic clip so you can pick the fastest acceptable one for your hardware.
-- **Safer cancellation** — Cancel in the GUI (and Ctrl+C in the CLI) now reliably kills the running ffmpeg/yt-dlp process, including cases where it was stuck writing output.
-
-### Changed
-
-- **Frame-accurate cutting** — both `segment` and `batch` methods were reworked so cuts land exactly on the requested timestamps. Previously each non-initial segment could lose ~0.5 seconds, and the `batch` method inserted a 1-second freeze where silence was removed. The batch method also no longer re-decodes the file from the start for every chunk — a 6-hour stream with 100 chunks used to decode 600 hours of video, now it decodes 6.
-- **Honest source bitrate on hardware encoders** — when `video_quality=source` is set, the actual source bitrate is probed via ffprobe and used as the encoder target; previously a hardcoded fallback was silently applied.
-- **Better default downloads** — `best` download quality now prefers separate best video + best audio tracks (often 1080p where the old logic grabbed a pre-merged 720p).
-- **No more audio downgrade** — audio is encoded at the quality you pick; a 256k+ source is no longer silently compressed to a lower bitrate.
-- **No more accumulated drift** — the 100 ms per-segment audio padding that added up to seconds of drift on very long videos is gone.
-- **GUI layout** — the main window defaults to 1280×720 and fits all controls without scrolling; input/output and quality pickers are tightened into two columns.
-- **GUI presets behave as expected** — switching the resource preset back to `balanced` actually restores the default tunables, and the selected preset is remembered across restarts.
-- **Python 3.13 is now the baseline.** Windows ARM64 is still supported; CI runs the full test suite on both Ubuntu and Windows.
-
-### Fixed
-
 - Downloaded-file detection no longer misfires when yt-dlp prints extra lines after the download — the run no longer reports "file not found" despite a successful download.
+
 - A slow video-host page no longer trips the "stalled before first byte" watchdog — the timer only fires when yt-dlp is truly silent.
+
 - Download timeout errors now include yt-dlp's own error message (e.g. "HTTP 403") instead of a bare "timed out".
+
 - Videos without an audio track, with odd channel layouts (mono/5.1), or with shifted timestamps (a known replay-capture quirk) now produce a valid, in-sync output instead of failing or freezing.
+
 - Videos where silence runs to the very end no longer have that last pause kept in the output.
+
 - Sources from systems with a comma as the decimal separator no longer break silence detection.
+
 - The GUI's "Silence" info line now actually shows the detected segment counts.
+
 - The waveform threshold line now sits exactly at the height of a peak of the same loudness, and zoom-in no longer under-reports loudness by one sample.
+
 - Pasting a `~/...` path now correctly enables the Waveform button.
+
 - The portable launcher (`run_gui.cmd`) now also installs Pillow and psutil on first run — previously a fresh install crashed the GUI silently on startup.
+
 - Cancelling no longer occasionally leaves a zombie ffmpeg process running in the background.
+
 - A stalled-ffmpeg kill is no longer misreported as an out-of-memory error.
+
 - The final concat step no longer produces broken timestamps on sources with shifted PTS; the timestamp-regeneration flag now sits in the correct position.
 
 ## [0.2] - 2026-06-06

@@ -705,6 +705,23 @@ class TestDoctorConfigValidation:
         self._isolated_defaults(tmp_path, monkeypatch)
         assert cli._doctor_impl(cfg) is True
 
+    def test_doctor_old_ffmpeg_is_warning_not_failure(self, monkeypatch):
+        """ffmpeg below FFMPEG_MIN_VERSION (the README floor): the doctor
+        adds the warning row but keeps the critical verdict green — the
+        tool still runs on an old build, it just mis-encodes the audio
+        quality presets, and the doctor must say exactly that."""
+        from stream2video import cli
+
+        warning = "ffmpeg 4.4.2 is older than the supported minimum 5.0"
+        monkeypatch.setattr("stream2video.cli.ffmpeg_min_version_warning", lambda: warning)
+        assert cli._doctor_impl(None) is True
+
+    def test_doctor_modern_ffmpeg_adds_no_version_row(self, monkeypatch):
+        from stream2video import cli
+
+        monkeypatch.setattr("stream2video.cli.ffmpeg_min_version_warning", lambda: None)
+        assert cli._doctor_impl(None) is True
+
     def test_doctor_user_defaults_unknown_and_rejected_keys_warn(self, tmp_path: Path, monkeypatch):
         """Audit round 24 P8: a syntactically valid user_defaults.json
         can be semantically dead — load_user_defaults silently drops

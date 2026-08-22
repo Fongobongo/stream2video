@@ -97,6 +97,7 @@ from stream2video.silence import (
     resume_inuse_path,
     save_silence_cache,
 )
+from stream2video.tools import ffmpeg_min_version_warning
 from stream2video.utils import check_disk_space as _check_disk_space
 from stream2video.utils import get_video_duration, has_audio_stream
 
@@ -852,6 +853,15 @@ class PipelineController:
             _cfg_errors = validate_pipeline_config(self.cfg)
             if _cfg_errors:
                 raise PipelineError("Invalid configuration: " + "; ".join(_cfg_errors))
+            # Old-ffmpeg warning (both CLI and GUI cross here): a build below
+            # FFMPEG_MIN_VERSION still runs, but the audio quality presets do
+            # not encode as documented on it — say so once, up front, instead
+            # of letting the user discover a mis-encoded output after a
+            # multi-hour run. Unparseable banner → no warning (fail-open,
+            # same choice the filter-flag fork makes).
+            _ffmpeg_warning = ffmpeg_min_version_warning()
+            if _ffmpeg_warning:
+                self.cb.on_log(_ffmpeg_warning)
             video_path, src_size_bytes, src_duration = self._run_download_phase()
             if self.cancel_event.is_set():
                 raise PipelineCancelled("cancelled between download and silence")

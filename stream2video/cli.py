@@ -65,7 +65,7 @@ from stream2video.pipeline_controller import (
     validate_pipeline_config,
 )
 from stream2video.pipeline_worker import PipelineWorkerParams, build_pipeline_config_from_snapshot
-from stream2video.tools import run_with_retry
+from stream2video.tools import ffmpeg_min_version_warning, run_with_retry
 
 # Module-level flag toggled by --log-format json. When True the human-
 # readable banner and Rich progress bars are suppressed so the stdout
@@ -363,6 +363,15 @@ def _doctor_impl(config_file: Path | None = None) -> bool:
         else:
             _row("[red]✗[/red]", "fail", f"{tool}: not found in PATH", f"{tool}: not found in PATH")
             all_critical_ok = False
+
+    # ffmpeg minimum version (README: Dependencies). An older build still
+    # runs, so this is a warning, not a critical fail — but the audio
+    # quality presets do not encode as documented below the minimum, and
+    # the doctor must say so instead of blessing the banner line above.
+    # Unparseable/missing banner → no row (fail-open, like the pipeline).
+    ffmpeg_warning = ffmpeg_min_version_warning()
+    if ffmpeg_warning:
+        _row("[yellow]![/yellow]", "warn", ffmpeg_warning, ffmpeg_warning)
 
     # GPU encoder availability (smoke test via the existing check_encoder).
     # Each check spawns a 1-frame lavfi encode — fast (< 2s each) and

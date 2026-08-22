@@ -451,6 +451,99 @@ class TestPipelineControllerRun:
         # Completion callback was called
         assert len(calls["complete"]) == 1
 
+    def test_old_ffmpeg_logs_startup_warning_before_phases(self, tmp_path: Path):
+        """ffmpeg below FFMPEG_MIN_VERSION (the README floor): run() says so
+        through on_log right after config validation — the audio quality
+        presets mis-encode on old builds, and the user must hear it before
+        a multi-hour run, not from the output file afterwards."""
+        cfg = _valid_config(output_dir=tmp_path, input_raw=str(tmp_path / "src.mp4"))
+        cb, calls = _make_callbacks()
+        cancel = __import__("threading").Event()
+        controller = PipelineController(cfg=cfg, cb=cb, cancel_event=cancel)
+
+        fake_video = tmp_path / "src.mp4"
+        fake_video.write_text("dummy")
+
+        def fake_download(url, out_dir, **kwargs):
+            from stream2video.download import DownloadResult
+
+            return DownloadResult(path=fake_video, is_downloaded=False)
+
+        def fake_cut_and_concat(*args, **kwargs):
+            Path(args[2]).write_text("output")
+
+        warning = "ffmpeg 4.4.2 is older than the supported minimum 5.0"
+        with (
+            patch(
+                "stream2video.pipeline_controller.ffmpeg_min_version_warning",
+                return_value=warning,
+            ),
+            patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+            patch("stream2video.pipeline_controller.detect_silence", return_value=[]),
+            patch("stream2video.pipeline_controller.save_silence_cache"),
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=None),
+            patch(
+                "stream2video.pipeline_controller.cut_and_concat",
+                side_effect=fake_cut_and_concat,
+            ),
+            patch(
+                "stream2video.pipeline_controller.generate_keep_segments", return_value=[(0.0, 1.0)]
+            ),
+            patch("stream2video.pipeline_controller.get_video_duration", return_value=10.0),
+            patch(
+                "stream2video.pipeline_controller.apply_per_video_dir",
+                return_value=(tmp_path, fake_video),
+            ),
+        ):
+            controller.run()
+
+        assert calls["log"].count(warning) == 1
+
+    def test_modern_ffmpeg_logs_no_version_warning(self, tmp_path: Path):
+        """The None branch: a modern (or unparseable-banner) ffmpeg adds no
+        log line at all — the happy path stays quiet."""
+        cfg = _valid_config(output_dir=tmp_path, input_raw=str(tmp_path / "src.mp4"))
+        cb, calls = _make_callbacks()
+        cancel = __import__("threading").Event()
+        controller = PipelineController(cfg=cfg, cb=cb, cancel_event=cancel)
+
+        fake_video = tmp_path / "src.mp4"
+        fake_video.write_text("dummy")
+
+        def fake_download(url, out_dir, **kwargs):
+            from stream2video.download import DownloadResult
+
+            return DownloadResult(path=fake_video, is_downloaded=False)
+
+        def fake_cut_and_concat(*args, **kwargs):
+            Path(args[2]).write_text("output")
+
+        with (
+            patch(
+                "stream2video.pipeline_controller.ffmpeg_min_version_warning",
+                return_value=None,
+            ),
+            patch("stream2video.pipeline_controller.download", side_effect=fake_download),
+            patch("stream2video.pipeline_controller.detect_silence", return_value=[]),
+            patch("stream2video.pipeline_controller.save_silence_cache"),
+            patch("stream2video.pipeline_controller.load_silence_cache", return_value=None),
+            patch(
+                "stream2video.pipeline_controller.cut_and_concat",
+                side_effect=fake_cut_and_concat,
+            ),
+            patch(
+                "stream2video.pipeline_controller.generate_keep_segments", return_value=[(0.0, 1.0)]
+            ),
+            patch("stream2video.pipeline_controller.get_video_duration", return_value=10.0),
+            patch(
+                "stream2video.pipeline_controller.apply_per_video_dir",
+                return_value=(tmp_path, fake_video),
+            ),
+        ):
+            controller.run()
+
+        assert not any("minimum" in s for s in calls["log"])
+
     def test_local_input_uses_compact_dynamic_progress_weights(self, tmp_path: Path):
         cfg = _valid_config(output_dir=tmp_path, input_raw=str(tmp_path / "src.mp4"))
         cb, calls = _make_callbacks()

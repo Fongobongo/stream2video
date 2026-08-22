@@ -41,10 +41,13 @@ The script auto-installs Python 3.13 + ffmpeg into `_portable/` on first run.
 ```bash
 pip install -e .
 
-# Install ffmpeg (required)
+# Install ffmpeg (required, 5.0+)
 # Windows: winget install Gyan.FFmpeg
 # macOS:   brew install ffmpeg
 # Linux:   sudo apt install ffmpeg
+#
+# Note: Ubuntu 22.04's apt still ships ffmpeg 4.4, where the audio quality
+# presets don't encode as documented — use 24.04+ or a newer static build.
 ```
 
 ## Dependencies
@@ -52,7 +55,7 @@ pip install -e .
 | Package | Version | Purpose |
 |---------|---------|---------|
 | **yt-dlp** | >=2024.01.01 | Download videos from YouTube/Twitch |
-| **ffmpeg** | system | Silence detection + video cutting |
+| **ffmpeg** | >=5.0 | Silence detection + video cutting. Older builds (e.g. the 4.4 that Ubuntu 22.04's apt ships) mis-encode the `--audio-quality` presets; CI verifies 8.x/9.x |
 | **typer** | >=0.12.0 | CLI framework |
 | **pyyaml** | >=6.0 | Config file parsing |
 | **rich** | >=13.0.0 | Progress bars and logging |
