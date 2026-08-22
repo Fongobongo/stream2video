@@ -31,6 +31,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from functools import cache
 from pathlib import Path
@@ -172,6 +173,22 @@ def ffmpeg_min_version_warning() -> str | None:
         "the audio quality presets (high/medium/low) may not encode as "
         "configured. Upgrade ffmpeg and re-run (--doctor shows the version)."
     )
+
+
+def ffmpeg_install_hint() -> str:
+    """Per-OS one-line install hint for a missing ffmpeg/ffprobe.
+
+    The doctor prints ``ffmpeg: not found in PATH`` on the single most
+    common first-run failure; this turns the diagnosis into diagnosis +
+    treatment by naming the package-manager command for the CURRENT
+    platform (the same commands the README documents, kept in sync
+    manually — there is no cross-platform package manager to query).
+    """
+    if os.name == "nt":
+        return "install with: winget install Gyan.FFmpeg  (or: choco install ffmpeg)"
+    if sys.platform == "darwin":
+        return "install with: brew install ffmpeg"
+    return "install with: sudo apt install ffmpeg  (or your distro's package manager)"
 
 
 def subprocess_kwargs_lowest() -> dict[str, Any]:

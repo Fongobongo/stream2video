@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **`silencecut` brand** — the app and its commands are now branded `silencecut`: the console scripts are `silencecut` / `silencecut-gui`, the GUI window title, the CLI banner and the `--doctor` header use the new name, and a GUI screenshot (`docs/screenshot.png`) is embedded in the README. The Python import package / distribution name stays `stream2video` (no settings or cache migration), and the legacy `stream2video` / `stream2video-gui` commands remain as aliases.
+- **`--version` flag** — prints `silencecut <version>` and exits; the version comes from the same single source of truth as the package metadata (`pyproject.toml` in a checkout, `importlib.metadata` when installed), so it can never drift from what bug reports need.
+- **Config auto-detection** — with no explicit `-c/--config`, the CLI now picks up `./silencecut.yaml` from the working directory (the legacy `./stream2video.yaml` still works), loads and validates it through the exact same loader as an explicit `--config`, logs the discovery at startup and reports it in `--doctor` (an "auto-detected" note on the Config file row). A project folder can now carry its own settings: drop a config next to your videos and run `silencecut video.mp4`.
+- **Doctor install hints for a missing ffmpeg/ffprobe** — the fail row no longer just says "not found in PATH": it now names the per-OS install command (Windows: `winget install Gyan.FFmpeg` / choco; macOS: brew; Linux: apt), turning the most common first-run failure into diagnosis + treatment.
+- **`--doctor --full` tails the last run's log** — after the diagnostics table (and as a `log_tail` JSON record under `--log-format json`), the doctor prints the last 40 lines of `{output_dir}/stream2video.log` so a pasted `--doctor --full` bug report already carries the previous run's error trail. The directory resolves exactly like a real run's (explicit YAML `output_dir` wins, relative to the YAML's folder), a missing log degrades to "(no log yet)", and tail failures never affect the verdict.
+- **`py.typed` marker shipped** (PEP 561) — the fully mypy-typed public API now announces its inline types to IDEs and downstream consumers instead of being treated as untyped.
+
 ## [0.3.1] - 2026-08-22
 
 ### Added

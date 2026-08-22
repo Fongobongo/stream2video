@@ -1355,7 +1355,7 @@ class TestB11CliSanitization:
         # parity error (audit round 23 P7).
         from stream2video import cli
 
-        def fake_run_doctor(cfg):
+        def fake_run_doctor(cfg, full=False):
             raise AssertionError("doctor must not run on a missing option value")
 
         monkeypatch.setattr(sys, "argv", ["stream2video", "-c", "--doctor", "--doctor"])
@@ -1372,7 +1372,7 @@ class TestB11CliSanitization:
         from stream2video import cli
 
         monkeypatch.setattr(sys, "argv", ["stream2video", "--doctor", "--log-format"])
-        monkeypatch.setattr(cli, "_run_doctor", lambda cfg: True)
+        monkeypatch.setattr(cli, "_run_doctor", lambda cfg, full=False: True)
         monkeypatch.setattr(cli, "_JSON_LOG_MODE", False)
         with pytest.raises(typer.Exit) as exc:
             cli._doctor_callback(None, None, True)

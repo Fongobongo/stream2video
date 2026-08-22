@@ -1,6 +1,6 @@
 @echo off
 chcp 65001 >nul
-title stream2video
+title silencecut
 setlocal enabledelayedexpansion
 
 cd /d "%~dp0"

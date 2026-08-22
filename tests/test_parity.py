@@ -459,7 +459,7 @@ class TestJsonLogStateIsolation:
         monkeypatch.setattr("sys.argv", ["stream2video", "--doctor", "--log-format", "JSON"])
         seen: list[bool] = []
 
-        def _capture(cfg):
+        def _capture(cfg, full=False):
             seen.append(cli_mod._JSON_LOG_MODE)
             return True
 
@@ -549,7 +549,7 @@ class TestJsonLogStateIsolation:
         )
         seen: list[bool] = []
 
-        def _capture(cfg):
+        def _capture(cfg, full=False):
             seen.append(cli_mod._JSON_LOG_MODE)
             return True
 
@@ -587,7 +587,7 @@ class TestJsonLogStateIsolation:
         monkeypatch.setattr(sys, "stderr", fake_err)
         seen: dict[str, object] = {}
 
-        def _capture(cfg):
+        def _capture(cfg, full=False):
             seen["enc"] = sys.stdout.encoding
             return True
 

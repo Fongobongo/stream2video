@@ -21,6 +21,7 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from stream2video.cli_config import detect_default_config
 from stream2video.cli_config import load_config as _load_config_impl
 from stream2video.cli_helpers import (
     LoggingSessionBusyError,
@@ -65,7 +66,7 @@ from stream2video.pipeline_controller import (
     validate_pipeline_config,
 )
 from stream2video.pipeline_worker import PipelineWorkerParams, build_pipeline_config_from_snapshot
-from stream2video.tools import ffmpeg_min_version_warning, run_with_retry
+from stream2video.tools import ffmpeg_install_hint, ffmpeg_min_version_warning, run_with_retry
 
 # Module-level flag toggled by --log-format json. When True the human-
 # readable banner and Rich progress bars are suppressed so the stdout
@@ -185,9 +186,25 @@ def load_config(config_file: Path | None) -> dict:
     return _load_config_impl(config_file, console)
 
 
+def _version_callback(value: bool) -> None:
+    """Eager callback for ``--version``: print the brand + version and exit.
+
+    The version comes from :data:`stream2video.__version__` (single
+    source of truth: ``pyproject.toml`` in a source checkout,
+    ``importlib.metadata`` for an installed distribution), so the flag
+    can never drift from the package metadata — which is exactly what
+    bug reports quote it for.
+    """
+    if value:
+        from stream2video import __version__
+
+        console.print(f"silencecut {__version__}")
+        raise typer.Exit(0)
+
+
 def _doctor_callback(ctx: typer.Context, param: Any, value: bool) -> bool:
     """Eager callback for ``--doctor``: run diagnostics + exit before the
-    positional-arg validator fires, so ``stream2video --doctor`` works
+    positional-arg validator fires, so ``silencecut --doctor`` works
     without an input path.
     """
     if value:
@@ -214,6 +231,10 @@ def _doctor_callback(ctx: typer.Context, param: Any, value: bool) -> bool:
         except _MissingOptionValue as e:
             console.print(f"[red]Error:[/red] {e}")
             raise typer.Exit(1) from None
+        # ``--full`` is a boolean flag (no value): presence in argv (before
+        # a ``--`` terminator) is the whole contract — same truncation rule
+        # as the value scans above.
+        full = "--full" in argv
         cfg = Path(cfg_raw) if cfg_raw is not None else None
         # Validate --log-format/--log-level with the SAME shared
         # validators main() uses (audit round 21 P2: the eager path used
@@ -234,7 +255,7 @@ def _doctor_callback(ctx: typer.Context, param: Any, value: bool) -> bool:
         # corrupting its state.
         try:
             with logging_session(log_format_lower, log_level, _set_json_mode):
-                ok = _run_doctor(cfg)
+                ok = _run_doctor(cfg, full=full)
         except LoggingSessionBusyError:
             console.print(
                 "[red]Error:[/red] another embedded CLI session is active; "
@@ -245,7 +266,7 @@ def _doctor_callback(ctx: typer.Context, param: Any, value: bool) -> bool:
     return value
 
 
-def _run_doctor(config_file: Path | None = None) -> bool:
+def _run_doctor(config_file: Path | None = None, full: bool = False) -> bool:
     """Print environment diagnostics; return True iff all critical checks pass.
 
     The heavy lifting lives in :func:`_doctor_impl`; this wrapper only
@@ -271,7 +292,7 @@ def _run_doctor(config_file: Path | None = None) -> bool:
         except (ValueError, OSError):
             pass
     try:
-        return _doctor_impl(config_file)
+        return _doctor_impl(config_file, full=full)
     finally:
         for _stream, _encoding, _errors in _stream_snapshots:
             _reconfigure = getattr(_stream, "reconfigure", None)
@@ -296,13 +317,18 @@ class _NullConsole:
         return None
 
 
-def _doctor_impl(config_file: Path | None = None) -> bool:
+def _doctor_impl(config_file: Path | None = None, full: bool = False) -> bool:
     """Print environment diagnostics; return True iff all critical checks pass.
 
     Reports system information (Python, ffmpeg, encoders, RAM, config)
     in a compact OK/fail list. Callers exit 0 when all critical checks
     pass, 1 otherwise. Non-critical items (psutil, YAML config file) only
     print a warning — the CLI still works without them.
+
+    ``full=True`` (``--doctor --full``): after the table, tail the last
+    run's log file (``{output_dir}/stream2video.log``) so a bug report
+    pasted from ``--doctor --full`` already carries the previous run's
+    error trail without asking the user to find the log themselves.
     """
     from rich.table import Table
 
@@ -366,7 +392,16 @@ def _doctor_impl(config_file: Path | None = None) -> bool:
                     f"{tool}: found at {exe} (version unknown: {e})",
                 )
         else:
-            _row("[red]✗[/red]", "fail", f"{tool}: not found in PATH", f"{tool}: not found in PATH")
+            # Diagnosis + treatment (not just diagnosis): the missing
+            # ffmpeg/ffprobe is the most common first-run failure, so
+            # the fail row carries the per-OS install command.
+            hint = f" — {ffmpeg_install_hint()}"
+            _row(
+                "[red]✗[/red]",
+                "fail",
+                f"{tool}: not found in PATH [red]({ffmpeg_install_hint()})[/red]",
+                f"{tool}: not found in PATH{hint}",
+            )
             all_critical_ok = False
 
     # ffmpeg minimum version (README: Dependencies). An older build still
@@ -433,6 +468,18 @@ def _doctor_impl(config_file: Path | None = None) -> bool:
     # proxy section below can layer the YAML's proxy keys over the
     # user-defaults view.
     loaded: dict = {}
+    auto_detected = False
+    if config_file is None:
+        # Brand default (README: Configuration): pick up
+        # ``./silencecut.yaml`` — or the legacy ``./stream2video.yaml`` —
+        # from the working directory so a project folder carries its own
+        # settings without an explicit --config. The doctor validates the
+        # discovered file through the SAME loader/verdicts as an explicit
+        # --config; only the discovery differs.
+        config_file = detect_default_config()
+        auto_detected = config_file is not None
+    _auto_note = " [dim](auto-detected)[/dim]" if auto_detected else ""
+    _auto_note_plain = " (auto-detected)" if auto_detected else ""
     if config_file is not None:
         # User explicitly passed --config: report whether it actually
         # LOADS. Existence alone is not enough (audit round 23 P6): a
@@ -447,8 +494,9 @@ def _doctor_impl(config_file: Path | None = None) -> bool:
             _row(
                 "[yellow]![/yellow]",
                 "warn",
-                f"Config file: {config_file} [yellow](not found — using defaults)[/yellow]",
-                f"Config file: {config_file} (not found — using defaults)",
+                f"Config file: {config_file} [yellow](not found — using defaults)[/yellow]"
+                f"{_auto_note}",
+                f"Config file: {config_file} (not found — using defaults){_auto_note_plain}",
             )
         else:
             try:
@@ -500,24 +548,25 @@ def _doctor_impl(config_file: Path | None = None) -> bool:
                         "[red]✗[/red]",
                         "fail",
                         f"Config file: {config_file} [red](pipeline validation: "
-                        f"{'; '.join(pipe_errors)})[/red]",
+                        f"{'; '.join(pipe_errors)})[/red]{_auto_note}",
                         f"Config file: {config_file} "
-                        f"(pipeline validation: {'; '.join(pipe_errors)})",
+                        f"(pipeline validation: {'; '.join(pipe_errors)}){_auto_note_plain}",
                     )
                     all_critical_ok = False
                 else:
                     _row(
                         "[green]✓[/green]",
                         "ok",
-                        f"Config file: {config_file} (loaded and validated)",
-                        f"Config file: {config_file} (loaded and validated)",
+                        f"Config file: {config_file} (loaded and validated){_auto_note}",
+                        f"Config file: {config_file} (loaded and validated){_auto_note_plain}",
                     )
             except typer.Exit:
                 _row(
                     "[red]✗[/red]",
                     "fail",
-                    f"Config file: {config_file} [red](invalid — rejected on load)[/red]",
-                    f"Config file: {config_file} (invalid — rejected on load)",
+                    f"Config file: {config_file} [red](invalid — rejected on load)[/red]"
+                    f"{_auto_note}",
+                    f"Config file: {config_file} (invalid — rejected on load){_auto_note_plain}",
                 )
                 all_critical_ok = False
     user_cfg = user_defaults_path()
@@ -681,6 +730,49 @@ def _doctor_impl(config_file: Path | None = None) -> bool:
     _row("[dim]i[/dim]", "info", f"Settings: {settings_path()}", f"Settings: {settings_path()}")
     _row("[dim]i[/dim]", "info", f"Base dir: {_base_dir()}", f"Base dir: {_base_dir()}")
 
+    # --full: tail the last run's log so a pasted ``--doctor --full`` bug
+    # report already carries the previous run's error trail. The log lives
+    # next to the outputs (``{output_dir}/stream2video.log``); the directory
+    # resolves exactly like main() does — an explicitly-written YAML
+    # ``output_dir`` wins, a RELATIVE one is relative to the YAML's folder,
+    # and the historical ``./processed_videos`` is the fallback. Best-effort
+    # by design: no log yet / unreadable file is an info note, never a
+    # doctor failure.
+    log_tail: list[str] | None = None
+    log_tail_path: Path | None = None
+    if full:
+        _raw_out = str(loaded.get("output_dir") or "").strip()
+        if not _raw_out:
+            _raw_out = str(effective_defaults().get("output_dir") or "").strip()
+        if not _raw_out:
+            _raw_out = "./processed_videos"
+        _out_dir = Path(_raw_out)
+        if (
+            not _out_dir.is_absolute()
+            and config_file is not None
+            and str(loaded.get("output_dir") or "").strip()
+        ):
+            _out_dir = config_file.parent / _out_dir
+        _log_file = _out_dir / "stream2video.log"
+        try:
+            if _log_file.is_file():
+                with open(_log_file, encoding="utf-8", errors="replace") as _fh:
+                    _fh.seek(0, os.SEEK_END)
+                    _size = _fh.tell()
+                    _fh.seek(max(0, _size - 65536))
+                    _lines = _fh.read().splitlines()
+                # A 64 KB window can start mid-line: drop the partial head
+                # so every reported line is a complete log record.
+                if _size > 65536 and _lines:
+                    _lines = _lines[1:]
+                log_tail = _lines[-40:]
+            else:
+                log_tail = []
+            log_tail_path = _log_file
+        except OSError:
+            log_tail = None
+            log_tail_path = None
+
     if _JSON_LOG_MODE:
         # JSON mode: line-per-object output so a downstream consumer
         # doesn't have to parse Rich markup/ANSI. Each check is one
@@ -694,13 +786,33 @@ def _doctor_impl(config_file: Path | None = None) -> bool:
                     {"doctor": "check", "status": status, "check": label}, ensure_ascii=False
                 )
             )
+        if full:
+            print(
+                _json.dumps(
+                    {
+                        "doctor": "log_tail",
+                        "file": str(log_tail_path) if log_tail_path else None,
+                        "lines": log_tail,
+                    },
+                    ensure_ascii=False,
+                )
+            )
         print(_json.dumps({"doctor": "end", "ok": all_critical_ok}, ensure_ascii=False))
         return all_critical_ok
 
-    console.print("\n[bold cyan]stream2video doctor[/bold cyan]\n")
+    console.print("\n[bold cyan]silencecut doctor[/bold cyan]\n")
     console.print(tbl)
     if not all_critical_ok:
         console.print("\n[red]Some critical checks failed — see above[/red]")
+    if full and log_tail is not None:
+        from rich.markup import escape
+
+        console.print(f"\n[bold cyan]Last log tail[/bold cyan] [dim]({log_tail_path})[/dim]")
+        if log_tail:
+            for _line in log_tail:
+                console.print(f"[dim]{escape(_line)}[/dim]")
+        else:
+            console.print("[dim](no log yet — run a job first)[/dim]")
     return all_critical_ok
 
 
@@ -905,12 +1017,28 @@ def main(
         "GUI's 'Sound when done' checkbox). If not passed, falls back to the "
         "config file's `completion_sound` key (default True).",
     ),
+    version: bool = typer.Option(
+        False,
+        "--version",
+        # Eager callback prints and exits before Typer validates the
+        # positional INPUT_VIDEO argument, so ``silencecut --version``
+        # works without a URL/path — same pattern as --doctor below.
+        is_eager=True,
+        callback=_version_callback,
+        help="Print the silencecut version and exit.",
+    ),
+    full: bool = typer.Option(
+        False,
+        "--full",
+        help="With --doctor: also tail the last run's log "
+        "(output_dir/stream2video.log) after the diagnostics table.",
+    ),
     doctor: bool = typer.Option(
         False,
         "--doctor",
         # Eager callback runs the diagnostics and exits before Typer
         # validates the positional INPUT_VIDEO argument, so
-        # ``stream2video --doctor`` works without a URL/path.
+        # ``silencecut --doctor`` works without a URL/path.
         is_eager=True,
         callback=_doctor_callback,
         help="Print environment diagnostics (Python version, ffmpeg/encoders, "
@@ -1190,6 +1318,16 @@ def main(
             # Load configuration. ``load_config`` strictly validates BOTH numeric
             # ranges (CONFIG_RANGES) AND enum keys (method/encoder/...), so a
             # bad YAML value for any of these cannot sneak through here.
+            # With no explicit --config, the brand default kicks in: pick up
+            # ./silencecut.yaml (or the legacy ./stream2video.yaml) from the
+            # working directory — the same loader, validation and precedence
+            # as an explicit --config, only the discovery differs.
+            if config_file is None:
+                config_file = detect_default_config()
+                if config_file is not None:
+                    logger.info(f"Auto-detected config file: {config_file}")
+                    if not _JSON_LOG_MODE:
+                        console.print(f"[dim]Config: {config_file} (auto-detected)[/dim]")
             config = load_config(config_file)
 
             # Resolve the effective output directory: an explicit -o/--output
@@ -1231,9 +1369,7 @@ def main(
             log_file = output_dir / "stream2video.log"
 
             if not _JSON_LOG_MODE:
-                console.print(
-                    "\n[bold cyan]stream2video[/bold cyan] - Compress by removing silence"
-                )
+                console.print("\n[bold cyan]silencecut[/bold cyan] - Compress by removing silence")
                 console.print(f"Logs saved to: {log_file}\n")
 
             _log_state.file_handler = _make_file_handler(log_file)

@@ -55,6 +55,29 @@ _CLI_ONLY_FLAGS: dict[str, str] = {
     "log_format": "--log-format",
 }
 
+# Auto-detected config filenames, in priority order (README:
+# Configuration). The brand name first; the historical package-name
+# spelling stays accepted so an existing project folder keeps working
+# after the silencecut rename without any settings migration.
+CONFIG_FILENAMES: tuple[str, ...] = ("silencecut.yaml", "stream2video.yaml")
+
+
+def detect_default_config(cwd: Path | None = None) -> Path | None:
+    """Return the first auto-detectable config file in ``cwd``, or None.
+
+    Checks :data:`CONFIG_FILENAMES` in order and returns the first one
+    that exists as a regular file — ``./silencecut.yaml`` wins over the
+    legacy ``./stream2video.yaml``. Only called when no explicit
+    --config was passed; the returned path goes through the exact same
+    validated loader, so discovery is the ONLY thing this changes.
+    """
+    base = Path(cwd) if cwd is not None else Path.cwd()
+    for name in CONFIG_FILENAMES:
+        candidate = base / name
+        if candidate.is_file():
+            return candidate
+    return None
+
 
 class _LoadedConfig(dict):
     """A plain ``dict`` that ALSO records which keys were EXPLICITLY

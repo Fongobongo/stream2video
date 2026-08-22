@@ -80,7 +80,7 @@ class Stream2VideoGUI(
     def __init__(self) -> None:
         super().__init__()
 
-        self.title("stream2video")
+        self.title("silencecut")
 
         # Per-mixin state init — call each mixin's ``_init_*`` in the
         # order the cross-mixin contract requires (see the mixin docs).

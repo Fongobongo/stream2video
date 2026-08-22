@@ -1,8 +1,12 @@
-# stream2video
+# silencecut
 
 Compress stream recordings by removing silence segments.
 
 Downloads VOD from YouTube/Twitch, detects silence via audio analysis, cuts out quiet parts, and concatenates the remaining video.
+
+> **Naming:** the app and commands are branded `silencecut`; the Python import package / distribution name remains `stream2video` (so existing scripts, caches, and settings keep working — no migration needed). The legacy `stream2video` / `stream2video-gui` commands are kept as aliases.
+
+![silencecut GUI](docs/screenshot.png)
 
 ## Features
 
@@ -16,8 +20,9 @@ Downloads VOD from YouTube/Twitch, detects silence via audio analysis, cuts out 
 - **Dry run** — `--dry-run` shows what would be cut without encoding, so you can tune `threshold` / `min_silence` / `margin` against a real video in seconds.
 - **Proxy support** — `--proxy` (HTTP / SOCKS5) for downloads on restricted networks. `--proxy-active` / `--no-proxy-active` pin the gate on/off, overriding a stored `proxy_active: true` — copied GUI commands carry `--no-proxy-active` so a paste never silently re-enables a stored proxy. The address is validated everywhere it can be entered (`http/https/socks4/socks4a/socks5/socks5h` scheme + host required), and `--doctor` probes a configured active proxy for reachability (masked address, no credentials in the output).
 - **JSON logging** — `--log-format json` emits one JSON object per line for ELK / Splunk / Loki.
-- **`--doctor`** — quick environment diagnostic (Python, ffmpeg, available encoders, RAM, config location) without running the pipeline.
-- **Shell completion** — `stream2video --install-completion` for Bash / Zsh / Fish / PowerShell.
+- **`--doctor`** — quick environment diagnostic (Python, ffmpeg, available encoders, RAM, config location) without running the pipeline. A missing ffmpeg/ffprobe prints the per-OS install command right in the fail row (diagnosis + treatment); `--doctor --full` also tails the last run's log so a pasted bug report already carries the previous error trail.
+- **`--version`** — print the app version and exit.
+- **Shell completion** — `silencecut --install-completion` for Bash / Zsh / Fish / PowerShell.
 - **Resume integrity** — segment/batch working directories contain a `_manifest.json` that snapshots (source path/size/mtime, encoder, quality, keep segments, pipeline version); a mismatch wipes the work dir so old artifacts from an incompatible run cannot be reused. Each resumed chunk is ffprobe-validated for missing moov atoms.
 - **Download watchdog** — `_CONNECT_TIMEOUT` (5 min, first byte), `_NO_PROGRESS_TIMEOUT` (30 min, mid-download stall), and `_DOWNLOAD_TIMEOUT` (8 h, absolute ceiling) catch hung connections before the user stares at a frozen bar. All three are now configurable via `--download-timeout` / `--connect-timeout` / `--no-progress-timeout`.
 - **Memory monitor** — optional `psutil`-based watchdog (`[monitor]` extra) cancels a runaway encode when its RSS exceeds a configurable budget (soft threshold 80% warns; hard threshold 95% cancels via the existing cancel path). The OS-reserve floor (`memory_reserve_mb`, default 2048 MB) is enforced as a *pre-flight* gate before each heavy phase, but as a *warning* once the encode is running — a transient dip from another app's GC won't kill a finished encode.
@@ -68,21 +73,21 @@ Python **3.13+** is required (matches `.python-version` and CI).
 ## CLI Usage
 
 ```bash
-stream2video <input> [options]
+silencecut <input> [options]
 ```
 
 ### Basic
 
 ```bash
-stream2video https://www.youtube.com/watch?v=VIDEO_ID
-stream2video /path/to/video.mp4
+silencecut https://www.youtube.com/watch?v=VIDEO_ID
+silencecut /path/to/video.mp4
 ```
 
 ### Shell completion
 
 ```bash
-stream2video --install-completion   # Bash/Zsh/Fish/PowerShell
-stream2video --show-completion      # Print the completion script for manual install
+silencecut --install-completion   # Bash/Zsh/Fish/PowerShell
+silencecut --show-completion      # Print the completion script for manual install
 ```
 
 ### Options
@@ -119,7 +124,8 @@ stream2video --show-completion      # Print the completion script for manual ins
 | `--min-part-bytes` | `1024` | Minimum bytes for a resumed part to be considered valid. Smaller files are re-encoded. |
 | `-f, --force` / `--no-force` | — | Re-detect silence, ignore cache. `--no-force` pins it off so a config file with `force: true` can be overridden |
 | `-n, --dry-run` | — | Run silence detection and print a "what would be cut" summary (segment count, total length removed, expected output duration) without encoding |
-| `-c, --config` | — | YAML config file |
+| `-c, --config` | — | YAML config file. When omitted, `./silencecut.yaml` (or the legacy `./stream2video.yaml`) in the working directory is auto-detected and loaded — same validation and precedence as an explicit `--config`; the discovery is logged at startup |
+| `--version` | — | Print the silencecut version and exit |
 | `--delete-after` / `--no-delete-after` | — | Delete downloaded source after successful compression. `--no-delete-after` pins it off so a config file with `delete_after: true` can be overridden |
 | `--per-video-dir` / `--no-per-video-dir` | (follows `per_video_dir` config) | Group all artifacts into `{output_dir}/{stem}_{hash}/` for local files, or `{output_dir}/{site}_{id}/` for downloaded sources (`site` = the yt-dlp site/domain, `id` = epoch-stripped video id, so re-runs of the same URL reuse the same project dir and caches) |
 | `--completion-sound` / `--no-completion-sound` | on | Play the completion chime after a successful run (matches the GUI's "Sound when done" checkbox). `--no-completion-sound` disables it even when the config file says `completion_sound: true` |
@@ -127,32 +133,33 @@ stream2video --show-completion      # Print the completion script for manual ins
 | `--proxy-active` / `--no-proxy-active` | (follows `proxy_active` config) | Pin the proxy gate on or off explicitly, overriding a stored `proxy_active: true` in `user_defaults.json` / config YAML. Passing neither flag leaves the config value in charge; passing a `--proxy` URL without a gate flag enables the proxy implicitly. Copied GUI commands emit `--no-proxy-active` when the GUI's proxy checkbox is off, so a paste can never silently re-enable a stored proxy |
 | `-l, --log-level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `--log-format` | `rich` | `rich` (default, human-readable) or `json` (one JSON object per line, for ELK/Splunk/Loki) |
-| `--doctor` | — | Print environment diagnostics (Python version, ffmpeg/encoders, RAM, config location) and exit. With a proxy configured and active, also probes it for reachability (masked address). Works without an input path |
+| `--doctor` | — | Print environment diagnostics (Python version, ffmpeg/encoders, RAM, config location) and exit. With a proxy configured and active, also probes it for reachability (masked address). Works without an input path. A missing ffmpeg/ffprobe prints the per-OS install command in the fail row |
+| `--full` | — | With `--doctor`: also tail the last run's log (`{output_dir}/stream2video.log`, last 40 lines) after the diagnostics table |
 | `--install-completion` | — | Install shell completion for Bash / Zsh / Fish / PowerShell (powered by Typer). `--show-completion` prints the script for manual install |
 
 ### Examples
 
 ```bash
 # Choose encoder
-stream2video video.mp4 --encoder h264_nvenc
+silencecut video.mp4 --encoder h264_nvenc
 
 # Download at 720p and encode at low quality (smaller output)
-stream2video https://www.youtube.com/watch?v=VIDEO_ID --download-quality 720p --video-quality low
+silencecut https://www.youtube.com/watch?v=VIDEO_ID --download-quality 720p --video-quality low
 
 # Specify output directory
-stream2video video.mp4 -o ./output --method batch
+silencecut video.mp4 -o ./output --method batch
 
 # Custom config
-stream2video video.mp4 --config my_config.yaml
+silencecut video.mp4 --config my_config.yaml
 
 # Extract audio only (mp3; also: opus, aac, wav, flac)
-stream2video video.mp4 --output-format mp3 --audio-quality high
+silencecut video.mp4 --output-format mp3 --audio-quality high
 
 # See what would be cut without encoding (tune threshold/min_silence first)
-stream2video video.mp4 --dry-run
+silencecut video.mp4 --dry-run
 
 # Best quality (lossless cut + single final encode)
-stream2video video.mp4 --method cut_then_encode --video-quality high
+silencecut video.mp4 --method cut_then_encode --video-quality high
 ```
 
 ## Configuration
@@ -164,6 +171,8 @@ threshold: -25
 min_silence: 0.7
 margin: 0.15
 ```
+
+**Auto-detection:** when `--config` is not passed, the CLI looks for `./silencecut.yaml` in the working directory (the legacy `./stream2video.yaml` is still picked up), loads and validates it like an explicit `--config`, and logs the discovery (`Config: ./silencecut.yaml (auto-detected)`). This lets a project folder carry its own settings — put a config next to your videos and just run `silencecut video.mp4`.
 
 | Parameter | Range | Default | Description |
 |-----------|-------|---------|-------------|
@@ -247,7 +256,7 @@ The file is plain JSON, type-validated on load, and atomic-written (via `os.repl
 
 ## Performance & Caching
 
-stream2video caches work in two layers so that re-running on the same video is fast, even with different `threshold` / `min_silence` / `margin` settings.
+silencecut caches work in two layers so that re-running on the same video is fast, even with different `threshold` / `min_silence` / `margin` settings.
 
 ### Two cache files
 
@@ -362,7 +371,7 @@ Logs: `{output_dir}/stream2video.log`
 
 ```bash
 pytest -v
-stream2video video.mp4 --log-level DEBUG
+silencecut video.mp4 --log-level DEBUG
 # Benchmark x264 presets (ultrafast vs veryfast vs medium ...) on the pipeline:
 uv run scripts/benchmark_presets.py --presets ultrafast,veryfast,fast,medium --repeat 3
 ```

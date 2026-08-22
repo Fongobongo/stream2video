@@ -57,8 +57,19 @@ monitor = [
 ]
 
 [project.scripts]
+# Brand: the user-facing commands are "silencecut" / "silencecut-gui".
+# The import package stays ``stream2video`` (no settings/data migration);
+# the legacy command names below are kept as deprecated aliases so
+# existing scripts and muscle memory keep working.
+silencecut = "stream2video.cli:app"
+silencecut-gui = "stream2video.gui:main"
 stream2video = "stream2video.cli:app"
 stream2video-gui = "stream2video.gui:main"
+
+[tool.setuptools.package-data]
+# PEP 561: ship the inline types marker so IDEs / downstream mypy see the
+# fully-typed public API instead of treating the import as untyped.
+stream2video = ["py.typed"]
 
 [tool.setuptools.packages.find]
 where = ["."]

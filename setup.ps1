@@ -58,7 +58,7 @@ if ($Gui) {
     python -m stream2video.gui
     exit $LASTEXITCODE
 } elseif ($Args) {
-    Write-Step "Running: stream2video $($Args -join ' ')"
+    Write-Step "Running: silencecut $($Args -join ' ')"
     python -m stream2video.cli $Args
     exit $LASTEXITCODE
 } else {

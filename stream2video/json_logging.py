@@ -5,7 +5,7 @@ with ``--log-format json``. Each log record is emitted as a single
 JSON object per line to **stdout** (not stderr), suitable for piping
 into ELK / Splunk / Loki / journald:
 
-    $ stream2video --log-format json video.mp4 | jq .
+    $ silencecut --log-format json video.mp4 | jq .
     {"ts": "2026-08-09T14:32:07.123Z", "level": "INFO", "logger": "stream2video", "msg": "..."}
 
 Why a custom formatter instead of ``python-json-logger``: the
@@ -72,7 +72,7 @@ def install_json_handler(logger: logging.Logger, level: str = "INFO") -> logging
     CLI replaces its Rich console handler explicitly before calling this).
 
     The stream is captured as ``sys.stdout`` *at call time* (not stderr)
-    so a piped command ``stream2video --log-format json video.mp4 | jq .``
+    so a piped command ``silencecut --log-format json video.mp4 | jq .``
     shows the JSON and the human-readable banner is unaffected.
 
     The handler's level is set from ``level``; the logger's own level is
