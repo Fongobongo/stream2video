@@ -56,9 +56,10 @@ ENV/
 env/
 .env
 
-# IDE
+# IDE / local tooling
 .vscode/
 .idea/
+.opencode/
 *.swp
 *.swo
 *~
