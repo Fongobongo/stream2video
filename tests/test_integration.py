@@ -24,6 +24,7 @@ from stream2video.concat import (
     generate_keep_segments,
     get_video_encoder,
 )
+from stream2video.config import VALID_X264_PRESETS
 from stream2video.download import download
 from stream2video.silence import SilenceSegment
 
@@ -800,6 +801,22 @@ class TestEncoderQualityPresets:
         assert "-threads" in opts
         assert "2" in opts
         assert "-x264-params" in opts
+
+    @pytest.mark.parametrize("preset", VALID_X264_PRESETS)
+    def test_every_x264_preset_value_reaches_ffmpeg_args(self, preset):
+        # Drift guard: VALID_X264_PRESETS had two values (superfast,
+        # slower) that no test had ever exercised — a value that the
+        # list accepts but encoder_opts mishandles would otherwise only
+        # surface as a confusing ffmpeg CLI error mid-encode. Every
+        # advertised value must map verbatim onto ``-preset <value>``
+        # for libx264 — and never leak to a hardware encoder (the preset
+        # knob is x264-specific).
+        opts = encoder_opts("libx264", "medium", x264_preset=preset)
+        assert opts[opts.index("-preset") + 1] == preset
+        # NVENC has its OWN -preset scale (p1..p7) — the x264 value must
+        # never leak into a hardware encoder's args.
+        hw_opts = encoder_opts("h264_nvenc", "medium", x264_preset=preset)
+        assert hw_opts[hw_opts.index("-preset") + 1] != preset
 
     def test_source_video_quality_maps_to_high_in_crf_mode(self):
         for enc in ("h264_mf", "h264_amf", "h264_nvenc", "libx264"):

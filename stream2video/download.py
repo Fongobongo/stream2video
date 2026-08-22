@@ -1,10 +1,13 @@
 """Video download module using yt-dlp CLI subprocess (cancellable)."""
 
+import base64
 import hashlib
+import http.client
 import logging
 import os
 import re
 import secrets
+import socket
 import subprocess
 import sys
 import threading
@@ -104,6 +107,281 @@ def _validate_url(url: str) -> bool:
     ``_is_local_file`` check has passed (non-existent local path).
     """
     return bool(re.match(r"^https?://", url, re.IGNORECASE))
+
+
+# Proxy address contract (validated at every entry point: the GUI proxy
+# dialog, load_config for YAML, validate_pipeline_config for resolved
+# configs). The schemes are exactly the ones yt-dlp's --proxy accepts;
+# anything else (the classic scheme-less ``127.0.0.1:8080`` typo, or
+# ``htt://``) is rejected before it can dead-end a download hours later.
+PROXY_SCHEMES: frozenset[str] = frozenset(
+    {"http", "https", "socks4", "socks4a", "socks5", "socks5h"}
+)
+
+# Port used when the address omits one (per scheme — same defaults
+# yt-dlp/PySocks assume).
+_PROXY_DEFAULT_PORTS: dict[str, int] = {
+    "http": 80,
+    "https": 443,
+    "socks4": 1080,
+    "socks4a": 1080,
+    "socks5": 1080,
+    "socks5h": 1080,
+}
+
+# The through-proxy HTTP probe target: the standard connectivity-check
+# endpoint (a successful answer is always a bare 204 with no body, so
+# the probe costs the proxy a single tiny round trip).
+_PROXY_PROBE_TARGET = "http://www.gstatic.com/generate_204"
+
+
+def validate_proxy_url(proxy: str) -> str | None:
+    """Return a human-readable error for a malformed proxy URL, None when valid.
+
+    Empty / whitespace-only is valid (no proxy configured). A scheme from
+    :data:`PROXY_SCHEMES` and a host are required; the port is optional
+    (the scheme default is assumed) but must be numeric and in range when
+    present. Credentials in the userinfo (``user:pass@``) are allowed.
+    Pure function — no I/O — so every surface (GUI dialog, YAML load,
+    pipeline validation, doctor) can share one rule.
+    """
+    value = proxy.strip()
+    if not value:
+        return None
+    try:
+        parts = urllib.parse.urlsplit(value)
+    except ValueError as e:
+        return f"{proxy!r} is not a valid proxy URL ({e})"
+    if parts.scheme not in PROXY_SCHEMES:
+        return (
+            f"{proxy!r} must start with a proxy scheme "
+            f"({'/'.join(sorted(PROXY_SCHEMES))}://), e.g. http://127.0.0.1:8080 "
+            "or socks5://user:pass@host:1080"
+        )
+    if not parts.hostname:
+        return f"{proxy!r} has no proxy host (expected scheme://[user:pass@]host[:port])"
+    try:
+        parts.port  # noqa: B018 — property access IS the validation (raises ValueError)
+    except ValueError as e:
+        return f"{proxy!r} has an invalid port ({e})"
+    return None
+
+
+def mask_proxy_url(proxy: str) -> str:
+    """Best-effort credential masking of a proxy URL for display.
+
+    Works by regex, not full parsing, so a garbage address (one that just
+    failed :func:`validate_proxy_url`) is still masked — the doctor and
+    logs never print a password, even on the error path.
+    """
+    value = proxy.strip()
+    value = re.sub(r"(://)[^/@:]+:[^/@]+@", r"\1***:***@", value)
+    return re.sub(r"(://)[^/@:]+@", r"\1***@", value)
+
+
+def check_proxy_reachable(proxy: str, timeout: float = 8.0) -> tuple[bool, str]:
+    """Liveness probe for the configured proxy. Returns ``(ok, detail)``.
+
+    Doctor-only by design — never called at pipeline startup (a network
+    probe there would add latency and flakiness to every run).
+
+    * ``http://`` proxies get the real end-to-end check: a TCP connect
+      plus an absolute-URI ``GET generate_204`` THROUGH the proxy, with
+      the URL's credentials sent as ``Proxy-Authorization`` — 204/200
+      proves the proxy is up, the credentials are accepted and it can
+      reach the internet; 407 means missing/rejected credentials.
+    * ``socks5``/``socks5h`` proxies get a full SOCKS5 handshake (RFC
+      1928 greeting, RFC 1929 username/password auth when the URL
+      carries credentials, then a CONNECT and one ``generate_204`` GET
+      through the tunnel) — implemented on raw sockets, no PySocks
+      dependency.
+    * ``https``/``socks4``/``socks4a`` get a TCP connect to host:port
+      (a TLS handshake needs an SSL client setup and SOCKS4 a separate
+      protocol for a marginal gain — the detail string says exactly
+      what was and wasn't probed).
+
+    Transport failures (DNS, refused, timeout) come back as ``(False,
+    message)``; the message always names host:port.
+    """
+    error = validate_proxy_url(proxy)
+    if error is not None:
+        return False, f"invalid address — {error}"
+    parts = urllib.parse.urlsplit(proxy.strip())
+    host = parts.hostname or ""
+    try:
+        port = parts.port or _PROXY_DEFAULT_PORTS[parts.scheme]
+    except ValueError as e:
+        return False, f"invalid port ({e})"
+    credentials = _proxy_credentials(parts)
+    try:
+        if parts.scheme == "http":
+            return _probe_http_proxy(host, port, credentials, timeout)
+        if parts.scheme in ("socks5", "socks5h"):
+            return _probe_socks5_proxy(host, port, credentials, timeout)
+        with socket.create_connection((host, port), timeout=timeout):
+            return True, (
+                f"TCP connect to {host}:{port} OK ({parts.scheme} — handshake not probed)"
+            )
+    except OSError as e:
+        return False, f"cannot connect to {host}:{port} ({e})"
+
+
+def _proxy_credentials(parts: urllib.parse.SplitResult) -> str | None:
+    """``user:pass`` from the URL's userinfo, or None when absent."""
+    if parts.username is None:
+        return None
+    return f"{parts.username}:{parts.password or ''}"
+
+
+def _probe_status_verdict(status: int, *, credentials: str | None) -> tuple[bool, str]:
+    """Shared 200/204/407/other interpretation for the HTTP probes."""
+    if status in (200, 204):
+        return True, f"reachable (HTTP {status} through generate_204 probe)"
+    if status == 407:
+        if credentials:
+            return False, "proxy rejected the credentials (HTTP 407)"
+        return False, "proxy requires authentication (HTTP 407) — add user:pass to the URL"
+    return False, f"proxy reachable, but the probe returned HTTP {status}"
+
+
+def _probe_http_proxy(
+    host: str, port: int, credentials: str | None, timeout: float
+) -> tuple[bool, str]:
+    """One GET through an http proxy; see :func:`check_proxy_reachable`."""
+    headers = {
+        "User-Agent": "stream2video-proxy-check",
+        "Host": urllib.parse.urlsplit(_PROXY_PROBE_TARGET).netloc,
+    }
+    if credentials:
+        # A credentialed http proxy answers an unauthenticated request
+        # with 407 — the probe must send the credentials to tell "works"
+        # from "wrong password" (Basic proxy auth, RFC 7617).
+        token = base64.b64encode(credentials.encode("utf-8")).decode("ascii")
+        headers["Proxy-Authorization"] = f"Basic {token}"
+    conn = http.client.HTTPConnection(host, port, timeout=timeout)
+    try:
+        conn.request("GET", _PROXY_PROBE_TARGET, headers=headers)
+        response = conn.getresponse()
+        status = response.status
+        response.read()
+        return _probe_status_verdict(status, credentials=credentials)
+    except (OSError, http.client.HTTPException) as e:
+        return False, f"no HTTP response from proxy ({e})"
+    finally:
+        conn.close()
+
+
+# SOCKS5 CONNECT reply codes (RFC 1928) for human-readable failures.
+_SOCKS5_REPLY_ERRORS: dict[int, str] = {
+    1: "general SOCKS server failure",
+    2: "connection not allowed by ruleset",
+    3: "network unreachable",
+    4: "host unreachable",
+    5: "connection refused",
+    6: "TTL expired",
+    7: "command not supported",
+    8: "address type not supported",
+}
+
+
+def _recv_exact(sock: socket.socket, count: int) -> bytes:
+    """Read exactly ``count`` bytes or raise OSError (truncated reply)."""
+    chunks: list[bytes] = []
+    remaining = count
+    while remaining > 0:
+        chunk = sock.recv(remaining)
+        if not chunk:
+            raise OSError(f"proxy closed the connection after {count - remaining}/{count} bytes")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _probe_socks5_proxy(
+    host: str, port: int, credentials: str | None, timeout: float
+) -> tuple[bool, str]:
+    """Full SOCKS5 check: greeting + RFC 1929 auth + CONNECT + one GET
+    through the tunnel; see :func:`check_proxy_reachable`."""
+    probe = urllib.parse.urlsplit(_PROXY_PROBE_TARGET)
+    target_host = probe.hostname or ""
+    target_port = probe.port or 80
+    try:
+        raw_sock = socket.create_connection((host, port), timeout=timeout)
+    except OSError as e:
+        return False, f"cannot connect to {host}:{port} ({e})"
+    try:
+        with raw_sock as sock:
+            sock.settimeout(timeout)
+            # Greeting: we speak SOCKS5 and offer no-auth (0) and
+            # username/password (2, RFC 1929).
+            sock.sendall(b"\x05\x02\x00\x02")
+            reply = _recv_exact(sock, 2)
+            if reply[0] != 5:
+                return False, f"not a SOCKS5 proxy (greeting reply {reply.hex()})"
+            if reply[1] == 0xFF:
+                return False, "SOCKS5 server accepts none of our auth methods"
+            if reply[1] == 2:
+                if credentials is None:
+                    return False, (
+                        "SOCKS5 proxy requires username/password auth — add user:pass to the URL"
+                    )
+                user, _, password = credentials.partition(":")
+                user_b = user.encode("utf-8")
+                password_b = password.encode("utf-8")
+                if len(user_b) > 255 or len(password_b) > 255:
+                    return False, "SOCKS5 username/password too long (max 255 bytes)"
+                sock.sendall(
+                    b"\x01"
+                    + len(user_b).to_bytes(1, "big")
+                    + user_b
+                    + len(password_b).to_bytes(1, "big")
+                    + password_b
+                )
+                auth = _recv_exact(sock, 2)
+                if auth[1] != 0:
+                    return False, "SOCKS5 authentication failed (invalid username/password)"
+            elif reply[1] != 0:
+                return False, f"SOCKS5 server picked an unknown auth method (0x{reply[1]:02x})"
+            # CONNECT to the probe target by domain name (ATYP=3).
+            name = target_host.encode("ascii")
+            sock.sendall(
+                b"\x05\x01\x00\x03"
+                + len(name).to_bytes(1, "big")
+                + name
+                + target_port.to_bytes(2, "big")
+            )
+            head = _recv_exact(sock, 4)
+            if head[1] != 0:
+                reason = _SOCKS5_REPLY_ERRORS.get(head[1], f"reply code {head[1]}")
+                return False, f"SOCKS5 CONNECT failed ({reason})"
+            # Skip the bound address (IPv4 / domain / IPv6) + port.
+            atyp = head[3]
+            if atyp == 1:
+                _recv_exact(sock, 4 + 2)
+            elif atyp == 3:
+                addr_len = _recv_exact(sock, 1)[0]
+                _recv_exact(sock, addr_len + 2)
+            elif atyp == 4:
+                _recv_exact(sock, 16 + 2)
+            # One plain HTTP GET through the tunnel.
+            request = (
+                f"GET {probe.path or '/'} HTTP/1.1\r\n"
+                f"Host: {target_host}\r\n"
+                "User-Agent: stream2video-proxy-check\r\n"
+                "Connection: close\r\n\r\n"
+            ).encode("ascii")
+            sock.sendall(request)
+            status_line = sock.recv(1024)
+            if not status_line:
+                return False, "SOCKS5 tunnel established, but no HTTP response came back"
+            first_line = status_line.split(b"\r\n", 1)[0].decode("latin-1", "replace")
+            parts_of_line = first_line.split(" ", 2)
+            if len(parts_of_line) < 2 or not parts_of_line[1].isdigit():
+                return False, f"unexpected response through the tunnel ({first_line!r})"
+            status = int(parts_of_line[1])
+            return _probe_status_verdict(status, credentials=credentials)
+    except OSError as e:
+        return False, f"SOCKS5 handshake failed ({e})"
 
 
 def redact_input_url(url: str) -> str:

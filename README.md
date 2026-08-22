@@ -14,7 +14,7 @@ Downloads VOD from YouTube/Twitch, detects silence via audio analysis, cuts out 
 - **Output FPS policy** — `source` (default) preserves the input's frame cadence without duplication; `24`/`25`/`30`/`50`/`60` force CFR conversion via the `fps` filter (duplicated frames warn about file-size cost).
 - **Gapless audio by default** — re-encodes audio in the final join pass so per-segment AAC priming (~21ms) doesn't accumulate as A/V drift on multi-segment outputs. Disable with `--no-gapless-concat` for the faster stream-copy join.
 - **Dry run** — `--dry-run` shows what would be cut without encoding, so you can tune `threshold` / `min_silence` / `margin` against a real video in seconds.
-- **Proxy support** — `--proxy` (HTTP / SOCKS5) for downloads on restricted networks. `--proxy-active` / `--no-proxy-active` pin the gate on/off, overriding a stored `proxy_active: true` — copied GUI commands carry `--no-proxy-active` so a paste never silently re-enables a stored proxy.
+- **Proxy support** — `--proxy` (HTTP / SOCKS5) for downloads on restricted networks. `--proxy-active` / `--no-proxy-active` pin the gate on/off, overriding a stored `proxy_active: true` — copied GUI commands carry `--no-proxy-active` so a paste never silently re-enables a stored proxy. The address is validated everywhere it can be entered (`http/https/socks4/socks4a/socks5/socks5h` scheme + host required), and `--doctor` probes a configured active proxy for reachability (masked address, no credentials in the output).
 - **JSON logging** — `--log-format json` emits one JSON object per line for ELK / Splunk / Loki.
 - **`--doctor`** — quick environment diagnostic (Python, ffmpeg, available encoders, RAM, config location) without running the pipeline.
 - **Shell completion** — `stream2video --install-completion` for Bash / Zsh / Fish / PowerShell.
@@ -127,7 +127,7 @@ stream2video --show-completion      # Print the completion script for manual ins
 | `--proxy-active` / `--no-proxy-active` | (follows `proxy_active` config) | Pin the proxy gate on or off explicitly, overriding a stored `proxy_active: true` in `user_defaults.json` / config YAML. Passing neither flag leaves the config value in charge; passing a `--proxy` URL without a gate flag enables the proxy implicitly. Copied GUI commands emit `--no-proxy-active` when the GUI's proxy checkbox is off, so a paste can never silently re-enable a stored proxy |
 | `-l, --log-level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `--log-format` | `rich` | `rich` (default, human-readable) or `json` (one JSON object per line, for ELK/Splunk/Loki) |
-| `--doctor` | — | Print environment diagnostics (Python version, ffmpeg/encoders, RAM, config location) and exit. Works without an input path |
+| `--doctor` | — | Print environment diagnostics (Python version, ffmpeg/encoders, RAM, config location) and exit. With a proxy configured and active, also probes it for reachability (masked address). Works without an input path |
 | `--install-completion` | — | Install shell completion for Bash / Zsh / Fish / PowerShell (powered by Typer). `--show-completion` prints the script for manual install |
 
 ### Examples
@@ -196,7 +196,7 @@ margin: 0.15
 | `batch_chunk_size` | positive int (1-500) | `40` | Number of keep-segments per batch filter invocation. Scaled down dynamically for large segment counts. |
 | `min_part_bytes` | positive int (1-10485760) | `1024` | Minimum bytes for a resumed part to be considered valid. Smaller files are re-encoded. |
 | `per_video_dir` | bool | `true` | When true, all artifacts (downloaded source, WAV, JSON, log, compressed, temp dirs) are collected into `{output_dir}/{stem}_{hash}/` for local files or `{output_dir}/{site}_{id}/` for downloads instead of living in the base `output_dir`. Local source files are never moved/copied — they stay where you put them. |
-| `proxy` | string | `` (off) | Proxy server for downloads, e.g. `http://127.0.0.1:8080` or `socks5://user:pass@host:1080`. Empty = no proxy. Passed to yt-dlp only while `proxy_active` is true. Also settable via `--proxy`. |
+| `proxy` | string | `` (off) | Proxy server for downloads, e.g. `http://127.0.0.1:8080` or `socks5://user:pass@host:1080`. Empty = no proxy. Passed to yt-dlp only while `proxy_active` is true. Also settable via `--proxy`. The address is validated (one shared rule on every surface: GUI dialog, YAML load, pipeline startup) — a scheme from `http/https/socks4/socks4a/socks5/socks5h` plus a host is required, so a scheme-less typo like `127.0.0.1:8080` is rejected with a copy-pasteable example instead of failing a download hours later. |
 | `proxy_active` | bool | `false` | When true, the address in `proxy` is actually used for downloads (`yt-dlp --proxy ...`). When false, the address is kept (so a temporarily-disabled proxy isn't lost) but no proxy is applied. The GUI has a checkbox and a "Set proxy" dialog; the CLI's `--proxy` flag turns this on automatically. Pinnable from the CLI via `--proxy-active` / `--no-proxy-active` (a stored `true` can be overridden without editing the file). |
 
 ## Project directory
@@ -336,7 +336,7 @@ python -m stream2video.gui
 - **Bottom overall label** — `Elapsed: X | Remaining: ~Y + ?` (or `Total: X` on completion)
 - **Waveform preview tab** — visualises the audio with detected silence regions overlaid, so you can tune `threshold` / `min_silence` / `margin` without running a full encode
 - **Completion sound** — optional short chime on success and a different attention sound on cancel/failure ("Sound when done" checkbox, on by default). Generated on first use (no bundled audio assets, no licensing); persisted in settings. Backends: Windows `winsound`, macOS `afplay`, Linux `paplay` / `aplay` / `ffplay` (first found in PATH; install `pulseaudio-utils` / `alsa-utils` if neither is present)
-- **Download proxy** — "Set proxy" button + checkbox in the Info panel (HTTP / SOCKS5), persisted in settings and honoured by yt-dlp on the next download
+- **Download proxy** — "Set proxy" dialog + checkbox in the Info panel. The dialog has a scheme dropdown (`http` / `https` / `socks5` / `socks5h` / `socks4` / `socks4a`) and a single `user:pass@host:port` field, so the scheme never has to be typed by hand; pasting a full address (`socks5://user:pass@host:1080`) auto-selects the matching scheme and strips the prefix. The value is validated inline before the dialog closes, persisted in settings and honoured by yt-dlp on the next download. `--doctor` can probe the configured proxy for reachability
 
 ## Output
 

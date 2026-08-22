@@ -509,10 +509,10 @@ class TestProxySecretHandling:
     """Proxy credentials must never reach the GUI log (regressions)."""
 
     def test_set_proxy_logs_masked_value(self, gui):
-        from stream2video.gui_lifecycle import _ProxyInputDialog
+        from stream2video.gui_lifecycle import _ProxyDialog
 
         secret = "socks5://user:super-secret@host:1080"
-        with patch.object(_ProxyInputDialog, "get_input", return_value=secret):
+        with patch.object(_ProxyDialog, "get_input", return_value=secret):
             gui._set_proxy()
             _flush_events(gui, 200)
         log_text = gui.txt_log.get("1.0", "end")
@@ -520,6 +520,217 @@ class TestProxySecretHandling:
         assert "socks5://***:***@host:1080" in log_text
         # The value is still remembered in full for actual use.
         assert gui.settings["proxy"] == secret
+
+    def test_set_proxy_rejects_invalid_address(self, gui, monkeypatch):
+        """The format gate (shared with load_config / pipeline validation):
+        a scheme-less address is refused with an error dialog and nothing
+        is stored — no time bomb for the moment the proxy is toggled on.
+        (The dialog validates inline; this is the choke point behind a
+        patched dialog.)"""
+        from stream2video.gui_lifecycle import _ProxyDialog
+
+        shown: list[tuple] = []
+        monkeypatch.setattr(
+            "tkinter.messagebox.showerror",
+            lambda *args, **kwargs: shown.append(args),
+        )
+        gui.settings["proxy"] = ""
+        gui.settings["proxy_active"] = False
+        with patch.object(_ProxyDialog, "get_input", return_value="127.0.0.1:8080"):
+            gui._set_proxy()
+            _flush_events(gui, 200)
+        assert len(shown) == 1
+        assert "proxy scheme" in shown[0][1]
+        # Nothing stored, the checkbox state untouched.
+        assert gui.settings["proxy"] == ""
+        assert gui.settings["proxy_active"] is False
+
+    def test_set_proxy_valid_address_still_saved_and_activates(self, gui):
+        from stream2video.gui_lifecycle import _ProxyDialog
+
+        gui.settings["proxy"] = ""
+        gui.settings["proxy_active"] = False
+        with patch.object(_ProxyDialog, "get_input", return_value="http://127.0.0.1:8080"):
+            gui._set_proxy()
+            _flush_events(gui, 200)
+        assert gui.settings["proxy"] == "http://127.0.0.1:8080"
+        assert gui.settings["proxy_active"] is True
+
+
+class TestProxySplitJoin:
+    """Pure helpers behind the proxy dialog's scheme selector — the
+    paste auto-detect and the OK assembly. No Tk needed."""
+
+    @pytest.mark.parametrize(
+        ("text", "scheme", "rest"),
+        [
+            ("http://127.0.0.1:8080", "http", "127.0.0.1:8080"),
+            ("socks5://user:pass@host:1080", "socks5", "user:pass@host:1080"),
+            ("socks5h://host", "socks5h", "host"),
+            ("socks4://host:1080", "socks4", "host:1080"),
+            ("socks4a://host", "socks4a", "host"),
+            ("https://proxy.corp:3128", "https", "proxy.corp:3128"),
+            ("SOCKS5://Host:1", "socks5", "Host:1"),  # case-insensitive scheme
+            ("  http://h:1  ", "http", "h:1"),  # surrounding whitespace
+            # No KNOWN scheme: keep verbatim — the selector applies on top.
+            ("127.0.0.1:8080", None, "127.0.0.1:8080"),
+            ("user:pass@host:1", None, "user:pass@host:1"),
+            ("htt://host:1", None, "htt://host:1"),  # typo scheme: not stripped
+            ("", None, ""),
+        ],
+    )
+    def test_split(self, text, scheme, rest):
+        from stream2video.gui_lifecycle import _split_proxy_url
+
+        assert _split_proxy_url(text) == (scheme, rest)
+
+    @pytest.mark.parametrize(
+        ("scheme", "rest", "url"),
+        [
+            ("http", "127.0.0.1:8080", "http://127.0.0.1:8080"),
+            ("socks5", "user:pass@host:1080", "socks5://user:pass@host:1080"),
+            ("socks5h", "  host  ", "socks5h://host"),  # rest is stripped
+            ("http", "", ""),  # empty field = no proxy
+        ],
+    )
+    def test_join(self, scheme, rest, url):
+        from stream2video.gui_lifecycle import _join_proxy_url
+
+        assert _join_proxy_url(scheme, rest) == url
+
+
+class TestProxyDialogWidgets:
+    """The proxy dialog itself: scheme dropdown + one field, paste
+    auto-detection, inline validation (the dialog stays open until the
+    value is valid or cancelled)."""
+
+    def test_paste_full_url_selects_scheme_and_strips_prefix(self, gui):
+        from stream2video.gui_lifecycle import _ProxyDialog
+
+        dialog = _ProxyDialog(gui, initial="")
+        try:
+            _flush_events(gui, 200)
+            dialog._entry.delete(0, "end")
+            dialog._entry.insert(0, "socks5://user:pass@host:1080")
+            dialog._on_entry_changed()
+            assert dialog._scheme.get() == "socks5"
+            assert dialog._entry.get() == "user:pass@host:1080"
+            dialog._ok_event()
+            assert dialog._result == "socks5://user:pass@host:1080"
+        finally:
+            try:
+                dialog.destroy()
+            except TclError:
+                pass
+
+    def test_initial_stored_url_is_split_into_selector_and_field(self, gui):
+        from stream2video.gui_lifecycle import _ProxyDialog
+
+        dialog = _ProxyDialog(gui, initial="http://user:pw@127.0.0.1:8080")
+        try:
+            _flush_events(gui, 200)
+            assert dialog._scheme.get() == "http"
+            assert dialog._entry.get() == "user:pw@127.0.0.1:8080"
+        finally:
+            try:
+                dialog.destroy()
+            except TclError:
+                pass
+
+    def test_plain_host_keeps_default_scheme_and_assembles_on_ok(self, gui):
+        # The main scenario: the user types host[:port] WITHOUT any
+        # scheme — the selected dropdown value supplies it.
+        from stream2video.gui_lifecycle import _ProxyDialog
+
+        dialog = _ProxyDialog(gui, initial="")
+        try:
+            _flush_events(gui, 200)
+            assert dialog._scheme.get() == "http"  # selector default
+            dialog._entry.delete(0, "end")
+            dialog._entry.insert(0, "127.0.0.1:8080")
+            dialog._on_entry_changed()
+            assert dialog._entry.get() == "127.0.0.1:8080"  # untouched
+            assert dialog._scheme.get() == "http"
+            dialog._scheme.set("socks5")
+            dialog._ok_event()
+            assert dialog._result == "socks5://127.0.0.1:8080"
+        finally:
+            try:
+                dialog.destroy()
+            except TclError:
+                pass
+
+    def test_ok_with_invalid_address_shows_inline_error_and_stays_open(self, gui):
+        from stream2video.gui_lifecycle import _ProxyDialog
+
+        dialog = _ProxyDialog(gui, initial="")
+        try:
+            _flush_events(gui, 200)
+            dialog._entry.delete(0, "end")
+            dialog._entry.insert(0, "user:pass@")  # no host
+            dialog._ok_event()
+            assert dialog._result is None  # not accepted
+            assert "no proxy host" in dialog._error_label.cget("text")
+            # The dialog is still alive — fix the field and OK again.
+            dialog._entry.delete(0, "end")
+            dialog._entry.insert(0, "user:pass@host:1")
+            dialog._ok_event()
+            assert dialog._result == "http://user:pass@host:1"
+        finally:
+            try:
+                dialog.destroy()
+            except TclError:
+                pass
+
+    def test_empty_field_ok_means_no_proxy(self, gui):
+        from stream2video.gui_lifecycle import _ProxyDialog
+
+        dialog = _ProxyDialog(gui, initial="http://old:1")
+        try:
+            _flush_events(gui, 200)
+            dialog._entry.delete(0, "end")
+            dialog._ok_event()
+            assert dialog._result == ""
+        finally:
+            try:
+                dialog.destroy()
+            except TclError:
+                pass
+
+    def test_cancel_returns_none(self, gui):
+        from stream2video.gui_lifecycle import _ProxyDialog
+
+        dialog = _ProxyDialog(gui, initial="http://old:1")
+        try:
+            _flush_events(gui, 200)
+            dialog._cancel_event()
+            assert dialog._result is None
+        finally:
+            try:
+                dialog.destroy()
+            except TclError:
+                pass
+
+    def test_long_inline_error_keeps_buttons_inside_the_window(self, gui):
+        """Regression: the dialog used to have a FIXED 230px height, so a
+        multi-line validation message pushed the OK/Cancel row below the
+        window edge (unreachable buttons). The window must auto-grow to
+        fit whatever the error label shows."""
+        from stream2video.gui_lifecycle import _ProxyDialog
+
+        dialog = _ProxyDialog(gui, initial="")
+        try:
+            _flush_events(gui, 300)
+            dialog._error_label.configure(text="word " * 60)  # ~6 lines
+            _flush_events(gui, 300)
+            button_bottom = dialog._ok_button.winfo_rooty() + dialog._ok_button.winfo_height()
+            window_bottom = dialog.winfo_rooty() + dialog.winfo_height()
+            assert button_bottom <= window_bottom + 1
+        finally:
+            try:
+                dialog.destroy()
+            except TclError:
+                pass
 
     def test_copy_cli_command_logs_redacted_command(self, gui, tmp_path: Path):
         # Copying the CLI command with an active proxy used to log the

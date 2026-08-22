@@ -74,6 +74,7 @@ from stream2video.download import (
     canonical_url_lock_key,
     download,
     redact_input_url,
+    validate_proxy_url,
 )
 from stream2video.formatters import fmt_size, fmt_time
 from stream2video.gui_helpers import build_silence_info_line
@@ -1876,6 +1877,14 @@ def validate_pipeline_config(cfg: PipelineConfig) -> list[str]:
         errors.append(f"Unknown x264_preset {cfg.x264_preset!r}.")
     if cfg.output_fps not in VALID_OUTPUT_FPS:
         errors.append(f"Unknown output_fps {cfg.output_fps!r}.")
+    # Proxy format (same rule as load_config / the GUI dialog). A typo'd
+    # address is useless the moment the gate opens, and cfg.proxy only
+    # ever carries the address the run will actually use, so this is the
+    # last line of defence for every surface (CLI flag, YAML, GUI).
+    if cfg.proxy:
+        proxy_error = validate_proxy_url(cfg.proxy)
+        if proxy_error:
+            errors.append(f"Invalid proxy: {proxy_error}")
     if not (
         cfg.encoder_threads == "auto"
         or (

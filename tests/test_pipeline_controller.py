@@ -207,6 +207,35 @@ class TestValidatePipelineConfig:
         cfg = _valid_config(video_quality=quality, audio_quality=quality)
         assert validate_pipeline_config(cfg) == []
 
+    def test_all_x264_presets_valid(self):
+        # Same drift guard as the quality presets: every value the
+        # VALID_X264_PRESETS list advertises must pass validation (the
+        # list had values no test had ever fed through the validator).
+        from stream2video.config import VALID_X264_PRESETS
+
+        for preset in VALID_X264_PRESETS:
+            assert validate_pipeline_config(_valid_config(x264_preset=preset)) == []
+
+    def test_proxy_schemeless_rejected(self):
+        # The classic typo: an address without a scheme never works in
+        # yt-dlp — reject it at validation with the shared rule.
+        cfg = _valid_config(proxy="127.0.0.1:8080")
+        errors = validate_pipeline_config(cfg)
+        assert any("Invalid proxy" in e and "proxy scheme" in e for e in errors)
+
+    def test_proxy_with_credentials_accepted(self):
+        cfg = _valid_config(proxy="socks5://user:pass@host:1080")
+        assert validate_pipeline_config(cfg) == []
+
+    def test_empty_proxy_accepted(self):
+        cfg = _valid_config(proxy="")
+        assert validate_pipeline_config(cfg) == []
+
+    def test_proxy_bad_port_rejected(self):
+        cfg = _valid_config(proxy="http://host:abc")
+        errors = validate_pipeline_config(cfg)
+        assert any("Invalid proxy" in e and "invalid port" in e for e in errors)
+
     def test_threshold_out_of_range(self):
         cfg = _valid_config(threshold=-70.0)
         errors = validate_pipeline_config(cfg)

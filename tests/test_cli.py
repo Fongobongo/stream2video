@@ -147,6 +147,54 @@ class TestCliMemoryReservePreflight:
         assert result.exit_code == 0, result.output
 
 
+class TestLoadConfigProxyValidation:
+    """``load_config`` must reject a malformed proxy address with the
+    shared format rule (download.validate_proxy_url) — the value is
+    stored even while proxy_active is off, so a typo is caught at load
+    time instead of dead-ending the first download through it."""
+
+    def test_schemeless_proxy_rejected(self, tmp_path: Path):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text('proxy: "127.0.0.1:8080"\n', encoding="utf-8")
+        with pytest.raises(typer.Exit):
+            load_config(cfg)
+
+    def test_unknown_scheme_rejected(self, tmp_path: Path):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("proxy: htt://host:8080\n", encoding="utf-8")
+        with pytest.raises(typer.Exit):
+            load_config(cfg)
+
+    def test_valid_socks5_with_credentials_loads(self, tmp_path: Path):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text(
+            "proxy: socks5://user:pass@host:1080\nproxy_active: true\n", encoding="utf-8"
+        )
+        loaded = load_config(cfg)
+        assert loaded["proxy"] == "socks5://user:pass@host:1080"
+        assert loaded["proxy_active"] is True
+
+    def test_empty_proxy_loads(self, tmp_path: Path):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text('proxy: ""\n', encoding="utf-8")
+        loaded = load_config(cfg)
+        assert loaded["proxy"] == ""
+
+    def test_int_proxy_rejected(self, tmp_path: Path):
+        # The resolver coerces ints to str ("8080"), but the result still
+        # has no scheme — reject at load with the format message.
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("proxy: 8080\n", encoding="utf-8")
+        with pytest.raises(typer.Exit):
+            load_config(cfg)
+
+    def test_bool_proxy_rejected(self, tmp_path: Path):
+        cfg = tmp_path / "cfg.yaml"
+        cfg.write_text("proxy: true\n", encoding="utf-8")
+        with pytest.raises(typer.Exit):
+            load_config(cfg)
+
+
 class TestLoadConfigBoolValidation:
     """``load_config`` must reject non-bool values for the bool config keys.
 

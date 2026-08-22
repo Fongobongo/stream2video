@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Proxy dialog with a scheme selector (GUI)** — "Set proxy" no longer makes you type `http://` by hand: a dropdown carries the scheme (`http` / `https` / `socks5` / `socks5h` / `socks4` / `socks4a`) and the single field takes `[user:pass@]host[:port]`. Pasting a full address (`socks5://user:pass@host:1080`, any casing) auto-selects the matching scheme and strips the prefix from the field; a plain `host:port` keeps the selected scheme. OK validates the assembled URL inline (same shared rule as everywhere else) and keeps the dialog open with the error shown until the value is valid or cancelled; an emptied field means "no proxy", as before.
+- **Proxy address validation** — one shared rule (`download.validate_proxy_url`) on every surface the address can enter: the GUI "Set proxy" dialog (error box, nothing stored), the YAML `proxy:` key in `load_config` (exit 1 naming the fix), and pipeline startup via `validate_pipeline_config` (the CLI flag, YAML and GUI all cross it). Requires a scheme yt-dlp actually supports (`http/https/socks4/socks4a/socks5/socks5h`) plus a host, with an optional in-range numeric port and credentials allowed — the classic scheme-less `127.0.0.1:8080` typo is rejected with a copy-pasteable example instead of dead-ending the first download through it hours later.
+- **`--doctor` probes a configured proxy for reachability** — with a proxy address configured and active, the doctor prints a `Proxy:` row: the masked address (credentials never shown, even for a garbage address that just failed validation) plus a liveness check. `http://` proxies get the real end-to-end probe: a `generate_204` GET through the proxy **with the URL's credentials sent as Basic `Proxy-Authorization`** — 204/200 proves the proxy is up, the credentials are accepted and it can reach the internet; 407 distinguishes "credentials rejected" (sent but refused) from "credentials missing". `socks5`/`socks5h` proxies get a full SOCKS5 check implemented on raw sockets (RFC 1928 greeting, RFC 1929 username/password auth, CONNECT, one GET through the tunnel — no PySocks dependency): wrong credentials, refused CONNECTs and non-SOCKS servers each get their own message. `https`/`socks4`/`socks4a` get a TCP connect with the limitation stated in the message. An invalid address or a disabled proxy is reported without any network call, and probe failures are warnings — a flaky network never fails the doctor (an ACTIVE invalid proxy still fails it through the shared pipeline validation). No probe ever runs at pipeline startup.
+
+### Changed
+
+- **A YAML `proxy:` without a valid scheme is now rejected at load** (exit 1 with the fix named) instead of being silently passed to yt-dlp. Previously such a config loaded fine and only failed — with an opaque yt-dlp error — the first time the proxy was activated. The format is checked even while `proxy_active` is false: the address is stored for later activation, so a typo is caught before it becomes a time bomb.
+
 ## [0.3] - 2026-08-22
 
 ### Breaking changes

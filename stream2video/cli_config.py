@@ -22,6 +22,7 @@ from stream2video.config import (
     ENUM_VALIDATORS,
     effective_defaults,
 )
+from stream2video.download import validate_proxy_url
 from stream2video.gui_helpers import mask_proxy
 from stream2video.param_specs import PARAM_SPECS
 
@@ -199,6 +200,24 @@ def load_config(config_file: Path | None, console: Any) -> dict:
             console.print(
                 f"[red]Invalid output_dir:[/red] {_out_dir!r} must be a non-empty string path"
             )
+            raise typer.Exit(1)
+
+    # Proxy address format — the SAME rule the GUI dialog and
+    # validate_pipeline_config enforce (download.validate_proxy_url).
+    # The value is stored even while proxy_active is off, so a typo is
+    # caught at load time instead of dead-ending the first download
+    # through it. Empty = no proxy (valid). Only a key the user actually
+    # wrote is checked. An int is coerced to str first (the resolver's
+    # historical ``proxy: 8080`` -> ``"8080"`` contract), which the
+    # format check then rejects unless it carries a scheme.
+    if "proxy" in file_config:
+        _proxy_raw = file_config["proxy"]
+        if isinstance(_proxy_raw, bool) or not isinstance(_proxy_raw, (str, int)):
+            console.print(f"[red]Invalid proxy:[/red] {_proxy_raw!r} must be a string")
+            raise typer.Exit(1)
+        _proxy_error = validate_proxy_url(str(_proxy_raw).strip())
+        if _proxy_error:
+            console.print(f"[red]Invalid proxy:[/red] {_proxy_error}")
             raise typer.Exit(1)
 
     # Validate numeric ranges. Preserve the input's int/float type —

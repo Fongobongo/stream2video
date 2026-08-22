@@ -10,6 +10,7 @@ delete incomplete output, save settings, destroy).
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from tkinter import messagebox
 from typing import Any, cast
@@ -21,6 +22,7 @@ from stream2video.config import (
     save_user_defaults,
     user_defaults_path,
 )
+from stream2video.download import PROXY_SCHEMES, validate_proxy_url
 from stream2video.gui_helpers import (
     build_cli_command,
     mask_proxy,
@@ -42,23 +44,142 @@ from stream2video.utils import cancel_process, list_active_owners
 _logger = logging.getLogger("stream2video.gui")
 
 
-class _ProxyInputDialog(ctk.CTkInputDialog):
-    """CTkInputDialog with the previous proxy address already inserted.
+# Scheme selector order for the proxy dialog: the schemes people actually
+# buy first, the exotic ones (socks4/4a) after.
+_PROXY_SCHEME_UI_ORDER: list[str] = [
+    s for s in ("http", "https", "socks5", "socks5h", "socks4", "socks4a") if s in PROXY_SCHEMES
+]
 
-    The value is inserted after the stock dialog builds its widgets
-    (so ``_entry`` exists) and the whole text is selected for quick
-    overwrite while still allowing in-place editing.
+
+def _split_proxy_url(text: str) -> tuple[str | None, str]:
+    """Split a pasted proxy address into ``(scheme, rest)``.
+
+    ``scheme`` is None when the text does NOT start with a known proxy
+    scheme (then the text is kept verbatim — the selector's scheme will
+    be applied on top by :func:`_join_proxy_url`). A known scheme is
+    stripped and lowercased so a pasted ``SOCKS5://…`` selects the
+    ``socks5`` entry. Pure function, no I/O.
+    """
+    value = text.strip()
+    m = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*)://", value)
+    if not m:
+        return None, value
+    scheme = m.group(1).lower()
+    if scheme not in PROXY_SCHEMES:
+        return None, value
+    return scheme, value[m.end() :]
+
+
+def _join_proxy_url(scheme: str, rest: str) -> str:
+    """Assemble the proxy URL from the selector's scheme and the entry's
+    text. An empty rest means "no proxy" and assembles to ``""``."""
+    value = rest.strip()
+    if not value:
+        return ""
+    return f"{scheme}://{value}"
+
+
+class _ProxyDialog(ctk.CTkToplevel):
+    """Proxy-address dialog: a scheme dropdown + one address field.
+
+    The user no longer types ``http://`` by hand: the dropdown carries
+    the scheme and the entry takes ``[user:pass@]host[:port]``. Pasting
+    a full address (``socks5://user:pass@host:1080``) auto-selects the
+    matching scheme and strips the prefix from the field. OK validates
+    the assembled URL with the shared rule (download.validate_proxy_url)
+    and shows the error INLINE — the dialog stays open until the value
+    is either valid or cancelled. ``get_input()`` mirrors the historical
+    CTkInputDialog contract: modal wait, returns the full URL (with the
+    scheme), ``""`` when the field was emptied (no proxy), None on cancel.
     """
 
-    def __init__(self, initial: str = "", **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self._initial = initial
+    def __init__(self, master: Any = None, initial: str = "") -> None:
+        super().__init__(master)
+        self._result: str | None = None
+        self.title("Download proxy")
+        # No fixed geometry: the inline error label can grow to several
+        # lines (the scheme-list message is ~250 chars), and a fixed
+        # height would clip the OK/Cancel row off the bottom of the
+        # window. The window auto-sizes to the grid; minsize keeps the
+        # no-error state compact and stable.
+        self.minsize(480, 200)
+        self.resizable(False, False)
+        self.transient(master)
+        self.protocol("WM_DELETE_WINDOW", self._cancel_event)
 
-    def _create_widgets(self) -> None:
-        super()._create_widgets()
-        if self._initial:
-            self._entry.insert(0, self._initial)
-            self._entry.select_range(0, "end")
+        scheme, rest = _split_proxy_url(initial)
+        self._scheme = ctk.StringVar(value=scheme or _PROXY_SCHEME_UI_ORDER[0])
+
+        ctk.CTkLabel(self, text="Proxy server for downloads (empty = no proxy).").grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(12, 2)
+        )
+        self._scheme_menu = ctk.CTkOptionMenu(
+            self, width=110, values=_PROXY_SCHEME_UI_ORDER, variable=self._scheme
+        )
+        self._scheme_menu.grid(row=1, column=0, sticky="w", padx=12, pady=6)
+        self._entry = ctk.CTkEntry(self, width=310, placeholder_text="user:pass@host:port")
+        self._entry.grid(row=1, column=1, sticky="ew", padx=(0, 12), pady=6)
+        self._entry.insert(0, rest)
+        self._entry.select_range(0, "end")
+        self._entry.focus_set()
+
+        ctk.CTkLabel(
+            self,
+            text="Paste a full address (http://… or socks5://…) — the type is detected.",
+            text_color=("gray40", "gray60"),
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 4))
+
+        self._error_label = ctk.CTkLabel(
+            self, text="", text_color="#e5484d", wraplength=430, justify="left"
+        )
+        self._error_label.grid(row=3, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 2))
+
+        self._ok_button = ctk.CTkButton(self, text="OK", width=90, command=self._ok_event)
+        self._ok_button.grid(row=4, column=0, sticky="e", padx=(12, 4), pady=(4, 12))
+        self._cancel_button = ctk.CTkButton(
+            self, text="Cancel", width=90, command=self._cancel_event, fg_color="transparent"
+        )
+        self._cancel_button.grid(row=4, column=1, sticky="e", padx=(0, 12), pady=(4, 12))
+
+        # Auto-detect the scheme of a pasted full address. Programmatic
+        # delete/insert below does NOT re-fire these bindings.
+        self._entry.bind("<KeyRelease>", lambda _e: self._on_entry_changed())
+        self._entry.bind("<<Paste>>", lambda _e: self.after_idle(self._on_entry_changed))
+        self.bind("<Return>", lambda _e: self._ok_event())
+
+        try:
+            self.grab_set()  # modal (may fail on exotic WMs — non-fatal)
+        except Exception:
+            pass
+
+    # -- events ------------------------------------------------------------
+
+    def _on_entry_changed(self) -> None:
+        scheme, rest = _split_proxy_url(self._entry.get())
+        if scheme is not None:
+            self._scheme.set(scheme)
+            self._entry.delete(0, "end")
+            self._entry.insert(0, rest)
+        self._error_label.configure(text="")
+
+    def _ok_event(self) -> None:
+        url = _join_proxy_url(self._scheme.get(), self._entry.get())
+        error = validate_proxy_url(url)
+        if error is not None:
+            self._error_label.configure(text=error)
+            self._entry.focus_set()
+            return
+        self._result = url
+        self.destroy()
+
+    def _cancel_event(self) -> None:
+        self._result = None
+        self.destroy()
+
+    def get_input(self) -> str | None:
+        """Block until the dialog closes; return the URL / "" / None."""
+        self.wait_window(self)
+        return self._result
 
 
 class LifecycleMixin:
@@ -219,19 +340,26 @@ class LifecycleMixin:
         auto-enables the proxy checkbox; the address is passed to
         yt-dlp as ``--proxy`` only while ``proxy_active`` is on.
         """
-        dialog = _ProxyInputDialog(
+        dialog = _ProxyDialog(
+            master=self.winfo_toplevel(),
             initial=str(self.settings.get("proxy", "")),
-            title="Download proxy",
-            text=(
-                "Proxy server for downloads (empty = no proxy).\n"
-                "Examples: http://127.0.0.1:8080 or "
-                "socks5://user:pass@host:1080."
-            ),
         )
         value = dialog.get_input()
         if value is None:
             return  # cancelled
         value = value.strip()
+        # Format gate (the SAME rule load_config and validate_pipeline_config
+        # enforce; the dialog already validates inline — this is the single
+        # choke point for hosts/tests that call _set_proxy with a patched
+        # dialog): a typo'd address is useless the moment the proxy is
+        # switched on, so reject it at entry instead of storing a time bomb.
+        proxy_error = validate_proxy_url(value)
+        if proxy_error is not None:
+            # parent via winfo_toplevel (the mixin's own typed pattern —
+            # see gui_recent_projects): an unparented dialog can fall
+            # behind the main window while blocking input.
+            messagebox.showerror("Invalid proxy address", proxy_error, parent=self.winfo_toplevel())
+            return
         self.settings["proxy"] = value
         if value and not self.settings.get("proxy_active", False):
             self.settings["proxy_active"] = True

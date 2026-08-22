@@ -306,7 +306,12 @@ def _doctor_impl(config_file: Path | None = None) -> bool:
     """
     from rich.table import Table
 
-    from stream2video.config import _base_dir, settings_path, user_defaults_path
+    from stream2video.config import (
+        _base_dir,
+        effective_defaults,
+        settings_path,
+        user_defaults_path,
+    )
 
     all_critical_ok = True
     tbl = Table(show_header=False, box=None, padding=(0, 1))
@@ -423,7 +428,11 @@ def _doctor_impl(config_file: Path | None = None) -> bool:
             f"RAM: could not query ({e})",
         )
 
-    # Config file (YAML or user_defaults.json)
+    # Config file (YAML or user_defaults.json). ``loaded`` keeps the
+    # successfully-loaded --config dict ({} when absent/rejected) so the
+    # proxy section below can layer the YAML's proxy keys over the
+    # user-defaults view.
+    loaded: dict = {}
     if config_file is not None:
         # User explicitly passed --config: report whether it actually
         # LOADS. Existence alone is not enough (audit round 23 P6): a
@@ -627,6 +636,46 @@ def _doctor_impl(config_file: Path | None = None) -> bool:
             f"User defaults: {user_cfg} [dim](none — defaults used)[/dim]",
             f"User defaults: {user_cfg} (none — defaults used)",
         )
+
+    # Proxy address + liveness. The probe is a REAL network call, so it
+    # lives only here — the doctor — never at pipeline startup. The
+    # verdict is informational (warn on failure, never a critical fail):
+    # a flaky network must not fail the doctor. Effective view = user
+    # defaults overlaid with the --config YAML's proxy keys.
+    from stream2video.download import (
+        check_proxy_reachable,
+        mask_proxy_url,
+        validate_proxy_url,
+    )
+
+    _view = effective_defaults()
+    _view.update({k: v for k, v in loaded.items() if k in ("proxy", "proxy_active")})
+    _proxy_addr = str(_view.get("proxy") or "").strip()
+    if _proxy_addr:
+        _masked = mask_proxy_url(_proxy_addr)
+        _proxy_err = validate_proxy_url(_proxy_addr)
+        if _proxy_err is not None:
+            _row(
+                "[yellow]![/yellow]",
+                "warn",
+                f"Proxy: {_masked} [yellow]({_proxy_err})[/yellow]",
+                f"Proxy: {_masked} ({_proxy_err})",
+            )
+        elif not bool(_view.get("proxy_active", False)):
+            _row(
+                "[dim]i[/dim]",
+                "info",
+                f"Proxy: {_masked} [dim](disabled — not probed)[/dim]",
+                f"Proxy: {_masked} (disabled — not probed)",
+            )
+        else:
+            _ok, _detail = check_proxy_reachable(_proxy_addr, timeout=6.0)
+            _row(
+                "[green]✓[/green]" if _ok else "[yellow]![/yellow]",
+                "ok" if _ok else "warn",
+                f"Proxy: {_masked} — {_detail}",
+                f"Proxy: {_masked} — {_detail}",
+            )
 
     # Output dir (settings file location — informational)
     _row("[dim]i[/dim]", "info", f"Settings: {settings_path()}", f"Settings: {settings_path()}")

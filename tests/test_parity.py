@@ -722,6 +722,127 @@ class TestDoctorConfigValidation:
         monkeypatch.setattr("stream2video.cli.ffmpeg_min_version_warning", lambda: None)
         assert cli._doctor_impl(None) is True
 
+
+class TestDoctorProxyCheck:
+    """--doctor's Proxy row: the format gate plus the liveness probe.
+    The probe is a REAL network call — every test here patches
+    check_proxy_reachable (or proves it is not called), so the suite
+    never touches the network."""
+
+    @staticmethod
+    def _defaults_with(tmp_path: Path, monkeypatch, payload: dict) -> None:
+        import json as _json
+
+        monkeypatch.setattr(
+            "stream2video.config.user_defaults_path", lambda: tmp_path / "user_defaults.json"
+        )
+        (tmp_path / "user_defaults.json").write_text(_json.dumps(payload), encoding="utf-8")
+
+    def _doctor_json(self, monkeypatch, capsys) -> tuple[bool, list[dict]]:
+        import json as _json
+
+        from stream2video import cli
+
+        monkeypatch.setattr(cli, "_JSON_LOG_MODE", True)
+        try:
+            ok = cli._doctor_impl(None)
+        finally:
+            monkeypatch.setattr(cli, "_JSON_LOG_MODE", False)
+        out = capsys.readouterr().out
+        records = [_json.loads(line) for line in out.splitlines() if line.strip()]
+        return ok, records
+
+    @staticmethod
+    def _proxy_rows(records: list[dict]) -> list[dict]:
+        return [r for r in records if r.get("doctor") == "check" and "Proxy:" in r["check"]]
+
+    def test_no_proxy_means_no_row_and_no_probe(self, tmp_path, monkeypatch, capsys):
+        self._defaults_with(tmp_path, monkeypatch, {})
+
+        def _no_network(*args, **kwargs):  # pragma: no cover - fail loudly
+            raise AssertionError("probe must not run without a configured proxy")
+
+        monkeypatch.setattr("stream2video.download.check_proxy_reachable", _no_network)
+        ok, records = self._doctor_json(monkeypatch, capsys)
+        assert ok is True
+        assert self._proxy_rows(records) == []
+
+    def test_active_reachable_proxy_gets_ok_row_with_masked_address(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._defaults_with(
+            tmp_path,
+            monkeypatch,
+            {"proxy": "http://user:secret@127.0.0.1:1", "proxy_active": True},
+        )
+        monkeypatch.setattr(
+            "stream2video.download.check_proxy_reachable",
+            lambda *a, **k: (True, "reachable (HTTP 204 through generate_204 probe)"),
+        )
+        ok, records = self._doctor_json(monkeypatch, capsys)
+        rows = self._proxy_rows(records)
+        assert len(rows) == 1
+        assert rows[0]["status"] == "ok"
+        assert "HTTP 204" in rows[0]["check"]
+        # Credentials never reach the row, even though the probe got the
+        # full address.
+        assert "secret" not in rows[0]["check"]
+        assert "***:***@127.0.0.1:1" in rows[0]["check"]
+        assert ok is True
+
+    def test_unreachable_proxy_warns_but_keeps_verdict_green(self, tmp_path, monkeypatch, capsys):
+        self._defaults_with(
+            tmp_path, monkeypatch, {"proxy": "http://127.0.0.1:9", "proxy_active": True}
+        )
+        monkeypatch.setattr(
+            "stream2video.download.check_proxy_reachable",
+            lambda *a, **k: (False, "cannot connect to 127.0.0.1:9 (refused)"),
+        )
+        ok, records = self._doctor_json(monkeypatch, capsys)
+        rows = self._proxy_rows(records)
+        assert len(rows) == 1
+        assert rows[0]["status"] == "warn"
+        assert "cannot connect" in rows[0]["check"]
+        # A flaky network must not fail the doctor — the verdict stays green.
+        assert ok is True
+
+    def test_invalid_proxy_address_warns_without_probing(self, tmp_path, monkeypatch, capsys):
+        self._defaults_with(
+            tmp_path, monkeypatch, {"proxy": "127.0.0.1:8080", "proxy_active": True}
+        )
+
+        def _no_network(*args, **kwargs):  # pragma: no cover - fail loudly
+            raise AssertionError("an invalid address must not be probed")
+
+        monkeypatch.setattr("stream2video.download.check_proxy_reachable", _no_network)
+        ok, records = self._doctor_json(monkeypatch, capsys)
+        rows = self._proxy_rows(records)
+        assert len(rows) == 1
+        assert rows[0]["status"] == "warn"
+        assert "must start with a proxy scheme" in rows[0]["check"]
+        # An ACTIVE invalid proxy dooms every run, so the verdict fails —
+        # the shared pipeline validation in the user-defaults row says
+        # why (the doctor's own pre-existing machinery, now also catching
+        # proxy typos through the shared rule).
+        assert ok is False
+        assert any(r.get("status") == "fail" and "Invalid proxy" in r["check"] for r in records)
+
+    def test_disabled_proxy_gets_info_row_not_probed(self, tmp_path, monkeypatch, capsys):
+        self._defaults_with(
+            tmp_path, monkeypatch, {"proxy": "http://127.0.0.1:8080", "proxy_active": False}
+        )
+
+        def _no_network(*args, **kwargs):  # pragma: no cover - fail loudly
+            raise AssertionError("a disabled proxy must not be probed")
+
+        monkeypatch.setattr("stream2video.download.check_proxy_reachable", _no_network)
+        ok, records = self._doctor_json(monkeypatch, capsys)
+        rows = self._proxy_rows(records)
+        assert len(rows) == 1
+        assert rows[0]["status"] == "info"
+        assert "disabled — not probed" in rows[0]["check"]
+        assert ok is True
+
     def test_doctor_user_defaults_unknown_and_rejected_keys_warn(self, tmp_path: Path, monkeypatch):
         """Audit round 24 P8: a syntactically valid user_defaults.json
         can be semantically dead — load_user_defaults silently drops
