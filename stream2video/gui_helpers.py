@@ -18,7 +18,13 @@ import shlex
 import sys
 from pathlib import Path
 
-from stream2video.config import CONFIG_DEFAULTS, PRESETS, apply_preset, effective_defaults
+from stream2video.config import (
+    CONFIG_DEFAULTS,
+    PRESETS,
+    apply_preset,
+    effective_defaults,
+    user_default_overrides,
+)
 from stream2video.formatters import fmt_clock_time, fmt_size, fmt_speed, fmt_time
 from stream2video.param_specs import (
     CLI_BOOL_FLAG_ORDER,
@@ -305,7 +311,14 @@ def build_cli_command(
     # preset's value (audit P1 follow-up).
     _defaults = effective_defaults()
     if preset in PRESETS:
-        _preset_applied = apply_preset(_defaults, preset)
+        # Same protection the CLI run applies: SAVED GUI choices
+        # (user_defaults.json) survive the preset overlay, so the copied
+        # command's divergence baseline matches what a real run resolves.
+        _preset_applied = apply_preset(
+            _defaults,
+            preset,
+            protected_keys=user_default_overrides(_defaults),
+        )
     else:
         _preset_applied = _defaults
     _values = {

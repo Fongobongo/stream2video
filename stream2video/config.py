@@ -74,6 +74,7 @@ __all__ = [
     "load_user_defaults",
     "save_user_defaults",
     "settings_path",
+    "user_default_overrides",
     "user_defaults_path",
 ]
 
@@ -160,6 +161,7 @@ def apply_preset(
     config: dict[str, Any],
     preset: str,
     explicit_keys: frozenset[str] | None = None,
+    protected_keys: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """Return a new config dict with the preset's tunables applied.
 
@@ -178,6 +180,14 @@ def apply_preset(
     ``preset: low_memory`` + ``batch_chunk_size: 50`` in one YAML file
     used to run ``batch_chunk_size=20`` because the preset overlay ran
     after the merge and won).
+
+    ``protected_keys`` is the set of keys carrying a deliberate user
+    choice that must survive the preset even when NOT explicitly written
+    in the YAML — the GUI's "Save current as defaults" values
+    (user_defaults.json). Without it, ``--preset low_memory`` silently
+    overwrote e.g. a saved ``x264_low_memory: false`` while the exact
+    same choice in a YAML file was honoured. See
+    :func:`user_default_overrides` for how the set is derived.
     """
     if preset not in PRESETS:
         raise ValueError(
@@ -186,12 +196,27 @@ def apply_preset(
     out = dict(config)
     overrides = PRESETS[preset]
     out.update(overrides)
-    if explicit_keys:
+    keep = (explicit_keys or frozenset()) | (protected_keys or frozenset())
+    if keep:
         for key in overrides:
-            if key in explicit_keys:
+            if key in keep:
                 out[key] = config[key]
     out["preset"] = preset
     return out
+
+
+def user_default_overrides(effective: dict[str, Any] | None = None) -> frozenset[str]:
+    """Keys whose value in ``effective`` DIFFERS from the stock default.
+
+    ``effective_defaults()`` = ``CONFIG_DEFAULTS`` overlaid with
+    user_defaults.json, so this diff is exactly the set of the user's
+    saved GUI choices with a non-default value — the set
+    :func:`apply_preset` must protect.
+    """
+    eff = effective_defaults() if effective is None else effective
+    return frozenset(
+        k for k, v in eff.items() if k in CONFIG_DEFAULTS and v != CONFIG_DEFAULTS[k]
+    )
 
 
 # Numeric bounds, derived from the PARAM_SPECS min/max column (audit

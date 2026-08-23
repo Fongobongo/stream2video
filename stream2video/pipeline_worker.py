@@ -40,6 +40,7 @@ handling) lives here so a unit test can drive it without Tk.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from collections.abc import Callable
@@ -279,12 +280,26 @@ def build_download_progress_callback(
             frac = min(1.0, (p.downloaded_bytes or 0.0) / p.total_bytes)
             gui.ui_progress(0.05 * frac)
         else:
-            frac = min(1.0, 0.1 * elapsed)  # unknown size: cap at the synthetic bar
-            gui.ui_progress(min(0.04, 0.005 * elapsed))
+            # Unknown total: ONE shared synthetic curve feeds both the
+            # phase indicator and the overall bar. The old pair used two
+            # different formulas — the phase sprinted to "Download (100%)"
+            # in ~10 s (0.1 * elapsed) while the bar crawled to its 4% cap
+            # in 8 s — two contradictory lies on one screen. The
+            # exponential creep never reaches 100%, so an unknown-size
+            # download no longer claims completion it can't know about.
+            synth = 1.0 - math.exp(-elapsed / 300.0)
+            frac = synth
+            gui.ui_progress(0.05 * synth)
         gui.ui_phase_progress(frac)
         # Delegate the status-line format to the shared helper so the GUI
         # and CLI stay in sync (the CLI prints the same string via
         # build_download_status in cli.py's progress callback).
+        #
+        # NOT forced: a yt-dlp burst fires many ticks per second, and
+        # force bypasses should_update_status's throttle entirely — the
+        # STATUS_UPDATE_INTERVAL contract was dead in this phase. Step
+        # transitions / errors force their own updates at their call
+        # sites; per-tick text is throttled like every other phase.
         gui.ui_status(
             "Step 1/4: "
             + build_download_status(
@@ -293,7 +308,7 @@ def build_download_progress_callback(
                 speed=p.speed,
                 eta=p.eta,
             ),
-            force=True,
+            force=False,
         )
         gui.ui_overall(elapsed, p.eta or 0.0, True)
 

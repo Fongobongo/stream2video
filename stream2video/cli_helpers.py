@@ -11,6 +11,7 @@ signal wiring, the per-run file handler, the ffmpeg presence check, the
 
 import contextlib
 import logging
+import os
 import shutil
 import signal
 import threading
@@ -382,9 +383,14 @@ def _make_file_handler(path: Path) -> logging.FileHandler:
 
 def _check_ffmpeg() -> None:
     """Warn if ffmpeg or ffprobe is missing."""
+    from stream2video.tools import ffmpeg_install_hint
+
     for tool in ("ffmpeg", "ffprobe"):
         if not shutil.which(tool):
             console.print(f"[red]Error:[/red] {tool} not found in PATH")
-            console.print("  Install: [cyan]winget install Gyan.FFmpeg[/cyan]")
-            console.print("  Or run:  [cyan]setup.ps1[/cyan] (Windows)")
+            # Same per-OS hint --doctor prints; the old text hardcoded the
+            # Windows winget command and fed it to macOS/Linux users too.
+            console.print(f"  Install: [cyan]{ffmpeg_install_hint()}[/cyan]")
+            if os.name == "nt":
+                console.print("  Or run:  [cyan]setup.ps1[/cyan] (Windows)")
             raise typer.Exit(1)

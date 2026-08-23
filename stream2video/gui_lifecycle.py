@@ -254,8 +254,24 @@ class LifecycleMixin:
             self.settings[key] = value
 
     def _restore_defaults(self) -> None:
+        # Recent Projects is SESSION STATE pointing at real directories on
+        # disk, not a tunable: effective_defaults() carries an empty list,
+        # and _save_settings() below used to persist that — silently
+        # wiping the on-disk list while the panel kept showing the old
+        # rows until restart. Carry the currently-displayed entries over.
+        previous_recent = (
+            list(self.settings.get("recent_projects", []))
+            if isinstance(self.settings, dict)
+            else []
+        )
         self.settings = effective_defaults()
-        ctk.set_appearance_mode(self.settings["theme"])
+        if previous_recent:
+            self.settings["recent_projects"] = previous_recent
+        # Route through the shared theme handler instead of re-implementing
+        # it: the inline copy set the mode + combo but skipped the log
+        # poller's tag re-skin, so [WARN]/[ERROR] colours stayed from the
+        # old theme until the next manual switch.
+        self._on_theme_change(self.settings["theme"])
         self.combo_theme.set(self.settings["theme"])
         self.entry_input.delete(0, "end")
         self.entry_output.delete(0, "end")
@@ -309,6 +325,9 @@ class LifecycleMixin:
                 self.chk_proxy.select()
             else:
                 self.chk_proxy.deselect()
+        # Re-render the panel so it matches what was preserved/persisted.
+        if hasattr(self, "_render_recent_projects"):
+            self._render_recent_projects()
         self._save_settings()
         self._log("Settings restored to defaults")
 

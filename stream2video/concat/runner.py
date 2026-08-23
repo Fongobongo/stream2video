@@ -81,6 +81,13 @@ def _run_ffmpeg(
     historical behaviour for callers that haven't been updated).
     """
     stdout_target = subprocess.PIPE if track_progress else subprocess.DEVNULL
+    # A non-positive timeout used to disable the read-loop deadline but
+    # still reach ``_wait_with_cancel`` with ``remaining_timeout=0``,
+    # which fired "timeout after 0s" AFTER a successful encode finished.
+    # Reject it up front — the config floors (min 1) already protect
+    # CLI/GUI callers; this guard is for direct API users.
+    if timeout is not None and timeout <= 0:
+        raise FFmpegError(f"timeout must be a positive number of seconds, got {timeout!r}")
     # Debug logging to help diagnose spawn failures from real GUI runs. When
     # this exception fires, we want to know exactly what was attempted.
     logger.debug(
@@ -129,6 +136,26 @@ def _run_ffmpeg(
             f"(attempted: {cmd[0]!r}, exists={Path(cmd[0]).is_file()}, "
             f"winerror={getattr(e, 'winerror', '?')}, "
             f"filename={getattr(e, 'filename', '?')!r}, "
+            f"strerror={getattr(e, 'strerror', '?')!r})"
+        ) from e
+    except OSError as e:
+        # popen_with_retry re-raises the LAST OSError after exhausting its
+        # retries — including the transient-class winerrors 3/206 that
+        # arrive as bare OSError (not FileNotFoundError). Without this
+        # wrapper those escaped raw instead of as FFmpegError, breaking
+        # the caller contract (fallback.py compensates by catching OSError
+        # too; every other _run_ffmpeg caller expected FFmpegError).
+        logger.error(
+            "ffmpeg spawn failed after retries: cmd[0]=%r errno=%s winerror=%s filename=%r",
+            cmd[0],
+            getattr(e, "errno", "?"),
+            getattr(e, "winerror", "?"),
+            getattr(e, "filename", "?"),
+        )
+        raise FFmpegError(
+            f"failed to spawn ffmpeg "
+            f"(attempted: {cmd[0]!r}, errno={getattr(e, 'errno', '?')}, "
+            f"winerror={getattr(e, 'winerror', '?')}, "
             f"strerror={getattr(e, 'strerror', '?')!r})"
         ) from e
 

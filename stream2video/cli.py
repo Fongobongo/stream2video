@@ -83,6 +83,22 @@ def _set_json_mode(value: bool) -> None:
     _JSON_LOG_MODE = value
 
 
+def _play_sound(kind: str = "completion") -> None:
+    """Best-effort chime shared by the completion and attention paths.
+
+    Playback failure returns a warning string (printed) instead of
+    raising; an unexpected error is logged at debug — a sound card hiccup
+    must never fail an hours-long encode at the last step. This used to
+    be spelled out twice in main() and could drift.
+    """
+    try:
+        _sound_warning = play_completion_sound(enabled=True, kind=kind)
+        if _sound_warning:
+            console.print(f"[yellow]{_sound_warning}[/yellow]")
+    except Exception:
+        logger.debug("play_completion_sound raised", exc_info=True)
+
+
 # The two console log formats --log-format accepts. The ONLY spelling
 # rule for them lives in :func:`normalize_log_format` (case-insensitive)
 # so the main() validator and the eager --doctor argv scan can never
@@ -91,6 +107,14 @@ def _set_json_mode(value: bool) -> None:
 # lowercased, so ``--log-format JSON`` behaved differently on the two
 # paths).
 _VALID_LOG_FORMATS = ("rich", "json")
+
+# One shared user-facing text for the non-overlapping-logging-sessions
+# rejection — it used to be spelled out twice (eager --doctor path and
+# main()) and could drift.
+_LOGGING_SESSION_BUSY_MSG = (
+    "[red]Error:[/red] another embedded CLI session is active; "
+    "logging sessions cannot overlap"
+)
 
 
 def normalize_log_format(value: str) -> str | None:
@@ -257,10 +281,7 @@ def _doctor_callback(ctx: typer.Context, param: Any, value: bool) -> bool:
             with logging_session(log_format_lower, log_level, _set_json_mode):
                 ok = _run_doctor(cfg, full=full)
         except LoggingSessionBusyError:
-            console.print(
-                "[red]Error:[/red] another embedded CLI session is active; "
-                "logging sessions cannot overlap"
-            )
+            console.print(_LOGGING_SESSION_BUSY_MSG)
             raise typer.Exit(1) from None
         raise typer.Exit(0 if ok else 1)
     return value
@@ -351,6 +372,45 @@ def _doctor_impl(config_file: Path | None = None, full: bool = False) -> bool:
     def _row(status_glyph: str, status: str, rich_label: str, plain_label: str) -> None:
         tbl.add_row(status_glyph, rich_label)
         checks.append((status, plain_label))
+
+    def _snapshot_pipeline_errors(snapshot: dict) -> list[str]:
+        """PIPELINE-level validation of an effective config snapshot.
+
+        Shared by the --config branch and the user-defaults branch below:
+        per-key loader checks don't see cross-field contracts (stall
+        warning >= kill pair, enum combos), so the exact PipelineConfig
+        the run would build is reconstructed here (same factory as the
+        CLI resolver and the GUI worker) and run through the same shared
+        validator. ``input_raw`` is a placeholder — the doctor has no
+        input, and validate_pipeline_config only requires it non-empty.
+        (audit round 27 P10) ``get(key, default)``, NOT
+        ``get(key) or default``: an explicit ``false`` / ``0`` / ``""``
+        is a REAL value and must survive into the validated snapshot.
+        """
+        params = PipelineWorkerParams(
+            input_raw="doctor",
+            output_dir=Path(str(snapshot.get("output_dir") or ".")),
+            method=str(snapshot.get("method", CONFIG_DEFAULTS["method"])),
+            encoder=str(snapshot.get("encoder", CONFIG_DEFAULTS["encoder"])),
+            video_quality=str(
+                snapshot.get("video_quality", CONFIG_DEFAULTS["video_quality"])
+            ),
+            audio_quality=str(
+                snapshot.get("audio_quality", CONFIG_DEFAULTS["audio_quality"])
+            ),
+            download_quality=str(
+                snapshot.get("download_quality", CONFIG_DEFAULTS["download_quality"])
+            ),
+            force=bool(snapshot.get("force", CONFIG_DEFAULTS["force"])),
+            per_video_dir=bool(
+                snapshot.get("per_video_dir", CONFIG_DEFAULTS["per_video_dir"])
+            ),
+            delete_after=bool(
+                snapshot.get("delete_after", CONFIG_DEFAULTS["delete_after"])
+            ),
+        )
+        pipe_cfg = build_pipeline_config_from_snapshot(params, snapshot)
+        return validate_pipeline_config(pipe_cfg)
 
     # stdout/stderr were already reconfigured to UTF-8 (and are restored
     # afterwards) by the ``_run_doctor`` wrapper.
@@ -504,45 +564,11 @@ def _doctor_impl(config_file: Path | None = None, full: bool = False) -> bool:
                     config_file,
                     console if not _JSON_LOG_MODE else _NullConsole(),
                 )
-                # (audit round 24 P7) The loader validates every value
-                # in isolation, but not the PIPELINE-level contract the
-                # run enforces (cross-field stall pair, enum combos).
-                # Rebuild the exact PipelineConfig the run would use
-                # (same factory as the CLI resolver and the GUI worker)
-                # and run the same validator — a YAML that only fails
-                # there used to be blessed by the doctor as "loaded and
-                # validated", so a run doomed to fail at startup passed
-                # the doctor's config check. ``input_raw`` is a
-                # placeholder: the doctor has no input, and
-                # validate_pipeline_config only requires it non-empty.
-                params = PipelineWorkerParams(
-                    input_raw="doctor",
-                    output_dir=Path(str(loaded.get("output_dir", "."))),
-                    method=str(loaded.get("method", CONFIG_DEFAULTS["method"])),
-                    encoder=str(loaded.get("encoder", CONFIG_DEFAULTS["encoder"])),
-                    video_quality=str(
-                        loaded.get("video_quality", CONFIG_DEFAULTS["video_quality"])
-                    ),
-                    audio_quality=str(
-                        loaded.get("audio_quality", CONFIG_DEFAULTS["audio_quality"])
-                    ),
-                    download_quality=str(
-                        loaded.get("download_quality", CONFIG_DEFAULTS["download_quality"])
-                    ),
-                    # ``get(key, default)``, NOT ``get(key) or default``:
-                    # an explicit ``false`` / ``0`` / ``""`` is a REAL
-                    # value and must survive into the snapshot the
-                    # doctor validates (audit round 27 P10) — the
-                    # truthiness fallback silently flipped it back to
-                    # the factory default.
-                    force=bool(loaded.get("force", CONFIG_DEFAULTS["force"])),
-                    per_video_dir=bool(
-                        loaded.get("per_video_dir", CONFIG_DEFAULTS["per_video_dir"])
-                    ),
-                    delete_after=bool(loaded.get("delete_after", CONFIG_DEFAULTS["delete_after"])),
-                )
-                pipe_cfg = build_pipeline_config_from_snapshot(params, loaded)
-                pipe_errors = validate_pipeline_config(pipe_cfg)
+                # (audit round 24 P7) Per-key loader validation is not the
+                # whole contract — run the same PIPELINE-level check a
+                # real startup performs (a YAML that only fails there used
+                # to be blessed here while the run died at startup).
+                pipe_errors = _snapshot_pipeline_errors(loaded)
                 if pipe_errors:
                     _row(
                         "[red]✗[/red]",
@@ -592,6 +618,20 @@ def _doctor_impl(config_file: Path | None = None, full: bool = False) -> bool:
                 for k, v in _user.items()
                 if k in CONFIG_DEFAULTS and coerce_typed_value(k, v) is None
             )
+            # Build the exact effective snapshot a run would see (stock
+            # defaults + every coerce-able user key), then ALWAYS run the
+            # PIPELINE-level validation — the same one --config gets.
+            # The old shape validated only when per-key checks were clean,
+            # so a file with ONE ignored key AND a broken cross-field pair
+            # (stall warning >= kill) got a yellow warn while --config
+            # with the same pair failed hard.
+            merged = dict(CONFIG_DEFAULTS)
+            for k, v in _user.items():
+                if k in CONFIG_DEFAULTS:
+                    coerced = coerce_typed_value(k, v)
+                    if coerced is not None:
+                        merged[k] = coerced
+            pipe_errors = _snapshot_pipeline_errors(merged)
             if unknown_keys or rejected:
                 parts = []
                 if unknown_keys:
@@ -607,63 +647,23 @@ def _doctor_impl(config_file: Path | None = None, full: bool = False) -> bool:
                     f"User defaults: {user_cfg} (partially ignored — {detail} — "
                     f"stock defaults are used for those)",
                 )
-            else:
-                # (audit round 25 P7) Per-key checks pass, but the
-                # PIPELINE-level contract the run enforces (cross-field
-                # stall pair etc.) can still reject the EFFECTIVE
-                # snapshot. Build the exact PipelineConfig the run would
-                # use (user defaults over stock defaults — the same
-                # merge load_user_defaults does — with every key
-                # coerce-typed so the merged dict is what a run would
-                # actually see) and run the shared validator, exactly
-                # like the explicit --config check above.
-                merged = dict(CONFIG_DEFAULTS)
-                for k, v in _user.items():
-                    if k in CONFIG_DEFAULTS:
-                        coerced = coerce_typed_value(k, v)
-                        if coerced is not None:
-                            merged[k] = coerced
-                params = PipelineWorkerParams(
-                    input_raw="doctor",
-                    output_dir=Path(str(merged.get("output_dir", "."))),
-                    method=str(merged.get("method", CONFIG_DEFAULTS["method"])),
-                    encoder=str(merged.get("encoder", CONFIG_DEFAULTS["encoder"])),
-                    video_quality=str(
-                        merged.get("video_quality", CONFIG_DEFAULTS["video_quality"])
-                    ),
-                    audio_quality=str(
-                        merged.get("audio_quality", CONFIG_DEFAULTS["audio_quality"])
-                    ),
-                    download_quality=str(
-                        merged.get("download_quality", CONFIG_DEFAULTS["download_quality"])
-                    ),
-                    # get(key, default): explicit false/0 must survive
-                    # (audit round 27 P10).
-                    force=bool(merged.get("force", CONFIG_DEFAULTS["force"])),
-                    per_video_dir=bool(
-                        merged.get("per_video_dir", CONFIG_DEFAULTS["per_video_dir"])
-                    ),
-                    delete_after=bool(merged.get("delete_after", CONFIG_DEFAULTS["delete_after"])),
+            if pipe_errors:
+                _row(
+                    "[red]✗[/red]",
+                    "fail",
+                    f"User defaults: {user_cfg} [red](pipeline validation: "
+                    f"{'; '.join(pipe_errors)})[/red]",
+                    f"User defaults: {user_cfg} "
+                    f"(pipeline validation: {'; '.join(pipe_errors)})",
                 )
-                pipe_cfg = build_pipeline_config_from_snapshot(params, merged)
-                pipe_errors = validate_pipeline_config(pipe_cfg)
-                if pipe_errors:
-                    _row(
-                        "[red]✗[/red]",
-                        "fail",
-                        f"User defaults: {user_cfg} [red](pipeline validation: "
-                        f"{'; '.join(pipe_errors)})[/red]",
-                        f"User defaults: {user_cfg} "
-                        f"(pipeline validation: {'; '.join(pipe_errors)})",
-                    )
-                    all_critical_ok = False
-                else:
-                    _row(
-                        "[green]✓[/green]",
-                        "ok",
-                        f"User defaults: {user_cfg}",
-                        f"User defaults: {user_cfg}",
-                    )
+                all_critical_ok = False
+            elif not (unknown_keys or rejected):
+                _row(
+                    "[green]✓[/green]",
+                    "ok",
+                    f"User defaults: {user_cfg}",
+                    f"User defaults: {user_cfg}",
+                )
         except (OSError, ValueError) as _e:
             # A corrupt user_defaults.json is silently ignored by
             # load_user_defaults (the run falls back to stock
@@ -1264,10 +1264,7 @@ def main(
     try:
         _log_state = logging_session_cm.__enter__()
     except LoggingSessionBusyError:
-        console.print(
-            "[red]Error:[/red] another embedded CLI session is active; "
-            "logging sessions cannot overlap"
-        )
+        console.print(_LOGGING_SESSION_BUSY_MSG)
         raise typer.Exit(1) from None
     try:
         try:
@@ -1416,9 +1413,18 @@ def main(
             resolved_preset = make_resolver(ctx, config, console).resolve("preset", preset)
             # ``apply_preset`` raises ValueError for an unknown preset, and
             # the resolver already rejected any value outside PRESET_NAMES —
-            # no separate validity check needed here.
+            # no separate validity check needed here. SAVED GUI defaults
+            # (user_defaults.json) are protected from the overlay the same
+            # way explicit YAML keys are: ``--preset low_memory`` used to
+            # silently overwrite e.g. a saved ``x264_low_memory: false``.
             _explicit = getattr(config, "explicit_keys", None) or frozenset()
-            config = apply_preset(config, resolved_preset, explicit_keys=_explicit)
+            _protected = getattr(config, "user_defaults_keys", None) or frozenset()
+            config = apply_preset(
+                config,
+                resolved_preset,
+                explicit_keys=_explicit,
+                protected_keys=_protected,
+            )
             resolver = make_resolver(ctx, config, console)
 
             # Resolve each CLI flag against the config via the generic resolver.
@@ -1836,14 +1842,8 @@ def main(
                 # effort — playback failure returns a warning string instead
                 # of raising.
                 def _play_attention_sound() -> None:
-                    if not resolved_completion_sound:
-                        return
-                    try:
-                        _sound_warning = play_completion_sound(enabled=True, kind="attention")
-                        if _sound_warning:
-                            console.print(f"[yellow]{_sound_warning}[/yellow]")
-                    except Exception:
-                        logger.debug("play_completion_sound raised", exc_info=True)
+                    if resolved_completion_sound:
+                        _play_sound("attention")
 
                 try:
                     result = controller.run()
@@ -2006,15 +2006,9 @@ def main(
             logger.info(f"Successfully compressed video to {output_video}")
 
             # Completion chime (CLI ↔ GUI parity): the GUI's worker plays
-            # ``completion_sound`` from the same config key. Best-effort —
-            # playback failure returns a warning string instead of raising.
+            # ``completion_sound`` from the same config key.
             if resolved_completion_sound:
-                try:
-                    _sound_warning = play_completion_sound(enabled=True)
-                    if _sound_warning:
-                        console.print(f"[yellow]{_sound_warning}[/yellow]")
-                except Exception:
-                    logger.debug("play_completion_sound raised", exc_info=True)
+                _play_sound()
 
         except typer.Exit:
             raise

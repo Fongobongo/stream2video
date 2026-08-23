@@ -219,11 +219,45 @@ class RecentProjectsMixin:
             )
             self._remove_recent_entry(path_str)
             return
-        size_mb = dir_size_mb(path)
+        # dir_size_mb rglobs a potentially multi-GB project tree — on the
+        # Tk thread that froze the window for seconds BEFORE the confirm
+        # dialog even appeared (the rmtree itself already runs in its own
+        # daemon thread). Compute the size off-thread and marshal the
+        # result back; the dialog then opens from the main loop as usual.
+        self._log("Calculating project size...")
+
+        def _size_worker() -> None:
+            try:
+                size = dir_size_mb(path)
+            except OSError:
+                size = -1.0
+
+            def _continue() -> None:
+                try:
+                    alive = self.winfo_exists()
+                except Exception:
+                    alive = False
+                if alive:
+                    self._confirm_project_delete(path, path_str, size)
+
+            try:
+                self._tk_after(0, _continue)
+            except Exception:
+                pass
+
+        threading.Thread(target=_size_worker, daemon=True).start()
+
+    def _confirm_project_delete(self, path: Path, path_str: str, size_mb: float) -> None:
+        """Confirmation dialog + rmtree spawn for a validated project dir.
+
+        Runs on the Tk main loop (marshalled here by the size worker);
+        the deletion itself is spawned into a daemon thread at the end.
+        """
+        size_text = f"{size_mb:.1f} MB" if size_mb >= 0 else "unknown"
         msg = (
             f"Delete project '{path.name}' and ALL its contents?\n\n"
             f"Location: {path}\n"
-            f"Approx size: {size_mb:.1f} MB\n\n"
+            f"Approx size: {size_text}\n\n"
             f"This will permanently remove the source video (if downloaded), "
             f"the compressed output, the audio cache, the silence cache, "
             f"and the log file.\n\n"
@@ -308,6 +342,10 @@ class RecentProjectsMixin:
             messagebox.showwarning(
                 "Folder not found",
                 f"Directory no longer exists:\n{path_str}",
+                # Same modal-parenting rule as every other dialog in this
+                # mixin: an unparented warning can hide behind the main
+                # window while still blocking input.
+                parent=self.winfo_toplevel(),
             )
             self._remove_recent_entry(path_str)
         except OSError as e:

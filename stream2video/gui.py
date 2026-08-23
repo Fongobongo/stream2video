@@ -373,6 +373,10 @@ class Stream2VideoGUI(
                         "Low disk space — may fail", msg, icon="warning", parent=self
                     ):
                         self._log("Start cancelled — low disk space")
+                        # _set_running(False) restores the buttons but not
+                        # the status line: without this the window kept
+                        # claiming "Starting..." after a refused start.
+                        self.lbl_status.configure(text="")
                         self._set_running(False)
                         return
         except Exception:
@@ -572,24 +576,64 @@ class _PipelineGuiCallbacksAdapter(_GuiLogAdapterBase):
         contract for interactive hosts (mirrors ``typer.confirm`` for
         the CLI). Any dialog error (Tk already destructed, headless run)
         defaults to *refuse* so ``ask`` never silently switches encoders.
+
+        The dialog is an owned :class:`CTkToplevel` (not a native
+        ``messagebox``) so the 60 s timeout can actually CLOSE it — the
+        native modal used to stay on screen after the worker had already
+        given up, and its late answer was silently dropped.
         """
         answered = threading.Event()
         consent: list[bool] = [False]
+        dialog_ref: list[ctk.CTkToplevel | None] = [None]
+
+        def _answer(value: bool) -> None:
+            consent[0] = value
+            answered.set()
+            dlg = dialog_ref[0]
+            if dlg is not None:
+                try:
+                    dlg.grab_release()
+                    dlg.destroy()
+                except Exception:
+                    pass
 
         def _ask() -> None:
             try:
-                consent[0] = bool(
-                    messagebox.askyesno(
-                        "Encoder fallback",
-                        "The selected encoder is unavailable or failed: "
+                dlg = ctk.CTkToplevel(self._gui)
+                dlg.title("Encoder fallback")
+                dlg.transient(self._gui)
+                dlg.resizable(False, False)
+                dlg.protocol("WM_DELETE_WINDOW", lambda: _answer(False))
+                body = ctk.CTkFrame(dlg, fg_color="transparent")
+                body.pack(fill="both", expand=True, padx=20, pady=(18, 12))
+                ctk.CTkLabel(
+                    body,
+                    justify="left",
+                    text=(
+                        "The selected encoder is unavailable or failed:\n"
                         f"{self._fallback_consent_enc_label()}.\n\n"
-                        "Fall back to libx264 (CPU, slower) for this run?",
-                        parent=self._gui,
-                    )
-                )
+                        "Fall back to libx264 (CPU, slower) for this run?"
+                    ),
+                    wraplength=380,
+                ).pack(anchor="w")
+                buttons = ctk.CTkFrame(dlg, fg_color="transparent")
+                buttons.pack(fill="x", padx=20, pady=(0, 16))
+                ctk.CTkButton(
+                    buttons,
+                    text="No (keep requested encoder)",
+                    command=lambda: _answer(False),
+                ).pack(side="right", padx=(8, 0))
+                ctk.CTkButton(
+                    buttons,
+                    text="Yes, use libx264",
+                    command=lambda: _answer(True),
+                ).pack(side="right")
+                dlg.grab_set()
+                dlg.lift()
+                dlg.focus_force()
+                dialog_ref[0] = dlg
             except Exception:
                 consent[0] = False
-            finally:
                 answered.set()
 
         try:
@@ -599,6 +643,21 @@ class _PipelineGuiCallbacksAdapter(_GuiLogAdapterBase):
         # Wait up to 60 s — plenty for a user click; a wedged Tk loop
         # (e.g. mid-shutdown) must not hang the pipeline worker forever.
         if not answered.wait(timeout=60):
+            # Close the dialog too: leaving a live modal on screen while
+            # the pipeline already refused the fallback invited clicks
+            # that were silently ignored.
+            def _dismiss() -> None:
+                dlg = dialog_ref[0]
+                if dlg is not None:
+                    try:
+                        dlg.destroy()
+                    except Exception:
+                        pass
+
+            try:
+                self._gui._tk_after(0, _dismiss)
+            except Exception:
+                pass
             self._gui._log("[WARN] Encoder-fallback dialog timed out — refusing fallback")
             return False
         if consent[0]:

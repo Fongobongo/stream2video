@@ -21,6 +21,7 @@ from stream2video.config import (
     CONFIG_RANGES,
     ENUM_VALIDATORS,
     effective_defaults,
+    user_default_overrides,
 )
 from stream2video.download import validate_proxy_url
 from stream2video.gui_helpers import mask_proxy
@@ -91,6 +92,13 @@ class _LoadedConfig(dict):
     """
 
     explicit_keys: frozenset[str] = frozenset()
+
+    # Keys carrying a SAVED GUI choice (user_defaults.json) with a
+    # non-default value. apply_preset protects these from its overlay so
+    # ``--preset low_memory`` can't silently overwrite e.g. a saved
+    # ``x264_low_memory: false`` — the same choice written in a YAML file
+    # was already protected via ``explicit_keys``.
+    user_defaults_keys: frozenset[str] = frozenset()
 
 
 # Keys whose PARAM_SPECS type is an integer (plain int or the
@@ -386,4 +394,5 @@ def load_config(config_file: Path | None, console: Any) -> dict:
     logger.debug(f"Final config: {_config_log}")
     result = _LoadedConfig(config)
     result.explicit_keys = frozenset(file_config.keys())
+    result.user_defaults_keys = user_default_overrides(config)
     return result

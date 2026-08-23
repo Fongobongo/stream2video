@@ -71,10 +71,22 @@ def _run_final_concat(
             "aresample=async=1:first_pts=0",
             "-c:a",
             "aac",
+            # Same rate/channel policy every other AAC re-encode site
+            # applies (segment/batch/cut_encode/gapless) — the resync pass
+            # used to skip it, so a non-source audio_quality silently lost
+            # its 48 kHz stereo normalisation at the final join.
+            *_c._audio_opts(options.audio_quality),
             *_c._audio_bitrate_opts(options.audio_quality),
         ]
     else:
         codec_opts = ["-c", "copy"]
+    # Web/streaming containers: relocate moov atom to the head so playback
+    # can start before the whole file is downloaded. Every per-part encode
+    # (cut_encode, gapless) already sets this for mp4/m4a — without it here
+    # the SAME request produced a fast-started file via cut_then_encode but
+    # a slow-start (moov at tail) file via segment/batch.
+    if output_path.suffix.lower() in (".mp4", ".m4a", ".mov"):
+        codec_opts += ["-movflags", "+faststart"]
     label_text = label
     try:
         _c._run_ffmpeg(

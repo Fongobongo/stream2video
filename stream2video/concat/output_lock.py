@@ -146,6 +146,18 @@ def _os_lock_fd(fd: int) -> None:
             try:
                 os.write(fd, b"\0")
             except OSError as e:
+                # A LOCK-VIOLATION here is contention, not a preparation
+                # fault: the byte-0 holder had locked the region but not
+                # yet written its owner record (file still empty), so our
+                # placeholder write hit their lock. Re-raise the raw
+                # OSError so the acquire loop treats it as an ordinary
+                # contention retry — wrapping it into ConcatLockError
+                # made the handler UNLINK the live owner's lock file
+                # (the exact two-owners scenario this module documents
+                # as unacceptable) and misreport the pause as "could not
+                # be prepared" instead of waiting.
+                if _is_contention_error(e):
+                    raise
                 raise ConcatLockError(f"Lock file could not be prepared ({e})") from None
         os.lseek(fd, 0, os.SEEK_SET)
         msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)

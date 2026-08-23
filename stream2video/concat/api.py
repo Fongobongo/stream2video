@@ -348,12 +348,13 @@ def _run_locked(
     source_bitrate: int | None = None
     effective_opts_quality = video_quality
     if video_quality == "source" and not use_crf:
-        from stream2video.utils import (
-            get_video_bitrate as _gvb,
-        )
-        from stream2video.utils import (
-            get_video_duration as _gvd,
-        )
+        # Route through the package namespace (`_c.*`), like every other
+        # probe in this module: a direct `stream2video.utils` import sits
+        # OUTSIDE the `stream2video.concat.*` patch seam, so tests (and
+        # embedders) stubbing the package-level probes never intercepted
+        # this branch.
+        _gvb = _c.get_video_bitrate
+        _gvd = _c.get_video_duration
 
         source_bitrate = _gvb(video_path, cancel_callback=cancel_callback)
         if source_bitrate is None or source_bitrate <= 0:
