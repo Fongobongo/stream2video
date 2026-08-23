@@ -9,10 +9,11 @@ from collections.abc import Callable
 from pathlib import Path
 
 from stream2video.concat.errors import CancelledError
-from stream2video.tools import ffmpeg_path, ffprobe_path, popen_with_retry
+from stream2video.tools import ffmpeg_path, popen_with_retry
 from stream2video.utils import (
     _run_ffprobe,
     drain_stderr_lines,
+    ffprobe_show_entries_args,
     kill_and_reap,
     registered_process,
     subprocess_kwargs,
@@ -79,18 +80,11 @@ def _ffprobe_is_valid_media(
     (audit round 33 P2).
     """
     rc, stdout = _run_ffprobe(
-        [
-            ffprobe_path(),
-            "-v",
-            "error",
-            "-select_streams",
-            stream_type,
-            "-show_entries",
+        ffprobe_show_entries_args(
+            path,
             "stream=codec_name",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(path),
-        ],
+            select_streams=stream_type,
+        ),
         cancel_callback=cancel_callback,
     )
     return rc == 0 and bool(stdout.strip())
@@ -120,18 +114,11 @@ def _ffprobe_media_complete(
     callback was accepted but dropped before the runner).
     """
     rc, stdout = _run_ffprobe(
-        [
-            ffprobe_path(),
-            "-v",
-            "error",
-            "-select_streams",
-            stream_type,
-            "-show_entries",
+        ffprobe_show_entries_args(
+            path,
             "stream=codec_name:format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(path),
-        ],
+            select_streams=stream_type,
+        ),
         cancel_callback=cancel_callback,
     )
     if rc != 0:
@@ -225,18 +212,11 @@ def _ffprobe_stream_timing(
     covers this probe the same way it covers the codec probe.
     """
     rc, stdout = _run_ffprobe(
-        [
-            ffprobe_path(),
-            "-v",
-            "error",
-            "-select_streams",
-            f"{stream_type}:0",
-            "-show_entries",
+        ffprobe_show_entries_args(
+            path,
             "stream=start_time,duration:stream_tags=DURATION",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(path),
-        ],
+            select_streams=f"{stream_type}:0",
+        ),
         cancel_callback=cancel_callback,
     )
     if rc != 0:
@@ -605,6 +585,63 @@ def _media_is_valid(
     return True
 
 
+def resume_part_ok(
+    part_path: Path,
+    *,
+    expected_duration: float,
+    min_part_bytes: int,
+    require_video: bool,
+    require_audio: bool,
+    timeout_seconds: float,
+    cancel_callback: Callable[[], bool] | None = None,
+    low_process_priority: bool = False,
+    rlimit_as_mb: int = 0,
+) -> bool:
+    """Unified resume gate for a pipeline part file.
+
+    One chain, five call sites (segment / batch / cut_encode parts and
+    raw concat, audio extract): size floor → duration sanity →
+    whole-stream media validity. The old hand-copied quadruplicates
+    drifted the moment any kwarg changed. Semantics:
+
+      * ``min_part_bytes`` — a crash can leave a tiny non-empty file;
+        below this floor it's re-encoded without probing.
+      * ``_ffprobe_duration_ok`` (slack=1.0, matching batch.py /
+        audio.py) rejects a moov-bearing part whose BODY was truncated
+        by a mid-flush kill — the moov records the PLANNED length while
+        the content is shorter.
+      * ``_media_is_valid`` runs the codec probe + whole-stream decode
+        (``-xerror``, audit round 31 P1-4): video when required, AND the
+        audio body too when required (a video-valid part can still
+        carry a truncated audio track, audit round 30 P6). Mid-body
+        corruption passes every header-level probe; the decode reads
+        every packet.
+      * Cancellable, ``timeout_seconds`` bounded (audit round 30 P7),
+        honours the caller's resource policy (low priority / rlimit,
+        audit round 31 P1-3), ``fail_safe=True`` so an infrastructure
+        fault re-encodes instead of reusing a suspect file.
+    """
+    if not part_path.exists():
+        return False
+    try:
+        if part_path.stat().st_size < min_part_bytes:
+            return False
+    except OSError:
+        return False
+    if not _ffprobe_duration_ok(part_path, expected_duration, cancel_callback=cancel_callback):
+        return False
+    return _media_is_valid(
+        part_path,
+        require_video=require_video,
+        require_audio=require_audio,
+        timeout=timeout_seconds,
+        cancel_callback=cancel_callback,
+        low_process_priority=low_process_priority,
+        rlimit_as_mb=rlimit_as_mb,
+        fail_safe=True,
+    )
+
+
 def _ffprobe_duration_ok(
     path: Path,
     expected_seconds: float,
@@ -637,16 +674,10 @@ def _ffprobe_duration_ok(
     """
     try:
         rc, stdout = _run_ffprobe(
-            [
-                ffprobe_path(),
-                "-v",
-                "error",
-                "-show_entries",
+            ffprobe_show_entries_args(
+                path,
                 "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                str(path),
-            ],
+            ),
             cancel_callback=cancel_callback,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):

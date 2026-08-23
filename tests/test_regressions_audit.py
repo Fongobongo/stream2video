@@ -160,9 +160,10 @@ class TestSegmentResumeDuration:
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_encode),
             patch("stream2video.concat._run_final_concat"),
             # Unified media gate accepts the part; the DURATION gate
-            # says "wrong length" → must NOT reuse.
-            patch("stream2video.concat._media_is_valid", return_value=True),
-            patch("stream2video.concat._ffprobe_duration_ok", return_value=False),
+            # says "wrong length" → must NOT reuse. Patched at the
+            # probing home so the REAL resume_part_ok chain runs.
+            patch("stream2video.concat.probing._media_is_valid", return_value=True),
+            patch("stream2video.concat.probing._ffprobe_duration_ok", return_value=False),
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
             _run_segment_concat(
@@ -200,10 +201,10 @@ class TestSegmentResumeDuration:
         with (
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_encode),
             patch("stream2video.concat._run_final_concat"),
-            patch("stream2video.concat._ffprobe_duration_ok", return_value=True),
+            patch("stream2video.concat.probing._ffprobe_duration_ok", return_value=True),
             # Unified gate (codec probe + whole-stream decode, audit
             # round 31 P1-4) rejects the part → re-encode.
-            patch("stream2video.concat._media_is_valid", return_value=False),
+            patch("stream2video.concat.probing._media_is_valid", return_value=False),
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
             _run_segment_concat(
@@ -248,8 +249,10 @@ class TestSegmentResumeDuration:
         with (
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_encode),
             patch("stream2video.concat._run_final_concat"),
-            patch("stream2video.concat._ffprobe_duration_ok", return_value=True),
-            patch("stream2video.concat._media_is_valid", side_effect=fake_gate),
+            # Patch the SHARED resume gate and capture the flags segment
+            # hands it — the gate itself (and its require-flag forwarding
+            # into the media validity check) is covered by probing tests.
+            patch("stream2video.concat.resume_part_ok", side_effect=fake_gate),
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
             _run_segment_concat(
@@ -292,11 +295,11 @@ class TestCutEncodeResumeDuration:
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_cut),
             patch("stream2video.concat._run_final_concat"),
             # Unified gate accepts, but the duration probe says
-            # "wrong length" → must NOT reuse.
-            patch("stream2video.concat._media_is_valid", return_value=True),
-            patch("stream2video.concat._ffprobe_duration_ok", return_value=False),
-            patch("stream2video.concat._run_subprocess_cmd"),
-            patch("stream2video.concat._ensure_fresh_work_dir"),
+            # "wrong length" → must NOT reuse. Patched at the probing
+            # home so the REAL resume_part_ok chain runs.
+            patch("stream2video.concat.probing._media_is_valid", return_value=True),
+            patch("stream2video.concat.probing._ffprobe_duration_ok", return_value=False),
+                patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
             _run_cut_then_encode(
                 video,
@@ -367,7 +370,6 @@ class TestForceClearsInUseCheckpoint:
             on_log=log_messages.append,
             on_info=lambda _t: None,
             on_overall=lambda _a, _b, _c: None,
-            on_total=lambda _a, **_k: None,
             on_download_progress=lambda _p: None,
             on_pipeline_complete=lambda _d: None,
         )

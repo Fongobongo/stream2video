@@ -328,7 +328,6 @@ class PipelineCallbacks:
     on_log: Callable[[str], None]
     on_info: Callable[[str], None]
     on_overall: Callable[[float, float | None, bool], None]
-    on_total: Callable[[float], None]
     on_download_progress: Callable[[DownloadProgress], None]
     on_pipeline_complete: Callable[[dict], None]
     # Fraction (0..1) within the CURRENT phase — drives the thin
@@ -373,9 +372,6 @@ class PipelineResult:
     # "what would be cut" summary. ``None`` on real runs.
     silence_segments: list[SilenceSegment] | None = None
     keep_segments: list[tuple[float, float]] | None = None
-    # True when the source was downloaded this run (vs a local-file
-    # passthrough). Hosts use it for delete-after decisions.
-    was_downloaded: bool = False
 
 
 class PipelineError(Exception):
@@ -571,6 +567,11 @@ class PipelineController:
     # a multi-GB VOD dwarfs the disk cost of keeping it. ``False``
     # throughout a local-file run and until the download phase returns.
     _download_was_real: bool = field(default=False, init=False)
+    # Audio-presence verdict computed by the fresh-download media gate
+    # (when that gate ran for a video source). The later "does the source
+    # have audio" probe reuses it instead of spawning a second ffprobe
+    # over the same multi-GB file; ``None`` when the gate didn't probe.
+    _download_gate_has_audio: bool | None = field(default=None, init=False)
     # Resolved per-run output directory (per_video_dir project dir when
     # enabled, else cfg.output_dir). Declared explicitly instead of being
     # set ad-hoc in _run_download_phase and read back via getattr — the
@@ -905,7 +906,6 @@ class PipelineController:
                     pipeline_seconds=time.monotonic() - self._pipeline_start,
                     silence_segments=silence_segments,
                     keep_segments=keep_segments,
-                    was_downloaded=self._download_was_real,
                 )
             if not check_memory_reserve(
                 self.cfg.memory_reserve_mb,
@@ -1155,6 +1155,8 @@ class PipelineController:
                         video_path,
                         cancel_callback=lambda: self.cancel_event.is_set(),
                     )
+                    # Cache for the later src-has-audio probe (same file).
+                    self._download_gate_has_audio = require_audio
                 except Exception as e:
                     # CancelledError must NOT be swallowed here: a user
                     # cancel during the probe is a cancel, not a probe
@@ -1282,18 +1284,23 @@ class PipelineController:
 
         # Whether the resolved source carries an audio track — the
         # final-output validation for video outputs is stricter when
-        # it should have one (audit round 30 P5).
-        try:
-            self._src_has_audio = has_audio_stream(
-                video_path, cancel_callback=lambda: self.cancel_event.is_set()
-            )
-        except Exception as e:
-            from stream2video.concat.errors import CancelledError
+        # it should have one (audit round 30 P5). When the fresh-download
+        # gate already probed this exact file, reuse its verdict instead
+        # of a second ffprobe run.
+        if self._download_gate_has_audio is not None:
+            self._src_has_audio = self._download_gate_has_audio
+        else:
+            try:
+                self._src_has_audio = has_audio_stream(
+                    video_path, cancel_callback=lambda: self.cancel_event.is_set()
+                )
+            except Exception as e:
+                from stream2video.concat.errors import CancelledError
 
-            if isinstance(e, CancelledError):
-                raise
-            logger.debug("has_audio_stream failed", exc_info=True)
-            self._src_has_audio = False
+                if isinstance(e, CancelledError):
+                    raise
+                logger.debug("has_audio_stream failed", exc_info=True)
+                self._src_has_audio = False
 
         # Fire the mid-pipeline hook so the GUI can update its
         # recent-projects panel, output label, and file-info widgets
@@ -1828,11 +1835,16 @@ class PipelineController:
 
         # Delete downloaded source if requested.
         if self.cfg.delete_after and self._download_path is not None:
-            try:
-                self._download_path.unlink()
+            # Same retry helper every other cleanup path uses: on Windows
+            # an AV scanner can hold the file briefly after the pipeline
+            # released it — a bare unlink() used to leave the source
+            # behind despite reporting success to the user.
+            if _unlink_with_retry(self._download_path):
                 self.cb.on_log(f"Deleted source: {self._download_path}")
-            except OSError as e:
-                self.cb.on_log(f"[WARN] Could not delete source: {e}")
+            else:
+                self.cb.on_log(
+                    f"[WARN] Could not delete source (locked?): {self._download_path}"
+                )
         self._download_path = None
 
         return PipelineResult(
@@ -1843,7 +1855,6 @@ class PipelineController:
             dst_size_bytes=dst_size_bytes,
             keep_duration=keep_dur,
             pipeline_seconds=total_elapsed,
-            was_downloaded=self._download_was_real,
         )
 
 

@@ -206,20 +206,22 @@ def _run_audio_extract(
             # Cancellable + segment-timeout bounded (audit round 30
             # P7), honours the caller's resource policy (audit round
             # 31 P1-3).
-            if (
-                seg_path.exists()
-                and seg_path.stat().st_size >= options.min_part_bytes
-                and _c._ffprobe_duration_ok(seg_path, dur, cancel_callback=cancel_callback)
-                and _c._media_is_valid(
-                    seg_path,
-                    require_video=False,
-                    require_audio=True,
-                    timeout=float(options.segment_encode_timeout),
-                    cancel_callback=cancel_callback,
-                    low_process_priority=options.low_process_priority,
-                    rlimit_as_mb=options.rlimit_as_mb,
-                    fail_safe=True,
-                )
+            # Audio segments probe the AUDIO stream — a video-stream
+            # gate would reject any valid mp3/opus/aac/wav/flac chunk
+            # because it has no video stream, defeating resume (P0 audit
+            # v0.3). Unified gate (see probing.resume_part_ok): the audio
+            # stream must exist and FULLY decode — header-level checks
+            # cannot see mid-body corruption.
+            if _c.resume_part_ok(
+                seg_path,
+                expected_duration=dur,
+                min_part_bytes=options.min_part_bytes,
+                require_video=False,
+                require_audio=True,
+                timeout_seconds=float(options.segment_encode_timeout),
+                cancel_callback=cancel_callback,
+                low_process_priority=options.low_process_priority,
+                rlimit_as_mb=options.rlimit_as_mb,
             ):
                 skipped += 1
                 encoded_keep += dur

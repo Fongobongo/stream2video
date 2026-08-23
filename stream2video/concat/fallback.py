@@ -77,15 +77,7 @@ def _run_with_fallback(
             f"Retagging {work_suffix[1:]} dir for libx264 retry after {failed_enc} "
             f"failure (valid parts will be reused)"
         )
-        libx264_opts = _c.encoder_opts(
-            "libx264",
-            options.video_quality,
-            x264_preset=options.x264_preset,
-            encoder_threads=options.encoder_threads,
-            x264_low_memory=options.x264_low_memory,
-            use_crf=options.use_crf,
-            source_bitrate=options.source_bitrate,
-        )
+        libx264_opts = _x264_retry_opts(options)
         manifest = _c._build_manifest(
             video_path,
             keep_segments,
@@ -150,6 +142,21 @@ def _run_with_fallback(
         (_c.ConcatError, OSError),
         _cleanup,
         options=options,
+    )
+
+
+def _x264_retry_opts(options: ConcatOptions) -> list[str]:
+    """libx264 option set for a fallback retry — one shared builder for
+    the retag path and the mid-run retry path (the same construction
+    used to be spelled out twice here and three times in encoders.py)."""
+    return _c.encoder_opts(
+        "libx264",
+        options.video_quality,
+        x264_preset=options.x264_preset,
+        encoder_threads=options.encoder_threads,
+        x264_low_memory=options.x264_low_memory,
+        use_crf=options.use_crf,
+        source_bitrate=options.source_bitrate,
     )
 
 
@@ -225,15 +232,4 @@ def _with_libx264_fallback(
                     on_fallback(enc)
                 except Exception as cleanup_err:
                     logger.warning(f"Cleanup before libx264 retry failed: {cleanup_err}")
-            enc, enc_opts = (
-                "libx264",
-                _c.encoder_opts(
-                    "libx264",
-                    options.video_quality,
-                    x264_preset=options.x264_preset,
-                    encoder_threads=options.encoder_threads,
-                    x264_low_memory=options.x264_low_memory,
-                    use_crf=options.use_crf,
-                    source_bitrate=options.source_bitrate,
-                ),
-            )
+            enc, enc_opts = ("libx264", _x264_retry_opts(options))

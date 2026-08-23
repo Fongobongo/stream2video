@@ -714,12 +714,6 @@ def build_completion_summary(
     }
 
 
-# Back-compat alias so existing imports of ``_build_completion_summary``
-# (inside gui.py and any downstream code) keep working during the
-# incremental refactor.
-_build_completion_summary = build_completion_summary
-
-
 # Short phase names keyed by the "Step X/4" token the pipeline emits in
 # its status lines (see PipelineController._run_*_phase). Used by the
 # GUI's status line to render "Step 2/4 · Silence (35%)" instead of a

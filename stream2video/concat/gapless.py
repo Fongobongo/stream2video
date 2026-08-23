@@ -218,8 +218,10 @@ def _run_gapless_segment_concat(
                 *_c._audio_opts(options.audio_quality),
             ],
             total_duration=total_duration,
+            # Same 0.9..1.0 band mapping the segment path's final join
+            # uses — reuse the shared mapper instead of an inline copy.
             progress_callback=(
-                (lambda s: progress_callback(min(s / total_duration * 0.1, 0.1) + 0.9))
+                _c._concat_progress_callback(progress_callback, total_duration)
                 if progress_callback and total_duration > 0
                 else None
             ),
@@ -446,10 +448,10 @@ def _run_gapless_segment_concat(
 
     # Final pass: encode video + audio with user settings, full priming
     # fix happens here (audiodec=re-encode), progress callback mapped to
-    # the last 10% of the bar — but tree already consumed 0.9..0.99, so
-    # map final encode to 0.99..1.0 via _prog wrapper below, or directly
-    # to 0.9..1.0 when there's no tree (n <= max_inputs). For tree case
-    # we remap to the tail slice to keep overall monotonic.
+    # the last 10% of the bar — but the tree already consumed 0.9..0.98,
+    # so map final encode to 0.98..1.0 via _prog wrapper below, or
+    # directly to 0.9..1.0 when there's no tree (n <= max_inputs). For
+    # the tree case we remap to the tail slice to keep overall monotonic.
     logger.info(
         f"gapless tree: {n} parts -> {len(current)} intermediates after "
         f"{level + 1} level(s); final join with encode"

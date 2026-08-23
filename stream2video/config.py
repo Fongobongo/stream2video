@@ -29,6 +29,7 @@ from typing import Any
 
 from stream2video.param_specs import (
     DEFAULT_PRESET,
+    PARAM_SPECS,
     PRESET_NAMES,
     PRESETS,
     SPEC_DEFAULTS,
@@ -310,48 +311,13 @@ OUTPUT_FORMAT_SPECS: dict[str, dict[str, Any]] = {
 # Keys that are user-tunable defaults (exclude per-session state like
 # output_dir / recent_projects / input_path). Used by the GUI's
 # "Save current as defaults" button.
-USER_DEFAULT_KEYS: list[str] = [
-    "threshold",
-    "min_silence",
-    "margin",
-    "method",
-    "encoder",
-    "video_quality",
-    "audio_quality",
-    "download_quality",
-    "preset",
-    "software_fallback",
-    "x264_preset",
-    "encoder_threads",
-    "output_fps",
-    "output_format",
-    "memory_limit_mb",
-    "memory_reserve_mb",
-    "x264_low_memory",
-    "use_crf",
-    "gapless_concat",
-    "low_process_priority",
-    "rlimit_as_mb",
-    "download_timeout",
-    "connect_timeout",
-    "no_progress_timeout",
-    "proxy",
-    "proxy_active",
-    # Pipeline phase timeouts + tuning
-    "segment_encode_timeout",
-    "final_concat_timeout",
-    "silence_timeout",
-    "stall_kill_timeout",
-    "stall_warning_timeout",
-    "waveform_timeout",
-    "batch_chunk_size",
-    "min_part_bytes",
-    "force",
-    "delete_after",
-    "per_video_dir",
-    "completion_sound",
-    "theme",
-]
+#
+# DERIVED from PARAM_SPECS (the single source of tunables) + the GUI-only
+# ``theme``. The old hand-maintained list was exactly the drift hazard it
+# claimed to have solved: a newly added spec tunable automatically landed
+# in settings.json but silently DROPPED out of "Save current as defaults"
+# until someone remembered to extend this list too.
+USER_DEFAULT_KEYS: list[str] = [*PARAM_SPECS, "theme"]
 
 
 def user_defaults_path() -> Path:

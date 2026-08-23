@@ -153,7 +153,7 @@ class TestToolkitCallbackDispatch:
     """Реальный toolkit smoke test на Windows.
 
     The worker thread's callbacks (on_progress / on_status / on_log /
-    on_overall / on_total / on_pipeline_complete) must dispatch to the Tk
+    on_overall / on_pipeline_complete) must dispatch to the Tk
     main loop via ``self._tk_after(0, lambda: ...)`` — direct widget
     writes from a non-main thread crash Tk. These tests verify the
     dispatch surface is wired correctly without driving a real event loop:

@@ -144,7 +144,6 @@ class TestPipelineCallbacks:
             on_log=lambda s: None,
             on_info=lambda s: None,
             on_overall=lambda e, r, m: None,
-            on_total=lambda t: None,
             on_download_progress=lambda p: None,
             on_pipeline_complete=lambda d: None,
         )
@@ -153,7 +152,6 @@ class TestPipelineCallbacks:
         assert isinstance(cb.on_log, Callable)
         assert isinstance(cb.on_info, Callable)
         assert isinstance(cb.on_overall, Callable)
-        assert isinstance(cb.on_total, Callable)
         assert isinstance(cb.on_download_progress, Callable)
         assert isinstance(cb.on_pipeline_complete, Callable)
 
@@ -164,7 +162,6 @@ class TestPipelineCallbacks:
             on_log=lambda s: None,
             on_info=lambda s: None,
             on_overall=lambda e, r, m: None,
-            on_total=lambda t: None,
             on_download_progress=lambda p: None,
             on_pipeline_complete=lambda d: None,
         )
@@ -396,9 +393,6 @@ def _make_callbacks() -> tuple[PipelineCallbacks, dict]:
     def on_overall(elapsed: float, remaining: float | None, more: bool) -> None:
         calls["overall"].append((elapsed, remaining, more))
 
-    def on_total(t: float) -> None:
-        calls["total"].append(t)
-
     def on_download_progress(p) -> None:
         calls["download_progress"].append(p)
 
@@ -411,7 +405,6 @@ def _make_callbacks() -> tuple[PipelineCallbacks, dict]:
         on_log=on_log,
         on_info=on_info,
         on_overall=on_overall,
-        on_total=on_total,
         on_download_progress=on_download_progress,
         on_pipeline_complete=on_pipeline_complete,
     )
@@ -2176,7 +2169,6 @@ class TestCleanupIncompleteOnClose:
             on_log=calls["log"].append,
             on_info=lambda s: None,
             on_overall=lambda e, r, m: None,
-            on_total=lambda t: None,
             on_download_progress=lambda p: None,
             on_pipeline_complete=lambda d: None,
         )
@@ -2277,7 +2269,6 @@ class TestFinishOutputValidation:
             on_log=logs.append,
             on_info=lambda s: None,
             on_overall=lambda e, r, m: None,
-            on_total=lambda t: None,
             on_download_progress=lambda p: None,
             on_pipeline_complete=completed.append,
         )

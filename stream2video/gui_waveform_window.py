@@ -9,7 +9,6 @@ the render pipeline live in sibling modules.
 
 from __future__ import annotations
 
-import logging
 import threading
 from pathlib import Path
 from tkinter import Event
@@ -21,8 +20,6 @@ from stream2video.gui_platform import is_previewable_input
 from stream2video.silence import SilenceSegment
 from stream2video.utils import cancel_process
 from stream2video.waveform_view_math import compute_render_size
-
-_logger = logging.getLogger("stream2video.gui")
 
 
 class WaveformWindowMixin:

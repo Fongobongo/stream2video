@@ -465,6 +465,20 @@ def get_video_encoder(
             f"(use {' or '.join(repr(s) for s in VALID_SOFTWARE_FALLBACKS)})"
         )
 
+    # One shared libx264 option builder for every fallback branch below
+    # (the same construction used to be spelled out five times across
+    # encoders.py and fallback.py and could drift).
+    def _x264_opts() -> list[str]:
+        return encoder_opts(
+            "libx264",
+            video_quality,
+            x264_preset=x264_preset,
+            encoder_threads=encoder_threads,
+            x264_low_memory=x264_low_memory,
+            source_bitrate=source_bitrate,
+            use_crf=use_crf,
+        )
+
     if check_encoder(preferred):
         return preferred, encoder_opts(
             preferred,
@@ -489,15 +503,7 @@ def get_video_encoder(
     # HW encoder unavailable -- apply fallback policy.
     if software_fallback == "enabled":
         logger.warning(f"{preferred} not available, falling back to libx264")
-        return "libx264", encoder_opts(
-            "libx264",
-            video_quality,
-            x264_preset=x264_preset,
-            encoder_threads=encoder_threads,
-            x264_low_memory=x264_low_memory,
-            source_bitrate=source_bitrate,
-            use_crf=use_crf,
-        )
+        return "libx264", _x264_opts()
     if software_fallback == "ask":
         if on_unavailable is None:
             raise EncoderUnavailableError(
@@ -507,15 +513,7 @@ def get_video_encoder(
             )
         if on_unavailable():
             logger.warning(f"{preferred} not available; user consented to libx264 fallback")
-            return "libx264", encoder_opts(
-                "libx264",
-                video_quality,
-                x264_preset=x264_preset,
-                encoder_threads=encoder_threads,
-                x264_low_memory=x264_low_memory,
-                source_bitrate=source_bitrate,
-                use_crf=use_crf,
-            )
+            return "libx264", _x264_opts()
         raise EncoderUnavailableError(f"{preferred} not available; user declined libx264 fallback")
     # software_fallback == "disabled"
     raise EncoderUnavailableError(

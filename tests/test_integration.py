@@ -1303,20 +1303,16 @@ class TestSegmentResumeSkipCrashArtifact:
             # First segment is corrupt (crash artifact), second is valid.
             return Path(path).name != "seg_000000.mp4"
 
-        # The resume integrity gate is the unified ``_media_is_valid``
-        # (audit round 31 P1-4) resolved through the concat facade, so
-        # patch it there: mirror the per-segment verdict so the corrupt
-        # part is rejected by the gate and re-encoded.
-        def fake_media_is_valid(path, **kw):
+        # The resume integrity gate is the shared ``resume_part_ok``
+        # resolved through the concat facade — patch it there: mirror the
+        # per-segment verdict so the corrupt part is rejected by the gate
+        # and re-encoded.
+        def fake_resume_gate(path, **kw):
             return fake_ffprobe(path)
 
         with (
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
-            patch("stream2video.concat._media_is_valid", side_effect=fake_media_is_valid),
-            # Duration gate is patched out — this test exercises the
-            # media gate; the fail-closed duration gate (unreadable
-            # duration → re-encode) is covered by its own tests.
-            patch("stream2video.concat._ffprobe_duration_ok", return_value=True),
+            patch("stream2video.concat.resume_part_ok", side_effect=fake_resume_gate),
             patch("stream2video.concat._run_final_concat"),
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
@@ -1366,13 +1362,8 @@ class TestSegmentResumeSkipCrashArtifact:
 
         with (
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
-            # The unified resume gate (audit round 31 P1-4) accepts
-            # every part here.
-            patch("stream2video.concat._media_is_valid", return_value=True),
-            # Duration gate is patched out — this test exercises the
-            # media gate; the fail-closed duration gate (unreadable
-            # duration → re-encode) is covered by its own tests.
-            patch("stream2video.concat._ffprobe_duration_ok", return_value=True),
+            # The unified resume gate accepts every part here.
+            patch("stream2video.concat.resume_part_ok", return_value=True),
             patch("stream2video.concat._run_final_concat"),
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
@@ -1420,7 +1411,7 @@ class TestSegmentResumeSkipCrashArtifact:
 
         with (
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
-            patch("stream2video.concat._media_is_valid", return_value=True),
+            patch("stream2video.concat.probing._media_is_valid", return_value=True),
             patch("stream2video.concat._run_final_concat"),
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
@@ -1480,8 +1471,7 @@ class TestBatchResumeSkipCrashArtifact:
 
         with (
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
-            patch("stream2video.concat._media_is_valid", side_effect=fake_chunk),
-            patch("stream2video.concat._ffprobe_duration_ok", return_value=True),
+            patch("stream2video.concat.resume_part_ok", side_effect=fake_chunk),
             patch("stream2video.concat._run_final_concat"),
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
@@ -1548,12 +1538,9 @@ class TestAudioExtractResumeStreamType:
         with (
             patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
             # The unified resume gate (audit round 31 P1-4) accepts
-            # every audio chunk here.
-            patch("stream2video.concat._media_is_valid", return_value=True),
-            # Duration gate is patched out — this test exercises the
-            # media gate; the fail-closed duration gate (unreadable
-            # duration → re-encode) is covered by its own tests.
-            patch("stream2video.concat._ffprobe_duration_ok", return_value=True),
+            # every audio chunk here — patched at the shared gate so the
+            # size/duration/media chain is bypassed as "valid".
+            patch("stream2video.concat.resume_part_ok", return_value=True),
             patch("stream2video.concat._run_audio_concat_filter") as m_acf,
             patch("stream2video.concat._run_final_concat") as m_fc,
             patch("stream2video.concat._ensure_fresh_work_dir"),
@@ -1698,7 +1685,7 @@ class TestCutThenEncodeCutPhaseProtection:
     ``CalledProcessError`` did NOT match the ``exc_types`` filter in
     ``_with_libx264_fallback`` — so a corrupt-source cut surfaced as a raw
     traceback (P0 audit v0.3 §3). Tests below mock the helper
-    ``_run_subprocess_cmd`` and assert the right exceptions are raised
+    the pipeline runners and assert the right exceptions are raised
     so the GUI/CLI see a friendly message instead.
     """
 
@@ -1725,14 +1712,11 @@ class TestCutThenEncodeCutPhaseProtection:
             # provides). Phase-3 mux (``-c copy`` → output) also uses
             # ``_run_ffmpeg`` since the review fix wires the real mux
             # progress through its progress_callback — keep
-            # ``_run_subprocess_cmd`` mocked as a no-op for safety.
-            patch("stream2video.concat._run_ffmpeg", side_effect=fake_ffmpeg_helper),
-            patch("stream2video.concat._run_subprocess_cmd"),
-            patch("stream2video.concat._run_final_concat"),
-            # The unified resume gate (audit round 31 P1-4) rejects
-            # every part → each keep segment must be re-cut/encoded.
-            patch("stream2video.concat._media_is_valid", return_value=False),
-            patch("stream2video.concat._ffprobe_duration_ok", return_value=True),
+                        patch("stream2video.concat._run_ffmpeg", side_effect=fake_ffmpeg_helper),
+                patch("stream2video.concat._run_final_concat"),
+            # The unified resume gate rejects every part → each keep
+            # segment must be re-cut/encoded.
+            patch("stream2video.concat.resume_part_ok", return_value=False),
             patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
             from stream2video.concat import _run_cut_then_encode
@@ -1768,11 +1752,10 @@ class TestCutThenEncodeCutPhaseProtection:
 
         with (
             # Phase-1 cut encode now runs via _run_ffmpeg; phase-3 mux
-            # uses _run_subprocess_cmd — keep both mocked as no-ops so the
+            # both are mocked as no-ops so the
             # test only observes the deliberate failure in phase 1.
             patch("stream2video.concat._run_ffmpeg", side_effect=failed_helper),
-            patch("stream2video.concat._run_subprocess_cmd"),
-            patch("stream2video.concat._ensure_fresh_work_dir"),
+                patch("stream2video.concat._ensure_fresh_work_dir"),
             pytest.raises(ConcatError, match="cut phase segment"),
         ):
             _run_cut_then_encode(
@@ -1803,12 +1786,11 @@ class TestCutThenEncodeCutPhaseProtection:
         with (
             # Phase-1 cut now uses _run_ffmpeg (frame-accurate encode
             # with the chosen codec), so the CancelledError surfaces
-            # there; phase-3 mux uses _run_subprocess_cmd and is mocked
+            # there; phase-3 mux is mocked
             # as a no-op (the test never reaches phase 3 because the
             # cut phase aborts first).
             patch("stream2video.concat._run_ffmpeg", side_effect=cancelled_helper),
-            patch("stream2video.concat._run_subprocess_cmd"),
-            patch("stream2video.concat._ensure_fresh_work_dir"),
+                patch("stream2video.concat._ensure_fresh_work_dir"),
             pytest.raises(CancelledError),
         ):
             _run_cut_then_encode(
@@ -1838,11 +1820,10 @@ class TestCutThenEncodeCutPhaseProtection:
 
         with (
             # Phase-1 cut encode is the only path that runs _run_ffmpeg;
-            # mock _run_subprocess_cmd as a no-op so the test never
+            # mock the phase-3 runner as a no-op so the test never
             # exercises phase-3.
             patch("stream2video.concat._run_ffmpeg", side_effect=timeout_helper),
-            patch("stream2video.concat._run_subprocess_cmd"),
-            patch("stream2video.concat._ensure_fresh_work_dir"),
+                patch("stream2video.concat._ensure_fresh_work_dir"),
             pytest.raises(FFmpegError, match="timeout"),
         ):
             _run_cut_then_encode(

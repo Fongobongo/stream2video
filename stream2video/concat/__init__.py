@@ -99,15 +99,16 @@ from stream2video.concat.probing import (
     _ffprobe_duration_ok,
     _ffprobe_is_valid_media,
     _media_is_valid,
+    resume_part_ok,
 )
 from stream2video.concat.runner import (
     _run_ffmpeg,
-    _run_subprocess_cmd,
     _wait_with_cancel,
 )
 from stream2video.concat.segment import _run_segment_concat
 from stream2video.utils import (
     drain_stderr_lines,
+    get_video_bitrate,
     get_video_duration,
     get_video_start_time,
     has_audio_stream,
@@ -213,7 +214,6 @@ __all__ = [
     "_run_final_concat",
     "_run_gapless_segment_concat",
     "_run_segment_concat",
-    "_run_subprocess_cmd",
     "_run_with_fallback",
     "_seg_progress_callback",
     "_source_identity",
@@ -229,6 +229,7 @@ __all__ = [
     "drain_stderr_lines",
     "encoder_opts",
     "generate_keep_segments",
+    "get_video_bitrate",
     "get_video_duration",
     "get_video_encoder",
     "get_video_start_time",
@@ -236,4 +237,5 @@ __all__ = [
     "looks_like_oom",
     "read_lines_queue",
     "release_output_lock",
+    "resume_part_ok",
 ]

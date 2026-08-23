@@ -142,31 +142,20 @@ def _run_batch_concat(
             # atom) doesn't get reused and produce a corrupt chunk in the
             # middle of the file.
             #
-            # Unified media gate (audit round 31 P1-4): ``_media_is_valid``
-            # checks the expected stream set — video always, and the
-            # AUDIO body too when the source has audio (a chunk killed
-            # after the moov write but before the AAC body injects a
-            # broken track into the final concat). Mid-body corruption
-            # passes every header-level probe; the whole-stream decode
-            # reads every packet. Cancellable + segment-timeout bounded
-            # (audit round 30 P7), honours the caller's resource policy
-            # (audit round 31 P1-3).
-            if (
-                chunk_path.exists()
-                and chunk_path.stat().st_size >= options.min_part_bytes
-                and _c._ffprobe_duration_ok(
-                    chunk_path, sum(e - s for s, e in chunk), cancel_callback=cancel_callback
-                )
-                and _c._media_is_valid(
-                    chunk_path,
-                    require_video=True,
-                    require_audio=options.source_has_audio,
-                    timeout=float(options.segment_encode_timeout),
-                    cancel_callback=cancel_callback,
-                    low_process_priority=options.low_process_priority,
-                    rlimit_as_mb=options.rlimit_as_mb,
-                    fail_safe=True,
-                )
+            # Unified resume gate (see probing.resume_part_ok): the
+            # whole-stream decode catches a chunk killed after the moov
+            # write but before the AAC body — header-level probes pass
+            # it and inject a broken track into the final concat.
+            if _c.resume_part_ok(
+                chunk_path,
+                expected_duration=sum(e - s for s, e in chunk),
+                min_part_bytes=options.min_part_bytes,
+                require_video=True,
+                require_audio=options.source_has_audio,
+                timeout_seconds=float(options.segment_encode_timeout),
+                cancel_callback=cancel_callback,
+                low_process_priority=options.low_process_priority,
+                rlimit_as_mb=options.rlimit_as_mb,
             ):
                 skipped += 1
                 encoded_duration += sum(e - s for s, e in chunk)

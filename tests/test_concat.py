@@ -5,15 +5,12 @@ import shutil
 import subprocess
 from pathlib import Path
 from subprocess import TimeoutExpired
-from typing import ClassVar
 from unittest.mock import patch
 
 import pytest
 
 from stream2video.concat import (
-    FFmpegOutOfMemoryError,
     _run_final_concat,
-    _run_subprocess_cmd,
     cut_and_concat,
 )
 
@@ -207,37 +204,6 @@ class TestDirectCallAtomicPublish:
             release_output_lock(lock)
         assert output.read_bytes() == b"previous good result"
         assert not list(tmp_path.glob(".*s2v_partial*"))
-
-
-def test_run_subprocess_cmd_waits_for_stderr_drain_before_oom_classification():
-    class _FakeProcess:
-        args: ClassVar[list[str]] = ["ffmpeg"]
-
-        def __init__(self):
-            self.stderr = io.BytesIO()
-            self.returncode = 137
-
-        def poll(self):
-            return self.returncode
-
-        def wait(self, timeout=None):
-            return self.returncode
-
-        def kill(self):
-            self.returncode = -9
-
-    def fake_drain(pipe, sink, on_line=None):
-        def wait_for_drain():
-            sink.append("Cannot allocate memory\n")
-
-        return wait_for_drain
-
-    with (
-        patch("stream2video.concat.subprocess.Popen", return_value=_FakeProcess()),
-        patch("stream2video.concat.drain_stderr_lines", side_effect=fake_drain),
-        pytest.raises(FFmpegOutOfMemoryError),
-    ):
-        _run_subprocess_cmd(["ffmpeg"], timeout=5, label="cut phase")
 
 
 def test_gapless_uses_tree_when_cmdline_would_exceed_windows_limit(tmp_path: Path, monkeypatch):
@@ -445,7 +411,7 @@ class TestFfprobeDurationOkFailClosed:
             return result.returncode, result.stdout
 
         with (
-            patch("stream2video.concat.probing.ffprobe_path", return_value="ffprobe"),
+            patch("stream2video.utils.ffprobe_path", return_value="ffprobe"),
             patch("stream2video.concat.probing._run_ffprobe", side_effect=_run),
         ):
             return _ffprobe_duration_ok(tmp_path / "part.mp4", expected_seconds=10.0)
@@ -500,7 +466,7 @@ class TestFfprobeDurationOkBoundedSlack:
         from stream2video.concat.probing import _ffprobe_duration_ok
 
         with (
-            patch("stream2video.concat.probing.ffprobe_path", return_value="ffprobe"),
+            patch("stream2video.utils.ffprobe_path", return_value="ffprobe"),
             patch("stream2video.concat.probing._run_ffprobe", return_value=(0, actual)),
         ):
             return _ffprobe_duration_ok(
@@ -1223,7 +1189,7 @@ class TestRunFfprobe:
 
         cb = lambda: False  # noqa: E731 — bare callback identity is the assertion
         with (
-            patch("stream2video.concat.probing.ffprobe_path", return_value="ffprobe"),
+            patch("stream2video.utils.ffprobe_path", return_value="ffprobe"),
             patch("stream2video.concat.probing._run_ffprobe", side_effect=fake_run),
         ):
             assert probing._ffprobe_media_complete(Path("x.mp4"), cancel_callback=cb) is True

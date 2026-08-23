@@ -102,28 +102,20 @@ def _run_segment_concat(
             # drop the missing tail. Mirrors ``batch.py`` (slack=1.0)
             # and ``cut_encode.py`` (slack=1.0 after the P2 audit).
             #
-            # Unified media gate (audit round 31 P1-4): ``_media_is_valid``
-            # runs the codec probe + whole-stream decode (``-xerror``)
-            # for the expected stream set — video always, and the AUDIO
-            # body too when the source has audio (a video-valid part
-            # can still carry a truncated audio track, audit round 30
-            # P6). Cancellable, segment-timeout bounded (audit round
-            # 30 P7) and honours the caller's resource policy (audit
-            # round 31 P1-3).
-            if (
-                seg_path.exists()
-                and seg_path.stat().st_size >= options.min_part_bytes
-                and _c._ffprobe_duration_ok(seg_path, dur, cancel_callback=cancel_callback)
-                and _c._media_is_valid(
-                    seg_path,
-                    require_video=True,
-                    require_audio=options.source_has_audio,
-                    timeout=float(options.segment_encode_timeout),
-                    cancel_callback=cancel_callback,
-                    low_process_priority=options.low_process_priority,
-                    rlimit_as_mb=options.rlimit_as_mb,
-                    fail_safe=True,
-                )
+            # Unified resume gate — size floor, duration sanity and the
+            # whole-stream media validity chain live in
+            # ``probing.resume_part_ok`` (single source for all five
+            # resume sites; see its docstring for the audit history).
+            if _c.resume_part_ok(
+                seg_path,
+                expected_duration=dur,
+                min_part_bytes=options.min_part_bytes,
+                require_video=True,
+                require_audio=options.source_has_audio,
+                timeout_seconds=float(options.segment_encode_timeout),
+                cancel_callback=cancel_callback,
+                low_process_priority=options.low_process_priority,
+                rlimit_as_mb=options.rlimit_as_mb,
             ):
                 skipped += 1
                 encoded_keep += dur

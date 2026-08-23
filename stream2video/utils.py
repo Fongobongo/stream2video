@@ -192,6 +192,32 @@ def _run_ffprobe(
     return rc, "".join(stdout_lines)
 
 
+def ffprobe_show_entries_args(
+    path: Path,
+    entries: str,
+    *,
+    select_streams: str | None = None,
+) -> list[str]:
+    """argv for the package's standard ffprobe scalar-value probe.
+
+    One builder for the ``-v error [-select_streams S] -show_entries E
+    -of default=noprint_wrappers=1:nokey=1 <path>`` template that used to
+    be spelled out eight times across utils.py and concat/probing.py and
+    could drift (e.g. one copy losing ``-v error``).
+    """
+    cmd = [ffprobe_path(), "-v", "error"]
+    if select_streams is not None:
+        cmd += ["-select_streams", select_streams]
+    cmd += [
+        "-show_entries",
+        entries,
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    return cmd
+
+
 def get_video_bitrate(
     video_path: Path, cancel_callback: "Callable[[], bool] | None" = None
 ) -> int | None:
@@ -742,11 +768,9 @@ def cancel_process(owner: str, timeout: float = 2.0) -> bool:
 def list_active_owners() -> list[str]:
     """Return the owner strings currently holding a live subprocess.
 
-    Diagnostics-only public API (paired with ``cancel_process`` for a
-    future "kill every leftover subprocess" shutdown path — see the GUI's
-    ``_on_close`` which currently only kills the default owner). Not yet
-    called by production code; kept because removing it would shrink the
-    scoped-registry API surface the shutdown path is expected to build on.
+    Called by the GUI's lifecycle diagnostics (window close / shutdown
+    paths) and available to embedders auditing the scoped registry. Paired
+    with ``cancel_process(owner)`` for targeted kills.
     """
     with _proc_registry_lock:
         return [
@@ -777,10 +801,15 @@ def kill_and_reap(process: subprocess.Popen, timeout: float = 30.0) -> None:
 
 
 def no_window_kwargs() -> dict:
-    """Return subprocess kwargs that suppress console windows on Windows."""
-    if sys.platform == "win32":
-        return {"creationflags": subprocess.CREATE_NO_WINDOW}
-    return {}
+    """Return subprocess kwargs that suppress console windows on Windows.
+
+    Delegates to :func:`tools.subprocess_kwargs_lowest` — the package's
+    single CREATE_NO_WINDOW implementation (this used to be a second,
+    independently maintained copy that could drift from the tools one).
+    """
+    from stream2video.tools import subprocess_kwargs_lowest
+
+    return dict(subprocess_kwargs_lowest())
 
 
 def subprocess_kwargs(low_priority: bool = False, rlimit_as_mb: int = 0) -> dict:

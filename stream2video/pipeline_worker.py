@@ -491,7 +491,10 @@ class PipelineWorker:
                 on_log=self._gui.log,
                 on_info=self._gui.ui_info,
                 on_overall=self._gui.ui_overall,
-                on_total=self._gui.ui_total,
+                # Total is published directly via ``ui_total`` where the
+                # controller computes it — the old ``on_total`` Protocol
+                # slot was never invoked by the controller and every host
+                # just passed a no-op stub into it.
                 on_phase_progress=self._gui.ui_phase_progress,
                 on_progress_plan=self._gui.ui_progress_plan,
                 on_download_progress=build_download_progress_callback(self._gui, download_start),

@@ -38,7 +38,7 @@ from stream2video.settings_io import (
     build_settings_payload,
     build_user_defaults_snapshot,
 )
-from stream2video.slider_widgets import format_slider_entry_value
+from stream2video.slider_widgets import SLIDER_KEYS, format_slider_entry_value
 from stream2video.utils import cancel_process, list_active_owners
 
 _logger = logging.getLogger("stream2video.gui")
@@ -304,7 +304,7 @@ class LifecycleMixin:
         sh = self.winfo_screenheight()
         win_w, win_h = self._fit_to_screen(sw, sh)
         self.geometry(f"{win_w}x{win_h}")
-        for key in ("threshold", "min_silence", "margin"):
+        for key in SLIDER_KEYS:
             slider = getattr(self, f"_slider_{key}", None)
             if slider:
                 val = self.settings[key]

@@ -9,9 +9,10 @@ recourse was a hard reset.
 Design:
   * ``MemoryMonitor`` is a daemon thread that polls the active
     subprocess's RSS every ``_POLL_INTERVAL`` seconds.
-  * Soft threshold (default 80% of budget): warning log + set
-    ``soft_exceeded`` so the pipeline can refuse to start a new
-    parallel heavy task.
+  * Soft threshold (default 80% of budget): warning log only — an
+    early heads-up before the hard limit; the historical
+    ``soft_exceeded`` flag was removed because no consumer ever
+    materialized (the pipeline's parallel-task refusal was never built).
   * Hard threshold (default 95% of budget): cancel the current task
     via the same ``cancel_callback`` the user uses for Ctrl+C, so the
     existing cleanup path runs.
@@ -156,7 +157,6 @@ class MemoryMonitor:
 
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
-        self.soft_exceeded = False
         self.hard_exceeded = False
         self.peak_rss_mb: float = 0.0
         # Set when available RAM dipped below ``memory_reserve_mb`` at
@@ -260,7 +260,6 @@ class MemoryMonitor:
                     return
                 if rss >= soft_mb and not warned_soft:
                     warned_soft = True
-                    self.soft_exceeded = True
                     msg = (
                         f"{self.label} RSS={rss:.0f}MB >= soft limit "
                         f"{soft_mb:.0f}MB ({self.soft_threshold_frac * 100:.0f}% of "

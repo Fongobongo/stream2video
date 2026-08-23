@@ -167,20 +167,23 @@ def _run_cut_then_encode(
             # stream-copy cut used slack=15.0 because ``-c copy``
             # legitimately let the part overrun by up to one GOP —
             # that's no longer the case here.
-            if (
-                cut_path.exists()
-                and cut_path.stat().st_size >= options.min_part_bytes
-                and _c._ffprobe_duration_ok(cut_path, dur, cancel_callback=cancel_callback)
-                and _c._media_is_valid(
-                    cut_path,
-                    require_video=True,
-                    require_audio=options.source_has_audio,
-                    timeout=float(options.segment_encode_timeout),
-                    cancel_callback=cancel_callback,
-                    low_process_priority=options.low_process_priority,
-                    rlimit_as_mb=options.rlimit_as_mb,
-                    fail_safe=True,
-                )
+            # Unified resume gate (see probing.resume_part_ok). Slack=1.0
+            # (the module default; matches batch.py / audio.py) is plenty
+            # for fractional frame rounding and tight enough to reject a
+            # part whose body was truncated by a mid-flush kill. The
+            # legacy stream-copy cut used slack=15.0 because ``-c copy``
+            # legitimately let the part overrun by up to one GOP — that's
+            # no longer the case here.
+            if _c.resume_part_ok(
+                cut_path,
+                expected_duration=dur,
+                min_part_bytes=options.min_part_bytes,
+                require_video=True,
+                require_audio=options.source_has_audio,
+                timeout_seconds=float(options.segment_encode_timeout),
+                cancel_callback=cancel_callback,
+                low_process_priority=options.low_process_priority,
+                rlimit_as_mb=options.rlimit_as_mb,
             ):
                 logger.debug(f"cut_then_encode: reusing cut_{i:06d}.mp4")
                 encoded_keep += dur
@@ -304,7 +307,8 @@ def _run_cut_then_encode(
                 )
 
         # ── Phase 2: Lossless concat (concat demuxer → raw_concat.mp4) ──
-        # Progress: 0.4 .. 0.5 (fast stream-copy join).
+        # Progress: 0.4 .. 0.45 (fast stream-copy join; the unused
+        # 0.45..0.5 headroom stays reserved for a future mux pass).
         part_paths = [cut_dir / f"cut_{i:06d}.mp4" for i in range(n_segs)]
 
         # Reuse _run_final_concat but point it at raw_concat.mp4 instead
@@ -326,22 +330,22 @@ def _run_cut_then_encode(
         # the probed duration against the full expected keep duration;
         # slack=1.0 matches the cut-part check above and the other
         # pipelines.
-        if not (
-            raw_concat_path.exists()
-            and raw_concat_path.stat().st_size >= options.min_part_bytes
-            and _c._ffprobe_duration_ok(
-                raw_concat_path, total_duration, cancel_callback=cancel_callback
-            )
-            and _c._media_is_valid(
-                raw_concat_path,
-                require_video=True,
-                require_audio=options.source_has_audio,
-                timeout=float(options.final_concat_timeout),
-                cancel_callback=cancel_callback,
-                low_process_priority=options.low_process_priority,
-                rlimit_as_mb=options.rlimit_as_mb,
-                fail_safe=True,
-            )
+        # Unified resume gate (see probing.resume_part_ok). Duration
+        # check (audit): a moov-bearing but body-truncated raw_concat.mp4
+        # (ffmpeg killed mid phase-2 write) passes the codec probes — the
+        # moov reflects the PLANNED length while the body is shorter, and
+        # the phase-3 ``-c copy`` would then rename that truncated file
+        # to the final output with no error.
+        if not _c.resume_part_ok(
+            raw_concat_path,
+            expected_duration=total_duration,
+            min_part_bytes=options.min_part_bytes,
+            require_video=True,
+            require_audio=options.source_has_audio,
+            timeout_seconds=float(options.final_concat_timeout),
+            cancel_callback=cancel_callback,
+            low_process_priority=options.low_process_priority,
+            rlimit_as_mb=options.rlimit_as_mb,
         ):
             _c._run_final_concat(
                 cut_dir,
@@ -371,10 +375,9 @@ def _run_cut_then_encode(
         # output container. The muxer still touches the whole file
         # (copying the moov + faststart layout), so progress is mapped
         # into 0.5..1.0 from ffmpeg's ``out_time``; it's I/O-bound
-        # rather than CPU-bound. ``_run_ffmpeg`` (not the bare
-        # ``_run_subprocess_cmd``) is used because it parses the
-        # ``-progress pipe:1`` stream into a progress callback AND runs
-        # the stall watchdog off it.
+        # rather than CPU-bound. ``_run_ffmpeg`` is used because it
+        # parses the ``-progress pipe:1`` stream into a progress callback
+        # AND runs the stall watchdog off it.
         encode_progress_base = 0.5
         encode_progress_span = 0.5
 

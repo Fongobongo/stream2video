@@ -4,8 +4,7 @@ This is the heart of the concat pipeline -- it owns spawning ffmpeg,
 parsing its ``-progress pipe:1`` stdout, wiring up the memory monitor
 and stall watchdog, and converting exit codes into the package's error
 hierarchy. Everything the rest of the pipeline does is built on top of
-these two functions (plus the bare-runner variant
-``_run_subprocess_cmd``).
+these two functions.
 """
 
 import logging
@@ -494,101 +493,6 @@ def _run_ffmpeg(
             if process.stdout is not None:
                 process.stdout.close()
             stderr_pipe.close()
-
-
-def _run_subprocess_cmd(
-    cmd: list[str],
-    *,
-    timeout: int,
-    label: str,
-    cancel_callback: Callable[[], bool] | None = None,
-    low_process_priority: bool = False,
-    rlimit_as_mb: int = 0,
-) -> None:
-    """Run a single ffmpeg command with timeout / cancel / registration.
-
-    Minimal sibling of ``_run_ffmpeg`` for commands that don't emit a
-    -progress stream (e.g. the stream-copy "cut" phase in
-    ``_run_cut_then_encode``). Unlike the historical bare
-    ``subprocess.run`` call with ``check=True, capture_output=True``, this:
-
-      * registers the process in the scoped supervisor so Cancel-GUI /
-        on-close kill reaches the running ffmpeg (P0 audit v0.3 §3);
-      * polls ``cancel_callback`` during the wait (not just between
-        segments) so a cancel mid-segment fires immediately;
-      * bounds the run with ``timeout`` so a hung ffmpeg doesn't hang
-        the whole pipeline;
-      * wraps ``CalledProcessError`` / ``TimeoutExpired`` in a
-        ``ConcatError`` carrying a truncated stderr so the CLI/GUI
-        surfaces a friendly message instead of a raw traceback.
-
-    Stderr is collected from the pipe via ``drain_stderr_lines`` and
-    surfaced on error. No progress callback — cut-фаза caller uses the
-    segment index for progress.
-    """
-    try:
-        # popen_with_retry here as well (parity): the
-        # transient winget-shim FNF is just as fatal for the cut phase.
-        # Tests still intercept at ``stream2video.concat.subprocess.Popen``
-        # (the helper delegates to that symbol).
-        process = popen_with_retry(
-            cmd,
-            # Same rationale as ``_run_ffmpeg``: inheriting a
-            # console-mode stdin under pythonw.exe triggers a
-            # CreateProcessW winerror 206 on Windows.
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            bufsize=-1,
-            **subprocess_kwargs(low_process_priority, rlimit_as_mb),
-        )
-    except FileNotFoundError as e:
-        raise FFmpegError(
-            f"executable not found in PATH "
-            f"(attempted: {cmd[0]!r}, winerror={getattr(e, 'winerror', '?')}, "
-            f"filename={getattr(e, 'filename', '?')!r})"
-        ) from e
-
-    stderr_pipe = process.stderr
-    assert stderr_pipe is not None
-    stderr_lines: list[str] = []
-    wait_for_drain = drain_stderr_lines(stderr_pipe, stderr_lines)
-    drain_done = False
-    try:
-        with registered_process(process), cancel_monitor(process, cancel_callback) as cancelled:
-            if cancelled.is_set():
-                raise CancelledError(f"{label} cancelled")
-            _c._wait_with_cancel(process, timeout, cancel_callback, label)
-            if cancelled.is_set():
-                raise CancelledError(f"{label} cancelled")
-            wait_for_drain()
-            drain_done = True
-            if process.returncode != 0:
-                stderr_text = "".join(stderr_lines)
-                if _c.looks_like_oom(process.returncode, stderr_text):
-                    raise FFmpegOutOfMemoryError(
-                        f"{label} ran out of memory (rc={process.returncode}); {_OOM_HINT}"
-                    )
-                # ``ConcatError`` is resolved through the package so
-                # ``stream2video.concat.ConcatError`` identity is
-                # preserved even if a test monkey-patches it.
-                msg = stderr_text[:_STDERR_TRUNCATE] if stderr_text else "unknown error (no stderr)"
-                raise _c.ConcatError(f"{label} failed (rc={process.returncode}): {msg}")
-    except subprocess.TimeoutExpired as e:
-        process.kill()
-        try:
-            # Bounded reap: on Windows TerminateProcess is async and a
-            # wedged child would hang an unbounded wait() (and the
-            # finally-drain below) forever. Mirrors the timeout bound
-            # used everywhere else in the pipeline (30s).
-            process.wait(timeout=30)  # reap so stderr can finish draining
-        except subprocess.TimeoutExpired:
-            pass  # already dead or un-killable; nothing more to reap
-        raise FFmpegError(f"{label} timeout after {e.timeout}s") from None
-    finally:
-        if not drain_done:
-            wait_for_drain()
-        stderr_pipe.close()
 
 
 def _wait_with_cancel(

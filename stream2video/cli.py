@@ -962,7 +962,7 @@ def main(
         "`low_process_priority: true` can be overridden.",
     ),
     rlimit_as_mb: int = typer.Option(
-        0,
+        CONFIG_DEFAULTS["rlimit_as_mb"],
         "--rlimit-as-mb",
         help=(
             "POSIX-only. When >0, cap each spawned ffmpeg subprocess's "
@@ -1826,7 +1826,6 @@ def main(
                         on_log=_console_log_line,
                         on_info=_console_log_line,
                         on_overall=lambda elapsed, remaining, silent: None,
-                        on_total=lambda total: None,
                         on_phase=_on_phase_cli,
                         on_download_progress=_download_progress_cb,
                         on_pipeline_complete=lambda summary: None,

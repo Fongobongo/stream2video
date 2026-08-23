@@ -27,9 +27,9 @@ import typer
 
 from stream2video.cli_helpers import ParameterSource
 from stream2video.config import CONFIG_DEFAULTS
-from stream2video.param_specs import PARAM_SPECS, ParamKind  # re-exported for back-compat
+from stream2video.param_specs import PARAM_SPECS, ParamKind
 
-__all__ = ["PARAM_SPECS", "ParamKind", "is_from_cli", "make_resolver"]
+__all__ = ["is_from_cli", "make_resolver"]
 
 
 def is_from_cli(ctx: typer.Context | None, name: str) -> bool:

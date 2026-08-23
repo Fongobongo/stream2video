@@ -15,6 +15,7 @@ import customtkinter as ctk
 from stream2video.config import CONFIG_DEFAULTS
 from stream2video.gui_widgets import Tooltip as _Tooltip
 from stream2video.slider_widgets import (
+    SLIDER_KEYS,
     format_slider_entry_value,
     parse_slider_entry_value,
     sync_slider_entries,
@@ -132,7 +133,7 @@ class SlidersMixin:
         # config that doesn't match what the sliders show.
         bounds: dict[str, tuple[float, float]] = getattr(self, "_slider_bounds", {})
         entries: dict[str, str] = {}
-        for key in ("threshold", "min_silence", "margin"):
+        for key in SLIDER_KEYS:
             slider = getattr(self, f"_slider_{key}", None)
             if slider and hasattr(slider, "_entry_val"):
                 entries[key] = slider._entry_val.get()
@@ -160,7 +161,7 @@ class SlidersMixin:
         """
         bounds: dict[str, tuple[float, float]] = getattr(self, "_slider_bounds", {})
         errors: dict[str, str] = {}
-        for key in ("threshold", "min_silence", "margin"):
+        for key in SLIDER_KEYS:
             slider = getattr(self, f"_slider_{key}", None)
             if not slider or not hasattr(slider, "_entry_val"):
                 continue

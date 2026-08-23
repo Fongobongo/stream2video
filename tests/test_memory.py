@@ -123,5 +123,4 @@ def test_rss_soft_limit_warns_without_cancelling(monkeypatch):
     )
 
     assert cancelled == []
-    assert monitor.soft_exceeded is True
     assert monitor.hard_exceeded is False

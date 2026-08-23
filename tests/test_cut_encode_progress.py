@@ -3,7 +3,7 @@
 The cut phase used to compute every segment's progress against a
 CONSTANT base, so the bar rolled back to zero at the start of each new
 segment (0 → 0.1 → 0 → 0.2 → 0 …). Phase 3 (the mux-to-output pass) ran
-through ``_run_subprocess_cmd`` which discards stdout, so it reported no
+through a stdout-discarding runner, so it reported no
 progress at all and the bar jumped from the 0.45 concat slice straight
 to 1.0.
 
@@ -53,12 +53,11 @@ def _run_and_capture(
                 progress_callback(frac * dur)
 
     with (
-        patch("stream2video.concat._run_subprocess_cmd"),
         patch("stream2video.concat._run_final_concat"),
         # The unified resume gate rejects every part → each keep
         # segment runs through the cut encode under test.
-        patch("stream2video.concat._media_is_valid", return_value=False),
-        patch("stream2video.concat._ffprobe_duration_ok", return_value=True),
+        patch("stream2video.concat.probing._media_is_valid", return_value=False),
+        patch("stream2video.concat.probing._ffprobe_duration_ok", return_value=True),
         patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
         patch("stream2video.concat._ensure_fresh_work_dir"),
     ):
@@ -98,7 +97,7 @@ def test_cut_phase_progress_is_monotonic_no_rollback(tmp_path: Path) -> None:
 
 def test_mux_phase_progress_maps_into_tail_span(tmp_path: Path) -> None:
     # Regression: phase 3 reported no progress at all (the old
-    # _run_subprocess_cmd discarded stdout), so the bar jumped from the
+    # stdout was discarded), so the bar jumped from the
     # 0.45 concat slice straight to 1.0. The mux pass must expose a
     # progress callback mapping out_time into 0.5..1.0, and the run must
     # end at exactly 1.0.
