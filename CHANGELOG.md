@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **Waveform preview could cancel itself and drop the overlay** — the view re-render token (bumped by every drag/zoom `_apply_view`) was the SAME token the preview thread used as its lifecycle guard, so a scheduled initial render silently invalidated the in-flight run: Phase 3 (segment overlay, "Waveform ready", live poller) was skipped, and the dry-run detect's own ffmpeg could be killed as "stale" ("Detected 0 segments"). Preview runs now use a dedicated run token; drag/zoom coalescing is untouched.
+- **`--doctor` user-defaults pipeline validation is no longer skipped** — a `user_defaults.json` with one ignored key AND a broken cross-field pair (stall warning ≥ kill) got only a yellow warning while an identical `--config` failed hard; both sources now run the same end-to-end snapshot validation.
+- **A missing ffmpeg hint is now per-OS on every surface** — the CLI startup error (`_check_ffmpeg`) used to tell macOS/Linux users to run `winget`; it now prints the same platform-appropriate install command the doctor prints.
+- **`--preset` can no longer silently overwrite saved GUI defaults** — values stored via "Save current as defaults" (`user_defaults.json`) are protected from the preset overlay exactly like explicitly-written YAML keys always were; explicit CLI flags still win over both.
+- **Unknown-size downloads report honest progress** — the phase indicator used to sprint to "Download (100%)" within ~10 seconds while the overall bar crawled at 4% (two different synthetic formulas in one branch); both now share one asymptotic curve that never claims completion. Per-tick status text in the download phase is throttled again (it passed `force=True`, which disabled `STATUS_UPDATE_INTERVAL` for the whole phase).
+- **Final concat output gains `-movflags +faststart`** for mp4/m4a/mov — per-part encodes already fast-started their files, so the same request produced a moov-at-head file via `cut_then_encode` but a moov-at-tail file via `segment`/`batch`; the audio-resync pass also applies the shared rate/channel policy now.
+
+### Changed
+
+- **Restore defaults keeps Recent Projects** — a factory reset used to persist an empty recents list to disk while the panel kept showing the old rows until restart. The theme switch inside Restore also goes through the shared handler again, so log tag colours follow immediately.
+- **Encoder-fallback consent dialog is dismissible** — the 60 s timeout now closes the dialog instead of leaving a live modal whose late answers were silently ignored.
+- Recent-projects delete dialog computes the folder size off-thread (a multi-GB rglob froze the UI before the dialog appeared), and every confirmation/warning box is parented.
+
+## [Unreleased] — audit rounds 38–40 (internal quality)
+
+- Fixed: waveform self-cancel race; stale SIGINT handler restored on repeated embedded `main()` calls; empty `output_dir` config key silently redirecting outputs (and the run log) into the launch directory; resume checkpoint `.inuse` preferred over the NEWER canonical checkpoint after a mid-run crash (hours of detection progress rolled back); `~/` output dirs creating a literal `~` folder before expansion; external kills during silence detect / WAV extract surfacing as "OOM" in a narrow race window.
+- Removed dead code: `_run_subprocess_cmd` (~90 lines, test-only), the never-invoked `PipelineCallbacks.on_total` slot, `PipelineResult.was_downloaded`, `MemoryMonitor.soft_exceeded`, unused back-compat re-exports/aliases.
+- Deduplicated: the resume gate chain (5 hand-copied blocks → `probing.resume_part_ok`), libx264 option construction (5 copies → one builder), the ffprobe argv template (8 copies → `utils.ffprobe_show_entries_args`), the final-concat progress mapper, the CREATE_NO_WINDOW subprocess kwargs, `USER_DEFAULT_KEYS` (now derived from PARAM_SPECS — a new tunable can no longer be forgotten by "Save current as defaults"), and the doctor's twice-written PipelineWorkerParams validation block.
+- Hardened: `output_lock` treats a placeholder-write lock violation as contention (it used to unlink another owner's live lock file); `_run_ffmpeg` rejects non-positive timeouts up front and wraps post-retry spawn failures in `FFmpegError`; source-bitrate probes go through the package patch seam; `delete_after` uses the retrying unlink like every other cleanup path; fresh-download audio probe result is reused instead of a second ffprobe pass.
+
+## [Unreleased]
+
 ### Added
 
 - **`silencecut` brand** — the app and its commands are now branded `silencecut`: the console scripts are `silencecut` / `silencecut-gui`, the GUI window title, the CLI banner and the `--doctor` header use the new name, and a GUI screenshot (`docs/screenshot.png`) is embedded in the README. The Python import package / distribution name stays `stream2video` (no settings or cache migration), and the legacy `stream2video` / `stream2video-gui` commands remain as aliases.

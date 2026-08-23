@@ -511,7 +511,6 @@ class TestFfmpegDecodeTiming:
 
     class _FakeProc:
         def __init__(self, rc: int, stderr_text: str, waits_before_exit: int = 0):
-            import io
 
             self.returncode: int | None = None
             self._rc = rc
@@ -1022,7 +1021,6 @@ class TestRunFfprobe:
 
         class _FakeProc:
             def __init__(self):
-                import io
 
                 self.stdout = io.StringIO("")
                 self._waits = 10_000_000
@@ -1063,7 +1061,6 @@ class TestRunFfprobe:
 
         class _FakeProc:
             def __init__(self):
-                import io
 
                 self.stdout = io.StringIO("")
                 self._killed = False
