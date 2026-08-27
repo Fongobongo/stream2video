@@ -347,6 +347,11 @@ def _run_gapless_segment_concat(
                         low_process_priority=options.low_process_priority,
                         rlimit_as_mb=options.rlimit_as_mb,
                         fail_safe=True,
+                        # Intermediates are pipeline-encoded CFR (libx264
+                        # CRF18): the frame-hole check is safe here and
+                        # catches a damaged intermediate whose duration
+                        # probes clean (benchmark 2026-08 finding #6).
+                        check_frame_holes=True,
                     )
                     if not reuse:
                         logger.warning(

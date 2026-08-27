@@ -18,12 +18,45 @@ from pathlib import Path
 from typing import Any
 
 from stream2video import concat as _c
-from stream2video.concat.constants import _BATCH_CHUNK_MIN
+from stream2video.concat.constants import (
+    _BATCH_CHUNK_MIN,
+    _BATCH_TRIM_MAX,
+    scaled_part_timeout,
+)
 from stream2video.concat.options import ConcatOptions, coerce_options
 from stream2video.tools import ffmpeg_path, filter_complex_script_args
 from stream2video.utils import get_video_start_time
 
 logger = logging.getLogger(__name__)
+
+
+def _split_long_segments(
+    chunk: list[tuple[float, float]], max_trim: float
+) -> list[tuple[float, float]]:
+    """Split keep segments longer than ``max_trim`` into contiguous
+    sub-segments of at most ``max_trim`` seconds (benchmark 2026-08,
+    finding #7).
+
+    The ffmpeg 9.x concat filter loses/livelocks the video stream when
+    ONE ``trim`` passes a very long stream alongside its audio chain.
+    The pieces produced here are adjacent in the source, so the concat
+    filter glues them back into identical content — the split is
+    lossless. Segments at or under ``max_trim`` pass through unchanged,
+    so typical content (keep segments of seconds to a minute) is
+    untouched. Pure and side-effect free so the split can be unit
+    tested without running ffmpeg.
+    """
+    out: list[tuple[float, float]] = []
+    for s, e in chunk:
+        if e - s <= max_trim:
+            out.append((s, e))
+            continue
+        cur = s
+        while e - cur > max_trim:
+            out.append((cur, cur + max_trim))
+            cur += max_trim
+        out.append((cur, e))
+    return out
 
 
 def _run_batch_concat(
@@ -152,7 +185,12 @@ def _run_batch_concat(
                 min_part_bytes=options.min_part_bytes,
                 require_video=True,
                 require_audio=options.source_has_audio,
-                timeout_seconds=float(options.segment_encode_timeout),
+                # Scale with the chunk's own length (benchmark 2026-08
+                # finding #1): a chunk holding a multi-hour keep block
+                # decodes longer than any flat cap.
+                timeout_seconds=scaled_part_timeout(
+                    options.segment_encode_timeout, sum(e - s for s, e in chunk)
+                ),
                 cancel_callback=cancel_callback,
                 low_process_priority=options.low_process_priority,
                 rlimit_as_mb=options.rlimit_as_mb,
@@ -230,10 +268,24 @@ def _run_batch_concat(
             # concat call at the end glues them. ``concat=n=N:v=1:a=1``
             # in filter form renumbers PTS internally so no manual
             # ``setpts`` is needed after the final concat.
+            # Finding #7 guard (benchmark 2026-08): keep the individual
+            # ``trim`` length in the chunk graph under the ffmpeg 9.x
+            # concat-filter frame-loss trigger by splitting long keep
+            # blocks into contiguous sub-trims. Chunking, the manifest
+            # and resume are untouched (they still see the original
+            # ``chunk``); only the filter graph expands.
+            graph_segs = _split_long_segments(chunk, _BATCH_TRIM_MAX)
+            if len(graph_segs) != len(chunk):
+                logger.info(
+                    f"batch chunk {ci}: split long keep block(s) into "
+                    f"{len(graph_segs)} sub-trims (max {_BATCH_TRIM_MAX:.0f}s "
+                    "each) to avoid the ffmpeg concat-filter frame loss"
+                )
+
             v_chains = []
             a_chains = []
             fps_suffix = _c._fps_filter_chain(options.output_fps)
-            for idx, (s, e) in enumerate(chunk):
+            for idx, (s, e) in enumerate(graph_segs):
                 # ``s``/``e`` are absolute source timestamps (user-visible
                 # 0..N). The seek above made ffmpeg start at ``seek_to``
                 # in file-position terms; with ``-copyts`` the PTS in the
@@ -272,7 +324,7 @@ def _run_batch_concat(
                         f"[0:a]atrim={s + start_time}:{e + start_time},asetpts=PTS-STARTPTS,"
                         f"apad,atrim=0:{e - s}[a{idx}]"
                     )
-            n = len(chunk)
+            n = len(graph_segs)
             if options.source_has_audio:
                 concat_inputs = "".join(f"[v{i}][a{i}]" for i in range(n))
                 graph = (
@@ -378,7 +430,11 @@ def _run_batch_concat(
                         str(chunk_path),
                     ],
                     progress_callback=_chunk_prog,
-                    timeout=options.segment_encode_timeout,
+                    # Scale with the chunk's content length (benchmark
+                    # 2026-08 finding #1); stall_kill still catches hangs.
+                    timeout=scaled_part_timeout(
+                        options.segment_encode_timeout, sum(e - s for s, e in chunk)
+                    ),
                     label=label_text,
                     cancel_callback=cancel_callback,
                     memory_monitor=_c._new_memory_monitor(

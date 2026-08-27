@@ -719,6 +719,11 @@ class PipelineController:
             cancel_callback=cancel_callback,
             low_process_priority=self.cfg.low_process_priority,
             rlimit_as_mb=self.cfg.rlimit_as_mb,
+            # The output is pipeline-encoded CFR — a frame count far
+            # below duration x fps is a hole, not VFR. This is the last
+            # line of defence that stops a corrupt output being
+            # published as success (benchmark 2026-08 findings #6/#7).
+            check_frame_holes=stream_type == "v",
         )
 
     def _set_phase_progress(self, fraction: float) -> None:
@@ -1842,9 +1847,7 @@ class PipelineController:
             if _unlink_with_retry(self._download_path):
                 self.cb.on_log(f"Deleted source: {self._download_path}")
             else:
-                self.cb.on_log(
-                    f"[WARN] Could not delete source (locked?): {self._download_path}"
-                )
+                self.cb.on_log(f"[WARN] Could not delete source (locked?): {self._download_path}")
         self._download_path = None
 
         return PipelineResult(

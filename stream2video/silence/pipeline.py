@@ -180,9 +180,7 @@ def detect_silence(
         inuse_path = _c.resume_inuse_path(resume_cache_path)
         _candidates = [p for p in (resume_cache_path, inuse_path) if p.exists()]
         load_path = (
-            max(_candidates, key=lambda p: p.stat().st_mtime)
-            if _candidates
-            else resume_cache_path
+            max(_candidates, key=lambda p: p.stat().st_mtime) if _candidates else resume_cache_path
         )
         loaded = _c._load_silence_cache_from_path(load_path, video_path, current_config)
         if loaded is not None:

@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 def _run_ffmpeg(
     cmd: list[str],
     progress_callback: Callable[[float], None] | None,
-    timeout: int,
+    timeout: float,
     label: str = "ffmpeg",
     cancel_callback: Callable[[], bool] | None = None,
     track_progress: bool = True,
@@ -497,7 +497,7 @@ def _run_ffmpeg(
 
 def _wait_with_cancel(
     process: subprocess.Popen,
-    timeout: int,
+    timeout: float,
     cancel_callback: Callable[[], bool] | None,
     label: str,
 ) -> int:

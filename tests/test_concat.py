@@ -1007,6 +1007,122 @@ class TestMediaIsValid:
             )
 
 
+class TestFfprobeNominalFps:
+    """Benchmark 2026-08 P0 (finding #6): the frame-hole gate needs the
+    DECLARED (nominal) fps to compute an expected decoded frame count."""
+
+    def _probe(self, stdout: str, rc: int = 0):
+        from stream2video.concat import probing
+
+        with patch("stream2video.concat.probing._run_ffprobe", return_value=(rc, stdout)):
+            return probing._ffprobe_nominal_fps(Path("x.mp4"))
+
+    def test_fraction(self):
+        assert self._probe("60/1\n") == 60.0
+
+    def test_ntsc_fraction(self):
+        fps = self._probe("30000/1001\n")
+        assert fps is not None and abs(fps - 29.97) < 0.01
+
+    def test_bare_number(self):
+        assert self._probe("25\n") == 25.0
+
+    def test_na_returns_none(self):
+        assert self._probe("N/A\n") is None
+
+    def test_empty_returns_none(self):
+        assert self._probe("") is None
+
+    def test_nonzero_rc_returns_none(self):
+        assert self._probe("60/1\n", rc=1) is None
+
+    def test_zero_denominator_returns_none(self):
+        assert self._probe("60/0\n") is None
+
+    def test_garbage_returns_none(self):
+        assert self._probe("banana\n") is None
+
+
+class TestMediaIsValidFrameHoles:
+    """Benchmark 2026-08 P0 (findings #6/#7): a video that lost most of
+    its frames still decodes cleanly and reports a full duration — only
+    the decoded FRAME COUNT exposes the hole. The check is opt-in
+    (``check_frame_holes``) because it is only safe for pipeline-encoded
+    CFR media, not genuinely VFR sources."""
+
+    def _run(self, *, frames, measured=100.0, fps=60.0, check=True, fail_safe=False, fps_exc=None):
+        from stream2video.concat import probing
+
+        def fake_decode(path, stream_type="v", timeout=43200, cancel_callback=None, **kw):
+            out = kw.get("frame_count_out")
+            if out is not None and frames is not None:
+                out.append(frames)
+            return True, measured
+
+        if fps_exc is not None:
+            fps_patch = patch(
+                "stream2video.concat.probing._ffprobe_nominal_fps", side_effect=fps_exc
+            )
+        else:
+            fps_patch = patch("stream2video.concat.probing._ffprobe_nominal_fps", return_value=fps)
+        with (
+            patch("stream2video.concat.probing._ffprobe_is_valid_media", return_value=True),
+            patch("stream2video.concat.probing._ffmpeg_decode_timing", side_effect=fake_decode),
+            fps_patch,
+        ):
+            return probing._media_is_valid(
+                Path("x.mp4"),
+                require_video=True,
+                require_audio=False,
+                check_frame_holes=check,
+                fail_safe=fail_safe,
+            )
+
+    def test_full_frame_count_passes(self):
+        # 100 s at 60 fps -> ~6000 frames; 6000 decoded is healthy.
+        assert self._run(frames=6000) is True
+
+    def test_catastrophic_frame_loss_rejected(self):
+        # 100 s at 60 fps but only 19% of the frames survived — the real
+        # finding #6 shape. Must be rejected.
+        assert self._run(frames=1140) is False
+
+    def test_check_disabled_by_default(self):
+        # Same catastrophic loss, but the caller did not opt in (e.g. the
+        # fresh-download gate on a possibly-VFR source): legacy behaviour.
+        assert self._run(frames=1140, check=False) is True
+
+    def test_unmeasurable_fps_skips_check(self):
+        # fps None -> expected count unknown -> skip, do not reject.
+        assert self._run(frames=1140, fps=None) is True
+
+    def test_unmeasurable_frame_count_skips_check(self):
+        # No frame= feed -> skip, do not reject.
+        assert self._run(frames=None) is True
+
+    def test_fps_probe_fault_raises_without_fail_safe(self):
+        import subprocess
+
+        import pytest
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            self._run(frames=6000, fps_exc=subprocess.TimeoutExpired("ffprobe", 10.0))
+
+    def test_fps_probe_fault_fail_safe_skips_check(self):
+        import subprocess
+
+        # fail_safe (resume gates): an fps-probe hiccup must not reject —
+        # the frame check is skipped, other gates still apply.
+        assert (
+            self._run(
+                frames=6000,
+                fps_exc=subprocess.TimeoutExpired("ffprobe", 10.0),
+                fail_safe=True,
+            )
+            is True
+        )
+
+
 class TestRunFfprobe:
     """Audit round 33 P2: every metadata probe runs through ONE
     cancellable, bounded popen loop — a cancel fires within the poll

@@ -33,6 +33,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from stream2video import concat as _c
+from stream2video.concat.constants import scaled_part_timeout
 from stream2video.concat.options import ConcatOptions, coerce_options
 from stream2video.tools import ffmpeg_path
 
@@ -180,7 +181,10 @@ def _run_cut_then_encode(
                 min_part_bytes=options.min_part_bytes,
                 require_video=True,
                 require_audio=options.source_has_audio,
-                timeout_seconds=float(options.segment_encode_timeout),
+                # Scale with the part's own length (benchmark 2026-08
+                # finding #1): a multi-hour cut's validation decode
+                # exceeds any flat cap.
+                timeout_seconds=scaled_part_timeout(options.segment_encode_timeout, dur),
                 cancel_callback=cancel_callback,
                 low_process_priority=options.low_process_priority,
                 rlimit_as_mb=options.rlimit_as_mb,
@@ -289,7 +293,9 @@ def _run_cut_then_encode(
             _c._run_ffmpeg(
                 cmd,
                 progress_callback=_seg_prog if progress_callback else None,
-                timeout=options.segment_encode_timeout,
+                # Scale with the segment's own length (benchmark 2026-08
+                # finding #1); hung encodes are still caught by stall_kill.
+                timeout=scaled_part_timeout(options.segment_encode_timeout, dur),
                 label=f"cut_then_encode cut phase segment {i}",
                 cancel_callback=cancel_callback,
                 memory_monitor=_c._new_memory_monitor(

@@ -57,10 +57,13 @@ class TestSilencecutBranding:
         data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
         scripts = data["project"]["scripts"]
         # New brand commands point at the unchanged import package...
-        assert scripts["silencecut"] == "stream2video.cli:app"
+        # ``_cli_entry`` wraps the Typer ``app`` with the UTF-8 stdio
+        # guard (benchmark 2026-08 P1) so piped/redirected runs on a
+        # non-UTF-8 console don't crash on ✓/✗/— glyphs.
+        assert scripts["silencecut"] == "stream2video.cli:_cli_entry"
         assert scripts["silencecut-gui"] == "stream2video.gui:main"
         # ...and the historical names stay as aliases (no settings migration).
-        assert scripts["stream2video"] == "stream2video.cli:app"
+        assert scripts["stream2video"] == "stream2video.cli:_cli_entry"
         assert scripts["stream2video-gui"] == "stream2video.gui:main"
 
     def test_py_typed_marker_shipped(self):

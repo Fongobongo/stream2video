@@ -243,6 +243,57 @@ def _ffprobe_stream_timing(
     return start, duration
 
 
+def _ffprobe_nominal_fps(
+    path: Path,
+    cancel_callback: "Callable[[], bool] | None" = None,
+) -> float | None:
+    """Nominal frame rate (``r_frame_rate``) of the first video stream,
+    or None when it cannot be determined (audit: benchmark 2026-08 P0).
+
+    Feeds the frame-hole check in ``_media_is_valid``: the expected
+    decoded frame count is ``decoded_seconds * nominal fps``. The
+    nominal rate is what the container/encoder DECLARED (``60/1`` on a
+    60 fps encode) — a file whose video body is mostly missing still
+    carries the declaration, so a decoded count far below the
+    expectation exposes the hole. ``avg_frame_rate`` is NOT used: it is
+    ``nb_frames / duration`` from the same possibly-lying moov and is
+    circular for this check.
+
+    Error contract matches ``_ffprobe_stream_timing``: ``None`` is ONLY
+    a normal ffprobe verdict (non-zero rc, empty/``N/A``/non-numeric/
+    zero rate); infrastructure faults (timeout, spawn failure, cancel)
+    PROPAGATE so "validation unavailable" is never mistaken for
+    "invalid media". The caller treats ``None`` as "frame-hole check
+    skipped" — an unmeasurable rate must not reject media on its own.
+    """
+    rc, stdout = _run_ffprobe(
+        ffprobe_show_entries_args(
+            path,
+            "stream=r_frame_rate",
+            select_streams="v:0",
+        ),
+        cancel_callback=cancel_callback,
+    )
+    if rc != 0:
+        return None
+    value = stdout.strip()
+    if not value or value == "N/A":
+        return None
+    # r_frame_rate is a fraction ("60/1", "30000/1001") or a bare number.
+    try:
+        if "/" in value:
+            num, den = value.split("/", 1)
+            den_f = float(den)
+            if den_f <= 0:
+                return None
+            fps = float(num) / den_f
+        else:
+            fps = float(value)
+    except ValueError:
+        return None
+    return fps if fps > 0 else None
+
+
 def _ffmpeg_decode_timing(
     path: Path,
     stream_type: str = "v",
@@ -251,6 +302,7 @@ def _ffmpeg_decode_timing(
     *,
     low_process_priority: bool = False,
     rlimit_as_mb: int = 0,
+    frame_count_out: "list[int] | None" = None,
 ) -> tuple[bool, float | None]:
     """Decode the WHOLE requested stream into the null sink; return
     ``(ok, decoded_seconds)``.
@@ -302,6 +354,18 @@ def _ffmpeg_decode_timing(
 
     Spawn faults, timeout and cancellations re-raise: "validation
     unavailable" must never be mistaken for "invalid media".
+
+    ``frame_count_out`` (benchmark 2026-08 P0): when a list is passed,
+    the FINAL decoded frame count (last ``frame=`` line of the same
+    ``-progress`` feed) is appended to it. The caller compares it
+    against ``decoded_seconds * nominal fps`` to catch PTS-hole files:
+    a part whose video frames are mostly missing still decodes without
+    errors and reports a full ``out_time_ms`` (the tail PTS survives),
+    so the duration-based gates pass it — only the frame count exposes
+    the hole (a real VOD resume part lost 92% of its video this way and
+    sailed through every previous check). The count is best-effort: a
+    missing/garbled ``frame=`` feed simply appends nothing, and the
+    caller must treat "no count" as "check skipped", never as failure.
     """
     cmd = [
         ffmpeg_path(),
@@ -328,10 +392,13 @@ def _ffmpeg_decode_timing(
         **subprocess_kwargs(low_process_priority, rlimit_as_mb),
     )
     decoded_ms: list[str] = []
+    frame_counts: list[str] = []
 
     def _capture_out_time_ms(line: str) -> None:
         if line.startswith("out_time_ms="):
             decoded_ms.append(line.split("=", 1)[1].strip())
+        elif line.startswith("frame="):
+            frame_counts.append(line.split("=", 1)[1].strip())
 
     stdout_chunks: list[str] = []
     stderr_chunks: list[str] = []
@@ -386,6 +453,11 @@ def _ffmpeg_decode_timing(
             decoded_seconds = float(decoded_ms[-1]) / 1_000_000.0
         except ValueError:
             decoded_seconds = None
+    if frame_count_out is not None and frame_counts:
+        try:
+            frame_count_out.append(int(frame_counts[-1]))
+        except ValueError:
+            pass  # garbage feed — caller treats "no count" as "skip"
     return ok, decoded_seconds
 
 
@@ -424,6 +496,19 @@ def _allowed_stream_drift(video_dur: float, audio_dur: float) -> float:
     )
 
 
+# Frame-hole gate (benchmark 2026-08 P0, findings #6/#7): a video whose
+# decoded frame count falls below this fraction of
+# ``decoded_seconds * nominal fps`` is rejected. The real corruption that
+# motivated the gate kept 19% of its frames (segment path) and 14%
+# (batch path) — both far below any threshold; 0.5 catches catastrophic
+# loss with a wide margin while staying lenient enough for encoder flush
+# rounding and mild cadence variance. Deliberately NOT tighter: the gate
+# also guards the final output, where a false positive throws away a
+# good multi-hour encode, and genuinely VFR content can average well
+# below its nominal rate (such sources are gated with the check off).
+_FRAME_HOLE_MIN_RATIO = 0.5
+
+
 def _media_is_valid(
     path: Path,
     *,
@@ -434,6 +519,7 @@ def _media_is_valid(
     low_process_priority: bool = False,
     rlimit_as_mb: int = 0,
     fail_safe: bool = False,
+    check_frame_holes: bool = False,
 ) -> bool:
     """Unified integrity gate for the EXPECTED stream set of ``path``.
 
@@ -473,6 +559,22 @@ def _media_is_valid(
     still fell into the fail-closed branch and deleted the download) —
     while decode cancellations / phase timeouts and spawn faults out
     of ``_ffmpeg_decode_timing`` always propagate regardless of it.
+
+    ``check_frame_holes`` (benchmark 2026-08 P0): additionally reject a
+    video whose DECODED FRAME COUNT is far below ``decoded_seconds *
+    nominal fps``. Duration-based checks cannot see a PTS-hole file: a
+    part that lost 92% of its video frames still decodes cleanly and
+    reports a full ``out_time_ms`` (the surviving tail carries the last
+    timestamp), so every previous gate passed it and the corrupt part
+    was published into the final output (real VOD benchmark, findings
+    #6/#7). The check is OPT-IN: it is safe for pipeline-encoded parts
+    and outputs (CFR, declared fps is the true cadence) but would
+    false-positive on genuinely VFR sources, so the fresh-download gate
+    leaves it off while the resume gates and the final-output gate
+    enable it. The threshold ``_FRAME_HOLE_MIN_RATIO`` is deliberately
+    lenient (catches catastrophic loss, tolerates encoder flush
+    rounding); an unmeasurable fps or frame count SKIPS the check
+    rather than rejecting — the other gates still apply.
     """
     if not require_video and not require_audio:
         return True
@@ -490,6 +592,7 @@ def _media_is_valid(
             if not fail_safe:
                 raise
             return False
+        video_frame_counts: list[int] = []
         video_ok, video_measured = _ffmpeg_decode_timing(
             path,
             stream_type="v",
@@ -497,9 +600,38 @@ def _media_is_valid(
             cancel_callback=cancel_callback,
             low_process_priority=low_process_priority,
             rlimit_as_mb=rlimit_as_mb,
+            frame_count_out=video_frame_counts if check_frame_holes else None,
         )
         if not video_ok:
             return False
+        if (
+            check_frame_holes
+            and video_frame_counts
+            and video_measured is not None
+            and video_measured > 0
+        ):
+            try:
+                nominal_fps = _ffprobe_nominal_fps(path, cancel_callback=cancel_callback)
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                if not fail_safe:
+                    raise
+                nominal_fps = None
+            if nominal_fps is not None:
+                expected_frames = video_measured * nominal_fps
+                if (
+                    expected_frames > 0
+                    and video_frame_counts[0] < expected_frames * _FRAME_HOLE_MIN_RATIO
+                ):
+                    logger.warning(
+                        "frame-hole gate rejected %s: decoded %d frames, "
+                        "expected ~%.0f at %.3f fps (%.1f%% missing)",
+                        path,
+                        video_frame_counts[0],
+                        expected_frames,
+                        nominal_fps,
+                        (1.0 - video_frame_counts[0] / expected_frames) * 100.0,
+                    )
+                    return False
         if cancel_callback is not None and cancel_callback():
             raise CancelledError("media validation cancelled")
         try:
@@ -639,6 +771,11 @@ def resume_part_ok(
         low_process_priority=low_process_priority,
         rlimit_as_mb=rlimit_as_mb,
         fail_safe=True,
+        # Parts are pipeline-encoded CFR: the declared fps is the true
+        # cadence, so a frame count far below duration x fps is a hole,
+        # not VFR. A corrupt part reused here injects the hole into the
+        # final output (benchmark 2026-08 finding #6).
+        check_frame_holes=True,
     )
 
 

@@ -1377,3 +1377,60 @@ class TestB11CliSanitization:
         with pytest.raises(typer.Exit) as exc:
             cli._doctor_callback(None, None, True)
         assert exc.value.exit_code == 1
+
+
+class TestUtf8Stdio:
+    """Benchmark 2026-08 P1: piped/redirected stdout on a non-UTF-8
+    console (cp1251/cp866) crashed every CLI run on the first ✓/✗/—/…
+    glyph with UnicodeEncodeError. ``_utf8_stdio`` reconfigures the
+    streams to UTF-8 (errors=replace) and restores the original
+    encoding + error policy on exit."""
+
+    class _FakeStream:
+        def __init__(self, encoding: str = "cp1251", errors: str = "strict"):
+            self.encoding = encoding
+            self.errors = errors
+            self.calls: list[tuple[str, str]] = []
+
+        def reconfigure(self, encoding: str | None = None, errors: str | None = None) -> None:
+            self.calls.append((encoding, errors))
+            if encoding is not None:
+                self.encoding = encoding
+            if errors is not None:
+                self.errors = errors
+
+    def test_reconfigures_and_restores(self, monkeypatch):
+        from stream2video import cli
+
+        out, err = self._FakeStream(), self._FakeStream()
+        monkeypatch.setattr(sys, "stdout", out)
+        monkeypatch.setattr(sys, "stderr", err)
+        with cli._utf8_stdio():
+            assert out.encoding == "utf-8" and out.errors == "replace"
+            assert err.encoding == "utf-8" and err.errors == "replace"
+        assert out.encoding == "cp1251" and out.errors == "strict"
+        assert err.encoding == "cp1251" and err.errors == "strict"
+        assert out.calls[0] == ("utf-8", "replace")
+        assert out.calls[-1] == ("cp1251", "strict")
+
+    def test_restores_on_exception(self, monkeypatch):
+        from stream2video import cli
+
+        out = self._FakeStream()
+        monkeypatch.setattr(sys, "stdout", out)
+        monkeypatch.setattr(sys, "stderr", self._FakeStream())
+        with pytest.raises(RuntimeError), cli._utf8_stdio():
+            raise RuntimeError("boom")
+        assert out.encoding == "cp1251" and out.errors == "strict"
+
+    def test_stream_without_reconfigure_is_skipped(self, monkeypatch):
+        from stream2video import cli
+
+        class _NoReconfigure:
+            encoding = "cp1251"
+
+        out = _NoReconfigure()
+        monkeypatch.setattr(sys, "stdout", out)
+        monkeypatch.setattr(sys, "stderr", self._FakeStream())
+        with cli._utf8_stdio():
+            assert out.encoding == "cp1251"  # untouched, no crash

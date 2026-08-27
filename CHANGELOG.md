@@ -1,9 +1,80 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.2] - 2026-08-28
+
+This release is the result of a full benchmark pass over two real Twitch
+VODs (a 1h28m 1080p60 gameplay stream and a 6h26m 720p60 recording,
+~80% and ~46% silence-cut respectively). The method matrix (`segment` /
+`batch` / `cut_then_encode`) exposed two critical frame-loss defects and
+a set of CLI robustness bugs on long content; all are fixed here.
+Measurements and reproduction details live in `docs/benchmarks.md`.
+
+### Added
+
+- **Frame-hole integrity gate** — the shared media-validity check (resume
+  part reuse, gapless-tree intermediate reuse, and the final-output gate)
+  now also rejects a video whose DECODED FRAME COUNT is far below
+  `duration × nominal fps`. A file that lost most of its frames still
+  decodes without errors and reports a full duration (the surviving tail
+  carries the last timestamp), so every previous duration-based gate
+  passed it — this is what let a real VOD output holding only 19% of its
+  frames be published as a success. The check is opt-in per gate: it
+  guards pipeline-encoded (CFR) parts and outputs, and stays off on the
+  fresh-download gate so a genuinely-VFR source is never rejected.
+- **`silencecut` brand** — the app and its commands are now branded `silencecut`: the console scripts are `silencecut` / `silencecut-gui`, the GUI window title, the CLI banner and the `--doctor` header use the new name, and a GUI screenshot (`docs/screenshot.png`) is embedded in the README. The Python import package / distribution name stays `stream2video` (no settings or cache migration), and the legacy `stream2video` / `stream2video-gui` commands remain as aliases.
+- **`--version` flag** — prints `silencecut <version>` and exits; the version comes from the same single source of truth as the package metadata (`pyproject.toml` in a checkout, `importlib.metadata` when installed), so it can never drift from what bug reports need.
+- **Config auto-detection** — with no explicit `-c/--config`, the CLI now picks up `./silencecut.yaml` from the working directory (the legacy `./stream2video.yaml` still works), loads and validates it through the exact same loader as an explicit `--config`, logs the discovery at startup and reports it in `--doctor` (an "auto-detected" note on the Config file row). A project folder can now carry its own settings: drop a config next to your videos and run `silencecut video.mp4`.
+- **Doctor install hints for a missing ffmpeg/ffprobe** — the fail row no longer just says "not found in PATH": it now names the per-OS install command (Windows: `winget install Gyan.FFmpeg` / choco; macOS: brew; Linux: apt), turning the most common first-run failure into diagnosis + treatment.
+- **`--doctor --full` tails the last run's log** — after the diagnostics table (and as a `log_tail` JSON record under `--log-format json`), the doctor prints the last 40 lines of `{output_dir}/stream2video.log` so a pasted `--doctor --full` bug report already carries the previous run's error trail. The directory resolves exactly like a real run's (explicit YAML `output_dir` wins, relative to the YAML's folder), a missing log degrades to "(no log yet)", and tail failures never affect the verdict.
+- **`py.typed` marker shipped** (PEP 561) — the fully mypy-typed public API now announces its inline types to IDEs and downstream consumers instead of being treated as untyped.
+
+### Changed
+
+- **Segment encode/validate timeout scales with part length** — the flat
+  600 s `segment_encode_timeout` cap killed a legitimate encode of a
+  3.5-hour keep block (and would time out its whole-stream resume
+  validation on a re-run). The effective timeout is now
+  `max(base, duration × 6)` across the segment / batch / cut_then_encode /
+  audio paths, so multi-hour parts are no longer cut off mid-encode; a
+  genuinely hung encode is still caught far sooner by the `stall_kill`
+  no-progress watchdog.
+- **Restore defaults keeps Recent Projects** — a factory reset used to persist an empty recents list to disk while the panel kept showing the old rows until restart. The theme switch inside Restore also goes through the shared handler again, so log tag colours follow immediately.
+- **Encoder-fallback consent dialog is dismissible** — the 60 s timeout now closes the dialog instead of leaving a live modal whose late answers were silently ignored.
+- Recent-projects delete dialog computes the folder size off-thread (a multi-GB rglob froze the UI before the dialog appeared), and every confirmation/warning box is parented.
 
 ### Fixed
 
+- **`batch` no longer loses frames on very long keep blocks** — the
+  ffmpeg 9.x concat filter truncates (or livelocks) the video stream when
+  a single `trim` passes a very long stream alongside its audio chain: a
+  6h26m VOD with one 3.5-hour keep block came out with only 14% of its
+  frames while reporting a plausible duration. Keep segments longer than
+  300 s are now split into contiguous sub-trims inside the chunk filter
+  graph (lossless — the pieces glue back to identical content), keeping
+  every individual trim under the length the scheduler handles
+  correctly. Chunking, the resume manifest and typical short-segment
+  content are untouched.
+- **CLI output no longer crashes on non-UTF-8 consoles** — on Windows a
+  piped/redirected stdout decodes via the OEM/ANSI codepage (cp1251/cp866
+  on ru systems), which cannot encode the ✓/✗/—/… glyphs the Rich console
+  and the final summary emit, so every piped invocation died with
+  `UnicodeEncodeError` AFTER the work was done and was reported as
+  failed. stdout/stderr are now reconfigured to UTF-8 (`errors=replace`)
+  for the whole CLI invocation (console scripts included) and restored on
+  exit.
+- **Headless runs no longer hang on interactive prompts** — the
+  software-fallback consent (`software_fallback: ask`) and the
+  legacy-project-rename prompt called `typer.confirm()` unconditionally;
+  on an open-but-silent stdin (a background/automated run) that blocks
+  FOREVER, and a benchmark matrix run hung for hours holding the project
+  lock. Both prompts now check `stdin.isatty()` and refuse (the safe
+  default) instead of blocking when there is no interactive terminal.
+- **MemoryMonitor measures the whole process tree** — RSS now sums the
+  watched pid AND all its descendants. On Windows the ffmpeg on PATH is
+  often a package-manager shim (Chocolatey's `ffmpeg.EXE`) and yt-dlp runs
+  under the venv `python.exe` launcher, so the pid the pipeline held was
+  the ~13 MB launcher while the real encode was its ~1.3 GB child — the
+  budget guard never fired and peak-RSS logged 13 MB for a 1.3 GB encode.
 - **Waveform preview could cancel itself and drop the overlay** — the view re-render token (bumped by every drag/zoom `_apply_view`) was the SAME token the preview thread used as its lifecycle guard, so a scheduled initial render silently invalidated the in-flight run: Phase 3 (segment overlay, "Waveform ready", live poller) was skipped, and the dry-run detect's own ffmpeg could be killed as "stale" ("Detected 0 segments"). Preview runs now use a dedicated run token; drag/zoom coalescing is untouched.
 - **`--doctor` user-defaults pipeline validation is no longer skipped** — a `user_defaults.json` with one ignored key AND a broken cross-field pair (stall warning ≥ kill) got only a yellow warning while an identical `--config` failed hard; both sources now run the same end-to-end snapshot validation.
 - **A missing ffmpeg hint is now per-OS on every surface** — the CLI startup error (`_check_ffmpeg`) used to tell macOS/Linux users to run `winget`; it now prints the same platform-appropriate install command the doctor prints.
@@ -11,29 +82,12 @@
 - **Unknown-size downloads report honest progress** — the phase indicator used to sprint to "Download (100%)" within ~10 seconds while the overall bar crawled at 4% (two different synthetic formulas in one branch); both now share one asymptotic curve that never claims completion. Per-tick status text in the download phase is throttled again (it passed `force=True`, which disabled `STATUS_UPDATE_INTERVAL` for the whole phase).
 - **Final concat output gains `-movflags +faststart`** for mp4/m4a/mov — per-part encodes already fast-started their files, so the same request produced a moov-at-head file via `cut_then_encode` but a moov-at-tail file via `segment`/`batch`; the audio-resync pass also applies the shared rate/channel policy now.
 
-### Changed
-
-- **Restore defaults keeps Recent Projects** — a factory reset used to persist an empty recents list to disk while the panel kept showing the old rows until restart. The theme switch inside Restore also goes through the shared handler again, so log tag colours follow immediately.
-- **Encoder-fallback consent dialog is dismissible** — the 60 s timeout now closes the dialog instead of leaving a live modal whose late answers were silently ignored.
-- Recent-projects delete dialog computes the folder size off-thread (a multi-GB rglob froze the UI before the dialog appeared), and every confirmation/warning box is parented.
-
-## [Unreleased] — audit rounds 38–40 (internal quality)
+### Internal quality (audit rounds 38–40)
 
 - Fixed: waveform self-cancel race; stale SIGINT handler restored on repeated embedded `main()` calls; empty `output_dir` config key silently redirecting outputs (and the run log) into the launch directory; resume checkpoint `.inuse` preferred over the NEWER canonical checkpoint after a mid-run crash (hours of detection progress rolled back); `~/` output dirs creating a literal `~` folder before expansion; external kills during silence detect / WAV extract surfacing as "OOM" in a narrow race window.
 - Removed dead code: `_run_subprocess_cmd` (~90 lines, test-only), the never-invoked `PipelineCallbacks.on_total` slot, `PipelineResult.was_downloaded`, `MemoryMonitor.soft_exceeded`, unused back-compat re-exports/aliases.
 - Deduplicated: the resume gate chain (5 hand-copied blocks → `probing.resume_part_ok`), libx264 option construction (5 copies → one builder), the ffprobe argv template (8 copies → `utils.ffprobe_show_entries_args`), the final-concat progress mapper, the CREATE_NO_WINDOW subprocess kwargs, `USER_DEFAULT_KEYS` (now derived from PARAM_SPECS — a new tunable can no longer be forgotten by "Save current as defaults"), and the doctor's twice-written PipelineWorkerParams validation block.
 - Hardened: `output_lock` treats a placeholder-write lock violation as contention (it used to unlink another owner's live lock file); `_run_ffmpeg` rejects non-positive timeouts up front and wraps post-retry spawn failures in `FFmpegError`; source-bitrate probes go through the package patch seam; `delete_after` uses the retrying unlink like every other cleanup path; fresh-download audio probe result is reused instead of a second ffprobe pass.
-
-## [Unreleased]
-
-### Added
-
-- **`silencecut` brand** — the app and its commands are now branded `silencecut`: the console scripts are `silencecut` / `silencecut-gui`, the GUI window title, the CLI banner and the `--doctor` header use the new name, and a GUI screenshot (`docs/screenshot.png`) is embedded in the README. The Python import package / distribution name stays `stream2video` (no settings or cache migration), and the legacy `stream2video` / `stream2video-gui` commands remain as aliases.
-- **`--version` flag** — prints `silencecut <version>` and exits; the version comes from the same single source of truth as the package metadata (`pyproject.toml` in a checkout, `importlib.metadata` when installed), so it can never drift from what bug reports need.
-- **Config auto-detection** — with no explicit `-c/--config`, the CLI now picks up `./silencecut.yaml` from the working directory (the legacy `./stream2video.yaml` still works), loads and validates it through the exact same loader as an explicit `--config`, logs the discovery at startup and reports it in `--doctor` (an "auto-detected" note on the Config file row). A project folder can now carry its own settings: drop a config next to your videos and run `silencecut video.mp4`.
-- **Doctor install hints for a missing ffmpeg/ffprobe** — the fail row no longer just says "not found in PATH": it now names the per-OS install command (Windows: `winget install Gyan.FFmpeg` / choco; macOS: brew; Linux: apt), turning the most common first-run failure into diagnosis + treatment.
-- **`--doctor --full` tails the last run's log** — after the diagnostics table (and as a `log_tail` JSON record under `--log-format json`), the doctor prints the last 40 lines of `{output_dir}/stream2video.log` so a pasted `--doctor --full` bug report already carries the previous run's error trail. The directory resolves exactly like a real run's (explicit YAML `output_dir` wins, relative to the YAML's folder), a missing log degrades to "(no log yet)", and tail failures never affect the verdict.
-- **`py.typed` marker shipped** (PEP 561) — the fully mypy-typed public API now announces its inline types to IDEs and downstream consumers instead of being treated as untyped.
 
 ## [0.3.1] - 2026-08-22
 

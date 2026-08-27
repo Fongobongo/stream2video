@@ -299,7 +299,7 @@ class TestCutEncodeResumeDuration:
             # home so the REAL resume_part_ok chain runs.
             patch("stream2video.concat.probing._media_is_valid", return_value=True),
             patch("stream2video.concat.probing._ffprobe_duration_ok", return_value=False),
-                patch("stream2video.concat._ensure_fresh_work_dir"),
+            patch("stream2video.concat._ensure_fresh_work_dir"),
         ):
             _run_cut_then_encode(
                 video,

@@ -7,7 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from stream2video import concat as _c
-from stream2video.concat.constants import _FINAL_CONCAT_TIMEOUT
+from stream2video.concat.constants import _FINAL_CONCAT_TIMEOUT, scaled_part_timeout
 from stream2video.concat.options import ConcatOptions, coerce_options
 from stream2video.config import OUTPUT_FORMAT_SPECS
 from stream2video.tools import ffmpeg_path
@@ -218,7 +218,9 @@ def _run_audio_extract(
                 min_part_bytes=options.min_part_bytes,
                 require_video=False,
                 require_audio=True,
-                timeout_seconds=float(options.segment_encode_timeout),
+                # Scale with the part's own length (benchmark 2026-08
+                # finding #1).
+                timeout_seconds=scaled_part_timeout(options.segment_encode_timeout, dur),
                 cancel_callback=cancel_callback,
                 low_process_priority=options.low_process_priority,
                 rlimit_as_mb=options.rlimit_as_mb,
@@ -259,7 +261,9 @@ def _run_audio_extract(
                     str(seg_path),
                 ],
                 progress_callback=seg_prog,
-                timeout=options.segment_encode_timeout,
+                # Scale with the segment's own length (benchmark 2026-08
+                # finding #1); stall_kill still catches hangs.
+                timeout=scaled_part_timeout(options.segment_encode_timeout, dur),
                 label=label_text,
                 cancel_callback=cancel_callback,
                 memory_monitor=_c._new_memory_monitor(options.memory_monitor_factory, label_text),

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import signal
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -112,8 +113,7 @@ _VALID_LOG_FORMATS = ("rich", "json")
 # rejection — it used to be spelled out twice (eager --doctor path and
 # main()) and could drift.
 _LOGGING_SESSION_BUSY_MSG = (
-    "[red]Error:[/red] another embedded CLI session is active; "
-    "logging sessions cannot overlap"
+    "[red]Error:[/red] another embedded CLI session is active; logging sessions cannot overlap"
 )
 
 
@@ -287,6 +287,46 @@ def _doctor_callback(ctx: typer.Context, param: Any, value: bool) -> bool:
     return value
 
 
+@contextlib.contextmanager
+def _utf8_stdio() -> Iterator[None]:
+    """Reconfigure stdout/stderr to UTF-8 for the duration of a CLI run,
+    restoring the original encoding + error policy on exit.
+
+    Redirected/piped output on Windows decodes via the OEM/ANSI
+    codepage (cp1251/cp866 on ru systems), which cannot encode the
+    ✓/✗/—/→ glyphs the Rich console and pipeline summary emit — the
+    write raises ``UnicodeEncodeError`` AFTER the work is done and the
+    run is reported as failed (benchmark 2026-08, finding: dry-run and
+    every piped invocation crashed on the final summary). ``errors=
+    "replace"`` guarantees a glyph the terminal still cannot render
+    degrades to ``?`` instead of crashing. Streams without
+    ``reconfigure`` (pytest's captured stdout) are skipped. The snapshot
+    is restored so an embedded host that outlives the CLI call does not
+    keep the doctor's/run's encoding forever (audit round 22 P4).
+    """
+    snapshots: list[tuple[Any, str | None, Any]] = []
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            snapshots.append((stream, stream.encoding, getattr(stream, "errors", "strict")))
+            reconfigure(encoding="utf-8", errors="replace")
+        except (ValueError, OSError):
+            pass
+    try:
+        yield
+    finally:
+        for stream, encoding, errors in snapshots:
+            reconfigure = getattr(stream, "reconfigure", None)
+            if reconfigure is None:
+                continue
+            try:
+                reconfigure(encoding=encoding, errors=errors)
+            except (ValueError, OSError):
+                pass
+
+
 def _run_doctor(config_file: Path | None = None, full: bool = False) -> bool:
     """Print environment diagnostics; return True iff all critical checks pass.
 
@@ -300,29 +340,8 @@ def _run_doctor(config_file: Path | None = None, full: bool = False) -> bool:
     in standalone mode exits immediately, which is why the leak was
     invisible until an embedded host ran it.
     """
-    _stream_snapshots: list[tuple[Any, str | None, Any]] = []
-    for _stream in (sys.stdout, sys.stderr):
-        _reconfigure = getattr(_stream, "reconfigure", None)
-        if _reconfigure is None:
-            continue  # e.g. pytest's captured stream
-        try:
-            _stream_snapshots.append(
-                (_stream, _stream.encoding, getattr(_stream, "errors", "strict"))
-            )
-            _reconfigure(encoding="utf-8", errors="replace")
-        except (ValueError, OSError):
-            pass
-    try:
+    with _utf8_stdio():
         return _doctor_impl(config_file, full=full)
-    finally:
-        for _stream, _encoding, _errors in _stream_snapshots:
-            _reconfigure = getattr(_stream, "reconfigure", None)
-            if _reconfigure is None:
-                continue
-            try:
-                _reconfigure(encoding=_encoding, errors=_errors)
-            except (ValueError, OSError):
-                pass
 
 
 class _NullConsole:
@@ -392,22 +411,14 @@ def _doctor_impl(config_file: Path | None = None, full: bool = False) -> bool:
             output_dir=Path(str(snapshot.get("output_dir") or ".")),
             method=str(snapshot.get("method", CONFIG_DEFAULTS["method"])),
             encoder=str(snapshot.get("encoder", CONFIG_DEFAULTS["encoder"])),
-            video_quality=str(
-                snapshot.get("video_quality", CONFIG_DEFAULTS["video_quality"])
-            ),
-            audio_quality=str(
-                snapshot.get("audio_quality", CONFIG_DEFAULTS["audio_quality"])
-            ),
+            video_quality=str(snapshot.get("video_quality", CONFIG_DEFAULTS["video_quality"])),
+            audio_quality=str(snapshot.get("audio_quality", CONFIG_DEFAULTS["audio_quality"])),
             download_quality=str(
                 snapshot.get("download_quality", CONFIG_DEFAULTS["download_quality"])
             ),
             force=bool(snapshot.get("force", CONFIG_DEFAULTS["force"])),
-            per_video_dir=bool(
-                snapshot.get("per_video_dir", CONFIG_DEFAULTS["per_video_dir"])
-            ),
-            delete_after=bool(
-                snapshot.get("delete_after", CONFIG_DEFAULTS["delete_after"])
-            ),
+            per_video_dir=bool(snapshot.get("per_video_dir", CONFIG_DEFAULTS["per_video_dir"])),
+            delete_after=bool(snapshot.get("delete_after", CONFIG_DEFAULTS["delete_after"])),
         )
         pipe_cfg = build_pipeline_config_from_snapshot(params, snapshot)
         return validate_pipeline_config(pipe_cfg)
@@ -653,8 +664,7 @@ def _doctor_impl(config_file: Path | None = None, full: bool = False) -> bool:
                     "fail",
                     f"User defaults: {user_cfg} [red](pipeline validation: "
                     f"{'; '.join(pipe_errors)})[/red]",
-                    f"User defaults: {user_cfg} "
-                    f"(pipeline validation: {'; '.join(pipe_errors)})",
+                    f"User defaults: {user_cfg} (pipeline validation: {'; '.join(pipe_errors)})",
                 )
                 all_critical_ok = False
             elif not (unknown_keys or rejected):
@@ -1608,6 +1618,19 @@ def main(
                     return None
 
                 def _consent() -> bool:
+                    # Non-interactive stdin (piped, or inherited by a
+                    # background job): typer.confirm blocks FOREVER
+                    # waiting for input that never arrives — an
+                    # open-but-silent stdin neither raises EOF nor
+                    # returns, so the except-EOF guard below never
+                    # fires (benchmark 2026-08: a background matrix run
+                    # hung here for hours holding the project lock).
+                    # Refuse the fallback without prompting: ``ask``
+                    # must not silently switch encoders, and a headless
+                    # run must not hang.
+                    _isatty = getattr(sys.stdin, "isatty", None)
+                    if _isatty is None or not _isatty():
+                        return False
                     try:
                         return typer.confirm(
                             f"Selected encoder {encoder!r} is unavailable or failed. "
@@ -1810,6 +1833,12 @@ def main(
                     # Opt-in legacy project rename (audit round 28 P9).
                     # JSON log mode keeps stdout line-per-record — a
                     # prompt would corrupt it, so non-JSON runs only.
+                    # Non-interactive stdin: typer.confirm blocks forever
+                    # on an open-but-silent stdin (see _consent) — skip
+                    # the rename, matching the default=False answer.
+                    _isatty = getattr(sys.stdin, "isatty", None)
+                    if _isatty is None or not _isatty():
+                        return False
                     return bool(
                         typer.confirm(
                             f"Legacy project directory found: {legacy}\n"
@@ -2060,5 +2089,22 @@ def main(
         logging_session_cm.__exit__(*sys.exc_info())
 
 
+def _cli_entry() -> None:
+    """Console-script / ``__main__`` entry point: run the Typer app with
+    stdout/stderr reconfigured to UTF-8 for the whole invocation.
+
+    Wrapping ``app()`` (rather than re-indenting the ~800-line ``main``
+    body) puts the encoding fix around EVERY surface — the pipeline run,
+    the eager ``--doctor`` / ``--version`` callbacks, and Typer's own
+    usage/error output — so a glyph in any of them can no longer crash a
+    piped/redirected run on a non-UTF-8 console (benchmark 2026-08:
+    every piped invocation died on the final summary with
+    ``UnicodeEncodeError``). The console scripts in pyproject.toml point
+    here for the same reason.
+    """
+    with _utf8_stdio():
+        app()
+
+
 if __name__ == "__main__":
-    app()
+    _cli_entry()

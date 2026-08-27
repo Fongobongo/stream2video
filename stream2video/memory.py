@@ -102,18 +102,41 @@ def check_memory_reserve(
 
 
 def _process_rss_mb(pid: int) -> float | None:
-    """Return the RSS of ``pid`` in MB, or None if not measurable."""
+    """Return the combined RSS of ``pid`` and ALL its descendants in MB,
+    or None if not measurable.
+
+    The whole process tree is summed (benchmark 2026-08 P2): on Windows
+    the ffmpeg on PATH is often a package-manager SHIM (Chocolatey's
+    ``ffmpeg.EXE`` wrapper) and yt-dlp runs under the venv ``python.exe``
+    launcher — the pid the pipeline holds is the tiny launcher (~13 MB)
+    while the real worker doing the encode is its child (measured up to
+    1363 MB). Measuring only the pid under-reported RSS by two orders
+    of magnitude, so the budget guard never fired and the peak-RSS log
+    line reported 13 MB for a 1.3 GB encode. Descendants are collected
+    recursively; one that exits mid-walk (``NoSuchProcess``) or denies
+    access (``AccessDenied``) is skipped, not fatal — a partial sum is
+    still closer to the truth than the launcher alone.
+    """
     if not _HAS_PSUTIL:
         return None
     try:
         proc = psutil.Process(pid)
-        mem = proc.memory_info()
-        return mem.rss / (1024 * 1024)
+        family = [proc, *proc.children(recursive=True)]
     except (psutil.NoSuchProcess, psutil.AccessDenied):
         return None
     except Exception:
-        logger.debug(f"psutil RSS read for pid={pid} failed", exc_info=True)
+        logger.debug(f"psutil process tree read for pid={pid} failed", exc_info=True)
         return None
+    total = 0
+    for member in family:
+        try:
+            total += member.memory_info().rss
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        except Exception:
+            logger.debug(f"psutil RSS read for pid={member.pid} failed", exc_info=True)
+            continue
+    return total / (1024 * 1024)
 
 
 class MemoryMonitor:

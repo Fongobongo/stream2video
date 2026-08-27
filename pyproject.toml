@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "stream2video"
-version = "0.3.1"
+version = "0.3.2"
 description = "CLI tool to compress stream recordings by removing silence"
 readme = "README.md"
 license = {text = "MIT"}
@@ -61,9 +61,9 @@ monitor = [
 # The import package stays ``stream2video`` (no settings/data migration);
 # the legacy command names below are kept as deprecated aliases so
 # existing scripts and muscle memory keep working.
-silencecut = "stream2video.cli:app"
+silencecut = "stream2video.cli:_cli_entry"
 silencecut-gui = "stream2video.gui:main"
-stream2video = "stream2video.cli:app"
+stream2video = "stream2video.cli:_cli_entry"
 stream2video-gui = "stream2video.gui:main"
 
 [tool.setuptools.package-data]

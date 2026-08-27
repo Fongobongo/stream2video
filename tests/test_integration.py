@@ -1434,6 +1434,84 @@ class TestSegmentResumeSkipCrashArtifact:
         )
 
 
+class TestSplitLongSegments:
+    """Benchmark 2026-08 finding #7: the ffmpeg 9.x concat filter loses
+    the video stream when one ``trim`` passes a very long stream with an
+    audio chain. ``_split_long_segments`` breaks long keep blocks into
+    contiguous sub-trims so no single trim exceeds the safe length."""
+
+    def _split(self, chunk, max_trim=300.0):
+        from stream2video.concat.batch import _split_long_segments
+
+        return _split_long_segments(chunk, max_trim)
+
+    def test_short_segments_pass_through(self):
+        chunk = [(0.0, 2.0), (5.0, 60.0), (100.0, 399.0)]
+        assert self._split(chunk) == chunk
+
+    def test_exact_boundary_not_split(self):
+        # Exactly max_trim is allowed (the trigger is strictly longer).
+        assert self._split([(0.0, 300.0)]) == [(0.0, 300.0)]
+
+    def test_long_segment_split_into_contiguous_pieces(self):
+        from itertools import pairwise
+
+        out = self._split([(0.0, 12536.0)])
+        # All pieces contiguous, cover the full range, each <= max_trim.
+        assert out[0][0] == 0.0
+        assert out[-1][1] == 12536.0
+        for prev, nxt in pairwise(out):
+            assert abs(prev[1] - nxt[0]) < 1e-9
+        for s, e in out:
+            assert e - s <= 300.0 + 1e-9
+        # 12536 / 300 -> 41 full pieces + a tail.
+        assert len(out) == 42
+
+    def test_total_duration_preserved(self):
+        chunk = [(0.0, 12536.0), (13000.0, 13005.0)]
+        out = self._split(chunk)
+        assert sum(e - s for s, e in out) == sum(e - s for s, e in chunk)
+
+    def test_mixed_chunk_preserves_order(self):
+        chunk = [(0.0, 1.0), (10.0, 700.0), (800.0, 801.0)]
+        out = self._split(chunk)
+        assert out[0] == (0.0, 1.0)
+        assert out[-1] == (800.0, 801.0)
+        # The 690 s middle segment splits into 300 + 300 + 90.
+        assert out[1] == (10.0, 310.0)
+        assert out[2] == (310.0, 610.0)
+        assert out[3] == (610.0, 700.0)
+
+
+class TestScaledPartTimeout:
+    """Benchmark 2026-08 finding #1: a flat 600 s segment-encode timeout
+    killed a legitimate 3.5-hour keep-block encode. The effective timeout
+    must scale with the part's own duration."""
+
+    def _scaled(self, base, dur):
+        from stream2video.concat.constants import scaled_part_timeout
+
+        return scaled_part_timeout(base, dur)
+
+    def test_short_part_keeps_base(self):
+        # A 2 s part must not inherit a multi-hour cap.
+        assert self._scaled(600, 2.0) == 600.0
+
+    def test_long_part_scales_with_duration(self):
+        # 12536 s keep block: scaled well past the old flat 600 s cap.
+        assert self._scaled(600, 12536.0) > 12536.0
+        assert self._scaled(600, 12536.0) == 12536.0 * 6.0
+
+    def test_never_below_base(self):
+        assert self._scaled(600, 0.0) == 600.0
+        assert self._scaled(600, -5.0) == 600.0
+
+    def test_boundary_where_scaling_overtakes_base(self):
+        # duration * 6 == 600 at duration == 100 s.
+        assert self._scaled(600, 100.0) == 600.0
+        assert self._scaled(600, 101.0) == 101.0 * 6.0
+
+
 class TestBatchResumeSkipCrashArtifact:
     """Resume/failure: crash mid-batch.
 
@@ -1712,8 +1790,8 @@ class TestCutThenEncodeCutPhaseProtection:
             # provides). Phase-3 mux (``-c copy`` → output) also uses
             # ``_run_ffmpeg`` since the review fix wires the real mux
             # progress through its progress_callback — keep
-                        patch("stream2video.concat._run_ffmpeg", side_effect=fake_ffmpeg_helper),
-                patch("stream2video.concat._run_final_concat"),
+            patch("stream2video.concat._run_ffmpeg", side_effect=fake_ffmpeg_helper),
+            patch("stream2video.concat._run_final_concat"),
             # The unified resume gate rejects every part → each keep
             # segment must be re-cut/encoded.
             patch("stream2video.concat.resume_part_ok", return_value=False),
@@ -1755,7 +1833,7 @@ class TestCutThenEncodeCutPhaseProtection:
             # both are mocked as no-ops so the
             # test only observes the deliberate failure in phase 1.
             patch("stream2video.concat._run_ffmpeg", side_effect=failed_helper),
-                patch("stream2video.concat._ensure_fresh_work_dir"),
+            patch("stream2video.concat._ensure_fresh_work_dir"),
             pytest.raises(ConcatError, match="cut phase segment"),
         ):
             _run_cut_then_encode(
@@ -1790,7 +1868,7 @@ class TestCutThenEncodeCutPhaseProtection:
             # as a no-op (the test never reaches phase 3 because the
             # cut phase aborts first).
             patch("stream2video.concat._run_ffmpeg", side_effect=cancelled_helper),
-                patch("stream2video.concat._ensure_fresh_work_dir"),
+            patch("stream2video.concat._ensure_fresh_work_dir"),
             pytest.raises(CancelledError),
         ):
             _run_cut_then_encode(
@@ -1823,7 +1901,7 @@ class TestCutThenEncodeCutPhaseProtection:
             # mock the phase-3 runner as a no-op so the test never
             # exercises phase-3.
             patch("stream2video.concat._run_ffmpeg", side_effect=timeout_helper),
-                patch("stream2video.concat._ensure_fresh_work_dir"),
+            patch("stream2video.concat._ensure_fresh_work_dir"),
             pytest.raises(FFmpegError, match="timeout"),
         ):
             _run_cut_then_encode(

@@ -215,9 +215,7 @@ def user_default_overrides(effective: dict[str, Any] | None = None) -> frozenset
     :func:`apply_preset` must protect.
     """
     eff = effective_defaults() if effective is None else effective
-    return frozenset(
-        k for k, v in eff.items() if k in CONFIG_DEFAULTS and v != CONFIG_DEFAULTS[k]
-    )
+    return frozenset(k for k, v in eff.items() if k in CONFIG_DEFAULTS and v != CONFIG_DEFAULTS[k])
 
 
 # Numeric bounds, derived from the PARAM_SPECS min/max column (audit

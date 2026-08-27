@@ -124,3 +124,79 @@ def test_rss_soft_limit_warns_without_cancelling(monkeypatch):
 
     assert cancelled == []
     assert monitor.hard_exceeded is False
+
+
+class _FakeMemInfo:
+    def __init__(self, rss: int):
+        self.rss = rss
+
+
+class _FakeProc:
+    def __init__(self, pid: int, rss: int, children: list[_FakeProc] | None = None):
+        self.pid = pid
+        self._rss = rss
+        self._children = children or []
+
+    def memory_info(self) -> _FakeMemInfo:
+        return _FakeMemInfo(self._rss)
+
+    def children(self, recursive: bool = False) -> list[_FakeProc]:
+        if not recursive:
+            return list(self._children)
+        out: list[_FakeProc] = []
+        for child in self._children:
+            out.append(child)
+            out.extend(child.children(recursive=True))
+        return out
+
+
+class _FakePsutil:
+    NoSuchProcess = type("NoSuchProcess", (Exception,), {})
+    AccessDenied = type("AccessDenied", (Exception,), {})
+
+    def __init__(self, root: _FakeProc):
+        self._root = root
+
+    def Process(self, pid: int) -> _FakeProc:
+        if pid != self._root.pid:
+            raise self.NoSuchProcess(pid)
+        return self._root
+
+
+def test_process_rss_sums_whole_tree(monkeypatch):
+    """Benchmark 2026-08 P2: the watched pid is often a shim/launcher
+    (~13 MB) whose CHILD is the real ffmpeg (~1.3 GB). Only summing the
+    whole tree measures the true footprint."""
+    MB = 1024 * 1024
+    grandchild = _FakeProc(pid=30, rss=50 * MB)
+    child = _FakeProc(pid=20, rss=1200 * MB, children=[grandchild])
+    root = _FakeProc(pid=10, rss=13 * MB, children=[child])
+    monkeypatch.setattr(memory, "_HAS_PSUTIL", True)
+    monkeypatch.setattr(memory, "psutil", _FakePsutil(root))
+
+    rss = memory._process_rss_mb(10)
+    assert rss is not None
+    assert abs(rss - (13 + 1200 + 50)) < 0.001
+
+
+def test_process_rss_skips_gone_child(monkeypatch):
+    """A child that exits mid-walk must not abort the reading."""
+
+    class _GoneChild(_FakeProc):
+        def memory_info(self) -> _FakeMemInfo:
+            raise memory.psutil.NoSuchProcess(self.pid)
+
+    MB = 1024 * 1024
+    root = _FakeProc(pid=10, rss=13 * MB, children=[_GoneChild(pid=20, rss=0)])
+    monkeypatch.setattr(memory, "_HAS_PSUTIL", True)
+    monkeypatch.setattr(memory, "psutil", _FakePsutil(root))
+
+    rss = memory._process_rss_mb(10)
+    assert rss is not None and abs(rss - 13) < 0.001
+
+
+def test_process_rss_none_for_gone_root(monkeypatch):
+    monkeypatch.setattr(memory, "_HAS_PSUTIL", True)
+    monkeypatch.setattr(memory, "psutil", _FakePsutil(_FakeProc(pid=10, rss=0)))
+
+    assert memory._process_rss_mb(999) is None
