@@ -1435,13 +1435,15 @@ class TestSegmentResumeSkipCrashArtifact:
 
 
 class TestSplitLongSegments:
-    """Benchmark 2026-08 finding #7: the ffmpeg 9.x concat filter loses
-    the video stream when one ``trim`` passes a very long stream with an
+    """Benchmark 2026-08 findings #7/#8: the ffmpeg 9.x concat filter loses
+    the video stream when one input passes a very long stream with an
     audio chain. ``_split_long_segments`` breaks long keep blocks into
-    contiguous sub-trims so no single trim exceeds the safe length."""
+    contiguous sub-segments so no single concat-filter input exceeds the
+    safe length. Shared by both concat-filter paths (batch ``trim`` and
+    segment+gapless long part)."""
 
     def _split(self, chunk, max_trim=300.0):
-        from stream2video.concat.batch import _split_long_segments
+        from stream2video.concat.constants import _split_long_segments
 
         return _split_long_segments(chunk, max_trim)
 
@@ -1481,6 +1483,108 @@ class TestSplitLongSegments:
         assert out[1] == (10.0, 310.0)
         assert out[2] == (310.0, 610.0)
         assert out[3] == (610.0, 700.0)
+
+
+class TestSegmentAppliesSplitLongSegments:
+    """Benchmark 2026-08 finding #8: segment+gapless fed a 3.5-hour keep
+    block to the concat-filter join as ONE very-long input and lost 80% of
+    the frames. ``_run_segment_concat`` must split long keep blocks (same
+    ``_split_long_segments`` guard as batch) BEFORE the manifest and encode
+    loop, so every part handed to the join is short."""
+
+    def test_long_keep_block_is_encoded_as_split_segments(self, tmp_path: Path):
+        """A single 700 s keep block must be encoded as 3 split segments
+        (300 + 300 + 100), not one long segment."""
+        from unittest.mock import patch
+
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"fake video data")
+        output = tmp_path / "out.mp4"
+        keep = [(0.0, 700.0)]
+
+        # _ensure_fresh_work_dir is mocked below, so create the seg dir it
+        # would normally create (fresh encode — no pre-existing parts).
+        seg_dir = tmp_path / f"_{output.stem}_segments"
+        seg_dir.mkdir()
+
+        encode_calls: list[str] = []
+
+        def fake_run_ffmpeg(cmd, *args, **kwargs):
+            out = str(cmd[-1])
+            if out.endswith(".mp4") and "seg_" in out:
+                encode_calls.append(out)
+                Path(out).write_bytes(b"re-encoded valid mp4")
+            return None
+
+        with (
+            patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
+            # Force every part to be encoded (no resume skip).
+            patch("stream2video.concat.resume_part_ok", return_value=False),
+            patch("stream2video.concat._run_final_concat"),
+            patch("stream2video.concat._run_gapless_segment_concat"),
+            patch("stream2video.concat._ensure_fresh_work_dir"),
+        ):
+            from stream2video.concat import _run_segment_concat
+
+            _run_segment_concat(
+                video,
+                keep,
+                output,
+                "libx264",
+                ["-preset", "medium"],
+                None,  # progress_callback
+                None,  # cancel_callback
+            )
+
+        assert len(encode_calls) == 3, (
+            f"Expected 3 split-segment encodes for a 700s keep block, "
+            f"got {len(encode_calls)}: {encode_calls}"
+        )
+
+    def test_short_keep_blocks_are_not_split(self, tmp_path: Path):
+        """Keep blocks at/under the threshold encode one-to-one (typical
+        content is untouched by the split)."""
+        from unittest.mock import patch
+
+        video = tmp_path / "src.mp4"
+        video.write_bytes(b"fake video data")
+        output = tmp_path / "out.mp4"
+        keep = [(0.0, 2.0), (5.0, 60.0), (100.0, 300.0)]
+
+        seg_dir = tmp_path / f"_{output.stem}_segments"
+        seg_dir.mkdir()
+
+        encode_calls: list[str] = []
+
+        def fake_run_ffmpeg(cmd, *args, **kwargs):
+            out = str(cmd[-1])
+            if out.endswith(".mp4") and "seg_" in out:
+                encode_calls.append(out)
+                Path(out).write_bytes(b"re-encoded valid mp4")
+            return None
+
+        with (
+            patch("stream2video.concat._run_ffmpeg", side_effect=fake_run_ffmpeg),
+            patch("stream2video.concat.resume_part_ok", return_value=False),
+            patch("stream2video.concat._run_final_concat"),
+            patch("stream2video.concat._run_gapless_segment_concat"),
+            patch("stream2video.concat._ensure_fresh_work_dir"),
+        ):
+            from stream2video.concat import _run_segment_concat
+
+            _run_segment_concat(
+                video,
+                keep,
+                output,
+                "libx264",
+                ["-preset", "medium"],
+                None,
+                None,
+            )
+
+        assert len(encode_calls) == 3, (
+            f"Expected 3 one-to-one encodes (no split), got {len(encode_calls)}: {encode_calls}"
+        )
 
 
 class TestScaledPartTimeout:

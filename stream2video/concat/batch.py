@@ -20,7 +20,8 @@ from typing import Any
 from stream2video import concat as _c
 from stream2video.concat.constants import (
     _BATCH_CHUNK_MIN,
-    _BATCH_TRIM_MAX,
+    _CONCAT_TRIM_MAX,
+    _split_long_segments,
     scaled_part_timeout,
 )
 from stream2video.concat.options import ConcatOptions, coerce_options
@@ -28,35 +29,6 @@ from stream2video.tools import ffmpeg_path, filter_complex_script_args
 from stream2video.utils import get_video_start_time
 
 logger = logging.getLogger(__name__)
-
-
-def _split_long_segments(
-    chunk: list[tuple[float, float]], max_trim: float
-) -> list[tuple[float, float]]:
-    """Split keep segments longer than ``max_trim`` into contiguous
-    sub-segments of at most ``max_trim`` seconds (benchmark 2026-08,
-    finding #7).
-
-    The ffmpeg 9.x concat filter loses/livelocks the video stream when
-    ONE ``trim`` passes a very long stream alongside its audio chain.
-    The pieces produced here are adjacent in the source, so the concat
-    filter glues them back into identical content — the split is
-    lossless. Segments at or under ``max_trim`` pass through unchanged,
-    so typical content (keep segments of seconds to a minute) is
-    untouched. Pure and side-effect free so the split can be unit
-    tested without running ffmpeg.
-    """
-    out: list[tuple[float, float]] = []
-    for s, e in chunk:
-        if e - s <= max_trim:
-            out.append((s, e))
-            continue
-        cur = s
-        while e - cur > max_trim:
-            out.append((cur, cur + max_trim))
-            cur += max_trim
-        out.append((cur, e))
-    return out
 
 
 def _run_batch_concat(
@@ -274,11 +246,11 @@ def _run_batch_concat(
             # blocks into contiguous sub-trims. Chunking, the manifest
             # and resume are untouched (they still see the original
             # ``chunk``); only the filter graph expands.
-            graph_segs = _split_long_segments(chunk, _BATCH_TRIM_MAX)
+            graph_segs = _split_long_segments(chunk, _CONCAT_TRIM_MAX)
             if len(graph_segs) != len(chunk):
                 logger.info(
                     f"batch chunk {ci}: split long keep block(s) into "
-                    f"{len(graph_segs)} sub-trims (max {_BATCH_TRIM_MAX:.0f}s "
+                    f"{len(graph_segs)} sub-trims (max {_CONCAT_TRIM_MAX:.0f}s "
                     "each) to avoid the ffmpeg concat-filter frame loss"
                 )
 

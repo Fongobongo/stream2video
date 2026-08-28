@@ -25,17 +25,20 @@ _BATCH_CHUNK_SIZE = 40
 # Minimum chunk size used for small files that would produce too many
 # tiny chunks; also protects against zero-length chunk lists.
 _BATCH_CHUNK_MIN = 5
-# Maximum length (seconds) of a single ``trim`` inside a batch chunk
-# filter graph (benchmark 2026-08, finding #7): ffmpeg 9.x loses or
-# livelocks the VIDEO stream of a concat-filter graph when one trim
-# passes a very long stream alongside its audio chain (a 12536 s trim
-# truncated the output to 2.9% of its frames; the same graph with the
-# trim capped at 347 s was frame-exact). Long keep blocks are split
-# into contiguous sub-trims of at most this length before the graph is
-# built — contiguous pieces concat back to identical content. 300 s
-# sits below the proven-safe 347 s with margin, and far above typical
-# keep segments (seconds to a minute), so normal content is untouched.
-_BATCH_TRIM_MAX = 300.0
+# Maximum length (seconds) of a single stream passed through one
+# concat-filter input (benchmark 2026-08, findings #7 and #8): ffmpeg 9.x
+# loses or livelocks the VIDEO stream of a concat-filter graph when ONE
+# input carries a very long stream alongside its audio chain (a 12536 s
+# trim truncated the output to 2.9% of its frames; the same graph with the
+# input capped at 347 s was frame-exact). Applies to BOTH concat-filter
+# paths: batch (a long ``trim`` in the chunk graph, finding #7) and
+# segment+gapless (a long encoded part fed as one concat-filter input,
+# finding #8). Long keep blocks are split into contiguous sub-segments of
+# at most this length before the graph is built — contiguous pieces concat
+# back to identical content. 300 s sits below the proven-safe 347 s with
+# margin, and far above typical keep segments (seconds to a minute), so
+# normal content is untouched.
+_CONCAT_TRIM_MAX = 300.0
 ENCODER_CHECK_TIMEOUT = 10
 _FINAL_CONCAT_TIMEOUT = 86400
 _SEGMENT_ENCODE_TIMEOUT = 600
@@ -62,6 +65,37 @@ def scaled_part_timeout(base_timeout: float, duration: float) -> float:
     finding #1). Pure — trivially unit-testable.
     """
     return max(float(base_timeout), max(0.0, float(duration)) * _SEGMENT_TIMEOUT_PER_SECOND)
+
+
+def _split_long_segments(
+    chunk: list[tuple[float, float]], max_trim: float
+) -> list[tuple[float, float]]:
+    """Split keep segments longer than ``max_trim`` into contiguous
+    sub-segments of at most ``max_trim`` seconds (benchmark 2026-08,
+    findings #7 and #8).
+
+    The ffmpeg 9.x concat filter loses/livelocks the video stream when ONE
+    input passes a very long stream alongside its audio chain. Shared by
+    both concat-filter paths: batch (a long ``trim`` in the chunk graph)
+    and segment+gapless (a long encoded part fed as one concat-filter
+    input). The pieces produced here are adjacent in the source, so the
+    concat filter glues them back into identical content — the split is
+    lossless. Segments at or under ``max_trim`` pass through unchanged, so
+    typical content (keep segments of seconds to a minute) is untouched.
+    Pure and side-effect free so the split can be unit tested without
+    running ffmpeg.
+    """
+    out: list[tuple[float, float]] = []
+    for s, e in chunk:
+        if e - s <= max_trim:
+            out.append((s, e))
+            continue
+        cur = s
+        while e - cur > max_trim:
+            out.append((cur, cur + max_trim))
+            cur += max_trim
+        out.append((cur, e))
+    return out
 
 
 _STDERR_TRUNCATE = 1000

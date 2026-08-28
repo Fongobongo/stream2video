@@ -7,7 +7,11 @@ from collections.abc import Callable
 from pathlib import Path
 
 from stream2video import concat as _c
-from stream2video.concat.constants import scaled_part_timeout
+from stream2video.concat.constants import (
+    _CONCAT_TRIM_MAX,
+    _split_long_segments,
+    scaled_part_timeout,
+)
 from stream2video.concat.options import ConcatOptions, coerce_options
 from stream2video.tools import ffmpeg_path
 
@@ -40,6 +44,18 @@ def _run_segment_concat(
     """
     options = coerce_options(options, legacy_kwargs)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Guard against the ffmpeg 9.x concat-filter frame-loss trigger
+    # (benchmark 2026-08, findings #7/#8): a keep block longer than
+    # ``_CONCAT_TRIM_MAX`` would otherwise be encoded as ONE long part and
+    # fed to the gapless concat-filter join as a single very-long input,
+    # which truncates/livelocks the video stream. Split long keep blocks
+    # into contiguous sub-segments BEFORE the manifest and encode loop so
+    # every part handed to the join is short. Contiguous pieces concat back
+    # to identical content (lossless); the manifest, resume and seg-file
+    # numbering all operate on the split list. Typical content (keep
+    # segments of seconds to a minute) passes through unchanged.
+    keep_segments = _split_long_segments(keep_segments, _CONCAT_TRIM_MAX)
 
     total_duration = sum(e - s for s, e in keep_segments)
     n_segs = len(keep_segments)
