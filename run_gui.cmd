@@ -54,6 +54,15 @@ if %errorlevel% equ 0 (
     exit /b 1
 )
 
+:: Offline prebuilt mode: _portable\python ships with all dependencies
+:: already installed (marker .s2v_offline). Skip venv creation and pip
+:: install entirely - no network access needed, launch directly.
+if exist "%PORT_DIR%\python\.s2v_offline" (
+    set "PYTHON=%PORT_DIR%\python\python.exe"
+    echo [+] Offline prebuilt environment detected
+    goto launch
+)
+
 :: Venv + deps
 if not exist "%PORT_DIR%\venv\" (
     echo ==^> Creating virtual environment...
@@ -92,6 +101,7 @@ if errorlevel 1 (
     echo [+] Dependencies already installed
 )
 
+:launch
 :: ---- Launch GUI ----
 echo ==^> Launching GUI...
 for %%e in ("%PYTHON%") do set "PYTHONW=%%~dpepythonw.exe"
