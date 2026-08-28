@@ -110,6 +110,112 @@ def _concat_filter_one_pass(
     )
 
 
+def _run_final_concat_demuxer_encode(
+    part_paths: list[Path],
+    output_path: Path,
+    vcodec: str,
+    vcodec_opts: list[str],
+    *,
+    audio_codec: str,
+    audio_opts: list[str],
+    total_duration: float,
+    progress_callback: Callable[[float], None] | None = None,
+    cancel_callback: Callable[[], bool] | None = None,
+    timeout: int,
+    label: str,
+    options: ConcatOptions | None = None,
+    **legacy_kwargs: object,
+) -> None:
+    """Final join via the **concat demuxer** with a full re-encode.
+
+    Benchmark 2026-08, findings #7/#8 follow-up: the ffmpeg 9.x
+    concat-filter bug (very long streams alongside audio get truncated
+    or livelocked — surfaced as a *fake* ``ENOSPC``, error -28, at a
+    content position unrelated to actual disk space) also fires at the
+    gapless tree's final level, where L0 intermediates grouped by
+    *input count* can still be hours long each. Splitting the final
+    level into more, shorter parts does not help — the demuxer path
+    below avoids the concat filter entirely, so no single-pass stream
+    length can re-trigger the bug.
+
+    Semantics preserved vs ``_concat_filter_one_pass``:
+    - both streams are re-encoded (video with the caller's codec,
+      audio with the caller's codec/opts) — gapless priming is added
+      once at the final mux, not once per part, so audio is seam-free;
+    - the demuxer hands the decoder a *sequential* packet stream
+      (one ``-i concat.txt``), which ffmpeg 9.x handles correctly at
+      any length;
+    - ``-shortest`` keeps the tail honest (same rationale as the filter
+      path: per-part encode rounding can leave video/audio a fraction
+      of a frame apart);
+    - progress is mapped from the output time exactly like the filter
+      path, so the caller's 0.98..1.0 slice contract is unchanged.
+    """
+    options = coerce_options(options, legacy_kwargs)
+    work_dir = part_paths[0].parent if part_paths else output_path.parent
+    list_path = work_dir / "concat_final.txt"
+    with open(list_path, "w", encoding="utf-8") as lf:
+        for part in part_paths:
+            lf.write(f"file {_c._quote_concat_path(part.name)}\n")
+
+    def _prog(seconds: float) -> None:
+        if progress_callback and total_duration > 0:
+            progress_callback(min(seconds / total_duration, 1.0))
+
+    _movflags: list[str] = (
+        ["-movflags", "+faststart"] if output_path.suffix.lower() == ".mp4" else []
+    )
+    try:
+        _c._run_ffmpeg(
+            [
+                ffmpeg_path(),
+                "-y",
+                "-loglevel",
+                "error",
+                "-progress",
+                "pipe:1",
+                # Demuxer flags before -i (same placement rule as
+                # final_concat.py): +genpts rebuilds PTS across the
+                # L0/L1 seam discontinuities.
+                "-fflags",
+                "+genpts",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(list_path),
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a:0?",
+                "-c:v",
+                vcodec,
+                *vcodec_opts,
+                "-c:a",
+                audio_codec,
+                *audio_opts,
+                "-shortest",
+                *_movflags,
+                str(output_path),
+            ],
+            progress_callback=_prog,
+            timeout=timeout,
+            label=label,
+            cancel_callback=cancel_callback,
+            memory_monitor=_c._new_memory_monitor(options.memory_monitor_factory, label),
+            stall_kill=options.stall_kill,
+            stall_warning=options.stall_warning,
+            low_process_priority=options.low_process_priority,
+            rlimit_as_mb=options.rlimit_as_mb,
+        )
+    finally:
+        try:
+            list_path.unlink(missing_ok=True)
+        except OSError as e:
+            logger.debug(f"could not remove concat list {list_path}: {e}")
+
+
 def _run_gapless_segment_concat(
     output_path: Path,
     part_paths: list[Path],
@@ -470,7 +576,15 @@ def _run_gapless_segment_concat(
         frac = max(0.0, min(1.0, seconds / total_duration))
         progress_callback(base + frac * span)
 
-    _c._concat_filter_one_pass(
+    # Final join: concat DEMUXER with re-encode (not the concat filter).
+    # The tree's L0/L1 intermediates are grouped by input count, so a
+    # single intermediate can still be hours long; feeding such parts
+    # through the concat filter re-triggers the ffmpeg 9.x stream-loss
+    # bug (findings #7/#8 — observed as a fake ENOSPC at the final pass).
+    # The demuxer reads parts sequentially, which ffmpeg 9.x handles at
+    # any length. Video + audio are still re-encoded here, so gapless
+    # priming is added once at this final mux (not per part).
+    _c._run_final_concat_demuxer_encode(
         current,
         output_path,
         vcodec,

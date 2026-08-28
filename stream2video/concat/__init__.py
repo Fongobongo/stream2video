@@ -66,6 +66,7 @@ from stream2video.concat.fallback import _run_with_fallback, _with_libx264_fallb
 from stream2video.concat.final_concat import _run_final_concat
 from stream2video.concat.gapless import (
     _concat_filter_one_pass,
+    _run_final_concat_demuxer_encode,
     _run_gapless_segment_concat,
 )
 from stream2video.concat.helpers import (
@@ -212,6 +213,7 @@ __all__ = [
     "_run_cut_then_encode",
     "_run_ffmpeg",
     "_run_final_concat",
+    "_run_final_concat_demuxer_encode",
     "_run_gapless_segment_concat",
     "_run_segment_concat",
     "_run_with_fallback",

@@ -220,12 +220,20 @@ def test_gapless_uses_tree_when_cmdline_would_exceed_windows_limit(tmp_path: Pat
 
     recorded_leaf_sizes: list[int] = []
     recorded_outputs: list[Path] = []
+    final_join: list[tuple[tuple[Path, ...], Path]] = []
 
     def fake_one_pass(part_paths, output_path, vcodec, vcodec_opts, **kwargs):
         recorded_leaf_sizes.append(len(part_paths))
         recorded_outputs.append(Path(output_path))
 
+    def fake_final_demuxer(part_paths, output_path, vcodec, vcodec_opts, **kwargs):
+        final_join.append((tuple(Path(p) for p in part_paths), Path(output_path)))
+
     monkeypatch.setattr(concat_mod, "_concat_filter_one_pass", fake_one_pass)
+    # The final join is now the concat DEMUXER (findings #7/#8: the
+    # filter re-triggers the ffmpeg 9.x stream-loss bug on long L0
+    # intermediates) — stub it so the test exercises only the tree.
+    monkeypatch.setattr(concat_mod, "_run_final_concat_demuxer_encode", fake_final_demuxer)
     monkeypatch.setattr(concat_mod, "_GAPLESS_MAX_INPUTS_PER_CALL", 2)
 
     parts = [tmp_path / f"seg_{i:06d}.mp4" for i in range(5)]
@@ -246,8 +254,74 @@ def test_gapless_uses_tree_when_cmdline_would_exceed_windows_limit(tmp_path: Pat
     # at L1 (1 leaf of 2 intermediates), then final. Every leaf ≤ 2.
     assert recorded_leaf_sizes, "no concat calls recorded"
     assert max(recorded_leaf_sizes) <= 2, recorded_leaf_sizes
-    # Final call target is the real output path.
-    assert recorded_outputs[-1] == out
+    # Final join goes through the DEMUXER helper, not the filter.
+    assert len(final_join) == 1, final_join
+    assert final_join[0][1] == out
+    # ...and the filter's last call is the last L1 intermediate, so
+    # every recorded filter output is an intermediate (L0_/L1_ name).
+    assert all(o.name.startswith(("L0_", "L1_")) for o in recorded_outputs), recorded_outputs
+
+
+def test_final_concat_demuxer_encode_builds_demuxer_cmdline(tmp_path: Path, monkeypatch):
+    """Findings #7/#8 follow-up: the gapless tree's final join must use
+    the concat DEMUXER (sequential packet stream — no concat filter
+    anywhere in the graph), re-encoding video and audio to the caller's
+    codecs. This records the argv the helper builds and asserts the
+    shape: ``-f concat -safe 0 -i <list>`` before the codec options, no
+    ``-filter_complex``, both streams re-encoded, ``-shortest``, and the
+    per-part list file written next to the parts."""
+    from stream2video import concat as concat_mod
+    from stream2video.concat import gapless as gapless_mod
+
+    recorded: dict = {}
+
+    def fake_run_ffmpeg(argv, **kwargs):
+        recorded["argv"] = list(argv)
+        # The helper unlinks the list in its finally-block — snapshot
+        # the content while it still exists.
+        li = argv.index("-i")
+        recorded["list"] = Path(argv[li + 1]).read_text(encoding="utf-8")
+
+    monkeypatch.setattr(concat_mod, "_run_ffmpeg", fake_run_ffmpeg)
+
+    parts = [tmp_path / f"L0_{i:05d}.mkv" for i in range(3)]
+    for p in parts:
+        p.write_bytes(b"\x00" * 2048)
+    out = tmp_path / "out.mp4"
+
+    gapless_mod._run_final_concat_demuxer_encode(
+        parts,
+        out,
+        "h264_mf",
+        ["-b:v", "3042k"],
+        audio_codec="aac",
+        audio_opts=["-b:a", "192k", "-ar", "48000", "-ac", "2"],
+        total_duration=90.0,
+        timeout=600,
+        label="test demuxer join",
+    )
+
+    argv = recorded["argv"]
+    # No concat filter anywhere — the bug trigger is the filter graph.
+    assert "-filter_complex" not in argv
+    # The demuxer list is the single input, opened before codecs.
+    f = argv.index("-f")
+    assert argv[f + 1] == "concat"
+    assert argv[f + 2] == "-safe" and argv[f + 3] == "0"
+    list_path = Path(argv[argv.index("-i") + 1])
+    assert list_path.name == "concat_final.txt"
+    assert list_path.parent == tmp_path
+    # The list enumerates every part, in order, basename-only.
+    lines = recorded["list"].splitlines()
+    assert lines == [f"file {p.name}" for p in parts]
+    # Both streams re-encoded with the caller's codecs.
+    assert "-c:v" in argv and argv[argv.index("-c:v") + 1] == "h264_mf"
+    assert "-b:v" in argv and argv[argv.index("-b:v") + 1] == "3042k"
+    assert argv[argv.index("-c:a") + 1] == "aac"
+    assert "-b:a" in argv
+    # Tail honesty + MP4 faststart.
+    assert "-shortest" in argv
+    assert "-movflags" in argv and argv[argv.index("-movflags") + 1] == "+faststart"
 
 
 @pytest.mark.skipif(
@@ -277,6 +351,9 @@ def test_gapless_tree_reuse_rejects_corrupted_intermediate_body(tmp_path: Path, 
 
     monkeypatch.setattr(concat_mod, "_concat_filter_one_pass", fake_one_pass)
     monkeypatch.setattr(concat_mod, "_GAPLESS_MAX_INPUTS_PER_CALL", 2)
+    # The final join is the concat demuxer (findings #7/#8 follow-up);
+    # stub it — this test exercises only the L0 reuse gate.
+    monkeypatch.setattr(concat_mod, "_run_final_concat_demuxer_encode", lambda *a, **k: None)
 
     parts = [tmp_path / f"seg_{i:06d}.mp4" for i in range(5)]
     for p in parts:
