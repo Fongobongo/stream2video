@@ -20,7 +20,10 @@ from stream2video.channel import (
     ChannelImportError,
     ChannelVod,
     _canonical_vod_url,
+    is_listing_url,
     is_twitch_channel_url,
+    is_youtube_channel_url,
+    is_youtube_playlist_url,
     parse_channel_selection,
     resolve_channel_vods,
     sort_channel_vods,
@@ -67,12 +70,234 @@ class TestIsTwitchChannelUrl:
         assert not is_twitch_channel_url("https://www.twitch.tv/" + "a" * 26 + "/videos")
 
 
+class TestIsYoutubeChannelUrl:
+    def test_handle_with_videos_tab(self):
+        assert is_youtube_channel_url("https://www.youtube.com/@NASA/videos")
+
+    def test_handle_bare_homepage(self):
+        # The channel home page IS the videos tab; a bare @handle means
+        # "the channel's videos".
+        assert is_youtube_channel_url("https://www.youtube.com/@NASA")
+
+    def test_handle_shorts_and_streams_tabs(self):
+        assert is_youtube_channel_url("https://www.youtube.com/@NASA/shorts")
+        assert is_youtube_channel_url("https://www.youtube.com/@NASA/streams")
+
+    def test_channel_id_form(self):
+        assert is_youtube_channel_url(
+            "https://www.youtube.com/channel/UCFDAuPUyGwC8mM8oLW1tFjw/videos"
+        )
+
+    def test_legacy_c_and_user_forms(self):
+        assert is_youtube_channel_url("https://www.youtube.com/c/Markiplier/videos")
+        assert is_youtube_channel_url(
+            "https://www.youtube.com/user/ PewDiePie/videos".replace(" ", "")
+        )
+
+    def test_mobile_host(self):
+        assert is_youtube_channel_url("https://m.youtube.com/@NASA/videos")
+
+    def test_watch_url_is_not_channel(self):
+        assert not is_youtube_channel_url("https://www.youtube.com/watch?v=abc123")
+
+    def test_playlist_is_not_channel(self):
+        assert not is_youtube_channel_url("https://www.youtube.com/playlist?list=PLabc123def456")
+
+    def test_twitch_is_not_youtube(self):
+        assert not is_youtube_channel_url("https://www.twitch.tv/nasa/videos")
+
+    def test_video_url_short_form_not_channel(self):
+        assert not is_youtube_channel_url("https://youtu.be/abc123")
+
+
+class TestIsYoutubePlaylistUrl:
+    def test_dedicated_playlist_page(self):
+        assert is_youtube_playlist_url(
+            "https://www.youtube.com/playlist?list=PL2aBzTdFySbziB9KGW3h5mYztYJPgiA2l"
+        )
+
+    def test_watch_link_with_list(self):
+        # Copied from the playlist UI: v= picks the video, list= names the
+        # playlist — listing the playlist is the natural meaning.
+        assert is_youtube_playlist_url(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL2aBzTdFySbziB9KGW3h5mYztYJPgiA2l"
+        )
+
+    def test_watch_link_without_list_is_not_playlist(self):
+        assert not is_youtube_playlist_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+
+    def test_channel_url_is_not_playlist(self):
+        assert not is_youtube_playlist_url("https://www.youtube.com/@NASA/videos")
+
+    def test_mobile_playlist(self):
+        assert is_youtube_playlist_url(
+            "https://m.youtube.com/playlist?list=PL2aBzTdFySbziB9KGW3h5mYztYJPgiA2l"
+        )
+
+
+class TestIsListingUrl:
+    def test_twitch_channel(self):
+        assert is_listing_url("https://www.twitch.tv/nasa/videos")
+
+    def test_youtube_channel(self):
+        assert is_listing_url("https://www.youtube.com/@NASA/videos")
+
+    def test_youtube_playlist(self):
+        assert is_listing_url("https://www.youtube.com/playlist?list=PLabcdefghij123456")
+
+    def test_single_video_is_not_listing(self):
+        assert not is_listing_url("https://www.youtube.com/watch?v=abc")
+        assert not is_listing_url("https://www.twitch.tv/videos/123")
+
+
+class TestYoutubeListing:
+    """YouTube channel/playlist listings via the shim: URL construction
+    (tabs, playlists) and the timestamp-powered date sort."""
+
+    YT_CHANNEL = "https://www.youtube.com/@somechannel/videos"
+    YT_PLAYLIST = "https://www.youtube.com/playlist?list=PLsomeplaylist123"
+
+    def _env(self, tmp_path: Path, monkeypatch) -> None:
+        import os
+
+        monkeypatch.setenv(
+            "PYTHONPATH", str(tmp_path) + os.pathsep + os.environ.get("PYTHONPATH", "")
+        )
+
+    def _shim(self, tmp_path: Path, body: str) -> None:
+        _fake_ytdlp_script(tmp_path, body)
+
+    def test_channel_videos_tab(self, tmp_path: Path, monkeypatch):
+        self._shim(
+            tmp_path,
+            """
+            import sys
+            url = [a for a in sys.argv if a.startswith("https://")][-1]
+            if url != "https://www.youtube.com/@somechannel/videos":
+                sys.stderr.write(f"bad listing url: {url}\\n")
+                sys.exit(1)
+            print("abc123::600.0::1000::1755500000::A video")
+            """,
+        )
+        self._env(tmp_path, monkeypatch)
+
+        (vod,) = resolve_channel_vods(self.YT_CHANNEL, 1)
+        assert vod.video_id == "abc123"
+        assert vod.url == "https://www.youtube.com/watch?v=abc123"
+        assert vod.timestamp == 1755500000
+
+    def test_shorts_tab_appends_category(self, tmp_path: Path, monkeypatch):
+        self._shim(
+            tmp_path,
+            """
+            import sys
+            url = [a for a in sys.argv if a.startswith("https://")][-1]
+            if not url.endswith("/shorts"):
+                sys.stderr.write(f"expected /shorts, got {url}\\n")
+                sys.exit(1)
+            print("xyz789::45.0::999::1755600000::A short")
+            """,
+        )
+        self._env(tmp_path, monkeypatch)
+
+        (vod,) = resolve_channel_vods(self.YT_CHANNEL, 1, category="shorts")
+        assert vod.video_id == "xyz789"
+
+    def test_playlist_lists_entries(self, tmp_path: Path, monkeypatch):
+        self._shim(
+            tmp_path,
+            """
+            import sys
+            url = [a for a in sys.argv if a.startswith("https://")][-1]
+            if "playlist?list=PLsomeplaylist123" not in url:
+                sys.stderr.write(f"expected playlist url, got {url}\\n")
+                sys.exit(1)
+            print("vid01::300.0::50::1755700000::Playlist entry one")
+            print("vid02::400.0::60::1755800000::Playlist entry two")
+            """,
+        )
+        self._env(tmp_path, monkeypatch)
+
+        vods = resolve_channel_vods(self.YT_PLAYLIST, 2)
+        assert [v.video_id for v in vods] == ["vid01", "vid02"]
+        assert vods[0].url == "https://www.youtube.com/watch?v=vid01"
+
+    def test_watch_list_url_resolves_playlist(self, tmp_path: Path, monkeypatch):
+        # The watch?v=...&list=... form lists that playlist.
+        self._shim(
+            tmp_path,
+            """
+            import sys
+            url = [a for a in sys.argv if a.startswith("https://")][-1]
+            if "playlist?list=PLsomeplaylist123" not in url:
+                sys.stderr.write(f"expected playlist url, got {url}\\n")
+                sys.exit(1)
+            print("vid01::300.0::50::NA::Entry")
+            """,
+        )
+        self._env(tmp_path, monkeypatch)
+
+        (vod,) = resolve_channel_vods(
+            "https://www.youtube.com/watch?v=vid01&list=PLsomeplaylist123", 1
+        )
+        assert vod.video_id == "vid01"
+
+    def test_playlist_rejects_category(self):
+        with pytest.raises(ChannelImportError, match="no tabs"):
+            resolve_channel_vods(self.YT_PLAYLIST, 1, category="shorts")
+
+    def test_twitch_type_on_youtube_rejected(self):
+        with pytest.raises(ChannelImportError, match="YouTube channels accept"):
+            resolve_channel_vods(self.YT_CHANNEL, 1, category="clips")
+
+
+class TestTimestampSort:
+    """``date`` prefers a real timestamp (YouTube) over the id heuristic."""
+
+    def _v(self, vid: str, ts: int | None) -> ChannelVod:
+        return ChannelVod(video_id=vid, url="u", title=None, duration=60.0, timestamp=ts)
+
+    def test_date_sort_uses_timestamp_desc(self):
+        vods = [self._v("a", 100), self._v("b", 300), self._v("c", 200)]
+        assert [v.video_id for v in sort_channel_vods(vods, "date")] == ["b", "c", "a"]
+
+    def test_missing_timestamps_sink(self):
+        vods = [self._v("a", None), self._v("b", 100), self._v("c", None)]
+        assert [v.video_id for v in sort_channel_vods(vods, "date")] == ["b", "a", "c"]
+
+    def test_id_fallback_when_no_timestamps(self):
+        # All-NA timestamps (Twitch shape): the numeric-id heuristic.
+        vods = [self._v("v100", None), self._v("v300", None), self._v("v200", None)]
+        assert [v.video_id for v in sort_channel_vods(vods, "date")] == [
+            "v300",
+            "v200",
+            "v100",
+        ]
+
+    def test_date_label(self):
+        v = ChannelVod(
+            video_id="x",
+            url="u",
+            title=None,
+            duration=None,
+            timestamp=1755500000,  # 2025-08-18 (TZ-dependent day, but digits)
+        )
+        assert v.date_label().startswith("20")
+        assert ChannelVod(video_id="x", url="u", title=None, duration=None).date_label() == "?"
+
+
 class TestCanonicalVodUrl:
     def test_v_prefix_stripped(self):
-        assert _canonical_vod_url("v123") == "https://www.twitch.tv/videos/123"
+        assert _canonical_vod_url("v123", platform="twitch") == "https://www.twitch.tv/videos/123"
 
     def test_bare_id_kept(self):
-        assert _canonical_vod_url("123") == "https://www.twitch.tv/videos/123"
+        assert _canonical_vod_url("123", platform="twitch") == "https://www.twitch.tv/videos/123"
+
+    def test_youtube_watch_url(self):
+        assert (
+            _canonical_vod_url("dQw4w9WgXcQ", platform="youtube")
+            == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        )
 
 
 def _fake_ytdlp_script(tmp_path: Path, body: str) -> Path:
@@ -105,7 +330,7 @@ class TestResolveChannelVods:
                 ("v222", "200.0", "3343", "Middle"),
                 ("v111", "NA", "NA", "Live"),
             ]:
-                print(f"{vid}::{dur}::{views}::{title}")
+                print(f"{vid}::{dur}::{views}::NA::{title}")
             """,
         )
         self._env(tmp_path, monkeypatch)
@@ -126,7 +351,7 @@ class TestResolveChannelVods:
         _fake_ytdlp_script(
             tmp_path,
             """
-            print("v9::60.0::12::Title with :: inside")
+            print("v9::60.0::12::NA::Title with :: inside")
             """,
         )
         self._env(tmp_path, monkeypatch)
@@ -139,7 +364,7 @@ class TestResolveChannelVods:
             tmp_path,
             """
             print("[download] Downloading webpage")
-            print("v5::30.0::77::Real entry")
+            print("v5::30.0::77::NA::Real entry")
             """,
         )
         self._env(tmp_path, monkeypatch)
@@ -152,7 +377,7 @@ class TestResolveChannelVods:
         _fake_ytdlp_script(tmp_path, "")
         self._env(tmp_path, monkeypatch)
 
-        with pytest.raises(ChannelImportError, match="No archives"):
+        with pytest.raises(ChannelImportError, match="No entries"):
             resolve_channel_vods(CHANNEL_URL, 1)
 
     def test_ytdlp_failure_raises_with_stderr(self, tmp_path: Path, monkeypatch):
@@ -201,7 +426,7 @@ class TestResolveChannelVods:
             tmp_path,
             """
             import time
-            print("v1::10.0::5::Entry")
+            print("v1::10.0::5::NA::Entry")
             time.sleep(30)
             """,
         )
@@ -223,7 +448,7 @@ class TestResolveChannelVods:
             if "--proxy http://127.0.0.1:8080" not in argv:
                 sys.stderr.write("missing --proxy\\n")
                 sys.exit(1)
-            print("v2::20.0::9::OK")
+            print("v2::20.0::9::NA::OK")
             """,
         )
         self._env(tmp_path, monkeypatch)
@@ -240,8 +465,8 @@ class TestResolveChannelVods:
             if "--playlist-items 1:2" not in argv:
                 sys.stderr.write("missing --playlist-items 1:2\\n")
                 sys.exit(1)
-            print("v1::10.0::3::A")
-            print("v2::20.0::4::B")
+            print("v1::10.0::3::NA::A")
+            print("v2::20.0::4::NA::B")
             """,
         )
         self._env(tmp_path, monkeypatch)
@@ -261,7 +486,7 @@ class TestResolveChannelVods:
             if "?filter=highlights" not in url:
                 sys.stderr.write(f"missing ?filter=highlights in {url}\\n")
                 sys.exit(1)
-            print("v7::120.0::500::A highlight")
+            print("v7::120.0::500::NA::A highlight")
             """,
         )
         self._env(tmp_path, monkeypatch)
@@ -281,7 +506,7 @@ class TestResolveChannelVods:
             if "?filter=" in url:
                 sys.stderr.write(f"archives must be the bare listing, got {url}\\n")
                 sys.exit(1)
-            print("v7::120.0::500::An archive")
+            print("v7::120.0::500::NA::An archive")
             """,
         )
         self._env(tmp_path, monkeypatch)
@@ -298,7 +523,7 @@ class TestResolveChannelVods:
             if "/clips" not in url or "/videos" in url:
                 sys.stderr.write(f"expected /clips path, got {url}\\n")
                 sys.exit(1)
-            print("577522052::19.0::411::A clip")
+            print("577522052::19.0::411::NA::A clip")
             """,
         )
         self._env(tmp_path, monkeypatch)
@@ -310,6 +535,12 @@ class TestResolveChannelVods:
 
     def test_unknown_category_raises(self):
         with pytest.raises(ChannelImportError, match="Unknown channel type"):
+            resolve_channel_vods(CHANNEL_URL, 1, category="nonsense")
+
+    def test_youtube_category_on_twitch_rejected(self):
+        # The union of types is accepted at the CLI boundary, but a
+        # YouTube-only tab on a Twitch URL must fail with the valid list.
+        with pytest.raises(ChannelImportError, match="Twitch"):
             resolve_channel_vods(CHANNEL_URL, 1, category="shorts")
 
 

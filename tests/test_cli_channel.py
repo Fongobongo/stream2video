@@ -57,7 +57,7 @@ class TestChannelUrlGate:
             catch_exceptions=False,
         )
         assert result.exit_code == 2
-        assert "Channel URL detected" in result.output
+        assert "Listing URL detected" in result.output
         assert "--channel-limit" in result.output
 
     def test_single_vod_url_untouched(self, tmp_path: Path):
@@ -222,6 +222,149 @@ class TestChannelBatchFlow:
         assert calls == ["https://www.twitch.tv/videos/2", "https://www.twitch.tv/videos/1"]
 
 
+class TestYoutubeListingCli:
+    """The CLI listing gate for YouTube channels and playlists: the
+    picker flow applies to them exactly like Twitch channels, with the
+    platform's own default tab and type validation."""
+
+    YT_CHANNEL = "https://www.youtube.com/@somechannel/videos"
+    YT_PLAYLIST = "https://www.youtube.com/playlist?list=PLsomeplaylist123"
+
+    def test_youtube_channel_goes_through_picker_gate(self, tmp_path: Path):
+        """A YouTube channel URL is a listing: without --channel-select
+        and with a non-tty stdin the interactive picker refuses with the
+        --channel-select hint (not the old single-video error)."""
+        with patch("stream2video.cli.resolve_channel_vods", return_value=[_vod(1)]) as fake:
+            result = CliRunner().invoke(
+                app,
+                [self.YT_CHANNEL, "-o", str(tmp_path / "out")],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 2
+        assert "use --channel-select" in result.output
+        # The listing WAS fetched before the tty check (default window).
+        assert fake.call_count == 1
+        # Platform default: videos (not Twitch's archives).
+        assert fake.call_args.kwargs.get("category") == "videos"
+
+    def test_youtube_playlist_select_non_interactive(self, tmp_path: Path):
+        ran: list[str] = []
+
+        class _R:
+            src_size_bytes = 100
+            dst_size_bytes = 50
+            src_duration = 60.0
+            pipeline_seconds = 1.0
+            output_path = Path("out.mp4")
+
+        class _Ctrl:
+            def __init__(self, cfg=None, **kw):
+                ran.append(cfg.input_raw)
+
+            def run(self):
+                return _R()
+
+        yt_entry = ChannelVod(
+            video_id="vid01",
+            url="https://www.youtube.com/watch?v=vid01",
+            title="Playlist entry",
+            duration=300.0,
+        )
+        with (
+            patch("stream2video.cli.resolve_channel_vods", return_value=[yt_entry]),
+            patch("stream2video.cli.PipelineController", side_effect=_Ctrl),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    self.YT_PLAYLIST,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "5",
+                    "--channel-select",
+                    "1",
+                ],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        assert ran == ["https://www.youtube.com/watch?v=vid01"]
+
+    def test_twitch_type_rejected_on_youtube(self, tmp_path: Path):
+        with patch("stream2video.cli.resolve_channel_vods", return_value=[_vod(1)]):
+            result = CliRunner().invoke(
+                app,
+                [
+                    self.YT_CHANNEL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "3",
+                    "--channel-select",
+                    "1",
+                    "--channel-type",
+                    "clips",
+                ],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 2
+        assert "does not apply here" in result.output
+
+    def test_playlist_type_tab_rejected(self, tmp_path: Path):
+        with patch("stream2video.cli.resolve_channel_vods", return_value=[_vod(1)]):
+            result = CliRunner().invoke(
+                app,
+                [
+                    self.YT_PLAYLIST,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "3",
+                    "--channel-select",
+                    "1",
+                    "--channel-type",
+                    "shorts",
+                ],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 2
+        assert "does not apply here" in result.output
+        assert "videos" in result.output  # the playlist's valid set
+
+    def test_youtube_shorts_type_forwarded(self, tmp_path: Path):
+        with (
+            patch("stream2video.cli.resolve_channel_vods", return_value=[_vod(1)]) as fake,
+            patch("stream2video.cli.PipelineController"),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    self.YT_CHANNEL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "3",
+                    "--channel-select",
+                    "1",
+                    "--channel-type",
+                    "shorts",
+                ],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        assert fake.call_args.kwargs.get("category") == "shorts"
+
+    def test_single_watch_url_untouched(self, tmp_path: Path):
+        """A plain watch URL must NOT hit the listing gate."""
+        with patch("stream2video.cli.resolve_channel_vods") as fake:
+            CliRunner().invoke(
+                app,
+                ["https://www.youtube.com/watch?v=abc123", "-o", str(tmp_path / "out")],
+                catch_exceptions=False,
+            )
+        assert fake.call_count == 0
+
+
 class TestChannelListingErrors:
     def test_listing_error_exits_1(self, tmp_path: Path):
         with patch(
@@ -330,7 +473,7 @@ class TestChannelTypeAndSort:
         assert fake.call_args.kwargs.get("category") == "archives"
 
     def test_unknown_type_exits_2(self, tmp_path: Path):
-        result, _ = self._run_with(tmp_path, "--channel-type", "shorts")
+        result, _ = self._run_with(tmp_path, "--channel-type", "nonsense")
         assert result.exit_code == 2
         assert "Unknown --channel-type" in result.output
 

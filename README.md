@@ -99,11 +99,11 @@ silencecut --show-completion      # Print the completion script for manual insta
 | `-vq, --video-quality` | `source` | Encode quality preset: `source` (encoder defaults, default), `high` (10000k / CRF 18), `medium` (7000k / CRF 23), `low` (3500k / CRF 28) |
 | `-aq, --audio-quality` | `source` | Audio quality preset: `source` (codec defaults + native rate/channels, default), `high` (256k), `medium` (192k), `low` (128k) |
 | `-dq, --download-quality` | `best` | Download quality preset (Twitch/YouTube, ignored for local files): `best`, `1080p`, `720p`, `480p`, `360p` |
-| `--channel-limit` | `0` | Twitch channel import: how many entries to list from the channel (the picker's window; default 50). Ignored for non-channel inputs |
-| `--channel-type` | `archives` | Twitch channel import: which channel tab to list — `archives`, `highlights`, `uploads`, `all` or `clips` |
-| `--channel-sort` | `date` | Twitch channel import: table sort — `date` (newest first), `duration` (longest first) or `views` (most-watched first) |
-| `--channel-select` | — | Twitch channel import: non-interactive selection by the table's 1-based numbers, e.g. `'1,3-5'` |
-| `--channel-pick` | off | Twitch channel import: force the interactive numbered-table picker (the default for channel URLs without `--channel-select`) |
+| `--channel-limit` | `0` | Channel/playlist import: how many entries to list (the picker's window; default 50). Ignored for single-video inputs |
+| `--channel-type` | — | Channel/playlist import: which tab to list — Twitch: `archives` (default), `highlights`, `uploads`, `all`, `clips`; YouTube: `videos` (default), `shorts`, `streams`. Playlists have no tabs |
+| `--channel-sort` | `date` | Channel/playlist import: table sort — `date` (newest first), `duration` (longest first) or `views` (most-watched first) |
+| `--channel-select` | — | Channel/playlist import: non-interactive selection by the table's 1-based numbers, e.g. `'1,3-5'` |
+| `--channel-pick` | off | Channel/playlist import: force the interactive numbered-table picker (the default for listing URLs without `--channel-select`) |
 | `-m, --method` | `segment` | `segment` (per-segment encode + concat demuxer), `batch` (frame-exact trim+concat filter), or `cut_then_encode` (lossless cut + single final encode, best quality) |
 | `--software-fallback` | `ask` | What happens when the requested HW encoder is unavailable or fails mid-run: `ask` (refuse silent fallback — the run fails with a clear error), `disabled` (fail immediately), `enabled` (silently retry with libx264, legacy behaviour) |
 | `--x264-preset` | `medium` | libx264 preset: `ultrafast`/`superfast`/`veryfast`/`faster`/`fast`/`medium`/`slow`/`slower`. Faster presets reduce CPU load at the cost of file size / quality. Use `ultrafast` or `veryfast` on an unstable / overclocked CPU. |
@@ -166,15 +166,19 @@ silencecut video.mp4 --dry-run
 # Best quality (lossless cut + single final encode)
 silencecut video.mp4 --method cut_then_encode --video-quality high
 
-# Import a Twitch channel: shows a numbered table of the channel's VODs
-# (duration, views, title) and prompts for which ones to compress
+# Import a Twitch channel or YouTube channel/playlist: shows a numbered
+# table of the entries (duration, views, title) and prompts for which
+# ones to compress
 silencecut https://www.twitch.tv/<channel>/videos
+silencecut https://www.youtube.com/@<handle>/videos
+silencecut "https://www.youtube.com/playlist?list=<id>"
 
 # Same, non-interactively: list 10, sort by views, compress entries 1 and 3-5
 silencecut https://www.twitch.tv/<channel>/videos --channel-limit 10 --channel-sort views --channel-select '1,3-5'
 
-# List only highlights (or: archives, uploads, all, clips)
+# List only highlights (Twitch) or shorts (YouTube channels)
 silencecut https://www.twitch.tv/<channel>/videos --channel-type highlights --channel-limit 20
+silencecut https://www.youtube.com/@<handle>/videos --channel-type shorts --channel-limit 20
 ```
 
 ## Configuration

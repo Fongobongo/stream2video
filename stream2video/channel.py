@@ -1,20 +1,30 @@
-"""Twitch channel import: resolve a channel's recent VOD list via
-yt-dlp's flat-playlist listing, then drive the existing single-VOD
-pipeline over each entry.
+"""Channel/playlist import: resolve a multi-entry listing (Twitch
+channel, YouTube channel or YouTube playlist) via yt-dlp's flat-playlist
+mode, then drive the existing single-video pipeline over each entry.
 
 The single-video ``download()`` contract (one ``after_move:filepath``)
-cannot consume a channel URL: yt-dlp would resolve the playlist and
+cannot consume a listing URL: yt-dlp would resolve the playlist and
 either grab the first entry or die on the output template. This module
 splits the job in two:
 
 1. ``resolve_channel_vods`` — a *listing* pass: yt-dlp with
    ``--flat-playlist`` and ``--playlist-items 1:N`` fetches only the
-   channel's VOD index (id / title / duration, no media), which is fast
-   (seconds for dozens of entries) and cheap on bandwidth.
-2. The caller (the CLI) iterates the returned list and hands each VOD
-   URL to the existing ``PipelineController`` unchanged, so every
-   per-video behaviour (project dirs, silence cache, resume, frame-hole
-   gates) applies as-is.
+   entries' metadata (id / title / duration / views, no media), which is
+   fast (seconds for dozens of entries) and cheap on bandwidth.
+2. The caller (the CLI) iterates the returned list and hands each entry
+   to the existing ``PipelineController`` unchanged, so every per-video
+   behaviour (project dirs, silence cache, resume, frame-hole gates)
+   applies as-is.
+
+Supported listings:
+- Twitch channels — ``https://(www|m).twitch.tv/<channel>/videos``
+  with the ``?filter=`` tabs (archives / highlights / uploads / all)
+  and the separate ``/<channel>/clips`` path.
+- YouTube channels — ``/@handle/videos``, ``/channel/<id>/videos``,
+  ``/c/<name>/videos``, ``/user/<name>/videos`` and the
+  ``/shorts`` / ``/streams`` tabs.
+- YouTube playlists — ``/playlist?list=<id>`` (and a bare
+  ``watch?v=...&list=...`` link lists that playlist).
 
 Cancel semantics mirror ``download``: a drain thread watches
 ``cancel_callback`` and kills the spawned yt-dlp; the caller sees
@@ -51,25 +61,52 @@ _CHANNEL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# YouTube channel-tab URLs. Four channel-address forms are live today
+# (@handle, /channel/UC…, legacy /c/ and /user/); the trailing segment
+# selects the tab (videos / shorts / streams). The tab is OPTIONAL in
+# the pattern — a bare ``/@handle`` is the channel home page whose
+# default tab IS videos, and the user pasting that means "the channel's
+# videos" exactly like ``/@handle/videos`` does.
+_YT_CHANNEL_RE = re.compile(
+    r"^https?://(?:www\.|m\.)?youtube\.com/"
+    r"(@[A-Za-z0-9_.-]{3,30}|channel/UC[A-Za-z0-9_-]{10,40}"
+    r"|c/[A-Za-z0-9_.-]{1,40}|user/[A-Za-z0-9_.-]{1,40})"
+    r"(?:/(videos|shorts|streams))?(?:[/?#]|$)",
+    re.IGNORECASE,
+)
+
+# YouTube playlist URLs: the dedicated ``/playlist?list=…`` page and a
+# bare ``watch?v=…&list=…`` link (the user copied it from the playlist
+# UI — listing that playlist is the natural meaning).
+_YT_PLAYLIST_RE = re.compile(
+    r"^https?://(?:www\.|m\.)?youtube\.com/(?:playlist\?list=|watch\?.*?[?&]list=)"
+    r"([A-Za-z0-9_-]{10,60})",
+    re.IGNORECASE,
+)
+
 # Listing timeout (seconds). The flat-playlist index for a channel with
 # hundreds of VODs arrives in a few seconds once connected; slow links
-# and Twitch API hiccups can stretch that, but a listing that takes
-# longer than this is effectively wedged and should be retried, not
-# waited on. Media downloads use the (much larger) download_timeout.
+# and API hiccups can stretch that, but a listing that takes longer
+# than this is effectively wedged and should be retried, not waited
+# on. Media downloads use the (much larger) download_timeout.
 _CHANNEL_LIST_TIMEOUT = 300
 
-# Listing categories. Twitch's channel page exposes these as tabs; the
-# CLI surfaces them so a user can import exactly one content type.
-# ``archives`` (past broadcasts) is the default everywhere. ``all``
-# merges archives + highlights + uploads in Twitch's own order.
-CHANNEL_TYPES = ("archives", "highlights", "uploads", "all", "clips")
+# Listing categories — the platform's own tabs, keyed per site. Twitch's
+# channel page exposes archives / highlights / uploads / all via the
+# ``?filter=`` query plus the separate /clips path; YouTube channels
+# have videos / shorts / streams tabs (and ``videos`` doubles as the
+# ``all`` default — the Videos tab IS the main listing). The CLI accepts
+# the union and rejects a value that doesn't apply to the input's
+# platform with the valid list in the error.
+TWITCH_CHANNEL_TYPES = ("archives", "highlights", "uploads", "all", "clips")
+YOUTUBE_CHANNEL_TYPES = ("videos", "shorts", "streams")
+CHANNEL_TYPES = TWITCH_CHANNEL_TYPES + YOUTUBE_CHANNEL_TYPES
 
-# Sort keys for the listing table. Twitch's listing is newest-first by
-# VOD id; the alternatives let a user target long recordings or the
-# most-watched entries. ``id`` sorts by the numeric VOD id, which is
-# monotonic in creation time (Twitch ids are sequential), so it is the
-# date sort without needing a date field the flat listing does not
-# provide.
+# Sort keys for the listing table. ``date`` is the newest-first default;
+# Twitch ids are sequential (a higher id is a newer recording) while
+# YouTube's flat listing carries a real ``timestamp``, which
+# ``sort_channel_vods`` prefers when present and falls back to the id
+# heuristic otherwise.
 CHANNEL_SORTS = ("date", "duration", "views")
 
 # How many entries the listing fetches when the user picks interactively.
@@ -92,13 +129,17 @@ class ChannelImportCancelled(ChannelImportError):
 
 @dataclasses.dataclass(frozen=True)
 class ChannelVod:
-    """One VOD in a channel's listing (no media fetched)."""
+    """One entry in a listing (no media fetched)."""
 
     video_id: str
     url: str
     title: str | None
     duration: float | None
     view_count: int | None = None
+    # Unix upload timestamp when the listing provides one (YouTube's
+    # flat listing does; Twitch's does not). Optional so the Twitch
+    # shape stays constructible without it.
+    timestamp: int | None = None
 
     def duration_hm(self) -> str:
         """``3569.0 -> "59m29s"`` / ``"45m"`` — for the picker table."""
@@ -110,6 +151,15 @@ class ChannelVod:
         if h:
             return f"{h}h{m:02d}m"
         return f"{m}m{s:02d}s" if s else f"{m}m"
+
+    def date_label(self) -> str:
+        """Short local date for the picker table (``2026-08-14``), or
+        ``?`` when the listing carried no timestamp."""
+        if self.timestamp is None:
+            return "?"
+        import datetime
+
+        return datetime.datetime.fromtimestamp(self.timestamp).strftime("%Y-%m-%d")
 
 
 def parse_channel_selection(spec: str, max_index: int) -> list[int]:
@@ -157,14 +207,14 @@ def parse_channel_selection(spec: str, max_index: int) -> list[int]:
 
 
 def sort_channel_vods(vods: list[ChannelVod], key: str) -> list[ChannelVod]:
-    """Sort a listing by ``key``: ``date`` (newest first, the default
-    listing order by descending VOD id), ``duration`` (longest first) or
-    ``views`` (most-watched first).
+    """Sort a listing by ``key``: ``date`` (newest first), ``duration``
+    (longest first) or ``views`` (most-watched first).
 
     Pure: returns a new list; entries with a missing value (``?`` in
     the table) sink to the end regardless of key rather than crashing
-    the sort. ``date`` uses the numeric VOD id — Twitch ids are
-    sequential, so a higher id is a newer recording.
+    the sort. ``date`` prefers a real upload ``timestamp`` (YouTube's
+    flat listing provides one) and falls back to the numeric id —
+    Twitch ids are sequential, so a higher id is a newer recording.
     """
     if key not in CHANNEL_SORTS:
         raise ValueError(f"Unknown sort {key!r} (expected one of {CHANNEL_SORTS})")
@@ -174,6 +224,16 @@ def sort_channel_vods(vods: list[ChannelVod], key: str) -> list[ChannelVod]:
         return int(digits) if digits else 0
 
     if key == "date":
+        # Entries WITH a timestamp sort by it; the id-heuristic list
+        # sorts by id; timestamp-less entries sink last.
+        if any(v.timestamp is not None for v in vods):
+            return sorted(
+                vods,
+                key=lambda v: (
+                    v.timestamp is None,
+                    -(v.timestamp if v.timestamp is not None else 0),
+                ),
+            )
         return sorted(vods, key=_num_id, reverse=True)
     if key == "duration":
         return sorted(vods, key=lambda v: (v.duration is None, -(v.duration or 0.0)))
@@ -192,44 +252,135 @@ def is_twitch_channel_url(url: str) -> bool:
     return _CHANNEL_RE.match(url.strip()) is not None
 
 
-def _canonical_vod_url(video_id: str) -> str:
-    """Watch URL for a listed VOD id (``v123`` → ``/videos/123``).
+def is_youtube_channel_url(url: str) -> bool:
+    """True when ``url`` addresses a YouTube channel (any of the four
+    live address forms, with an optional videos/shorts/streams tab).
 
-    yt-dlp's listing prints ids with a ``v`` prefix; the canonical watch
-    URL uses the bare numeric id. Both spellings resolve in yt-dlp, but
-    the bare form keeps project-dir identity (the id namespaces the
-    cache) identical to what a user gets by pasting the watch URL
-    directly — one video, one project dir, both entry points.
+    A bare watch URL (``/watch?v=…``) does not match; a playlist URL
+    does not either (``is_youtube_playlist_url`` covers it). The tab is
+    optional because the channel's home page IS the videos tab.
     """
+    return _YT_CHANNEL_RE.match(url.strip()) is not None
+
+
+def is_youtube_playlist_url(url: str) -> bool:
+    """True when ``url`` points at a YouTube playlist — either the
+    dedicated ``/playlist?list=…`` page or a ``watch?v=…&list=…`` link
+    (copied from the playlist UI; listing that playlist is the natural
+    meaning of such a paste)."""
+    return _YT_PLAYLIST_RE.match(url.strip()) is not None
+
+
+def is_listing_url(url: str) -> bool:
+    """True when ``url`` is ANY multi-entry listing this module can
+    resolve (Twitch channel, YouTube channel or YouTube playlist)."""
+    return is_twitch_channel_url(url) or is_youtube_channel_url(url) or is_youtube_playlist_url(url)
+
+
+def _canonical_vod_url(video_id: str, *, platform: str) -> str:
+    """Watch URL for a listed entry id.
+
+    Twitch: yt-dlp's listing prints ids with a ``v`` prefix and the
+    canonical watch URL uses the bare numeric id (both resolve in
+    yt-dlp, but the bare form keeps project-dir identity — the id
+    namespaces the cache — identical to a pasted watch URL).
+    YouTube: the plain ``watch?v=<id>`` form.
+    """
+    if platform == "youtube":
+        return f"https://www.youtube.com/watch?v={video_id}"
     return f"https://www.twitch.tv/videos/{video_id.removeprefix('v')}"
+
+
+def _default_category_for(url: str) -> str:
+    """The platform's default tab for ``url``: ``archives`` for Twitch,
+    ``videos`` for YouTube (channels and playlists alike)."""
+    if is_twitch_channel_url(url):
+        return "archives"
+    return "videos"
+
+
+def _resolve_listing_url(url: str, category: str) -> tuple[str, str]:
+    """Map the input URL + category to the concrete listing URL and the
+    entry-id namespace (``twitch`` / ``youtube``) used for canonical
+    watch URLs.
+
+    Twitch: ``archives`` is the bare listing (``?filter=archives`` is NOT
+    a value the channel page accepts — it returns an empty listing,
+    verified empirically), ``highlights`` / ``uploads`` / ``all`` are
+    ``?filter=`` values, and ``clips`` re-routes to ``/<channel>/clips``.
+    YouTube: the category IS the tab (``videos`` / ``shorts`` /
+    ``streams``) appended to whichever of the four channel-address forms
+    the URL used; a URL that already carries a tab keeps it unless the
+    user explicitly passes a different ``--channel-type``. Playlists
+    have no tabs — the playlist URL is the listing, and the category
+    must be left at the default.
+    """
+    u = url.strip()
+
+    m = _CHANNEL_RE.match(u)
+    if m is not None:
+        if category not in TWITCH_CHANNEL_TYPES:
+            raise ChannelImportError(
+                f"Twitch channels accept --channel-type {TWITCH_CHANNEL_TYPES}, not {category!r}"
+            )
+        channel = m.group(1)
+        if category == "clips":
+            return f"https://www.twitch.tv/{channel}/clips", "twitch"
+        if category == "archives":
+            return f"https://www.twitch.tv/{channel}/videos", "twitch"
+        return f"https://www.twitch.tv/{channel}/videos?filter={category}", "twitch"
+
+    pm = _YT_PLAYLIST_RE.match(u)
+    if pm is not None:
+        if category != "videos":
+            # Playlists have no tabs; the CLI validates this before the
+            # call, so reaching here is a programming error.
+            raise ChannelImportError("Playlists have no tabs; leave --channel-type at the default")
+        return f"https://www.youtube.com/playlist?list={pm.group(1)}", "youtube"
+
+    cm = _YT_CHANNEL_RE.match(u)
+    if cm is not None:
+        if category not in YOUTUBE_CHANNEL_TYPES:
+            raise ChannelImportError(
+                f"YouTube channels accept --channel-type {YOUTUBE_CHANNEL_TYPES}, not {category!r}"
+            )
+        return f"https://www.youtube.com/{cm.group(1)}/{category}", "youtube"
+
+    raise ChannelImportError(f"Not a supported listing URL: {url}")
 
 
 def resolve_channel_vods(
     url: str,
     limit: int,
     *,
-    category: str = "archives",
+    category: str = "",
     cancel_callback: Callable[[], bool] | None = None,
     proxy: str = "",
     timeout: int = _CHANNEL_LIST_TIMEOUT,
     low_process_priority: bool = False,
 ) -> list[ChannelVod]:
-    """List the channel's ``limit`` most recent VODs via yt-dlp.
+    """List the ``limit`` most recent entries of a channel or playlist
+    via yt-dlp.
 
     Runs yt-dlp with ``--flat-playlist`` (metadata only — no media is
     downloaded) and ``--playlist-items 1:{limit}`` so the listing pass
     stops after the requested window even on channels with hundreds of
-    VODs. Returns entries newest-first (Twitch's listing order), which
-    matches what a user sees on the channel page.
+    entries. Returns entries newest-first (the platform's own listing
+    order), which matches what a user sees on the channel page.
 
     Args:
-        url: Channel VOD-listing URL (``.../<channel>/videos``).
-        limit: Maximum number of VODs to return; must be >= 1.
-        category: Which channel tab to list — ``archives`` (past
-            broadcasts, default), ``highlights``, ``uploads``,
-            ``all`` (Twitch's merged tab) or ``clips``. ``clips`` is
-            re-routed to the channel's ``/clips`` path; the others are
-            the ``?filter=`` query on the VOD listing.
+        url: A Twitch channel VOD-listing URL, a YouTube channel URL
+            (any address form, with or without a tab segment) or a
+            YouTube playlist URL (``/playlist?list=…`` or a
+            ``watch?v=…&list=…`` link).
+        limit: Maximum number of entries to return; must be >= 1.
+        category: Which tab to list. Empty string (default) picks the
+            platform default: ``archives`` for Twitch,
+            ``videos`` for YouTube channels and playlists. Explicit
+            values: Twitch ``archives`` / ``highlights`` / ``uploads``
+            / ``all`` / ``clips``; YouTube ``videos`` / ``shorts`` /
+            ``streams``. Playlists have no tabs — any explicit
+            category other than ``videos`` is rejected.
         cancel_callback: Optional callable polled by the stdout drain
             thread; returning True kills yt-dlp and raises
             ``ChannelImportCancelled``.
@@ -249,33 +400,26 @@ def resolve_channel_vods(
     """
     if limit < 1:
         raise ChannelImportError(f"Channel limit must be >= 1, got {limit}")
-    if category not in CHANNEL_TYPES:
+    # Empty category = the platform's default tab. The platform is
+    # decided by the URL, so the default can only be computed after
+    # matching; resolved here and passed down as a concrete value.
+    if category not in CHANNEL_TYPES and category != "":
         raise ChannelImportError(
             f"Unknown channel type {category!r} (expected one of {CHANNEL_TYPES})"
         )
+    _effective_category = category or _default_category_for(url)
 
-    # Clips live on a different channel path, not a ?filter= of the VOD
-    # listing; everything else is the listing's own filter query.
-    # ``archives`` is the listing WITHOUT a filter (Twitch's default
-    # tab): ``?filter=archives`` is NOT a value the channel page accepts
-    # (it returns an empty listing — verified empirically), while the
-    # bare listing URL returns the past broadcasts.
-    m = _CHANNEL_RE.match(url.strip())
-    assert m is not None  # caller (CLI) gates on is_twitch_channel_url first
-    channel_name = m.group(1)
-    if category == "clips":
-        listing_url = f"https://www.twitch.tv/{channel_name}/clips"
-    elif category == "archives":
-        listing_url = f"https://www.twitch.tv/{channel_name}/videos"
-    else:
-        listing_url = f"https://www.twitch.tv/{channel_name}/videos?filter={category}"
+    listing_url, platform = _resolve_listing_url(url, _effective_category)
 
-    # One line per VOD: ``id::duration::views::title``. ``::`` cannot
-    # appear in the id (alphanumeric), the duration (float/NA) or the
-    # view count (int/NA), and the title goes LAST so a ``::`` inside a
-    # title stays in the title field (split with maxsplit keeps the
-    # remainder intact).
-    line_template = "%(id)s::%(duration)s::%(view_count)s::%(title)s"
+    # One line per entry: ``id::duration::views::timestamp::title``.
+    # ``::`` cannot appear in the id (alphanumeric), the duration
+    # (float/NA), the view count (int/NA) or the timestamp (int/NA),
+    # and the title goes LAST so a ``::`` inside a title stays in the
+    # title field (split with maxsplit keeps the remainder intact).
+    # Twitch's flat listing reports NA for the timestamp (its GraphQL
+    # listing has no created_at); YouTube's provides it, which powers
+    # the honest ``date`` sort and the table's date column.
+    line_template = "%(id)s::%(duration)s::%(view_count)s::%(timestamp)s::%(title)s"
     cmd = [
         sys.executable,
         "-m",
@@ -383,13 +527,13 @@ def resolve_channel_vods(
 
     vods: list[ChannelVod] = []
     for raw in lines:
-        parts = raw.split("::", 3)
-        if len(parts) != 4:
+        parts = raw.split("::", 4)
+        if len(parts) != 5:
             # Unknown line shape (a warning that slipped through, an ad
             # marker): skip rather than abort the whole import.
             logger.debug(f"Skipping unrecognized listing line: {raw!r}")
             continue
-        video_id, duration_raw, views_raw, title = parts
+        video_id, duration_raw, views_raw, ts_raw, title = parts
         if not video_id:
             continue
         duration: float | None
@@ -404,20 +548,26 @@ def resolve_channel_vods(
             view_count = int(float(views_raw))
         except ValueError:
             view_count = None
+        timestamp: int | None
+        try:
+            timestamp = int(float(ts_raw))
+        except ValueError:
+            timestamp = None
         vods.append(
             ChannelVod(
                 video_id=video_id,
-                url=_canonical_vod_url(video_id),
+                url=_canonical_vod_url(video_id, platform=platform),
                 title=title or None,
                 duration=duration,
                 view_count=view_count,
+                timestamp=timestamp,
             )
         )
 
     if not vods:
         raise ChannelImportError(
-            f"No {category} found for {url} (the channel may have none in "
-            "this category, or they are subscribers-only)"
+            f"No entries found for {url} in category {category!r} "
+            "(the channel/playlist may be empty, private, or region-blocked)"
         )
 
     logger.info(f"Channel listing: {len(vods)} {category} entry(s), newest {vods[0].url}")
@@ -438,7 +588,8 @@ def _module_smoke() -> None:  # pragma: no cover - manual probe helper
     for v in resolve_channel_vods(ns.url, ns.limit, category=ns.category):
         dur = v.duration_hm() if v.duration is not None else "?"
         views = str(v.view_count) if v.view_count is not None else "?"
-        print(f"{v.video_id}  {dur:>8}  {views:>8}  {v.title or '-'}  {v.url}")
+        date = v.date_label()
+        print(f"{v.video_id}  {date}  {dur:>8}  {views:>8}  {v.title or '-'}  {v.url}")
 
 
 if __name__ == "__main__":  # pragma: no cover

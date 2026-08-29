@@ -4,27 +4,38 @@
 
 ### Added
 
-- **Twitch channel import — interactive VOD picker.** Point the CLI at a
-  channel listing (`https://www.twitch.tv/<channel>/videos`) and it shows
-  the channel's entries as a numbered table (duration, view count, title)
-  and prompts for which ones to compress (answer like `1,3-5`). The
-  listing is fetched via yt-dlp's flat-playlist mode — metadata only,
-  seconds even for large channels — then each picked entry runs through
-  the normal pipeline (project dirs, silence cache, resume, frame-hole
-  gates all apply per entry). A failed entry is logged and skipped — one
-  deleted recording doesn't waste the rest of the queue — and the batch
-  epilogue lists the failed URLs. Cancellation (Ctrl+C / empty answer)
-  stops cleanly; a piped (non-tty) stdin refuses the prompt with a hint
-  instead of hanging.
+- **Channel/playlist import — interactive picker (Twitch channels,
+  YouTube channels and YouTube playlists).** Point the CLI at a listing
+  URL and it shows the entries as a numbered table (duration, view
+  count, title) and prompts for which ones to compress (answer like
+  `1,3-5`). The listing is fetched via yt-dlp's flat-playlist mode —
+  metadata only, seconds even for large channels — then each picked
+  entry runs through the normal pipeline (project dirs, silence cache,
+  resume, frame-hole gates all apply per entry). A failed entry is
+  logged and skipped — one deleted recording doesn't waste the rest of
+  the queue — and the batch epilogue lists the failed URLs. Cancellation
+  (Ctrl+C / empty answer) stops cleanly; a piped (non-tty) stdin refuses
+  the prompt with a hint instead of hanging. Supported listings:
+  - Twitch channels — `https://www.twitch.tv/<channel>/videos` (all
+    filter tabs and the separate `/clips` path).
+  - YouTube channels — `/@handle/videos`, `/channel/<id>/videos`,
+    legacy `/c/<name>/videos` and `/user/<name>/videos` (a bare channel
+    URL means the Videos tab), plus the `/shorts` and `/streams` tabs.
+  - YouTube playlists — `/playlist?list=...` and a bare
+    `watch?v=...&list=...` link (copied from the playlist UI — listing
+    that playlist is the natural meaning).
 - **Channel filters, sorts and non-interactive selection:**
-  - `--channel-type archives|highlights|uploads|all|clips` — which
-    channel tab to list (archives is the default; `?filter=archives` is
-    not a value Twitch's channel page accepts — the bare listing URL is
-    used instead).
+  - `--channel-type` — which tab to list. Twitch: `archives` (past
+    broadcasts, default), `highlights`, `uploads`, `all`, `clips`
+    (`?filter=archives` is not a value Twitch's channel page accepts —
+    the bare listing URL is used instead). YouTube: `videos` (default),
+    `shorts`, `streams`. Playlists have no tabs. A type that doesn't
+    apply to the input's platform is rejected with the valid list.
   - `--channel-sort date|duration|views` — table order: newest first
-    (Twitch VOD ids are sequential, so a higher id is a newer recording),
-    longest first, or most-watched first. Entries with a missing value
-    sink to the end instead of crashing the sort.
+    (YouTube entries carry a real upload timestamp, which the date sort
+    prefers; Twitch falls back to the sequential-id heuristic), longest
+    first, or most-watched first. Entries with a missing value sink to
+    the end instead of crashing the sort.
   - `--channel-select '1,3-5'` — non-interactive selection by the
     table's numbers (inclusive ranges, duplicates collapse, table order
     preserved). `--channel-limit N` sets the listing window (default 50
