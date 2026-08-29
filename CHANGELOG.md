@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.3.3] - 2026-08-29
+
+Concat-filter hardening for multi-hour content. The v0.3.2 benchmark left
+one follow-up open (finding #8): `segment`+gapless lost 80% of frames on a
+6h26m VOD because the ffmpeg 9.x concat filter cannot carry a very long
+stream alongside audio. This release closes that finding with a verified,
+two-layer fix. Full measurements: `docs/benchmarks.md` (findings #7/#8).
+
+### Fixed
+
+- **segment: long keep blocks no longer feed one very-long stream into the
+  concat-filter join** — keep blocks longer than 300 s are now split into
+  contiguous sub-segments *before* encoding (the same `_split_long_segments`
+  guard batch got in v0.3.2, now a shared `_CONCAT_TRIM_MAX` constant in
+  `concat/constants.py`). The split is lossless (adjacent pieces concat back
+  to identical content) and typical content (keep segments of seconds to a
+  minute) is untouched. Verified on the 6h26m benchmark VOD: the 3.5-hour
+  keep block is now encoded as 42 ≤300 s pieces.
+- **gapless tree: the FINAL join no longer goes through the concat filter**
+  — the tree groups intermediates by *input count*, so even with the segment
+  split above, a single L0 intermediate could still be hours long (the
+  benchmark run produced an 8 450 s / 2.35 h L0 piece). Feeding such parts
+  through the concat filter re-triggered the same ffmpeg 9.x bug — surfacing
+  as a *fake* `ENOSPC` (`error -28: No space left on device`) at the same
+  content position regardless of free disk (15 GB and 21 GB both failed;
+  no quotas, disk untouched after the crash). The final join now uses the
+  **concat demuxer** (`_run_final_concat_demuxer_encode`): a sequential
+  packet stream with no filter graph, so no single-pass stream length can
+  re-trigger the bug. Video + audio are still re-encoded once at the final
+  mux, preserving gapless audio semantics (encoder priming is added once,
+  not per part).
+- **Verification on the long VOD (6h26m, 487 keep segments / 3h58m keep
+  content)**: after both fixes the `segment`+gapless output holds
+  **856 642 of ~856 963 expected frames (99.96%)** — up from 19.3% in the
+  broken runs — with a continuous 14 282 s AAC track, and the v0.3.2
+  frame-hole gate passing the output.
+
 ## [0.3.2] - 2026-08-28
 
 This release is the result of a full benchmark pass over two real Twitch
