@@ -21,7 +21,9 @@ from stream2video.channel import (
     ChannelVod,
     _canonical_vod_url,
     is_twitch_channel_url,
+    parse_channel_selection,
     resolve_channel_vods,
+    sort_channel_vods,
 )
 
 CHANNEL_URL = "https://www.twitch.tv/somechannel/videos"
@@ -98,12 +100,12 @@ class TestResolveChannelVods:
             tmp_path,
             """
             import sys
-            for vid, dur, title in [
-                ("v333", "100.0", "Newest"),
-                ("v222", "200.0", "Middle"),
-                ("v111", "NA", "Live"),
+            for vid, dur, views, title in [
+                ("v333", "100.0", "97428", "Newest"),
+                ("v222", "200.0", "3343", "Middle"),
+                ("v111", "NA", "NA", "Live"),
             ]:
-                print(f"{vid}::{dur}::{title}")
+                print(f"{vid}::{dur}::{views}::{title}")
             """,
         )
         self._env(tmp_path, monkeypatch)
@@ -114,15 +116,17 @@ class TestResolveChannelVods:
         assert vods[0].url == "https://www.twitch.tv/videos/333"
         assert vods[0].title == "Newest"
         assert vods[0].duration == 100.0
-        # NA duration (live/upcoming marker) becomes None, not a crash.
+        assert vods[0].view_count == 97428
+        # NA duration/views (live/upcoming markers) become None, not a crash.
         assert vods[2].duration is None
+        assert vods[2].view_count is None
 
     def test_title_with_separator_stays_intact(self, tmp_path: Path, monkeypatch):
-        # maxsplit=2 keeps a ``::`` inside the title in the title field.
+        # maxsplit=3 keeps a ``::`` inside the title in the title field.
         _fake_ytdlp_script(
             tmp_path,
             """
-            print("v9::60.0::Title with :: inside")
+            print("v9::60.0::12::Title with :: inside")
             """,
         )
         self._env(tmp_path, monkeypatch)
@@ -135,7 +139,7 @@ class TestResolveChannelVods:
             tmp_path,
             """
             print("[download] Downloading webpage")
-            print("v5::30.0::Real entry")
+            print("v5::30.0::77::Real entry")
             """,
         )
         self._env(tmp_path, monkeypatch)
@@ -148,7 +152,7 @@ class TestResolveChannelVods:
         _fake_ytdlp_script(tmp_path, "")
         self._env(tmp_path, monkeypatch)
 
-        with pytest.raises(ChannelImportError, match="No VODs"):
+        with pytest.raises(ChannelImportError, match="No archives"):
             resolve_channel_vods(CHANNEL_URL, 1)
 
     def test_ytdlp_failure_raises_with_stderr(self, tmp_path: Path, monkeypatch):
@@ -197,7 +201,7 @@ class TestResolveChannelVods:
             tmp_path,
             """
             import time
-            print("v1::10.0::Entry")
+            print("v1::10.0::5::Entry")
             time.sleep(30)
             """,
         )
@@ -219,7 +223,7 @@ class TestResolveChannelVods:
             if "--proxy http://127.0.0.1:8080" not in argv:
                 sys.stderr.write("missing --proxy\\n")
                 sys.exit(1)
-            print("v2::20.0::OK")
+            print("v2::20.0::9::OK")
             """,
         )
         self._env(tmp_path, monkeypatch)
@@ -236,14 +240,193 @@ class TestResolveChannelVods:
             if "--playlist-items 1:2" not in argv:
                 sys.stderr.write("missing --playlist-items 1:2\\n")
                 sys.exit(1)
-            print("v1::10.0::A")
-            print("v2::20.0::B")
+            print("v1::10.0::3::A")
+            print("v2::20.0::4::B")
             """,
         )
         self._env(tmp_path, monkeypatch)
 
         vods = resolve_channel_vods(CHANNEL_URL, 2)
         assert len(vods) == 2
+
+    def test_category_filter_in_listing_url(self, tmp_path: Path, monkeypatch):
+        """archives/highlights/uploads map to ?filter=; clips re-route to
+        the channel's /clips path."""
+        _fake_ytdlp_script(
+            tmp_path,
+            """
+            import sys
+            argv = " ".join(sys.argv)
+            url = [a for a in sys.argv if a.startswith("https://")][-1]
+            if "?filter=highlights" not in url:
+                sys.stderr.write(f"missing ?filter=highlights in {url}\\n")
+                sys.exit(1)
+            print("v7::120.0::500::A highlight")
+            """,
+        )
+        self._env(tmp_path, monkeypatch)
+
+        (vod,) = resolve_channel_vods(CHANNEL_URL, 1, category="highlights")
+        assert vod.video_id == "v7"
+
+    def test_category_archives_is_bare_listing(self, tmp_path: Path, monkeypatch):
+        """``?filter=archives`` returns an EMPTY listing on Twitch (not a
+        value the channel page accepts) — the archives tab is the bare
+        listing URL. Verified empirically against twitch.tv."""
+        _fake_ytdlp_script(
+            tmp_path,
+            """
+            import sys
+            url = [a for a in sys.argv if a.startswith("https://")][-1]
+            if "?filter=" in url:
+                sys.stderr.write(f"archives must be the bare listing, got {url}\\n")
+                sys.exit(1)
+            print("v7::120.0::500::An archive")
+            """,
+        )
+        self._env(tmp_path, monkeypatch)
+
+        (vod,) = resolve_channel_vods(CHANNEL_URL, 1, category="archives")
+        assert vod.video_id == "v7"
+
+    def test_category_clips_reroutes(self, tmp_path: Path, monkeypatch):
+        _fake_ytdlp_script(
+            tmp_path,
+            """
+            import sys
+            url = [a for a in sys.argv if a.startswith("https://")][-1]
+            if "/clips" not in url or "/videos" in url:
+                sys.stderr.write(f"expected /clips path, got {url}\\n")
+                sys.exit(1)
+            print("577522052::19.0::411::A clip")
+            """,
+        )
+        self._env(tmp_path, monkeypatch)
+
+        (vod,) = resolve_channel_vods(CHANNEL_URL, 1, category="clips")
+        assert vod.video_id == "577522052"
+        # Clip ids have no 'v' prefix; the canonical URL still works.
+        assert vod.url == "https://www.twitch.tv/videos/577522052"
+
+    def test_unknown_category_raises(self):
+        with pytest.raises(ChannelImportError, match="Unknown channel type"):
+            resolve_channel_vods(CHANNEL_URL, 1, category="shorts")
+
+
+class TestSortChannelVods:
+    def _vod(self, vid: str, dur: float | None, views: int | None) -> ChannelVod:
+        return ChannelVod(
+            video_id=vid,
+            url=f"https://www.twitch.tv/videos/{vid.lstrip('v')}",
+            title=None,
+            duration=dur,
+            view_count=views,
+        )
+
+    def test_date_sort_is_newest_first_by_id(self):
+        # Twitch VOD ids are sequential — a higher id is a newer recording.
+        vods = [self._vod("v100", 60.0, 1), self._vod("v300", 60.0, 1), self._vod("v200", 60.0, 1)]
+        assert [v.video_id for v in sort_channel_vods(vods, "date")] == ["v300", "v200", "v100"]
+
+    def test_duration_sort_longest_first(self):
+        vods = [self._vod("v1", 100.0, 1), self._vod("v2", 900.0, 1), self._vod("v3", 300.0, 1)]
+        assert [v.video_id for v in sort_channel_vods(vods, "duration")] == ["v2", "v3", "v1"]
+
+    def test_views_sort_most_watched_first(self):
+        vods = [self._vod("v1", 60.0, 500), self._vod("v2", 60.0, 9000), self._vod("v3", 60.0, 12)]
+        assert [v.video_id for v in sort_channel_vods(vods, "views")] == ["v2", "v1", "v3"]
+
+    def test_missing_values_sink_not_crash(self):
+        # Live entries (duration=None) and NA view counts must not
+        # explode the sort — they sink to the end.
+        vods = [
+            self._vod("v1", None, 100),
+            self._vod("v2", 300.0, None),
+            self._vod("v3", 100.0, 50),
+        ]
+        by_dur = sort_channel_vods(vods, "duration")
+        # Longest first: v2 (300s) then v3 (100s); v1 (live, no
+        # duration) sinks last regardless of its view count.
+        assert [v.video_id for v in by_dur] == ["v2", "v3", "v1"]
+        by_views = sort_channel_vods(vods, "views")
+        # Most watched first: v1 (100 views) then v3 (50); v2 (no view
+        # count in the listing) sinks last regardless of duration.
+        assert [v.video_id for v in by_views] == ["v1", "v3", "v2"]
+
+    def test_unknown_sort_raises(self):
+        with pytest.raises(ValueError, match="Unknown sort"):
+            sort_channel_vods([], "rating")
+
+    def test_sort_is_pure(self):
+        vods = [self._vod("v1", 100.0, 1), self._vod("v2", 900.0, 9)]
+        snapshot = list(vods)
+        sort_channel_vods(vods, "duration")
+        assert vods == snapshot
+
+
+class TestParseChannelSelection:
+    def test_single_number(self):
+        assert parse_channel_selection("2", 5) == [2]
+
+    def test_comma_list(self):
+        assert parse_channel_selection("1,3,5", 5) == [1, 3, 5]
+
+    def test_inclusive_range(self):
+        assert parse_channel_selection("2-4", 5) == [2, 3, 4]
+
+    def test_mixed_ranges_and_numbers(self):
+        assert parse_channel_selection("1,3-5,9", 10) == [1, 3, 4, 5, 9]
+
+    def test_duplicates_collapse(self):
+        assert parse_channel_selection("3,3,1-3", 5) == [1, 2, 3]
+
+    def test_result_is_table_order_not_typing_order(self):
+        # "5,1-2" selects in table order (1,2,5), not typing order.
+        assert parse_channel_selection("5,1-2", 5) == [1, 2, 5]
+
+    def test_whitespace_free_form(self):
+        assert parse_channel_selection(" 1 , 3 - 4 ", 5) == [1, 3, 4]
+
+    def test_reversed_range_flipped(self):
+        assert parse_channel_selection("4-2", 5) == [2, 3, 4]
+
+    def test_out_of_range_rejected(self):
+        with pytest.raises(ValueError, match="outside the table"):
+            parse_channel_selection("6", 5)
+
+    def test_zero_rejected(self):
+        with pytest.raises(ValueError, match="outside the table"):
+            parse_channel_selection("0", 5)
+
+    def test_garbage_token_rejected(self):
+        with pytest.raises(ValueError, match="Bad"):
+            parse_channel_selection("abc", 5)
+
+    def test_bad_range_rejected(self):
+        with pytest.raises(ValueError, match="Bad range"):
+            parse_channel_selection("1-x", 5)
+
+    def test_empty_rejected(self):
+        with pytest.raises(ValueError, match="Empty selection"):
+            parse_channel_selection("  ", 5)
+
+
+class TestDurationHm:
+    def test_minutes_seconds(self):
+        v = ChannelVod(video_id="v1", url="u", title=None, duration=3569.0)
+        assert v.duration_hm() == "59m29s"
+
+    def test_exact_minute(self):
+        v = ChannelVod(video_id="v1", url="u", title=None, duration=2700.0)
+        assert v.duration_hm() == "45m"
+
+    def test_hours(self):
+        v = ChannelVod(video_id="v1", url="u", title=None, duration=12569.0)
+        assert v.duration_hm() == "3h29m"
+
+    def test_unknown(self):
+        v = ChannelVod(video_id="v1", url="u", title=None, duration=None)
+        assert v.duration_hm() == "?"
 
 
 class TestChannelVodDataclass:

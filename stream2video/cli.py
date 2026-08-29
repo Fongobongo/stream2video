@@ -23,11 +23,16 @@ from rich.progress import (
 )
 
 from stream2video.channel import (
+    _CHANNEL_PICK_WINDOW,
+    CHANNEL_SORTS,
+    CHANNEL_TYPES,
     ChannelImportCancelled,
     ChannelImportError,
     ChannelVod,
     is_twitch_channel_url,
+    parse_channel_selection,
     resolve_channel_vods,
+    sort_channel_vods,
 )
 from stream2video.cli_config import detect_default_config
 from stream2video.cli_config import load_config as _load_config_impl
@@ -37,6 +42,7 @@ from stream2video.cli_helpers import (
     _console_handler,
     _make_file_handler,
     _make_sigint_cancel,
+    _stdin_is_interactive,
     app,
     console,
     logger,
@@ -1115,15 +1121,52 @@ def main(
         0,
         "--channel-limit",
         help=(
-            "Twitch channel import: process the N most recent VODs of the "
-            "channel when INPUT_VIDEO is a channel VOD-listing URL "
-            "(https://www.twitch.tv/<channel>/videos). The listing is fetched "
-            "via yt-dlp's flat-playlist mode (fast, no media downloaded), then "
-            "each VOD runs through the normal pipeline. A failed VOD is "
-            "logged and skipped; the batch continues with the next one. "
-            "Without this flag a channel URL is rejected with a hint (a "
-            "channel can hold hundreds of VODs — an explicit limit keeps "
-            "the intent unambiguous)."
+            "Twitch channel import: how many entries to list from the "
+            "channel. With --channel-pick (or without --channel-select) "
+            "this is the interactive picker's window; the table shows "
+            "at most this many entries (fetched via flat-playlist, "
+            "metadata only). Ignored for non-channel inputs."
+        ),
+    ),
+    channel_type: str = typer.Option(
+        "archives",
+        "--channel-type",
+        help=(
+            "Twitch channel import: which channel tab to list — "
+            "'archives' (past broadcasts, default), 'highlights', "
+            "'uploads', 'all' (merged) or 'clips'."
+        ),
+    ),
+    channel_sort: str = typer.Option(
+        "date",
+        "--channel-sort",
+        help=(
+            "Twitch channel import: table sort — 'date' (newest first; "
+            "Twitch VOD ids are sequential so a higher id is newer), "
+            "'duration' (longest first) or 'views' (most-watched first). "
+            "Applies to both the interactive picker and --channel-select."
+        ),
+    ),
+    channel_select: str = typer.Option(
+        "",
+        "--channel-select",
+        help=(
+            "Twitch channel import: non-interactive entry selection — "
+            "the table's 1-based numbers, e.g. '1,3-5,9'. Runs the "
+            "pipeline only on the selected entries. Use "
+            "--channel-pick (or neither flag) for the interactive "
+            "checkbox table instead."
+        ),
+    ),
+    channel_pick: bool = typer.Option(
+        False,
+        "--channel-pick",
+        help=(
+            "Twitch channel import: show the listing as a numbered "
+            "table and prompt for entries to process (answer like "
+            "'1,3-5', empty = cancel). This is the default when a "
+            "channel URL is given without --channel-select; pass it "
+            "explicitly to override a config-file channel_select."
         ),
     ),
     memory_limit_mb: str = typer.Option(
@@ -1637,21 +1680,42 @@ def main(
             # listing up front and drive the controller per VOD below.
             _channel_vods: list[ChannelVod] | None = None
             if is_twitch_channel_url(input_video):
-                if channel_limit < 1:
+                # The listing window: --channel-limit when given, else a
+                # picker-friendly default (the flat listing is metadata-only,
+                # so a generous window costs seconds).
+                _list_window = channel_limit if channel_limit >= 1 else _CHANNEL_PICK_WINDOW
+                _interactive_pick = channel_pick or not channel_select
+                if channel_limit < 1 and not _interactive_pick:
+                    # Non-interactive use needs an explicit window — without
+                    # it the intent ("which entries?") is ambiguous.
                     console.print(f"[red]Channel URL detected:[/red] {input_video}")
                     console.print(
                         "  This input is a Twitch channel VOD listing, not a single video."
                     )
                     console.print(
-                        "  Pass --channel-limit N to process the N most "
-                        "recent VODs, or open a specific VOD URL "
+                        "  Pass --channel-limit N with --channel-select "
+                        "'1,3-5' (or --channel-pick for the interactive "
+                        "table), or open a specific VOD URL "
                         "(https://www.twitch.tv/videos/<id>)."
+                    )
+                    raise typer.Exit(2)
+                if channel_type not in CHANNEL_TYPES:
+                    console.print(
+                        f"[red]Unknown --channel-type:[/red] {channel_type!r} "
+                        f"(expected one of {', '.join(CHANNEL_TYPES)})"
+                    )
+                    raise typer.Exit(2)
+                if channel_sort not in CHANNEL_SORTS:
+                    console.print(
+                        f"[red]Unknown --channel-sort:[/red] {channel_sort!r} "
+                        f"(expected one of {', '.join(CHANNEL_SORTS)})"
                     )
                     raise typer.Exit(2)
                 try:
                     _channel_vods = resolve_channel_vods(
                         input_video,
-                        channel_limit,
+                        _list_window,
+                        category=channel_type,
                         cancel_callback=(lambda: cancel_event.is_set()),
                         proxy=resolved_proxy,
                         low_process_priority=resolved_low_process_priority,
@@ -1662,12 +1726,49 @@ def main(
                 except ChannelImportError as e:
                     console.print(f"[red]Channel import failed:[/red] {e}")
                     raise typer.Exit(1) from None
-                # The batch rewrites the per-run input: every VOD runs the
-                # SAME validated _pcfg (only input_raw differs), so config
-                # validation stays exactly as strict as the single run.
+
+                # Sort the table per the user's key (the listing arrives
+                # newest-first; duration/views reorder it).
+                _channel_vods = sort_channel_vods(_channel_vods, channel_sort)
+
+                # Numbered table — the "checkboxes" of the CLI: the user
+                # reads the numbers and answers with them.
+                console.print(f"\n[bold]Channel {channel_type}[/bold] (sorted by {channel_sort}):")
+                for _i, v in enumerate(_channel_vods, start=1):
+                    _views = f"{v.view_count:,}" if v.view_count is not None else "?"
+                    console.print(
+                        f"  [cyan]{_i:>3}[/cyan]  {v.duration_hm():>7}  "
+                        f"{_views:>9} views  {v.title or v.url}"
+                    )
+                console.print()
+
+                if _interactive_pick:
+                    # Interactive picker. Non-interactive stdin must not
+                    # hang (same rule as _consent): refuse the prompt and
+                    # tell the user how to do it non-interactively.
+                    if not _stdin_is_interactive():
+                        console.print(
+                            "[red]Interactive channel pick needs a terminal; "
+                            "use --channel-select '1,3-5' instead.[/red]"
+                        )
+                        raise typer.Exit(2)
+                    _answer = typer.prompt(
+                        "Comma-separated numbers to process (e.g. 1,3-5; empty cancels)",
+                        default="",
+                    ).strip()
+                    if not _answer:
+                        console.print("[yellow]Nothing selected — cancelled.[/yellow]")
+                        raise typer.Exit(130)
+                else:
+                    _answer = channel_select.strip()
+                try:
+                    _picks = parse_channel_selection(_answer, len(_channel_vods))
+                except ValueError as e:
+                    console.print(f"[red]Bad selection:[/red] {e}")
+                    raise typer.Exit(2) from None
+                _channel_vods = [_channel_vods[i - 1] for i in _picks]
                 console.print(
-                    f"[cyan]Channel import:[/cyan] {len(_channel_vods)} VOD(s) "
-                    f"queued (newest first)"
+                    f"[cyan]Channel import:[/cyan] {len(_channel_vods)} entry(ies) queued"
                 )
 
             # P1: reify ``software_fallback="ask"``. The callback typer

@@ -4,17 +4,31 @@
 
 ### Added
 
-- **Twitch channel import (`--channel-limit N`)** — point the CLI at a
-  channel's VOD listing (`https://www.twitch.tv/<channel>/videos`) and it
-  now compresses the N most recent VODs in one run. The listing is
-  fetched via yt-dlp's flat-playlist mode (metadata only, seconds even
-  for large channels), then each VOD runs through the normal pipeline
-  (project dirs, silence cache, resume, frame-hole gates all apply per
-  VOD). A failed VOD is logged and skipped — one deleted recording
-  doesn't waste the rest of the queue — and the batch epilogue lists the
-  failed URLs. Channel URLs without `--channel-limit` are rejected with
-  a hint (a channel can hold hundreds of VODs; the limit keeps the intent
-  explicit). Cancellation (Ctrl+C) stops the whole batch cleanly.
+- **Twitch channel import — interactive VOD picker.** Point the CLI at a
+  channel listing (`https://www.twitch.tv/<channel>/videos`) and it shows
+  the channel's entries as a numbered table (duration, view count, title)
+  and prompts for which ones to compress (answer like `1,3-5`). The
+  listing is fetched via yt-dlp's flat-playlist mode — metadata only,
+  seconds even for large channels — then each picked entry runs through
+  the normal pipeline (project dirs, silence cache, resume, frame-hole
+  gates all apply per entry). A failed entry is logged and skipped — one
+  deleted recording doesn't waste the rest of the queue — and the batch
+  epilogue lists the failed URLs. Cancellation (Ctrl+C / empty answer)
+  stops cleanly; a piped (non-tty) stdin refuses the prompt with a hint
+  instead of hanging.
+- **Channel filters, sorts and non-interactive selection:**
+  - `--channel-type archives|highlights|uploads|all|clips` — which
+    channel tab to list (archives is the default; `?filter=archives` is
+    not a value Twitch's channel page accepts — the bare listing URL is
+    used instead).
+  - `--channel-sort date|duration|views` — table order: newest first
+    (Twitch VOD ids are sequential, so a higher id is a newer recording),
+    longest first, or most-watched first. Entries with a missing value
+    sink to the end instead of crashing the sort.
+  - `--channel-select '1,3-5'` — non-interactive selection by the
+    table's numbers (inclusive ranges, duplicates collapse, table order
+    preserved). `--channel-limit N` sets the listing window (default 50
+    for the picker).
 
 ## [0.3.3] - 2026-08-29
 

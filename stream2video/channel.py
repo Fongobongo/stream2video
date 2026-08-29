@@ -58,6 +58,26 @@ _CHANNEL_RE = re.compile(
 # waited on. Media downloads use the (much larger) download_timeout.
 _CHANNEL_LIST_TIMEOUT = 300
 
+# Listing categories. Twitch's channel page exposes these as tabs; the
+# CLI surfaces them so a user can import exactly one content type.
+# ``archives`` (past broadcasts) is the default everywhere. ``all``
+# merges archives + highlights + uploads in Twitch's own order.
+CHANNEL_TYPES = ("archives", "highlights", "uploads", "all", "clips")
+
+# Sort keys for the listing table. Twitch's listing is newest-first by
+# VOD id; the alternatives let a user target long recordings or the
+# most-watched entries. ``id`` sorts by the numeric VOD id, which is
+# monotonic in creation time (Twitch ids are sequential), so it is the
+# date sort without needing a date field the flat listing does not
+# provide.
+CHANNEL_SORTS = ("date", "duration", "views")
+
+# How many entries the listing fetches when the user picks interactively.
+# A larger window gives the table more to filter/sort through; the flat
+# listing is cheap (metadata only), so a generous default keeps the
+# picker useful on channels the user doesn't know yet.
+_CHANNEL_PICK_WINDOW = 50
+
 
 class ChannelImportError(Exception):
     """Channel listing failed (unreachable, private, or no VODs)."""
@@ -78,6 +98,87 @@ class ChannelVod:
     url: str
     title: str | None
     duration: float | None
+    view_count: int | None = None
+
+    def duration_hm(self) -> str:
+        """``3569.0 -> "59m29s"`` / ``"45m"`` — for the picker table."""
+        if self.duration is None:
+            return "?"
+        total = round(self.duration)
+        h, rem = divmod(total, 3600)
+        m, s = divmod(rem, 60)
+        if h:
+            return f"{h}h{m:02d}m"
+        return f"{m}m{s:02d}s" if s else f"{m}m"
+
+
+def parse_channel_selection(spec: str, max_index: int) -> list[int]:
+    """Parse a 1-based entry selection like ``"1,3-5,9"``.
+
+    The interactive picker (and ``--channel-select``) show a numbered
+    table; the user checks entries by number. Ranges are inclusive,
+    whitespace is free-form, and duplicates collapse while preserving
+    the table's order (a range's numbers expand in ascending order, so
+    ``"5,1-2"`` selects 1, 2, 5 — the TABLE order, not the typing
+    order). Pure and raising on anything ambiguous.
+
+    Raises:
+        ValueError: an empty spec, a bad token, or an out-of-range
+            number (the error names the valid range, so a paste of the
+            table's numbers that lost a digit fails fast instead of
+            silently dropping an entry).
+    """
+    spec = spec.strip()
+    if not spec:
+        raise ValueError("Empty selection")
+    picked: set[int] = set()
+    for token in spec.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        if "-" in token:
+            lo_raw, _, hi_raw = token.partition("-")
+            try:
+                lo, hi = int(lo_raw), int(hi_raw)
+            except ValueError as e:
+                raise ValueError(f"Bad range {token!r}") from e
+            if lo > hi:
+                lo, hi = hi, lo
+        else:
+            try:
+                lo = hi = int(token)
+            except ValueError as e:
+                raise ValueError(f"Bad number {token!r}") from e
+        for n in range(lo, hi + 1):
+            if n < 1 or n > max_index:
+                raise ValueError(f"Number {n} is outside the table (1..{max_index})")
+            picked.add(n)
+    return sorted(picked)
+
+
+def sort_channel_vods(vods: list[ChannelVod], key: str) -> list[ChannelVod]:
+    """Sort a listing by ``key``: ``date`` (newest first, the default
+    listing order by descending VOD id), ``duration`` (longest first) or
+    ``views`` (most-watched first).
+
+    Pure: returns a new list; entries with a missing value (``?`` in
+    the table) sink to the end regardless of key rather than crashing
+    the sort. ``date`` uses the numeric VOD id — Twitch ids are
+    sequential, so a higher id is a newer recording.
+    """
+    if key not in CHANNEL_SORTS:
+        raise ValueError(f"Unknown sort {key!r} (expected one of {CHANNEL_SORTS})")
+
+    def _num_id(v: ChannelVod) -> int:
+        digits = "".join(ch for ch in v.video_id if ch.isdigit())
+        return int(digits) if digits else 0
+
+    if key == "date":
+        return sorted(vods, key=_num_id, reverse=True)
+    if key == "duration":
+        return sorted(vods, key=lambda v: (v.duration is None, -(v.duration or 0.0)))
+    # views
+    return sorted(vods, key=lambda v: (v.view_count is None, -(v.view_count or 0)))
 
 
 def is_twitch_channel_url(url: str) -> bool:
@@ -107,6 +208,7 @@ def resolve_channel_vods(
     url: str,
     limit: int,
     *,
+    category: str = "archives",
     cancel_callback: Callable[[], bool] | None = None,
     proxy: str = "",
     timeout: int = _CHANNEL_LIST_TIMEOUT,
@@ -123,6 +225,11 @@ def resolve_channel_vods(
     Args:
         url: Channel VOD-listing URL (``.../<channel>/videos``).
         limit: Maximum number of VODs to return; must be >= 1.
+        category: Which channel tab to list — ``archives`` (past
+            broadcasts, default), ``highlights``, ``uploads``,
+            ``all`` (Twitch's merged tab) or ``clips``. ``clips`` is
+            re-routed to the channel's ``/clips`` path; the others are
+            the ``?filter=`` query on the VOD listing.
         cancel_callback: Optional callable polled by the stdout drain
             thread; returning True kills yt-dlp and raises
             ``ChannelImportCancelled``.
@@ -142,12 +249,33 @@ def resolve_channel_vods(
     """
     if limit < 1:
         raise ChannelImportError(f"Channel limit must be >= 1, got {limit}")
+    if category not in CHANNEL_TYPES:
+        raise ChannelImportError(
+            f"Unknown channel type {category!r} (expected one of {CHANNEL_TYPES})"
+        )
 
-    # One line per VOD: ``id::duration::title``. ``::`` cannot appear in
-    # the id (alphanumeric) or the duration (float/NA), and the title
-    # goes LAST so a ``::`` inside a title stays in the title field
-    # (split with maxsplit keeps the remainder intact).
-    line_template = "%(id)s::%(duration)s::%(title)s"
+    # Clips live on a different channel path, not a ?filter= of the VOD
+    # listing; everything else is the listing's own filter query.
+    # ``archives`` is the listing WITHOUT a filter (Twitch's default
+    # tab): ``?filter=archives`` is NOT a value the channel page accepts
+    # (it returns an empty listing — verified empirically), while the
+    # bare listing URL returns the past broadcasts.
+    m = _CHANNEL_RE.match(url.strip())
+    assert m is not None  # caller (CLI) gates on is_twitch_channel_url first
+    channel_name = m.group(1)
+    if category == "clips":
+        listing_url = f"https://www.twitch.tv/{channel_name}/clips"
+    elif category == "archives":
+        listing_url = f"https://www.twitch.tv/{channel_name}/videos"
+    else:
+        listing_url = f"https://www.twitch.tv/{channel_name}/videos?filter={category}"
+
+    # One line per VOD: ``id::duration::views::title``. ``::`` cannot
+    # appear in the id (alphanumeric), the duration (float/NA) or the
+    # view count (int/NA), and the title goes LAST so a ``::`` inside a
+    # title stays in the title field (split with maxsplit keeps the
+    # remainder intact).
+    line_template = "%(id)s::%(duration)s::%(view_count)s::%(title)s"
     cmd = [
         sys.executable,
         "-m",
@@ -159,7 +287,7 @@ def resolve_channel_vods(
         line_template,
         "--playlist-items",
         f"1:{limit}",
-        url,
+        listing_url,
     ]
     if proxy:
         cmd.extend(["--proxy", proxy])
@@ -255,13 +383,13 @@ def resolve_channel_vods(
 
     vods: list[ChannelVod] = []
     for raw in lines:
-        parts = raw.split("::", 2)
-        if len(parts) != 3:
+        parts = raw.split("::", 3)
+        if len(parts) != 4:
             # Unknown line shape (a warning that slipped through, an ad
             # marker): skip rather than abort the whole import.
             logger.debug(f"Skipping unrecognized listing line: {raw!r}")
             continue
-        video_id, duration_raw, title = parts
+        video_id, duration_raw, views_raw, title = parts
         if not video_id:
             continue
         duration: float | None
@@ -271,38 +399,46 @@ def resolve_channel_vods(
             # Live/upcoming entries report no duration; import them
             # anyway and let the media download surface the truth.
             duration = None
+        view_count: int | None
+        try:
+            view_count = int(float(views_raw))
+        except ValueError:
+            view_count = None
         vods.append(
             ChannelVod(
                 video_id=video_id,
                 url=_canonical_vod_url(video_id),
                 title=title or None,
                 duration=duration,
+                view_count=view_count,
             )
         )
 
     if not vods:
         raise ChannelImportError(
-            f"No VODs found for {url} (channel may have no recordings, "
-            "or they are subscribers-only)"
+            f"No {category} found for {url} (the channel may have none in "
+            "this category, or they are subscribers-only)"
         )
 
-    logger.info(f"Channel listing: {len(vods)} VOD(s), newest {vods[0].url}")
+    logger.info(f"Channel listing: {len(vods)} {category} entry(s), newest {vods[0].url}")
     return vods
 
 
 def _module_smoke() -> None:  # pragma: no cover - manual probe helper
-    """``python -m stream2video.channel <url> <limit>`` — quick manual
-    check of the listing path outside the CLI (used during development;
-    the CLI embeds the same resolver)."""
+    """``python -m stream2video.channel <url> <limit> [category]`` — quick
+    manual check of the listing path outside the CLI (used during
+    development; the CLI embeds the same resolver)."""
     import argparse
 
     ap = argparse.ArgumentParser()
     ap.add_argument("url")
     ap.add_argument("limit", type=int)
+    ap.add_argument("category", nargs="?", default="archives")
     ns = ap.parse_args()
-    for v in resolve_channel_vods(ns.url, ns.limit):
-        dur = f"{v.duration:.0f}s" if v.duration is not None else "?"
-        print(f"{v.video_id}  {dur:>8}  {v.title or '-'}  {v.url}")
+    for v in resolve_channel_vods(ns.url, ns.limit, category=ns.category):
+        dur = v.duration_hm() if v.duration is not None else "?"
+        views = str(v.view_count) if v.view_count is not None else "?"
+        print(f"{v.video_id}  {dur:>8}  {views:>8}  {v.title or '-'}  {v.url}")
 
 
 if __name__ == "__main__":  # pragma: no cover

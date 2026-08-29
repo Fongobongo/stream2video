@@ -14,6 +14,7 @@ import logging
 import os
 import shutil
 import signal
+import sys
 import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -359,6 +360,22 @@ def _make_sigint_cancel() -> tuple[threading.Event, Callable[[], bool]]:
         return event.is_set()
 
     return event, _cb
+
+
+def _stdin_is_interactive() -> bool:
+    """True when stdin is an interactive terminal.
+
+    Shared by every CLI prompt site (encoder-fallback consent, legacy
+    project rename, the channel picker): a piped/redirected or
+    open-but-silent stdin must never reach a blocking prompt — a
+    background job would hang forever (benchmark 2026-08: a matrix run
+    hung for hours here). Extracted as a named helper so the channel
+    picker's tests can flip it without patching ``sys.stdin`` (which
+    the Typer test runner replaces per-invoke, defeating a plain
+    ``patch("sys.stdin")``).
+    """
+    isatty = getattr(sys.stdin, "isatty", None)
+    return isatty is not None and isatty()
 
 
 def _make_file_handler(path: Path) -> logging.FileHandler:

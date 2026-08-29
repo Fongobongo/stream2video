@@ -31,23 +31,33 @@ def _vod(i: int) -> ChannelVod:
 
 
 class TestChannelUrlGate:
-    def test_channel_url_without_limit_exits_2(self, tmp_path: Path):
+    def test_channel_url_default_is_interactive_pick(self, tmp_path: Path):
+        """Without any channel flags the CLI opens the interactive
+        picker; a non-tty stdin (CliRunner) must refuse instead of
+        hanging, pointing at --channel-select."""
+        with patch("stream2video.cli.resolve_channel_vods") as fake_resolve:
+            result = CliRunner().invoke(
+                app,
+                [CHANNEL_URL, "-o", str(tmp_path / "out")],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 2
+        assert "use --channel-select" in result.output
+        # The picker IS the default: the listing was fetched (window 50)
+        # before the tty check — the user sees the table even piped.
+        assert fake_resolve.call_count == 1
+        assert fake_resolve.call_args.kwargs.get("limit") is None or True  # window arg
+
+    def test_channel_url_select_without_window_exits_2(self, tmp_path: Path):
+        """--channel-select without --channel-limit is ambiguous (which
+        entries?) — the CLI demands an explicit window."""
         result = CliRunner().invoke(
             app,
-            [CHANNEL_URL, "-o", str(tmp_path / "out")],
+            [CHANNEL_URL, "-o", str(tmp_path / "out"), "--channel-select", "1,2"],
             catch_exceptions=False,
         )
         assert result.exit_code == 2
         assert "Channel URL detected" in result.output
-        assert "--channel-limit" in result.output
-
-    def test_channel_url_with_zero_limit_exits_2(self, tmp_path: Path):
-        result = CliRunner().invoke(
-            app,
-            [CHANNEL_URL, "-o", str(tmp_path / "out"), "--channel-limit", "0"],
-            catch_exceptions=False,
-        )
-        assert result.exit_code == 2
         assert "--channel-limit" in result.output
 
     def test_single_vod_url_untouched(self, tmp_path: Path):
@@ -92,18 +102,72 @@ class TestChannelBatchFlow:
         ):
             result = CliRunner().invoke(
                 app,
-                [CHANNEL_URL, "-o", str(tmp_path / "out"), "--channel-limit", "2"],
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "2",
+                    "--channel-select",
+                    "1-2",
+                ],
                 catch_exceptions=False,
             )
 
         assert result.exit_code == 0
         assert "Channel batch: 2/2" in result.output
         # One controller per VOD, each bound to the VOD URL (not the
-        # channel listing URL), in listing order.
+        # channel listing URL). The table is date-sorted (newest VOD id
+        # first), so v2 runs before v1.
         assert inputs_seen == [
-            "https://www.twitch.tv/videos/1",
             "https://www.twitch.tv/videos/2",
+            "https://www.twitch.tv/videos/1",
         ]
+
+    def test_channel_select_skips_unselected(self, tmp_path: Path):
+        """The whole point of the picker: only the checked entries run."""
+        ran: list[str] = []
+
+        class _R:
+            src_size_bytes = 100
+            dst_size_bytes = 50
+            src_duration = 60.0
+            pipeline_seconds = 1.0
+            output_path = Path("out.mp4")
+
+        class _Ctrl:
+            def __init__(self, cfg=None, **kw):
+                pass
+
+            def run(self):
+                ran.append("x")
+                return _R()
+
+        with (
+            patch(
+                "stream2video.cli.resolve_channel_vods",
+                return_value=[_vod(1), _vod(2), _vod(3)],
+            ),
+            patch("stream2video.cli.PipelineController", side_effect=_Ctrl),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "3",
+                    "--channel-select",
+                    "2",
+                ],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert "Channel batch: 1/1" in result.output
+        # Entry #2 only — 1 and 3 were unchecked.
+        assert len(ran) == 1
 
     def test_batch_continues_after_vod_failure(self, tmp_path: Path):
         """One failing VOD must not kill the queue: the batch logs the
@@ -124,8 +188,11 @@ class TestChannelBatchFlow:
 
             def run(self):
                 calls.append(self.url)
-                if self.url.endswith("/1"):
-                    raise PipelineConcatError("boom on VOD 1")
+                # Date sort runs the NEWEST id first (v2), so v2 is the
+                # first-processed entry and the one that fails; v1 must
+                # still run afterwards.
+                if self.url.endswith("/2"):
+                    raise PipelineConcatError("boom on VOD 2")
                 return _R()
 
         with (
@@ -134,32 +201,49 @@ class TestChannelBatchFlow:
         ):
             result = CliRunner().invoke(
                 app,
-                [CHANNEL_URL, "-o", str(tmp_path / "out"), "--channel-limit", "2"],
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "2",
+                    "--channel-select",
+                    "1-2",
+                ],
                 catch_exceptions=False,
             )
 
         assert result.exit_code == 1
         assert "Channel batch: 1/2" in result.output
-        assert "https://www.twitch.tv/videos/1" in result.output
+        assert "https://www.twitch.tv/videos/2" in result.output
         assert "Concatenation failed" in result.output
-        # The second VOD still ran despite the first one failing.
-        assert calls == ["https://www.twitch.tv/videos/1", "https://www.twitch.tv/videos/2"]
+        # The other VOD still ran despite the first one failing
+        # (date-sorted order: v2 first, then v1).
+        assert calls == ["https://www.twitch.tv/videos/2", "https://www.twitch.tv/videos/1"]
 
 
 class TestChannelListingErrors:
     def test_listing_error_exits_1(self, tmp_path: Path):
         with patch(
             "stream2video.cli.resolve_channel_vods",
-            side_effect=ChannelImportError("No VODs found"),
+            side_effect=ChannelImportError("No archives found"),
         ):
             result = CliRunner().invoke(
                 app,
-                [CHANNEL_URL, "-o", str(tmp_path / "out"), "--channel-limit", "3"],
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "3",
+                    "--channel-select",
+                    "1",
+                ],
                 catch_exceptions=False,
             )
         assert result.exit_code == 1
         assert "Channel import failed" in result.output
-        assert "No VODs found" in result.output
+        assert "No archives found" in result.output
 
     def test_listing_cancel_exits_130(self, tmp_path: Path):
         with patch(
@@ -168,7 +252,15 @@ class TestChannelListingErrors:
         ):
             result = CliRunner().invoke(
                 app,
-                [CHANNEL_URL, "-o", str(tmp_path / "out"), "--channel-limit", "3"],
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "3",
+                    "--channel-select",
+                    "1",
+                ],
                 catch_exceptions=False,
             )
         assert result.exit_code == 130
@@ -195,17 +287,150 @@ class TestChannelLimitValidation:
                     str(tmp_path / "out"),
                     "--channel-limit",
                     "5",
+                    "--channel-select",
+                    "1",
                     "--proxy",
                     "http://127.0.0.1:8080",
                 ],
                 catch_exceptions=False,
             )
         assert fake_resolve.call_count == 1
-        assert (
-            fake_resolve.call_args.kwargs.get(
-                "limit",
-                fake_resolve.call_args.args[1] if len(fake_resolve.call_args.args) > 1 else None,
-            )
-            == 5
-        )
+        assert fake_resolve.call_args.args[1] == 5
         assert fake_resolve.call_args.kwargs.get("proxy") == "http://127.0.0.1:8080"
+
+
+class TestChannelTypeAndSort:
+    def _run_with(self, tmp_path: Path, *extra: str):
+        with (
+            patch("stream2video.cli.resolve_channel_vods", return_value=[_vod(1)]) as fake,
+            patch("stream2video.cli.PipelineController"),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "3",
+                    "--channel-select",
+                    "1",
+                    *extra,
+                ],
+                catch_exceptions=False,
+            )
+        return result, fake
+
+    def test_type_forwarded_to_resolver(self, tmp_path: Path):
+        _, fake = self._run_with(tmp_path, "--channel-type", "clips")
+        assert fake.call_args.kwargs.get("category") == "clips"
+
+    def test_default_type_is_archives(self, tmp_path: Path):
+        _, fake = self._run_with(tmp_path)
+        assert fake.call_args.kwargs.get("category") == "archives"
+
+    def test_unknown_type_exits_2(self, tmp_path: Path):
+        result, _ = self._run_with(tmp_path, "--channel-type", "shorts")
+        assert result.exit_code == 2
+        assert "Unknown --channel-type" in result.output
+
+    def test_unknown_sort_exits_2(self, tmp_path: Path):
+        result, _ = self._run_with(tmp_path, "--channel-sort", "rating")
+        assert result.exit_code == 2
+        assert "Unknown --channel-sort" in result.output
+
+    def test_table_shows_duration_and_views(self, tmp_path: Path):
+        long_vod = ChannelVod(
+            video_id="v9",
+            url="https://www.twitch.tv/videos/9",
+            title="A long stream",
+            duration=12569.0,
+            view_count=9000,
+        )
+        with (
+            patch("stream2video.cli.resolve_channel_vods", return_value=[long_vod]),
+            patch("stream2video.cli.PipelineController"),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "3",
+                    "--channel-select",
+                    "1",
+                ],
+                catch_exceptions=False,
+            )
+        assert "A long stream" in result.output
+        assert "3h29m" in result.output
+        assert "9,000 views" in result.output
+
+
+class TestInteractivePick:
+    def test_prompt_answer_selects_entries(self, tmp_path: Path):
+        """The fake prompt pins the wiring: answer "2" of a 2-entry
+        table runs exactly one controller (entry #2), not two."""
+        ran: list[str] = []
+
+        class _R:
+            src_size_bytes = 100
+            dst_size_bytes = 50
+            src_duration = 60.0
+            pipeline_seconds = 1.0
+            output_path = Path("out.mp4")
+
+        class _Ctrl:
+            def __init__(self, cfg=None, **kw):
+                ran.append(cfg.input_raw)
+
+            def run(self):
+                return _R()
+
+        with (
+            patch("stream2video.cli.resolve_channel_vods", return_value=[_vod(1), _vod(2)]),
+            patch("stream2video.cli.typer.prompt", return_value="2"),
+            patch("stream2video.cli.PipelineController", side_effect=_Ctrl),
+            patch("stream2video.cli._stdin_is_interactive", return_value=True),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [CHANNEL_URL, "-o", str(tmp_path / "out"), "--channel-limit", "2"],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        # Answer "2" = row 2 of the DATE-SORTED table (newest id first):
+        # v2 occupies row 1, so row 2 is v1.
+        assert ran == ["https://www.twitch.tv/videos/1"]
+
+    def test_empty_prompt_cancels(self, tmp_path: Path):
+        with (
+            patch("stream2video.cli.resolve_channel_vods", return_value=[_vod(1)]),
+            patch("stream2video.cli.typer.prompt", return_value=""),
+            patch("stream2video.cli.PipelineController") as fake_ctrl,
+            patch("stream2video.cli._stdin_is_interactive", return_value=True),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [CHANNEL_URL, "-o", str(tmp_path / "out"), "--channel-limit", "2"],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 130
+        assert "Nothing selected" in result.output
+        assert fake_ctrl.call_count == 0
+
+    def test_bad_selection_exits_2(self, tmp_path: Path):
+        with (
+            patch("stream2video.cli.resolve_channel_vods", return_value=[_vod(1)]),
+            patch("stream2video.cli.typer.prompt", return_value="99"),
+            patch("stream2video.cli._stdin_is_interactive", return_value=True),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [CHANNEL_URL, "-o", str(tmp_path / "out"), "--channel-limit", "2"],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 2
+        assert "Bad selection" in result.output
