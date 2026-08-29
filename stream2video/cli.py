@@ -31,6 +31,7 @@ from stream2video.channel import (
     ChannelImportCancelled,
     ChannelImportError,
     ChannelVod,
+    filter_channel_vods,
     is_listing_url,
     is_twitch_channel_url,
     is_youtube_playlist_url,
@@ -1155,6 +1156,19 @@ def main(
             "to both the interactive picker and --channel-select."
         ),
     ),
+    channel_filter: str = typer.Option(
+        "",
+        "--channel-filter",
+        help=(
+            "Channel/playlist import: filter the table by TITLE globs, "
+            "comma-separated: '!' excludes, '+' or bare includes. '*'"
+            " matches any characters, '?' one character "
+            "(case-insensitive). Examples: '*undertale*' — only "
+            "Undertale streams; '!archive*,*day*' — drop archives, keep "
+            "days; '+*speedrun*,!*glitch*' — speedruns but no glitches. "
+            "Specs with only exclusions keep everything else."
+        ),
+    ),
     channel_select: str = typer.Option(
         "",
         "--channel-select",
@@ -1752,6 +1766,27 @@ def main(
                 except ChannelImportError as e:
                     console.print(f"[red]Channel import failed:[/red] {e}")
                     raise typer.Exit(1) from None
+
+                # Title filter (--channel-filter): applied to the RAW
+                # listing before the sort, so the table's numbers refer
+                # to the filtered set the user actually sees and picks.
+                if channel_filter.strip():
+                    try:
+                        _before = len(_channel_vods)
+                        _channel_vods = filter_channel_vods(_channel_vods, channel_filter)
+                    except ValueError as e:
+                        console.print(f"[red]Bad --channel-filter:[/red] {e}")
+                        raise typer.Exit(2) from None
+                    if not _channel_vods:
+                        console.print(
+                            f"[yellow]--channel-filter {channel_filter!r} matched "
+                            f"none of the {_before} listed entries.[/yellow]"
+                        )
+                        raise typer.Exit(1)
+                    console.print(
+                        f"[dim]Filter {channel_filter!r}: "
+                        f"{len(_channel_vods)}/{_before} entries match[/dim]"
+                    )
 
                 # Sort the table per the user's key (the listing arrives
                 # newest-first; duration/views reorder it).

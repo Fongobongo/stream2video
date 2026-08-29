@@ -40,6 +40,13 @@
     table's numbers (inclusive ranges, duplicates collapse, table order
     preserved). `--channel-limit N` sets the listing window (default 50
     for the picker).
+  - `--channel-filter` — title globs, comma-separated: `!` excludes,
+    `+` or bare includes, `*` matches any characters, `?` one
+    character (case-insensitive). `'*undertale*'` keeps only Undertale
+    streams; `'!archive*,*day*'` drops archives; `'+*speedrun*,!*glitch*'`
+    keeps speedruns minus glitches. Specs with only exclusions keep
+    everything else; the table's numbers and the selection refer to the
+    FILTERED set.
 
 ## [0.3.3] - 2026-08-29
 

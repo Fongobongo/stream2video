@@ -34,6 +34,7 @@ Cancel semantics mirror ``download``: a drain thread watches
 from __future__ import annotations
 
 import dataclasses
+import fnmatch
 import logging
 import re
 import subprocess
@@ -248,6 +249,85 @@ def sort_channel_vods(vods: list[ChannelVod], key: str) -> list[ChannelVod]:
         return sorted(vods, key=lambda v: (v.duration is None, -(v.duration or 0.0)))
     # views
     return sorted(vods, key=lambda v: (v.view_count is None, -(v.view_count or 0)))
+
+
+def parse_channel_filter(spec: str) -> tuple[list[str], list[str]]:
+    """Parse a ``--channel-filter`` spec into (include, exclude) globs.
+
+    Grammar (comma-separated terms, matched against the entry TITLE,
+    case-insensitively):
+
+    - ``!pattern`` — exclusion: drop matching entries.
+    - ``+pattern`` or bare ``pattern`` — inclusion: keep entries
+      matching at least one include (an explicit ``+`` is legal for
+      readability in mixed specs like ``+*bob*,!*archive*``).
+    - ``*`` matches any run of characters, ``?`` a single character;
+      everything else is literal (Python ``fnmatch`` semantics).
+
+    A spec with ONLY exclusions (``!a,!b``) implicitly includes
+    everything else; a spec with both sides keeps entries that match an
+    include and no exclude. Whitespace around terms is free-form.
+
+    Raises:
+        ValueError: a term with nothing after its ``!``/``+`` prefix —
+            ``!`` alone would silently drop nothing and ``+`` alone
+            would silently keep nothing; both are almost certainly
+            typos (a dropped ``*``), so fail fast with the term named.
+    """
+    includes: list[str] = []
+    excludes: list[str] = []
+    for term in spec.split(","):
+        term = term.strip()
+        if not term:
+            continue
+        if term.startswith("!"):
+            pattern = term[1:].strip()
+            if not pattern:
+                raise ValueError(f"Empty exclusion pattern in {term!r}")
+            excludes.append(pattern)
+        elif term.startswith("+"):
+            pattern = term[1:].strip()
+            if not pattern:
+                raise ValueError(f"Empty inclusion pattern in {term!r}")
+            includes.append(pattern)
+        else:
+            includes.append(term)
+    if not includes and not excludes:
+        raise ValueError("Empty filter")
+    return includes, excludes
+
+
+def filter_channel_vods(vods: list[ChannelVod], spec: str) -> list[ChannelVod]:
+    """Filter a listing by title globs (see ``parse_channel_filter``).
+
+    Pure: returns a new list preserving the input order. Entries whose
+    title is missing (``?`` in the table) never match an include and
+    are never excluded — a title-less entry can't be judged by its
+    title, and a bare ``*`` include means "everything titled", so a
+    lone ``!*something*`` spec keeps them (that's the "only exclusions"
+    case: the entry is not excluded, hence kept).
+
+    Raises:
+        ValueError: the spec doesn't parse (propagated from
+            ``parse_channel_filter`` with the term named).
+    """
+    includes, excludes = parse_channel_filter(spec)
+
+    def _match(title: str | None, patterns: list[str]) -> bool:
+        if title is None:
+            return False
+        low = title.lower()
+        return any(fnmatch.fnmatch(low, p.lower()) for p in patterns)
+
+    if includes:
+        kept = [v for v in vods if _match(v.title, includes)]
+    else:
+        # Only exclusions: everything not explicitly dropped is kept,
+        # including title-less entries.
+        kept = [v for v in vods if not _match(v.title, excludes)]
+    if excludes:
+        kept = [v for v in kept if not _match(v.title, excludes)]
+    return kept
 
 
 def is_twitch_channel_url(url: str) -> bool:

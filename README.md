@@ -102,6 +102,7 @@ silencecut --show-completion      # Print the completion script for manual insta
 | `--channel-limit` | `0` | Channel/playlist import: how many entries to list (the picker's window; default 50). Ignored for single-video inputs |
 | `--channel-type` | — | Channel/playlist import: which tab to list — Twitch: `archives` (default), `highlights`, `uploads`, `all`, `clips`; YouTube: `videos` (default), `shorts`, `streams`. Playlists have no tabs |
 | `--channel-sort` | `date` | Channel/playlist import: table sort — `date` (newest first), `duration` (longest first) or `views` (most-watched first) |
+| `--channel-filter` | — | Channel/playlist import: title globs, comma-separated — `!` excludes, `+`/bare includes, `*` any chars, `?` one char (case-insensitive). E.g. `'*undertale*'`, `'!archive*,*day*'`, `'+*speedrun*,!*glitch*'` |
 | `--channel-select` | — | Channel/playlist import: non-interactive selection by the table's 1-based numbers, e.g. `'1,3-5'` |
 | `--channel-pick` | off | Channel/playlist import: force the interactive numbered-table picker (the default for listing URLs without `--channel-select`) |
 | `-m, --method` | `segment` | `segment` (per-segment encode + concat demuxer), `batch` (frame-exact trim+concat filter), or `cut_then_encode` (lossless cut + single final encode, best quality) |
@@ -179,6 +180,9 @@ silencecut https://www.twitch.tv/<channel>/videos --channel-limit 10 --channel-s
 # List only highlights (Twitch) or shorts (YouTube channels)
 silencecut https://www.twitch.tv/<channel>/videos --channel-type highlights --channel-limit 20
 silencecut https://www.youtube.com/@<handle>/videos --channel-type shorts --channel-limit 20
+
+# Filter by title before picking: only Undertale, no archive reruns
+silencecut https://www.twitch.tv/<channel>/videos --channel-limit 30 --channel-filter '*undertale*,!*archive*'
 ```
 
 ## Configuration

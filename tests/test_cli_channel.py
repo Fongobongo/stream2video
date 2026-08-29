@@ -365,6 +365,113 @@ class TestYoutubeListingCli:
         assert fake.call_count == 0
 
 
+class TestChannelFilterCli:
+    """--channel-filter in the CLI flow: the table shows only matching
+    entries and the selection numbers refer to the filtered set."""
+
+    def _listing(self):
+        return [
+            ChannelVod("v1", "https://www.twitch.tv/videos/1", "Undertale Part 1", 60.0),
+            ChannelVod("v2", "https://www.twitch.tv/videos/2", "Zelda marathon", 120.0),
+            ChannelVod("v3", "https://www.twitch.tv/videos/3", "Undertale Part 2", 90.0),
+        ]
+
+    def test_filter_shows_only_matching(self, tmp_path: Path):
+        with (
+            patch("stream2video.cli.resolve_channel_vods", return_value=self._listing()),
+            patch("stream2video.cli.PipelineController") as fake_ctrl,
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "3",
+                    "--channel-select",
+                    "1-2",
+                    "--channel-filter",
+                    "*undertale*",
+                ],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        assert "Filter '*undertale*': 2/3 entries match" in result.output
+        # The table no longer lists the filtered-out Zelda entry...
+        assert "Zelda marathon" not in result.output
+        assert "Undertale Part 1" in result.output
+        # ...and selection 1-2 over the FILTERED set runs exactly 2
+        # entries (both Undertales), not 3.
+        assert fake_ctrl.call_count == 2
+
+    def test_filter_exclusion_only(self, tmp_path: Path):
+        with (
+            patch("stream2video.cli.resolve_channel_vods", return_value=self._listing()),
+            patch("stream2video.cli.PipelineController"),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "3",
+                    "--channel-select",
+                    "1",
+                    "--channel-filter",
+                    "!*zelda*",
+                ],
+                catch_exceptions=False,
+            )
+        assert "2/3 entries match" in result.output
+        assert "Zelda marathon" not in result.output
+
+    def test_filter_no_match_exits_1(self, tmp_path: Path):
+        with patch(
+            "stream2video.cli.resolve_channel_vods",
+            return_value=self._listing(),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "3",
+                    "--channel-select",
+                    "1",
+                    "--channel-filter",
+                    "*nonexistent*",
+                ],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 1
+        assert "matched none" in result.output
+
+    def test_bad_filter_exits_2(self, tmp_path: Path):
+        with patch("stream2video.cli.resolve_channel_vods", return_value=self._listing()):
+            result = CliRunner().invoke(
+                app,
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "3",
+                    "--channel-select",
+                    "1",
+                    "--channel-filter",
+                    "!",
+                ],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 2
+        assert "Bad --channel-filter" in result.output
+
+
 class TestChannelListingErrors:
     def test_listing_error_exits_1(self, tmp_path: Path):
         with patch(

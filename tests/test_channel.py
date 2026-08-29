@@ -20,10 +20,12 @@ from stream2video.channel import (
     ChannelImportError,
     ChannelVod,
     _canonical_vod_url,
+    filter_channel_vods,
     is_listing_url,
     is_twitch_channel_url,
     is_youtube_channel_url,
     is_youtube_playlist_url,
+    parse_channel_filter,
     parse_channel_selection,
     resolve_channel_vods,
     sort_channel_vods,
@@ -722,6 +724,86 @@ class TestDurationHm:
     def test_unknown(self):
         v = ChannelVod(video_id="v1", url="u", title=None, duration=None)
         assert v.duration_hm() == "?"
+
+
+class TestChannelFilter:
+    """``--channel-filter`` title globs: ``*`` / ``?`` patterns, ``!``
+    exclusion, ``+`` explicit inclusion, case-insensitive, comma-separated."""
+
+    def _v(self, title: str | None, vid: str = "v1") -> ChannelVod:
+        return ChannelVod(video_id=vid, url="u", title=title, duration=60.0)
+
+    def _titles(self, vods):
+        return [v.title for v in vods]
+
+    def _listing(self):
+        return [
+            self._v("Let's Play Undertale #22", "v1"),
+            self._v("Let's Sleep Undertale mit Andy #21", "v2"),
+            self._v("Archive: full stream", "v3"),
+            self._v("Speedrun glitchless", "v4"),
+            self._v(None, "v5"),
+        ]
+
+    def test_include_glob(self):
+        r = filter_channel_vods(self._listing(), "*undertale*")
+        assert self._titles(r) == [
+            "Let's Play Undertale #22",
+            "Let's Sleep Undertale mit Andy #21",
+        ]
+
+    def test_include_is_case_insensitive(self):
+        r = filter_channel_vods(self._listing(), "*UNDERTALE*")
+        assert len(r) == 2
+
+    def test_question_mark_single_char(self):
+        # let?s matches "Let's" (the ? is the apostrophe) but not "Lets".
+        listing = [
+            self._v("Let's Play Undertale"),
+            self._v("Lets Play Zelda"),
+        ]
+        r = filter_channel_vods(listing, "let?s play*")
+        assert self._titles(r) == ["Let's Play Undertale"]
+
+    def test_explicit_plus_include(self):
+        r = filter_channel_vods(self._listing(), "+*speedrun*")
+        assert self._titles(r) == ["Speedrun glitchless"]
+
+    def test_only_exclusions_keep_everything_else(self):
+        r = filter_channel_vods(self._listing(), "!*archive*,!*undertale*")
+        assert self._titles(r) == ["Speedrun glitchless", None]
+
+    def test_include_and_exclude_mixed(self):
+        r = filter_channel_vods(self._listing(), "+*undertale*,!*sleep*")
+        assert self._titles(r) == ["Let's Play Undertale #22"]
+
+    def test_multiple_includes_or_semantics(self):
+        r = filter_channel_vods(self._listing(), "*zelda*,*speedrun*")
+        assert self._titles(r) == ["Speedrun glitchless"]
+
+    def test_whitespace_free_form(self):
+        r = filter_channel_vods(self._listing(), "  *speedrun* , ! *glitch* ")
+        assert r == []  # include speedrun, then exclude glitchless -> empty
+
+    def test_no_match_returns_empty(self):
+        assert filter_channel_vods(self._listing(), "*nonexistent*") == []
+
+    def test_empty_exclusion_raises(self):
+        with pytest.raises(ValueError, match="Empty exclusion"):
+            filter_channel_vods(self._listing(), "!")
+
+    def test_empty_inclusion_raises(self):
+        with pytest.raises(ValueError, match="Empty inclusion"):
+            filter_channel_vods(self._listing(), "+")
+
+    def test_blank_spec_raises(self):
+        with pytest.raises(ValueError, match="Empty filter"):
+            filter_channel_vods(self._listing(), "   ")
+
+    def test_parser_returns_split_lists(self):
+        inc, exc = parse_channel_filter("+*a*, !*b*, *c*")
+        assert inc == ["*a*", "*c*"]
+        assert exc == ["*b*"]
 
 
 class TestChannelVodDataclass:
