@@ -2097,7 +2097,46 @@ def main(
                 _batch_results: list[tuple[str, str]] = []  # (url, status)
                 _batch_cancelled = False
 
+                # Batch-level progress bar (channel imports only): the
+                # controller's per-VOD ``on_progress`` fraction (already
+                # mapped into overall 0..1 space by its ProgressPlan:
+                # download+silence+cut+concat weighted per run) is
+                # folded into a single bar spanning the whole queue —
+                # completed = (finished VODs + this VOD's fraction)/N.
+                # The per-phase bars below stay as the detail view; this
+                # bar is the "where am I in the batch" answer.
+                _batch_total = len(_batch_targets)
+                task_batch: TaskID | None = None
+                if _channel_vods is not None:
+                    _batch_first_label = _batch_targets[0][0]
+                    task_batch = progress.add_task(
+                        f"[magenta]Batch 1/{_batch_total}[/magenta]"
+                        + (f": {_batch_first_label}" if _batch_first_label else ""),
+                        total=100 * _batch_total,
+                    )
+
+                def _batch_on_progress(f: float) -> None:
+                    # ``f`` is the CURRENT VOD's 0..1 overall fraction
+                    # (controller ProgressPlan space). The batch bar's
+                    # total is 100*N; entry i spans [(i-1)*100, i*100],
+                    # so the bar reads (i-1+f)*100 regardless of how the
+                    # previous entries settled (ok or failed — a failed
+                    # slot is clamped up to its boundary when the loop
+                    # moves on, keeping the bar monotonic).
+                    if task_batch is None:
+                        return
+                    _idx = _batch_state["index"]
+                    _completed = (_idx - 1 + max(0.0, min(1.0, f))) * 100.0
+                    progress.update(task_batch, completed=min(_completed, 100.0 * _batch_total))
+
+                # Loop bookkeeping shared with _batch_on_progress: the
+                # current 1-based entry index (the bar's slot math is
+                # derived from it; a settled entry is clamped to its
+                # boundary when the next iteration starts).
+                _batch_state: dict[str, int] = {"index": 1}
+
                 for _v_i, (_v_label, _v_url) in enumerate(_batch_targets, start=1):
+                    _batch_state["index"] = _v_i
                     if _v_i > 1:
                         console.print(
                             f"\n[bold cyan]VOD {_v_i}/{len(_batch_targets)}[/bold cyan]"
@@ -2117,10 +2156,24 @@ def main(
                         import dataclasses as _dc
 
                         _v_pcfg = _dc.replace(_pcfg, input_raw=_v_url)
+                        if task_batch is not None:
+                            progress.update(
+                                task_batch,
+                                description=f"[magenta]Batch {_v_i}/{_batch_total}[/magenta]"
+                                + (f": {_v_label}" if _v_label else ""),
+                            )
                     controller = PipelineController(
                         cfg=_v_pcfg,
                         cb=PipelineCallbacks(
-                            on_progress=lambda f: None,
+                            # In batch mode fold the per-VOD fraction into
+                            # the batch bar; single-video runs keep the
+                            # historical no-op (their per-phase bars are
+                            # the view).
+                            on_progress=(
+                                _batch_on_progress
+                                if _channel_vods is not None
+                                else (lambda f: None)
+                            ),
                             on_status=lambda text, *, force=False: None,
                             on_log=_console_log_line,
                             on_info=_console_log_line,
@@ -2212,8 +2265,27 @@ def main(
 
                     if _v_failed:
                         _batch_results.append((_v_url, "failed"))
+                        if task_batch is not None:
+                            # A failed VOD still consumed its queue slot:
+                            # clamp the bar up to the slot's boundary so
+                            # the next entry starts from a clean base and
+                            # the bar stays monotonic (a failure's own
+                            # last fraction never reaches 1.0).
+                            progress.update(
+                                task_batch,
+                                completed=min(_v_i * 100.0, 100.0 * _batch_total),
+                                description=(
+                                    f"[magenta]Batch {_v_i}/{_batch_total}[/magenta] "
+                                    f"[red](VOD {_v_i} failed)[/red]"
+                                ),
+                            )
                         continue
                     _batch_results.append((_v_url, "ok"))
+                    if task_batch is not None:
+                        progress.update(
+                            task_batch,
+                            completed=min(_v_i * 100.0, 100.0 * _batch_total),
+                        )
                     if _pcfg.dry_run:
                         # --dry-run: the controller stopped after silence
                         # detection. Show the "what would be cut" summary and
@@ -2279,6 +2351,13 @@ def main(
                 # so a re-run can target them). The single-video path falls
                 # through to the rich summary below.
                 if _channel_vods is not None:
+                    if task_batch is not None:
+                        progress.update(
+                            task_batch,
+                            completed=100.0 * _batch_total,
+                            description=f"[magenta]Batch done:[/magenta] "
+                            f"{len(_batch_results)} processed",
+                        )
                     _ok = [u for u, s in _batch_results if s == "ok"]
                     _fail = [u for u, s in _batch_results if s == "failed"]
                     console.print()

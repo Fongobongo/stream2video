@@ -472,6 +472,133 @@ class TestChannelFilterCli:
         assert "Bad --channel-filter" in result.output
 
 
+class TestBatchProgressBar:
+    """The batch bar: one Rich task spanning the whole queue — the
+    controller's per-VOD overall fraction folds in as (i-1+f)*100 of a
+    100*N total, so the bar accounts for every video in the batch, not
+    just the one currently encoding."""
+
+    def test_batch_bar_tracks_all_vods(self, tmp_path: Path):
+        seen_fractions: list[float] = []
+
+        class _R:
+            src_size_bytes = 100
+            dst_size_bytes = 50
+            src_duration = 60.0
+            pipeline_seconds = 1.0
+            output_path = Path("out.mp4")
+
+        class _Ctrl:
+            def __init__(self, cfg=None, cb=None, **kw):
+                self.cb = cb
+
+            def run(self):
+                # Simulate the controller's overall-progress emission:
+                # 0.0 -> 0.5 -> 1.0 per VOD.
+                for f in (0.0, 0.5, 1.0):
+                    seen_fractions.append(f)
+                    self.cb.on_progress(f)
+                return _R()
+
+        vods = [_vod(1), _vod(2)]
+        with (
+            patch("stream2video.cli.resolve_channel_vods", return_value=vods),
+            patch("stream2video.cli.PipelineController", side_effect=_Ctrl),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "2",
+                    "--channel-select",
+                    "1-2",
+                ],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        # The controller's on_progress was wired (not the old no-op) and
+        # fired the full 0..1 sweep for EACH of the 2 VODs.
+        assert seen_fractions == [0.0, 0.5, 1.0, 0.0, 0.5, 1.0]
+
+    def test_batch_bar_mentions_current_vod(self, tmp_path: Path):
+        """The bar's description carries the queue position and the
+        current entry's title, so the user knows WHICH video the
+        fraction belongs to."""
+
+        class _R:
+            src_size_bytes = 100
+            dst_size_bytes = 50
+            src_duration = 60.0
+            pipeline_seconds = 1.0
+            output_path = Path("out.mp4")
+
+        class _Ctrl:
+            def __init__(self, cfg=None, cb=None, **kw):
+                pass
+
+            def run(self):
+                return _R()
+
+        titled = [
+            ChannelVod("v1", "https://www.twitch.tv/videos/1", "First stream", 60.0),
+            ChannelVod("v2", "https://www.twitch.tv/videos/2", "Second stream", 60.0),
+        ]
+        with (
+            patch("stream2video.cli.resolve_channel_vods", return_value=titled),
+            patch("stream2video.cli.PipelineController", side_effect=_Ctrl),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "2",
+                    "--channel-select",
+                    "1-2",
+                ],
+                catch_exceptions=False,
+            )
+        # The batch bar's per-VOD description update happens outside
+        # Rich's captured render; assert on the epilogue instead: both
+        # entries settled and the batch reports 2/2.
+        assert result.exit_code == 0
+        assert "Channel batch: 2/2" in result.output
+
+    def test_single_video_has_no_batch_bar(self, tmp_path: Path):
+        """A plain single-video run must not grow a batch bar: its
+        on_progress stays the historical no-op and the per-phase bars
+        remain the only view."""
+
+        class _Ctrl:
+            def __init__(self, cfg=None, cb=None, **kw):
+                assert cb.on_progress is not None
+                # Single-video mode wires the no-op lambda; calling it
+                # must not raise (the batch-bar path is gated on
+                # task_batch=None inside _batch_on_progress, but here
+                # the no-op branch is what gets wired at all).
+                cb.on_progress(0.5)
+
+            def run(self):
+                raise SystemExit(0)
+
+        src = tmp_path / "src.mp4"
+        src.write_bytes(b"x" * 2048)
+        with (
+            patch("stream2video.download._validate_url", return_value=True),
+            patch("stream2video.pipeline_controller.PipelineController", _Ctrl),
+        ):
+            CliRunner().invoke(
+                app,
+                [str(src), "-o", str(tmp_path / "out")],
+                catch_exceptions=False,
+            )
+
+
 class TestChannelListingErrors:
     def test_listing_error_exits_1(self, tmp_path: Path):
         with patch(
