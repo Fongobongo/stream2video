@@ -212,20 +212,18 @@ def sort_channel_vods(vods: list[ChannelVod], key: str) -> list[ChannelVod]:
 
     Pure: returns a new list; entries with a missing value (``?`` in
     the table) sink to the end regardless of key rather than crashing
-    the sort. ``date`` prefers a real upload ``timestamp`` (YouTube's
-    flat listing provides one) and falls back to the numeric id —
-    Twitch ids are sequential, so a higher id is a newer recording.
+    the sort. ``date`` prefers a real upload ``timestamp`` when the
+    listing provides one; otherwise it applies the sequential-id
+    heuristic for Twitch (ids are sequential numbers — a higher id is a
+    newer recording) while non-numeric ids (YouTube's random ids keep
+    the platform's own newest-first listing order, a stable no-op).
     """
     if key not in CHANNEL_SORTS:
         raise ValueError(f"Unknown sort {key!r} (expected one of {CHANNEL_SORTS})")
 
-    def _num_id(v: ChannelVod) -> int:
-        digits = "".join(ch for ch in v.video_id if ch.isdigit())
-        return int(digits) if digits else 0
-
     if key == "date":
-        # Entries WITH a timestamp sort by it; the id-heuristic list
-        # sorts by id; timestamp-less entries sink last.
+        # Entries WITH a timestamp sort by it; timestamp-less entries
+        # sink last.
         if any(v.timestamp is not None for v in vods):
             return sorted(
                 vods,
@@ -234,7 +232,18 @@ def sort_channel_vods(vods: list[ChannelVod], key: str) -> list[ChannelVod]:
                     -(v.timestamp if v.timestamp is not None else 0),
                 ),
             )
-        return sorted(vods, key=_num_id, reverse=True)
+
+        # Twitch: ids are sequential numbers (``v246974233`` / bare
+        # ``246974233`` / clip ``577522052``) — a higher id is a newer
+        # recording, so sort by it. Anything else (YouTube's random
+        # 11-char ids — ``1icdW32gS8A``, ``UbAsuvO-164`` — contain
+        # digits too, and digit-mining them scrambles the order) keeps
+        # the listing's own newest-first order via a stable no-op.
+        def _twitch_seq(v: ChannelVod) -> float:
+            bare = v.video_id.removeprefix("v")
+            return float(bare) if bare.isdigit() else float("inf")
+
+        return sorted(vods, key=_twitch_seq, reverse=True)
     if key == "duration":
         return sorted(vods, key=lambda v: (v.duration is None, -(v.duration or 0.0)))
     # views
@@ -433,6 +442,17 @@ def resolve_channel_vods(
         f"1:{limit}",
         listing_url,
     ]
+    if platform == "youtube":
+        # Flat YouTube listings report NA for timestamps (and view
+        # counts) by default; ``approximate_date`` makes the tab
+        # extractor carry an upload-date-derived timestamp per entry
+        # (verified live: @NASA's listing yields real per-video dates
+        # with it, NA without). Powers the honest ``date`` sort and the
+        # table's date column at zero extra requests — the page already
+        # carries the data. Views stay NA either way (that genuinely
+        # needs a per-video extraction, ~1-2 s each — not worth it for
+        # a picker table).
+        cmd.extend(["--extractor-args", "youtubetab:approximate_date"])
     if proxy:
         cmd.extend(["--proxy", proxy])
 

@@ -1764,9 +1764,10 @@ def main(
                 )
                 for _i, v in enumerate(_channel_vods, start=1):
                     _views = f"{v.view_count:,}" if v.view_count is not None else "?"
+                    _date = v.date_label()
                     console.print(
                         f"  [cyan]{_i:>3}[/cyan]  {v.duration_hm():>7}  "
-                        f"{_views:>9} views  {v.title or v.url}"
+                        f"{_views:>9} views  {_date:>10}  {v.title or v.url}"
                     )
                 console.print()
 

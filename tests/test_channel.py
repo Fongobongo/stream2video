@@ -203,6 +203,43 @@ class TestYoutubeListing:
         (vod,) = resolve_channel_vods(self.YT_CHANNEL, 1, category="shorts")
         assert vod.video_id == "xyz789"
 
+    def test_youtube_uses_approximate_date_extractor_arg(self, tmp_path: Path, monkeypatch):
+        """YouTube flat listings report NA timestamps by default;
+        ``approximate_date`` carries a real (day-precision) timestamp
+        per entry at zero extra requests (verified live). Twitch needs
+        no such arg — its listing simply has no dates."""
+        _fake_ytdlp_script(
+            tmp_path,
+            """
+            import sys
+            argv = " ".join(sys.argv)
+            if "--extractor-args youtubetab:approximate_date" not in argv:
+                sys.stderr.write("missing approximate_date arg\\n")
+                sys.exit(1)
+            print("vid01::600.0::NA::1787958000::A video")
+            """,
+        )
+        self._env(tmp_path, monkeypatch)
+
+        (vod,) = resolve_channel_vods(self.YT_CHANNEL, 1)
+        assert vod.timestamp == 1787958000
+
+    def test_twitch_omits_youtube_extractor_arg(self, tmp_path: Path, monkeypatch):
+        _fake_ytdlp_script(
+            tmp_path,
+            """
+            import sys
+            if "extractor-args" in " ".join(sys.argv):
+                sys.stderr.write("extractor-args must not be passed for Twitch\\n")
+                sys.exit(1)
+            print("v1::600.0::100::NA::An archive")
+            """,
+        )
+        self._env(tmp_path, monkeypatch)
+
+        (vod,) = resolve_channel_vods(CHANNEL_URL, 1)
+        assert vod.video_id == "v1"
+
     def test_playlist_lists_entries(self, tmp_path: Path, monkeypatch):
         self._shim(
             tmp_path,
@@ -266,12 +303,39 @@ class TestTimestampSort:
         assert [v.video_id for v in sort_channel_vods(vods, "date")] == ["b", "a", "c"]
 
     def test_id_fallback_when_no_timestamps(self):
-        # All-NA timestamps (Twitch shape): the numeric-id heuristic.
+        # All-NA timestamps (Twitch shape): the sequential-id heuristic.
         vods = [self._v("v100", None), self._v("v300", None), self._v("v200", None)]
         assert [v.video_id for v in sort_channel_vods(vods, "date")] == [
             "v300",
             "v200",
             "v100",
+        ]
+
+    def test_youtube_random_ids_keep_listing_order(self):
+        """Regression: YouTube ids are random 11-char strings that
+        CONTAIN digits (``UbAsuvO-164``) — digit-mining them scrambled
+        the table (verified live on @NASA's listing through a proxy).
+        Only Twitch's sequential ids (``v<digits>`` or bare digits)
+        sort by id; everything else keeps the platform's own
+        newest-first order (stable no-op)."""
+        vods = [
+            self._v("1icdW32gS8A", None),  # newest, small digits
+            self._v("UbAsuvO-164", None),  # middle, digit-heavy id
+            self._v("FkgVB19I6xw", None),  # oldest
+        ]
+        assert [v.video_id for v in sort_channel_vods(vods, "date")] == [
+            "1icdW32gS8A",
+            "UbAsuvO-164",
+            "FkgVB19I6xw",
+        ]
+
+    def test_clip_ids_are_sequential_too(self):
+        # Clip ids are bare digits (no 'v' prefix) — still Twitch's
+        # sequential form and must sort.
+        vods = [self._v("577522052", None), self._v("999888777", None)]
+        assert [v.video_id for v in sort_channel_vods(vods, "date")] == [
+            "999888777",
+            "577522052",
         ]
 
     def test_date_label(self):
