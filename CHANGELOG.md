@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- **Twitch channel import (`--channel-limit N`)** — point the CLI at a
+  channel's VOD listing (`https://www.twitch.tv/<channel>/videos`) and it
+  now compresses the N most recent VODs in one run. The listing is
+  fetched via yt-dlp's flat-playlist mode (metadata only, seconds even
+  for large channels), then each VOD runs through the normal pipeline
+  (project dirs, silence cache, resume, frame-hole gates all apply per
+  VOD). A failed VOD is logged and skipped — one deleted recording
+  doesn't waste the rest of the queue — and the batch epilogue lists the
+  failed URLs. Channel URLs without `--channel-limit` are rejected with
+  a hint (a channel can hold hundreds of VODs; the limit keeps the intent
+  explicit). Cancellation (Ctrl+C) stops the whole batch cleanly.
+
 ## [0.3.3] - 2026-08-29
 
 Concat-filter hardening for multi-hour content. The v0.3.2 benchmark left

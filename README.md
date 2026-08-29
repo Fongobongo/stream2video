@@ -99,6 +99,7 @@ silencecut --show-completion      # Print the completion script for manual insta
 | `-vq, --video-quality` | `source` | Encode quality preset: `source` (encoder defaults, default), `high` (10000k / CRF 18), `medium` (7000k / CRF 23), `low` (3500k / CRF 28) |
 | `-aq, --audio-quality` | `source` | Audio quality preset: `source` (codec defaults + native rate/channels, default), `high` (256k), `medium` (192k), `low` (128k) |
 | `-dq, --download-quality` | `best` | Download quality preset (Twitch/YouTube, ignored for local files): `best`, `1080p`, `720p`, `480p`, `360p` |
+| `--channel-limit` | `0` | Twitch channel import: process the N most recent VODs when the input is a channel VOD-listing URL (`https://www.twitch.tv/<channel>/videos`). Required for channel URLs — without it they are rejected with a hint |
 | `-m, --method` | `segment` | `segment` (per-segment encode + concat demuxer), `batch` (frame-exact trim+concat filter), or `cut_then_encode` (lossless cut + single final encode, best quality) |
 | `--software-fallback` | `ask` | What happens when the requested HW encoder is unavailable or fails mid-run: `ask` (refuse silent fallback — the run fails with a clear error), `disabled` (fail immediately), `enabled` (silently retry with libx264, legacy behaviour) |
 | `--x264-preset` | `medium` | libx264 preset: `ultrafast`/`superfast`/`veryfast`/`faster`/`fast`/`medium`/`slow`/`slower`. Faster presets reduce CPU load at the cost of file size / quality. Use `ultrafast` or `veryfast` on an unstable / overclocked CPU. |
@@ -160,6 +161,9 @@ silencecut video.mp4 --dry-run
 
 # Best quality (lossless cut + single final encode)
 silencecut video.mp4 --method cut_then_encode --video-quality high
+
+# Import the 5 most recent VODs of a Twitch channel (one command, batch)
+silencecut https://www.twitch.tv/<channel>/videos --channel-limit 5
 ```
 
 ## Configuration

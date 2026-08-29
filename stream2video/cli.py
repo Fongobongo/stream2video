@@ -22,6 +22,13 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from stream2video.channel import (
+    ChannelImportCancelled,
+    ChannelImportError,
+    ChannelVod,
+    is_twitch_channel_url,
+    resolve_channel_vods,
+)
 from stream2video.cli_config import detect_default_config
 from stream2video.cli_config import load_config as _load_config_impl
 from stream2video.cli_helpers import (
@@ -1104,6 +1111,21 @@ def main(
         "Copied GUI commands use --no-proxy-active when the GUI has the proxy "
         "switched off, so a paste can't silently re-enable a stored proxy.",
     ),
+    channel_limit: int = typer.Option(
+        0,
+        "--channel-limit",
+        help=(
+            "Twitch channel import: process the N most recent VODs of the "
+            "channel when INPUT_VIDEO is a channel VOD-listing URL "
+            "(https://www.twitch.tv/<channel>/videos). The listing is fetched "
+            "via yt-dlp's flat-playlist mode (fast, no media downloaded), then "
+            "each VOD runs through the normal pipeline. A failed VOD is "
+            "logged and skipped; the batch continues with the next one. "
+            "Without this flag a channel URL is rejected with a hint (a "
+            "channel can hold hundreds of VODs — an explicit limit keeps "
+            "the intent unambiguous)."
+        ),
+    ),
     memory_limit_mb: str = typer.Option(
         str(CONFIG_DEFAULTS["memory_limit_mb"]),
         "--memory-limit-mb",
@@ -1608,6 +1630,46 @@ def main(
                     console.print(f"[red]Error:[/red] {_err}")
                 raise typer.Exit(1)
 
+            # Twitch channel import (PLAN backlog "Twitch latest N VODs"):
+            # a channel VOD-listing URL cannot go through the single-video
+            # pipeline (one after_move:filepath) — it would either grab the
+            # first playlist entry or die on the output template. Resolve the
+            # listing up front and drive the controller per VOD below.
+            _channel_vods: list[ChannelVod] | None = None
+            if is_twitch_channel_url(input_video):
+                if channel_limit < 1:
+                    console.print(f"[red]Channel URL detected:[/red] {input_video}")
+                    console.print(
+                        "  This input is a Twitch channel VOD listing, not a single video."
+                    )
+                    console.print(
+                        "  Pass --channel-limit N to process the N most "
+                        "recent VODs, or open a specific VOD URL "
+                        "(https://www.twitch.tv/videos/<id>)."
+                    )
+                    raise typer.Exit(2)
+                try:
+                    _channel_vods = resolve_channel_vods(
+                        input_video,
+                        channel_limit,
+                        cancel_callback=(lambda: cancel_event.is_set()),
+                        proxy=resolved_proxy,
+                        low_process_priority=resolved_low_process_priority,
+                    )
+                except ChannelImportCancelled:
+                    console.print("[yellow]Channel listing cancelled.[/yellow]")
+                    raise typer.Exit(130) from None
+                except ChannelImportError as e:
+                    console.print(f"[red]Channel import failed:[/red] {e}")
+                    raise typer.Exit(1) from None
+                # The batch rewrites the per-run input: every VOD runs the
+                # SAME validated _pcfg (only input_raw differs), so config
+                # validation stays exactly as strict as the single run.
+                console.print(
+                    f"[cyan]Channel import:[/cyan] {len(_channel_vods)} VOD(s) "
+                    f"queued (newest first)"
+                )
+
             # P1: reify ``software_fallback="ask"``. The callback typer
             # confirms with (``--force``-style defaults can't short-circuit
             # because the sigint-cancel has already fired for Ctrl+C-era
@@ -1847,24 +1909,6 @@ def main(
                         )
                     )
 
-                controller = PipelineController(
-                    cfg=_pcfg,
-                    cb=PipelineCallbacks(
-                        on_progress=lambda f: None,
-                        on_status=lambda text, *, force=False: None,
-                        on_log=_console_log_line,
-                        on_info=_console_log_line,
-                        on_overall=lambda elapsed, remaining, silent: None,
-                        on_phase=_on_phase_cli,
-                        on_download_progress=_download_progress_cb,
-                        on_pipeline_complete=lambda summary: None,
-                    ),
-                    cancel_event=cancel_event,
-                    on_output_resolved=_on_output_resolved,
-                    on_fallback_consent=_make_fallback_consent(),
-                    on_legacy_project=(None if _JSON_LOG_MODE else _ask_legacy_rename),
-                )
-
                 # CLI ↔ GUI parity: the GUI's worker plays an "attention"
                 # chime on cancel/failure and "success" on completion. Best-
                 # effort — playback failure returns a warning string instead
@@ -1873,8 +1917,138 @@ def main(
                     if resolved_completion_sound:
                         _play_sound("attention")
 
-                try:
-                    result = controller.run()
+                # Channel batch: the resolved listing (newest first) or a
+                # one-entry "batch" for the ordinary single-video run, so
+                # the loop below has exactly one shape to handle. Each
+                # VOD runs the SAME validated config — only input_raw is
+                # swapped per entry (a frozen dataclass copy), so every
+                # per-video behaviour (project dirs, silence cache,
+                # resume, frame-hole gates) applies unchanged.
+                _batch_targets: list[tuple[str | None, str]] = (
+                    [(v.title, v.url) for v in _channel_vods]
+                    if _channel_vods is not None
+                    else [(None, input_video)]
+                )
+                _batch_results: list[tuple[str, str]] = []  # (url, status)
+                _batch_cancelled = False
+
+                for _v_i, (_v_label, _v_url) in enumerate(_batch_targets, start=1):
+                    if _v_i > 1:
+                        console.print(
+                            f"\n[bold cyan]VOD {_v_i}/{len(_batch_targets)}[/bold cyan]"
+                            + (f": {_v_label}" if _v_label else "")
+                        )
+                        # task1/task2 bars are recreated by the controller
+                        # per VOD; reset the locals so the summary block
+                        # below re-materializes them (they are closed over
+                        # by the callbacks, which the fresh controller
+                        # re-binds via its own callbacks).
+                        task2 = progress.add_task("[cyan]Detecting silence segments...", total=100)
+                        task_cut = None
+                        task_concat = None
+
+                    _v_pcfg = _pcfg
+                    if _channel_vods is not None:
+                        import dataclasses as _dc
+
+                        _v_pcfg = _dc.replace(_pcfg, input_raw=_v_url)
+                    controller = PipelineController(
+                        cfg=_v_pcfg,
+                        cb=PipelineCallbacks(
+                            on_progress=lambda f: None,
+                            on_status=lambda text, *, force=False: None,
+                            on_log=_console_log_line,
+                            on_info=_console_log_line,
+                            on_overall=lambda elapsed, remaining, silent: None,
+                            on_phase=_on_phase_cli,
+                            on_download_progress=_download_progress_cb,
+                            on_pipeline_complete=lambda summary: None,
+                        ),
+                        cancel_event=cancel_event,
+                        on_output_resolved=_on_output_resolved,
+                        on_fallback_consent=_make_fallback_consent(),
+                        on_legacy_project=(None if _JSON_LOG_MODE else _ask_legacy_rename),
+                    )
+
+                    _v_failed = False
+                    try:
+                        result = controller.run()
+                    except PipelineCancelled:
+                        console.print("[yellow]Pipeline cancelled.[/yellow]")
+                        _play_attention_sound()
+                        raise typer.Exit(130) from None
+                    except PipelineDownloadError as e:
+                        cause = e.__cause__
+                        if isinstance(cause, URLValidationError):
+                            # Caught before the generic download handler so
+                            # the user gets a clear "this isn't a URL or
+                            # local file" message.
+                            console.print(f"[red]Invalid input:[/red] {e}")
+                            console.print(
+                                "  Expected an http(s):// URL or an existing local file path."
+                            )
+                            _v_code = 2
+                        elif isinstance(cause, VideoNotAvailableError):
+                            console.print(f"[red]Video unavailable:[/red] {e}")
+                            console.print(
+                                "  The video may be private, deleted, or region-restricted."
+                            )
+                            _v_code = 1
+                        elif isinstance(cause, DownloadTimeoutError):
+                            console.print(f"[red]Download timed out:[/red] {e}")
+                            console.print("  Try again later or check your connection.")
+                            _v_code = 1
+                        elif isinstance(cause, DiskSpaceError):
+                            console.print(f"[red]Disk space error:[/red] {e}")
+                            console.print("  Free up disk space and try again.")
+                            _v_code = 1
+                        elif isinstance(cause, PermissionDeniedError):
+                            console.print(f"[red]Permission denied:[/red] {e}")
+                            console.print("  Check file permissions and try again.")
+                            _v_code = 1
+                        elif isinstance(cause, FileBusyError):
+                            console.print(f"[red]File in use:[/red] {e}")
+                            console.print("  Close the program using the file and try again.")
+                            _v_code = 1
+                        else:
+                            console.print(f"[red]Download failed:[/red] {e}")
+                            logger.exception("Download error")
+                            _v_code = 1
+                        _play_attention_sound()
+                        if _channel_vods is None:
+                            raise typer.Exit(_v_code) from None
+                        _v_failed = True
+                    except PipelineSilenceError as e:
+                        console.print(f"[red]Silence detection failed:[/red] {e}")
+                        logger.exception("Silence detection error")
+                        _play_attention_sound()
+                        if _channel_vods is None:
+                            raise typer.Exit(1) from None
+                        _v_failed = True
+                    except PipelineConcatError as e:
+                        console.print(f"[red]Concatenation failed:[/red] {e}")
+                        logger.exception("Concatenation error")
+                        _play_attention_sound()
+                        if _channel_vods is None:
+                            raise typer.Exit(1) from None
+                        _v_failed = True
+                    except PipelineUnexpectedError as e:
+                        # The controller already logged the full traceback;
+                        # surface the user-facing message and preserve the
+                        # cause. In channel-batch mode a failed VOD is
+                        # logged and skipped — one broken VOD (a deleted
+                        # recording, a corrupt download) must not waste the
+                        # rest of the queued imports.
+                        console.print(f"[red]Unexpected error:[/red] {e}")
+                        _play_attention_sound()
+                        if _channel_vods is None:
+                            raise typer.Exit(1) from e
+                        _v_failed = True
+
+                    if _v_failed:
+                        _batch_results.append((_v_url, "failed"))
+                        continue
+                    _batch_results.append((_v_url, "ok"))
                     if _pcfg.dry_run:
                         # --dry-run: the controller stopped after silence
                         # detection. Show the "what would be cut" summary and
@@ -1934,67 +2108,40 @@ def main(
                             tc, completed=100, description="[green]+[/green] Concatenating done"
                         )
 
-                except PipelineCancelled:
-                    console.print("[yellow]Pipeline cancelled.[/yellow]")
-                    _play_attention_sound()
-                    raise typer.Exit(130) from None
-                except PipelineDownloadError as e:
-                    cause = e.__cause__
-                    if isinstance(cause, URLValidationError):
-                        # Caught before the generic download handler so the
-                        # user gets a clear "this isn't a URL or local file"
-                        # message.
-                        console.print(f"[red]Invalid input:[/red] {e}")
+                # Channel-batch epilogue (AFTER the loop, not per VOD): the
+                # per-VOD completion summaries above already printed; this
+                # shows the queue outcome at a glance (which URLs failed,
+                # so a re-run can target them). The single-video path falls
+                # through to the rich summary below.
+                if _channel_vods is not None:
+                    _ok = [u for u, s in _batch_results if s == "ok"]
+                    _fail = [u for u, s in _batch_results if s == "failed"]
+                    console.print()
+                    console.print(
+                        f"[bold]Channel batch:[/bold] {len(_ok)}/{len(_batch_results)} "
+                        f"VOD(s) compressed"
+                    )
+                    if _fail:
+                        console.print("[red]Failed:[/red]")
+                        for _fu in _fail:
+                            console.print(f"  - {_fu}")
                         console.print(
-                            "  Expected an http(s):// URL or an existing local file path."
+                            "  Re-run the failed URLs individually to see the full error."
                         )
-                        raise typer.Exit(2) from None
-                    if isinstance(cause, VideoNotAvailableError):
-                        console.print(f"[red]Video unavailable:[/red] {e}")
-                        console.print("  The video may be private, deleted, or region-restricted.")
-                        raise typer.Exit(1) from None
-                    if isinstance(cause, DownloadTimeoutError):
-                        console.print(f"[red]Download timed out:[/red] {e}")
-                        console.print("  Try again later or check your connection.")
-                        raise typer.Exit(1) from None
-                    if isinstance(cause, DiskSpaceError):
-                        console.print(f"[red]Disk space error:[/red] {e}")
-                        console.print("  Free up disk space and try again.")
-                        raise typer.Exit(1) from None
-                    if isinstance(cause, PermissionDeniedError):
-                        console.print(f"[red]Permission denied:[/red] {e}")
-                        console.print("  Check file permissions and try again.")
-                        raise typer.Exit(1) from None
-                    if isinstance(cause, FileBusyError):
-                        console.print(f"[red]File in use:[/red] {e}")
-                        console.print("  Close the program using the file and try again.")
-                        raise typer.Exit(1) from None
-                    console.print(f"[red]Download failed:[/red] {e}")
-                    logger.exception("Download error")
-                    _play_attention_sound()
-                    raise typer.Exit(1) from None
-                except PipelineSilenceError as e:
-                    console.print(f"[red]Silence detection failed:[/red] {e}")
-                    logger.exception("Silence detection error")
-                    _play_attention_sound()
-                    raise typer.Exit(1) from None
-                except PipelineConcatError as e:
-                    console.print(f"[red]Concatenation failed:[/red] {e}")
-                    logger.exception("Concatenation error")
-                    _play_attention_sound()
-                    raise typer.Exit(1) from None
-                except PipelineUnexpectedError as e:
-                    # The controller already logged the full traceback;
-                    # surface the user-facing message and preserve the cause.
-                    console.print(f"[red]Unexpected error:[/red] {e}")
-                    _play_attention_sound()
-                    raise typer.Exit(1) from e
+                    raise typer.Exit(0 if not _fail else 1)
 
             # Summary — show rich stats: input/output size + duration, percent
             # saved, wall-clock time, and a ``X.Yx realtime`` throughput hint.
             # The numbers help the user sanity-check a long encode at a glance
             # (a 6h source -> 1h output at 8x realtime is ~7.5 min wall time,
-            # anything slower suggests something went wrong).
+            # anything slower suggests something went wrong). Channel batches
+            # exited above with their own epilogue; this block runs only for
+            # the single-video path, where the loop had exactly one entry.
+            if output_video is None or result is None:
+                # Defensive: unreachable in single mode (the loop guards the
+                # same condition); keeps the summary's types honest for the
+                # type checker without an ``assert`` (vanishes under -O).
+                raise typer.Exit(1)
             try:
                 from stream2video.concat import get_video_duration as _get_duration
 
