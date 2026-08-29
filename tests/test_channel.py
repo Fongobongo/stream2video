@@ -259,12 +259,31 @@ class TestChannelVodDataclass:
         assert v.title is None and v.duration is None
 
 
+def _twitch_reachable(timeout: float = 5.0) -> bool:
+    """Best-effort TCP probe of twitch.tv:443 for the network smoke test.
+
+    CI runners are routinely firewalled off from Twitch (geo/abuse
+    filters), which must SKIP the smoke test, not fail it - a listing
+    contract test can't diagnose a datacenter block. The pure resolver
+    logic is fully covered by the shim tests above; this probe only
+    gates the optional live check.
+    """
+    import socket
+
+    try:
+        with socket.create_connection(("www.twitch.tv", 443), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 def test_real_ytdlp_flat_listing(tmp_path: Path, monkeypatch):
     """Network smoke: the REAL yt-dlp lists a real public channel.
 
-    Skipped without network/yt-dlp; kept minimal (limit=1, one page) so
-    it stays fast. Guards the template/flag contract against yt-dlp
-    drift — the unit tests above run a shim and can't catch that.
+    Skipped without network/yt-dlp or when Twitch is unreachable (CI);
+    kept minimal (limit=1, one page) so it stays fast. Guards the
+    template/flag contract against yt-dlp drift - the unit tests above
+    run a shim and can't catch that.
     """
     if (
         subprocess.run(
@@ -274,6 +293,8 @@ def test_real_ytdlp_flat_listing(tmp_path: Path, monkeypatch):
         != 0
     ):
         pytest.skip("yt-dlp not importable")
+    if not _twitch_reachable():
+        pytest.skip("twitch.tv unreachable (CI firewall / offline)")
 
     vods = resolve_channel_vods("https://www.twitch.tv/twitch/videos", 1, timeout=120)
     assert len(vods) == 1
