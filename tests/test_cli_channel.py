@@ -115,7 +115,7 @@ class TestChannelBatchFlow:
             )
 
         assert result.exit_code == 0
-        assert "Channel batch: 2/2" in result.output
+        assert "Batch: 2/2" in result.output
         # One controller per VOD, each bound to the VOD URL (not the
         # channel listing URL). The table is date-sorted (newest VOD id
         # first), so v2 runs before v1.
@@ -165,7 +165,7 @@ class TestChannelBatchFlow:
             )
 
         assert result.exit_code == 0
-        assert "Channel batch: 1/1" in result.output
+        assert "Batch: 1/1" in result.output
         # Entry #2 only — 1 and 3 were unchecked.
         assert len(ran) == 1
 
@@ -214,7 +214,7 @@ class TestChannelBatchFlow:
             )
 
         assert result.exit_code == 1
-        assert "Channel batch: 1/2" in result.output
+        assert "Batch: 1/2" in result.output
         assert "https://www.twitch.tv/videos/2" in result.output
         assert "Concatenation failed" in result.output
         # The other VOD still ran despite the first one failing
@@ -567,7 +567,7 @@ class TestBatchProgressBar:
         # Rich's captured render; assert on the epilogue instead: both
         # entries settled and the batch reports 2/2.
         assert result.exit_code == 0
-        assert "Channel batch: 2/2" in result.output
+        assert "Batch: 2/2" in result.output
 
     def test_single_video_has_no_batch_bar(self, tmp_path: Path):
         """A plain single-video run must not grow a batch bar: its
@@ -597,6 +597,558 @@ class TestBatchProgressBar:
                 [str(src), "-o", str(tmp_path / "out")],
                 catch_exceptions=False,
             )
+
+
+class TestChannelConfigParity:
+    """channel_* keys read from the YAML config like every other
+    tunable — the whole point of config parity: a config.yaml can carry
+    the picker's defaults, an explicit CLI flag still wins."""
+
+    def _config(self, tmp_path: Path, body: str) -> Path:
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(body, encoding="utf-8")
+        return cfg
+
+    def test_yaml_channel_keys_reach_the_listing(self, tmp_path: Path):
+        cfg = self._config(
+            tmp_path,
+            "channel_limit: 7\n"
+            "channel_type: clips\n"
+            "channel_sort: views\n"
+            "channel_filter: '*best*'\n"
+            "channel_min_duration: 60.0\n"
+            "channel_since: '-30d'\n",
+        )
+        with (
+            patch("stream2video.cli.resolve_channel_vods", return_value=[_vod(1)]) as fake,
+            patch("stream2video.cli.PipelineController"),
+        ):
+            CliRunner().invoke(
+                app,
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-select",
+                    "1",
+                    "-c",
+                    str(cfg),
+                ],
+                catch_exceptions=False,
+            )
+        # limit from YAML (>= 1 so the non-interactive gate passes),
+        # type from YAML:
+        assert fake.call_args.args[1] == 7
+        assert fake.call_args.kwargs.get("category") == "clips"
+
+    def test_cli_flag_overrides_yaml(self, tmp_path: Path):
+        cfg = self._config(tmp_path, "channel_limit: 5\nchannel_type: highlights\n")
+        with (
+            patch("stream2video.cli.resolve_channel_vods", return_value=[_vod(1)]) as fake,
+            patch("stream2video.cli.PipelineController"),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-select",
+                    "1",
+                    "--channel-limit",
+                    "9",
+                    "-c",
+                    str(cfg),
+                ],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        assert fake.call_args.args[1] == 9  # CLI wins over YAML's 5
+
+    def test_bad_yaml_channel_type_rejected(self, tmp_path: Path):
+        cfg = self._config(tmp_path, "channel_type: nonsense\n")
+        with patch("stream2video.cli.resolve_channel_vods"):
+            result = CliRunner().invoke(
+                app,
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-select",
+                    "1",
+                    "-c",
+                    str(cfg),
+                ],
+                catch_exceptions=False,
+            )
+        # load_config rejects an unknown enum for a PARAM_SPECS enum key
+        # — same rule family as method/encoder.
+        assert result.exit_code != 0
+
+
+class TestChannelMetaFiltersCli:
+    """--channel-min-dur / --channel-since in the CLI flow."""
+
+    def _listing(self):
+        return [
+            ChannelVod("v1", "u1", "A full stream", 3600.0, view_count=10, timestamp=1755500000),
+            ChannelVod("v2", "u2", "A short trailer", 45.0, view_count=20, timestamp=1755500000),
+            ChannelVod("v3", "u3", "An old stream", 3600.0, view_count=30, timestamp=1700000000),
+        ]
+
+    def test_min_duration_drops_short_entries(self, tmp_path: Path):
+        with (
+            patch("stream2video.cli.resolve_channel_vods", return_value=self._listing()),
+            patch("stream2video.cli.PipelineController"),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "3",
+                    "--channel-select",
+                    "1",
+                    "--channel-min-dur",
+                    "300",
+                ],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        assert "min-dur 300s" in result.output
+        assert "2/3 entries kept" in result.output
+        assert "A short trailer" not in result.output
+
+    def test_since_drops_old_entries(self, tmp_path: Path):
+        with (
+            patch("stream2video.cli.resolve_channel_vods", return_value=self._listing()),
+            patch("stream2video.cli.PipelineController"),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "3",
+                    "--channel-select",
+                    "1",
+                    "--channel-since",
+                    "2025-01-01",
+                ],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        assert "2/3 entries kept" in result.output  # old v3 (2023) dropped
+        assert "An old stream" not in result.output
+
+    def test_bad_since_exits_2(self, tmp_path: Path):
+        with patch("stream2video.cli.resolve_channel_vods", return_value=self._listing()):
+            result = CliRunner().invoke(
+                app,
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "3",
+                    "--channel-select",
+                    "1",
+                    "--channel-since",
+                    "not-a-date",
+                ],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 2
+        assert "Bad --channel-since" in result.output
+
+    def test_filters_empty_result_exits_1(self, tmp_path: Path):
+        with patch("stream2video.cli.resolve_channel_vods", return_value=self._listing()):
+            result = CliRunner().invoke(
+                app,
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "3",
+                    "--channel-select",
+                    "1",
+                    "--channel-min-dur",
+                    "99999",
+                ],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 1
+        assert "matched none" in result.output
+
+
+class TestBatchDryRun:
+    """--dry-run over a channel batch: EVERY selected entry gets its
+    what-would-be-cut stats (the historical early exit after the first
+    VOD starved the channel-wide comparison use case), then the batch
+    epilogue reports the queue outcome."""
+
+    def test_batch_dry_run_stats_for_every_vod(self, tmp_path: Path):
+        runs: list[str] = []
+
+        class _DryResult:
+            def __init__(self) -> None:
+                self.src_size_bytes = 100
+                self.src_duration = 60.0
+                self.pipeline_seconds = 1.0
+                self.output_path = None
+                self.silence_segments = [(0.0, 10.0)]
+                self.keep_segments = [(10.0, 20.0)]
+
+        class _Ctrl:
+            def __init__(self, cfg=None, **kw):
+                pass
+
+            def run(self):
+                runs.append("run")
+                return _DryResult()
+
+        with (
+            patch("stream2video.cli.resolve_channel_vods", return_value=[_vod(1), _vod(2)]),
+            patch("stream2video.cli.PipelineController", side_effect=_Ctrl),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "2",
+                    "--channel-select",
+                    "1-2",
+                    "--dry-run",
+                ],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        # Both entries went through the controller (both got stats)...
+        assert len(runs) == 2
+        # ...the dry-run summary block printed for each entry...
+        assert result.output.count("Would be cut") >= 2 or result.output.count("silence") >= 2
+        # ...and the epilogue says analysed, not compressed.
+        assert "analysed (dry run)" in result.output
+        assert "2/2" in result.output
+
+
+class TestBatchFile:
+    """--batch-file: a queue of inputs (single videos and listings)
+    processed as one batch — the scriptable surface for "here are my N
+    links, process them all"."""
+
+    def _queue_file(self, tmp_path: Path, body: str) -> Path:
+        q = tmp_path / "queue.txt"
+        q.write_text(body, encoding="utf-8")
+        return q
+
+    def test_queue_runs_every_entry(self, tmp_path: Path):
+        q = self._queue_file(
+            tmp_path,
+            "# a comment line\n"
+            "https://www.twitch.tv/videos/111\n"
+            "\n"  # blank lines are skipped
+            "https://www.youtube.com/watch?v=abc\n"
+            "D:/videos/local.mp4\n",
+        )
+
+        class _R:
+            src_size_bytes = 100
+            dst_size_bytes = 50
+            src_duration = 60.0
+            pipeline_seconds = 1.0
+            output_path = Path("out.mp4")
+
+        inputs_seen: list[str] = []
+
+        class _Ctrl:
+            def __init__(self, cfg=None, **kw):
+                inputs_seen.append(cfg.input_raw)
+
+            def run(self):
+                return _R()
+
+        with patch("stream2video.cli.PipelineController", side_effect=_Ctrl):
+            result = CliRunner().invoke(
+                app,
+                [str(q), "-o", str(tmp_path / "out"), "--batch-file", str(q)],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        assert "Batch queue: 3 entry(ies)" in result.output
+        # The comment, the blank line and the position-argument duplicate
+        # don't matter: exactly the 3 file entries ran, in file order.
+        assert inputs_seen == [
+            "https://www.twitch.tv/videos/111",
+            "https://www.youtube.com/watch?v=abc",
+            "D:/videos/local.mp4",
+        ]
+        assert "Batch: 3/3" in result.output
+
+    def test_queue_listing_line_expands_via_select(self, tmp_path: Path):
+        """A listing line joins the queue through --channel-select (the
+        non-interactive path), same rules as a direct listing argument."""
+        q = self._queue_file(tmp_path, "https://www.twitch.tv/somechannel/videos\n")
+        listing = [_vod(1), _vod(2)]
+
+        class _R:
+            src_size_bytes = 100
+            dst_size_bytes = 50
+            src_duration = 60.0
+            pipeline_seconds = 1.0
+            output_path = Path("out.mp4")
+
+        ran: list[str] = []
+
+        class _Ctrl:
+            def __init__(self, cfg=None, **kw):
+                pass
+
+            def run(self):
+                ran.append("x")
+                return _R()
+
+        with (
+            patch("stream2video.cli.resolve_channel_vods", return_value=listing),
+            patch("stream2video.cli.PipelineController", side_effect=_Ctrl),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    str(q),
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--batch-file",
+                    str(q),
+                    "--channel-limit",
+                    "2",
+                    "--channel-select",
+                    "2",
+                ],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        # Only entry 2 of the listing joined the queue.
+        assert len(ran) == 1
+        assert "Batch queue: 1 entry(ies)" in result.output
+
+    def test_queue_listing_without_select_errors(self, tmp_path: Path):
+        """A listing line in a queue REQUIRES --channel-select: an
+        interactive prompt mid-queue would block the whole file."""
+        q = self._queue_file(tmp_path, "https://www.twitch.tv/somechannel/videos\n")
+        with patch("stream2video.cli.resolve_channel_vods", return_value=[_vod(1)]):
+            result = CliRunner().invoke(
+                app,
+                [str(q), "-o", str(tmp_path / "out"), "--batch-file", str(q)],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 2
+        # The exact message wraps across Rich lines; assert on the
+        # stable half that survives the wrap.
+        assert "--channel-select in a" in result.output
+
+    def test_queue_combined_with_channel_input_rejected(self, tmp_path: Path):
+        q = self._queue_file(tmp_path, "https://www.twitch.tv/videos/111\n")
+        with patch("stream2video.cli.resolve_channel_vods", return_value=[_vod(1)]):
+            result = CliRunner().invoke(
+                app,
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--batch-file",
+                    str(q),
+                    "--channel-limit",
+                    "2",
+                    "--channel-select",
+                    "1",
+                ],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 2
+        assert "cannot be combined" in result.output
+
+    def test_queue_empty_rejected(self, tmp_path: Path):
+        q = self._queue_file(tmp_path, "# only comments\n\n")
+        result = CliRunner().invoke(
+            app,
+            [str(q), "-o", str(tmp_path / "out"), "--batch-file", str(q)],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 2
+        assert "no entries" in result.output
+
+    def test_queue_entry_failure_continues(self, tmp_path: Path):
+        q = self._queue_file(
+            tmp_path,
+            "https://www.twitch.tv/videos/111\nhttps://www.twitch.tv/videos/222\n",
+        )
+
+        class _R:
+            src_size_bytes = 100
+            dst_size_bytes = 50
+            src_duration = 60.0
+            pipeline_seconds = 1.0
+            output_path = Path("out.mp4")
+
+        class _Ctrl:
+            def __init__(self, cfg=None, **kw):
+                self.url = cfg.input_raw
+
+            def run(self):
+                if self.url.endswith("/111"):
+                    raise PipelineConcatError("boom on the first entry")
+                return _R()
+
+        with patch("stream2video.cli.PipelineController", side_effect=_Ctrl):
+            result = CliRunner().invoke(
+                app,
+                [str(q), "-o", str(tmp_path / "out"), "--batch-file", str(q)],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 1
+        assert "Batch: 1/2" in result.output
+        assert "https://www.twitch.tv/videos/111" in result.output
+
+
+class TestBatchResume:
+    """--channel-continue: the batch manifest (channel_batch.json)
+    carries the queue + completed URLs; a resume re-queues only the
+    unfinished tail, and MERGES completions back into the manifest."""
+
+    def _write_manifest(self, tmp_path: Path, entries, completed) -> Path:
+        import json
+
+        out = tmp_path / "out"
+        out.mkdir(exist_ok=True)
+        m = {
+            "version": 1,
+            "entries": entries,
+            "completed_urls": completed,
+        }
+        (out / "channel_batch.json").write_text(json.dumps(m), encoding="utf-8")
+        return out
+
+    def test_resume_reruns_only_unfinished(self, tmp_path: Path):
+        entries = [
+            {"title": "One", "url": "https://www.twitch.tv/videos/1"},
+            {"title": "Two", "url": "https://www.twitch.tv/videos/2"},
+            {"title": "Three", "url": "https://www.twitch.tv/videos/3"},
+        ]
+        out = self._write_manifest(tmp_path, entries, ["https://www.twitch.tv/videos/1"])
+
+        class _R:
+            src_size_bytes = 100
+            dst_size_bytes = 50
+            src_duration = 60.0
+            pipeline_seconds = 1.0
+            output_path = Path("out.mp4")
+
+        ran: list[str] = []
+
+        class _Ctrl:
+            def __init__(self, cfg=None, **kw):
+                ran.append(cfg.input_raw)
+
+            def run(self):
+                return _R()
+
+        with patch("stream2video.cli.PipelineController", side_effect=_Ctrl):
+            result = CliRunner().invoke(
+                app,
+                ["x", "-o", str(out), "--channel-continue"],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        # Only the two unfinished entries ran (VOD 1 was skipped).
+        assert ran == [
+            "https://www.twitch.tv/videos/2",
+            "https://www.twitch.tv/videos/3",
+        ]
+        assert "Batch resume: 2 of 3" in result.output
+        # The manifest merged: all 3 now completed.
+        import json
+
+        m = json.loads((out / "channel_batch.json").read_text(encoding="utf-8"))
+        assert set(m["completed_urls"]) == {
+            "https://www.twitch.tv/videos/1",
+            "https://www.twitch.tv/videos/2",
+            "https://www.twitch.tv/videos/3",
+        }
+
+    def test_resume_completed_batch_exits_0(self, tmp_path: Path):
+        entries = [{"title": "One", "url": "https://www.twitch.tv/videos/1"}]
+        out = self._write_manifest(tmp_path, entries, ["https://www.twitch.tv/videos/1"])
+        with patch("stream2video.cli.PipelineController") as fake_ctrl:
+            result = CliRunner().invoke(
+                app,
+                ["x", "-o", str(out), "--channel-continue"],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        assert "fully completed" in result.output
+        assert fake_ctrl.call_count == 0
+
+    def test_resume_without_manifest_exits_2(self, tmp_path: Path):
+        result = CliRunner().invoke(
+            app,
+            ["x", "-o", str(tmp_path / "empty_out"), "--channel-continue"],
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 2
+        assert "no previous batch" in result.output
+
+    def test_fresh_batch_writes_manifest(self, tmp_path: Path):
+        import json
+
+        class _R:
+            src_size_bytes = 100
+            dst_size_bytes = 50
+            src_duration = 60.0
+            pipeline_seconds = 1.0
+            output_path = Path("out.mp4")
+
+        class _Ctrl:
+            def __init__(self, cfg=None, **kw):
+                pass
+
+            def run(self):
+                return _R()
+
+        with (
+            patch("stream2video.cli.resolve_channel_vods", return_value=[_vod(1), _vod(2)]),
+            patch("stream2video.cli.PipelineController", side_effect=_Ctrl),
+        ):
+            result = CliRunner().invoke(
+                app,
+                [
+                    CHANNEL_URL,
+                    "-o",
+                    str(tmp_path / "out"),
+                    "--channel-limit",
+                    "2",
+                    "--channel-select",
+                    "1-2",
+                ],
+                catch_exceptions=False,
+            )
+        assert result.exit_code == 0
+        m_path = tmp_path / "out" / "channel_batch.json"
+        assert m_path.exists()
+        m = json.loads(m_path.read_text(encoding="utf-8"))
+        assert len(m["entries"]) == 2
+        assert set(m["completed_urls"]) == {
+            "https://www.twitch.tv/videos/1",
+            "https://www.twitch.tv/videos/2",
+        }
 
 
 class TestChannelListingErrors:
@@ -711,10 +1263,14 @@ class TestChannelTypeAndSort:
         assert result.exit_code == 2
         assert "Unknown --channel-type" in result.output
 
-    def test_unknown_sort_exits_2(self, tmp_path: Path):
+    def test_unknown_sort_exits(self, tmp_path: Path):
+        """``--channel-sort rating`` is rejected — via the shared
+        resolver's enum validation (config-parity path), same as any
+        other enum flag; the channel module never sees it."""
         result, _ = self._run_with(tmp_path, "--channel-sort", "rating")
-        assert result.exit_code == 2
-        assert "Unknown --channel-sort" in result.output
+        assert result.exit_code == 1
+        assert "channel_sort" in result.output
+        assert "rating" in result.output
 
     def test_table_shows_duration_and_views(self, tmp_path: Path):
         long_vod = ChannelVod(

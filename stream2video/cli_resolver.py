@@ -188,6 +188,19 @@ class _Resolver:
                 self._fail(name, fv, f"(must be <= {max_val})")
             return fv
 
+        if kind == "str":
+            # Free-form string tunables (channel filter/since/type
+            # specs): CLI flag > YAML value > default. No charset
+            # validation HERE — the consumer parses the grammar and
+            # fails fast with the offending term (e.g. a bad
+            # --channel-since date names the spec); a shared validator
+            # would only duplicate that error message. Empty string is
+            # a legal "unset" everywhere (the default), so it passes
+            # through unchanged.
+            if value is None or isinstance(value, bool):
+                self._fail(name, value, "(must be a string)")
+            return str(value)
+
         if kind == "auto_or_int":
             # Config-side values are already coerced by load_config; CLI
             # strings arrive as str and need parsing.

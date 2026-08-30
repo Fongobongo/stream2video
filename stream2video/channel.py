@@ -330,6 +330,82 @@ def filter_channel_vods(vods: list[ChannelVod], spec: str) -> list[ChannelVod]:
     return kept
 
 
+def filter_channel_vods_by_meta(
+    vods: list[ChannelVod],
+    *,
+    min_duration: float = 0.0,
+    since: str = "",
+) -> list[ChannelVod]:
+    """Filter a listing by entry metadata: a minimum duration (seconds)
+    and/or an upload-date floor.
+
+    ``min_duration`` drops the listing's noise tail — trailers, shorts,
+    30-second announcements — whose silence-cut savings can't pay for
+    the per-video pipeline overhead. Entries with an unknown duration
+    (live/upcoming markers) are KEPT: they may be real streams whose
+    metadata just hasn't landed yet, and dropping them silently would
+    hide content the user asked to see.
+
+    ``since`` accepts ``YYYY-MM-DD`` (kept if uploaded that day or
+    later), ``-Nd``/``-Nw`` (N days/weeks ago) or an ISO datetime; the
+    sugar forms cover the common "since last week" without a user
+    reaching for a calendar. Entries with an unknown timestamp (Twitch
+    listings have no dates) are KEPT — the filter must not silently
+    empty a platform that cannot answer the question.
+
+    Pure. Raises ``ValueError`` on an unparseable ``since`` (named so
+    the CLI can reject it with the input echoed).
+    """
+    since_ts: float | None = None
+    if since:
+        since_ts = parse_since_spec(since)
+    kept = [
+        v
+        for v in vods
+        if (v.duration is None or v.duration >= min_duration)
+        and (since_ts is None or v.timestamp is None or v.timestamp >= since_ts)
+    ]
+    return kept
+
+
+def parse_since_spec(spec: str) -> float:
+    """Parse a ``--channel-since`` value into a Unix timestamp.
+
+    Accepted forms:
+    - ``YYYY-MM-DD`` (and ``YYYY-MM-DD HH:MM`` / full ISO — midnight
+      of that day in LOCAL time);
+    - ``-Nd`` / ``-Nw`` / ``-Nm`` — N days / weeks / months ago
+      (months = 30 days; a calendar-accurate month walk buys nothing
+      for a coarse "since last month" filter).
+
+    Raises ``ValueError`` (naming the spec) on anything else so the CLI
+    can fail fast with the input echoed instead of silently treating a
+    typo as "no filter".
+    """
+    import datetime as _dt
+
+    s = spec.strip()
+    if not s:
+        raise ValueError("Empty --channel-since value")
+    m = re.fullmatch(r"-(\d+(?:\.\d+)?)([dwm])", s, re.IGNORECASE)
+    if m:
+        n = float(m.group(1))
+        unit = m.group(2).lower()
+        days = {"d": 1.0, "w": 7.0, "m": 30.0}[unit] * n
+        return time.time() - days * 86400.0
+    try:
+        # ``fromisoformat`` accepts YYYY-MM-DD and full ISO datetimes;
+        # a bare "2026-8-1" (non-padded) raises — good, be strict.
+        dt = _dt.datetime.fromisoformat(s)
+    except ValueError as e:
+        raise ValueError(
+            f"Bad --channel-since {spec!r} (expected YYYY-MM-DD or -Nd/-Nw/-Nm)"
+        ) from e
+    if dt.tzinfo is None:
+        dt = dt.astimezone()  # naive local -> aware local
+    return dt.timestamp()
+
+
 def is_twitch_channel_url(url: str) -> bool:
     """True when ``url`` is a Twitch *channel VOD-listing* URL.
 

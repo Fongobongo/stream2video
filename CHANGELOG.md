@@ -47,6 +47,44 @@
     keeps speedruns minus glitches. Specs with only exclusions keep
     everything else; the table's numbers and the selection refer to the
     FILTERED set.
+  - `--channel-min-dur 300` — drop entries shorter than N seconds
+    (trailers, shorts, 30-second announcements whose silence-cut
+    savings can't pay the pipeline overhead). Entries with an unknown
+    duration are kept.
+  - `--channel-since` — keep only entries uploaded since a date:
+    `2026-08-01`, or sugar `-7d` / `-2w` / `-1m` (days/weeks/months
+    ago). Entries without a known date (Twitch listings carry none)
+    are kept; a typo fails fast with the input echoed.
+- **Config parity for the channel knobs** — `channel_limit`,
+  `channel_type`, `channel_sort`, `channel_filter`,
+  `channel_min_duration` and `channel_since` are first-class YAML
+  config keys (CLI flag > YAML > default, same as method/encoder);
+  a bad enum/type value in the config is rejected by the same loader.
+  The PARAM_SPECS table grew a `str` kind for the free-form specs.
+- **`--batch-file`** — a queue file: every non-empty, non-`#` line is
+  a separate input (single video URLs, local paths, or listing URLs —
+  a listing line expands via `--channel-select`, same rules as a
+  direct listing argument). One batch = one progress bar, per-entry
+  error isolation, and the epilogue lists failures. `-` reads the
+  queue from stdin.
+- **`--channel-continue`** — resume the last batch in the output
+  directory: every channel/queue batch writes `channel_batch.json`
+  (the queue + completed URLs); the flag re-queues only the
+  unfinished/failed entries and merges new completions back into the
+  manifest. A fully-completed batch reports "nothing to resume" and
+  exits 0.
+- **Batch dry-run** — `--dry-run` over a channel selection now prints
+  the what-would-be-cut stats for EVERY selected entry (it used to
+  exit after the first — the whole point of a channel-wide dry run is
+  comparing entries); the epilogue says "analysed (dry run)".
+- **GUI channel picker** — pasting a listing URL into the GUI and
+  pressing Start now opens a checkbox table (duration, views, date,
+  title; click a column header to sort, Select all toggles) instead of
+  erroring: check the videos you want, Start runs them as a batch with
+  per-entry error isolation and a queue-position status line. The
+  listing resolves on a background thread through the same
+  flat-playlist path as the CLI; the listing knobs (window/type/
+  filter/sort) come from the GUI's saved settings.
 
 ## [0.3.3] - 2026-08-29
 

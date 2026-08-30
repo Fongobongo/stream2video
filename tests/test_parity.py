@@ -1822,11 +1822,13 @@ class TestMetadataSingleSource:
         assert "theme" in ENUM_VALIDATORS
         assert set(ENUM_VALIDATORS) - set(PARAM_SPECS) == {"theme"}
 
-    def test_spec_defaults_are_exactly_38(self):
-        """CLI/GUI parity contract (audit rounds 29-31): the spec table
-        stays at the 38 pipeline parameters; PARAM_SPECS count == the
-        derived defaults column count."""
+    def test_spec_defaults_count_matches_table(self):
+        """CLI/GUI parity contract (audit rounds 29-31): PARAM_SPECS
+        count == the derived defaults column count. The table grew from
+        38 pipeline params to 44 with the channel-import keys (2026-08:
+        limit/type/sort/filter/min_duration/since — config-parity
+        tunables); update this count WITH the table, never drift."""
         from stream2video.param_specs import SPEC_DEFAULTS
 
-        assert len(PARAM_SPECS) == 38
+        assert len(PARAM_SPECS) == 44
         assert set(SPEC_DEFAULTS) == set(PARAM_SPECS)

@@ -287,6 +287,16 @@ class Stream2VideoGUI(
         # used to silently create a ``~`` directory. Match
         # _copy_cli_command's expanduser() first.
         output_dir = Path(os.path.expanduser(str(output_dir))).resolve()
+
+        # Listing inputs (Twitch/YouTube channel, YouTube playlist) open
+        # the picker dialog instead of running directly: the pipeline
+        # downloads ONE video, so a listing needs "which entries?" first
+        # (the GUI equivalent of the CLI's --channel-pick prompt).
+        from stream2video.channel import is_listing_url as _is_listing
+
+        if _is_listing(input_raw):
+            self._open_channel_picker(input_raw, dry_run=dry_run)
+            return
         # Read EVERY tunable through the shared helper — the same source
         # _copy_cli_command and _save_settings use, so the run, the
         # saved settings and the copied command can't disagree (the
@@ -429,6 +439,177 @@ class Stream2VideoGUI(
             ),
             daemon=True,
         ).start()
+
+    def _open_channel_picker(self, input_raw: str, *, dry_run: bool) -> None:
+        """Open the listing picker for a channel/playlist input.
+
+        The listing resolves on a background thread inside the dialog
+        (``resolve_channel_vods`` — the same flat-playlist pass the CLI
+        uses) using the CURRENT widget values for window/type/filters,
+        so what the picker shows matches what a copied CLI command would
+        list. On Start the checked entries go to ``_start_batch``.
+        """
+
+        from stream2video.channel import resolve_channel_vods
+        from stream2video.gui_channel_picker import show_channel_picker
+
+        # The listing knobs: the GUI has no dedicated channel widgets —
+        # the values come from settings (user_defaults.json / config
+        # YAML / PARAM_SPECS defaults), the same resolution a copied CLI
+        # command would carry. ``channel_sort`` doubles as the table's
+        # initial sort.
+        merged = dict(self.settings)
+        merged.update(self._read_widget_values())
+
+        def _ch(key: str, fallback: Any = "") -> Any:
+            v = merged.get(key)
+            return v if v not in (None, "") else fallback
+
+        limit = int(_ch("channel_limit", 0) or 0) or 50
+        category = str(_ch("channel_type", ""))
+        title_filter = str(_ch("channel_filter", ""))
+        min_dur = float(_ch("channel_min_duration", 0.0) or 0.0)
+        since = str(_ch("channel_since", ""))
+        sort = str(_ch("channel_sort", "date"))
+        proxy = (
+            str(self.settings.get("proxy") or "")
+            if (
+                isinstance(self.settings.get("proxy_active"), bool)
+                and self.settings["proxy_active"]
+            )
+            else ""
+        )
+
+        def _factory() -> list:
+            from stream2video.channel import (
+                filter_channel_vods,
+                filter_channel_vods_by_meta,
+            )
+
+            vods = resolve_channel_vods(
+                input_raw,
+                limit,
+                category=category,
+                proxy=proxy,
+            )
+            if title_filter.strip():
+                vods = filter_channel_vods(vods, title_filter)
+            if min_dur > 0 or since.strip():
+                vods = filter_channel_vods_by_meta(vods, min_duration=min_dur, since=since)
+            return vods
+
+        self._log(f"Opening channel picker for {redact_input_url(input_raw)}")
+        show_channel_picker(
+            self,
+            _factory,
+            on_start=lambda picked: self._start_batch(picked, dry_run=dry_run),
+            initial_sort=sort,
+        )
+
+    def _start_batch(self, picked: list, *, dry_run: bool) -> None:
+        """Run the picker's checked entries as a sequential batch.
+
+        One background thread drives the queue: for each entry the SAME
+        ``_pipeline_worker`` path runs (per-entry project dirs, silence
+        caches, resume), the status line shows the queue position, and
+        a failed entry logs and yields to the next (the CLI batch's
+        error isolation, GUI-side). The single-video flow is untouched.
+        """
+        if self.running or not picked:
+            return
+
+        if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+            self._log("[ERROR] ffmpeg/ffprobe not found in PATH")
+            messagebox.showerror(
+                "ffmpeg not found",
+                "ffmpeg and ffprobe are required to process video.",
+                parent=self,
+            )
+            return
+
+        adv_errors = self._advanced_widget_errors(require_input=False)
+        if adv_errors:
+            for err in adv_errors.values():
+                self._log(f"[ERROR] Invalid setting: {err}")
+            messagebox.showerror(
+                "Invalid settings",
+                "Some Advanced settings are invalid:\n\n" + "\n".join(adv_errors.values()),
+                parent=self,
+            )
+            return
+
+        self._set_running(True)
+        self._cancel_event.clear()
+        self.progress.set(0)
+        self.lbl_progress_pct.configure(text="0%")
+        self.lbl_status.configure(text=f"Batch: 1/{len(picked)}…")
+
+        widget_values = self._read_widget_values()
+        output_dir = Path(
+            os.path.expanduser(self.entry_output.get().strip() or "./processed_videos")
+        ).resolve()
+        # The same snapshot logic _start_pipeline uses: widget values ARE
+        # the run's source of truth; the advanced keys ride along.
+        config_snapshot = dict(self.settings)
+        config_snapshot.update(widget_values)
+        config_snapshot["preset"] = widget_values["preset"]
+
+        total = len(picked)
+        ok_count = [0]
+
+        def _batch_thread() -> None:
+            import stream2video.pipeline_worker as _pw
+
+            for i, vod in enumerate(picked, start=1):
+                if self._cancel_event.is_set():
+                    self._tk_after(0, lambda: self._log("[WARN] Batch cancelled"))
+                    break
+                self._tk_after(
+                    0,
+                    lambda i=i, t=(vod.title or vod.url): self.lbl_status.configure(
+                        text=f"Batch: {i}/{total} — {t}"
+                    ),
+                )
+                self._log(f"Batch entry {i}/{total}: {vod.url}")
+                try:
+                    params = PipelineWorkerParams(
+                        input_raw=vod.url,
+                        output_dir=output_dir,
+                        method=widget_values["method"],
+                        encoder=widget_values["encoder"],
+                        video_quality=widget_values["video_quality"],
+                        audio_quality=widget_values["audio_quality"],
+                        download_quality=widget_values["download_quality"],
+                        force=widget_values["force"],
+                        per_video_dir=widget_values["per_video_dir"],
+                        delete_after=widget_values["delete_after"],
+                        dry_run=dry_run,
+                    )
+                    worker = _pw.PipelineWorker(
+                        _PipelineGuiCallbacksAdapter(self),
+                        config_snapshot,
+                    )
+                    self._pipeline_start = time.monotonic()
+                    worker.run(params)
+                    ok_count[0] += 1
+                except Exception as e:
+                    # A failed entry must not waste the rest of the queue
+                    # (the CLI batch's rule): log and continue.
+                    self._tk_after(
+                        0,
+                        lambda e=e, i=i: self._log(f"[ERROR] Batch entry {i}/{total} failed: {e}"),
+                    )
+            done = ok_count[0]
+            self._tk_after(0, lambda: self._log(f"Batch finished: {done}/{total} compressed"))
+            self._tk_after(0, lambda: self._finish_batch())
+
+        threading.Thread(target=_batch_thread, daemon=True).start()
+
+    def _finish_batch(self) -> None:
+        """Restore the UI after a batch (mirrors the worker's single-run
+        finish, without the single-run summary lines)."""
+        self._set_running(False)
+        self.lbl_status.configure(text="")
 
     def _pipeline_worker(
         self,

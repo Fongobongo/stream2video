@@ -32,6 +32,7 @@ from stream2video.channel import (
     ChannelImportError,
     ChannelVod,
     filter_channel_vods,
+    filter_channel_vods_by_meta,
     is_listing_url,
     is_twitch_channel_url,
     is_youtube_playlist_url,
@@ -1166,7 +1167,30 @@ def main(
             "(case-insensitive). Examples: '*undertale*' — only "
             "Undertale streams; '!archive*,*day*' — drop archives, keep "
             "days; '+*speedrun*,!*glitch*' — speedruns but no glitches. "
-            "Specs with only exclusions keep everything else."
+            "Specs with only exclusions keep everything else. "
+            "If not passed, the config file's `channel_filter` key is used."
+        ),
+    ),
+    channel_min_duration: float = typer.Option(
+        0.0,
+        "--channel-min-dur",
+        help=(
+            "Channel/playlist import: drop entries shorter than this "
+            "many seconds (e.g. 300 to skip trailers/shorts/announcements "
+            "whose silence-cut savings can't pay the pipeline overhead). "
+            "Entries with an unknown duration are kept. If not passed, "
+            "the config file's `channel_min_duration` key is used."
+        ),
+    ),
+    channel_since: str = typer.Option(
+        "",
+        "--channel-since",
+        help=(
+            "Channel/playlist import: keep only entries uploaded since "
+            "this date — 'YYYY-MM-DD', or '-Nd' / '-Nw' / '-Nm' (N "
+            "days/weeks/months ago). Entries without a known date "
+            "(Twitch listings carry none) are kept. If not passed, the "
+            "config file's `channel_since` key is used."
         ),
     ),
     channel_select: str = typer.Option(
@@ -1189,6 +1213,34 @@ def main(
             "'1,3-5', empty = cancel). This is the default when a "
             "channel URL is given without --channel-select; pass it "
             "explicitly to override a config-file channel_select."
+        ),
+    ),
+    batch_file: Path | None = typer.Option(
+        None,
+        "--batch-file",
+        help=(
+            "Queue file: process every non-empty, non-# line as a "
+            "separate input (one URL or local path per line — single "
+            "videos, Twitch/YouTube listings). Listing lines resolve "
+            "through the normal picker flags: with --channel-select "
+            "the listing's chosen entries join the queue; without it "
+            "they need an explicit limit+select (same rules as a "
+            "direct listing URL). Use '-' to read the list from stdin. "
+            "Cannot be combined with a channel/playlist INPUT_VIDEO "
+            "argument."
+        ),
+    ),
+    channel_continue: bool = typer.Option(
+        False,
+        "--channel-continue",
+        help=(
+            "Channel import: resume the LAST batch in the output "
+            "directory. The previous run's selection manifest "
+            "(channel_batch.json) lists which URLs were queued and "
+            "which already succeeded — this flag re-queues only the "
+            "unfinished/failed ones (same listing window and filters "
+            "as the original run), skipping everything that completed. "
+            "Without a manifest the flag errors with a hint."
         ),
     ),
     memory_limit_mb: str = typer.Option(
@@ -1603,6 +1655,18 @@ def main(
             resolved_waveform_timeout: int = resolver.resolve("waveform_timeout", waveform_timeout)
             resolved_completion_sound: bool = resolver.resolve("completion_sound", completion_sound)
             resolved_min_part_bytes: int = resolver.resolve("min_part_bytes", min_part_bytes)
+            # Channel-import keys: CLI flag > YAML `channel_*` key >
+            # PARAM_SPECS default (config parity — a config.yaml can now
+            # carry the picker's defaults the same way it carries
+            # method/encoder/timeouts).
+            resolved_channel_limit: int = resolver.resolve("channel_limit", channel_limit)
+            resolved_channel_type: str = resolver.resolve("channel_type", channel_type)
+            resolved_channel_sort: str = resolver.resolve("channel_sort", channel_sort)
+            resolved_channel_filter: str = resolver.resolve("channel_filter", channel_filter)
+            resolved_channel_min_duration: float = resolver.resolve(
+                "channel_min_duration", channel_min_duration
+            )
+            resolved_channel_since: str = resolver.resolve("channel_since", channel_since)
 
             # P1: proxy — honour YAML + CLI. The resolver's ``proxy`` kind
             # implements the "CLI --proxy implies proxy_active=True" contract:
@@ -1703,13 +1767,74 @@ def main(
             # playlist entry or die on the output template. Resolve the
             # listing up front and drive the controller per entry below.
             _channel_vods: list[ChannelVod] | None = None
-            if is_listing_url(input_video):
-                # The listing window: --channel-limit when given, else a
-                # picker-friendly default (the flat listing is metadata-only,
-                # so a generous window costs seconds).
-                _list_window = channel_limit if channel_limit >= 1 else _CHANNEL_PICK_WINDOW
+            # --channel-continue resume state: the re-queued (unfinished)
+            # entries of the last batch and its manifest (rewritten in the
+            # epilogue). None outside a resume run.
+            _resume_queue: list[tuple[str | None, str]] | None = None
+            _resume_manifest: dict | None = None
+            if channel_continue and not is_listing_url(input_video):
+                # --channel-continue is a batch-resume verb: it re-queues
+                # the LAST batch's unfinished entries. It doesn't need a
+                # listing URL (the manifest already carries the selected
+                # entries), so it is checked BEFORE the listing gate —
+                # any input (e.g. the original channel URL, or the same
+                # command re-run) works.
+                _manifest_path = output_dir / "channel_batch.json"
+                if not _manifest_path.exists():
+                    console.print(
+                        f"[red]--channel-continue: no previous batch found in {output_dir}.[/red]"
+                    )
+                    console.print(
+                        "  A channel batch writes channel_batch.json on "
+                        "every run; run the batch once without "
+                        "--channel-continue first."
+                    )
+                    raise typer.Exit(2)
+                try:
+                    import json as _json
+
+                    _prev = _json.loads(_manifest_path.read_text(encoding="utf-8"))
+                except (OSError, ValueError) as e:
+                    console.print(f"[red]Cannot read batch manifest:[/red] {e}")
+                    raise typer.Exit(2) from None
+                _prev_entries = _prev.get("entries") or []
+                _prev_done = set(_prev.get("completed_urls") or [])
+                _resume_urls = [
+                    (e.get("title"), e["url"])
+                    for e in _prev_entries
+                    if e.get("url") and e["url"] not in _prev_done
+                ]
+                if not _resume_urls:
+                    console.print(
+                        "[green]Previous batch already fully completed — "
+                        f"{len(_prev_entries)} entry(ies), nothing to resume.[/green]"
+                    )
+                    raise typer.Exit(0)
+                console.print(
+                    f"[cyan]Batch resume:[/cyan] {len(_resume_urls)} of "
+                    f"{len(_prev_entries)} entry(ies) from "
+                    f"{_manifest_path.name} (skipping "
+                    f"{len(_prev_done)} completed)"
+                )
+                # Feed the resumed URLs straight into the batch loop as a
+                # queue (same per-entry isolation, progress bar and
+                # epilogue); the manifest is rewritten on completion with
+                # the union of done URLs. ``_resume_queue`` is consumed by
+                # the _batch_targets build below (batch-file sets the same
+                # shape separately; the two are mutually exclusive via
+                # the flags' own gates).
+                _resume_queue = _resume_urls
+                _resume_manifest = _prev
+            elif is_listing_url(input_video):
+                # The listing window: --channel-limit (or the YAML
+                # `channel_limit` key) when >= 1, else a picker-friendly
+                # default (the flat listing is metadata-only, so a
+                # generous window costs seconds).
+                _list_window = (
+                    resolved_channel_limit if resolved_channel_limit >= 1 else _CHANNEL_PICK_WINDOW
+                )
                 _interactive_pick = channel_pick or not channel_select
-                if channel_limit < 1 and not _interactive_pick:
+                if resolved_channel_limit < 1 and not _interactive_pick:
                     # Non-interactive use needs an explicit window — without
                     # it the intent ("which entries?") is ambiguous.
                     console.print(f"[red]Listing URL detected:[/red] {input_video}")
@@ -1730,27 +1855,27 @@ def main(
                     if _is_yt_playlist
                     else (TWITCH_CHANNEL_TYPES if _is_twitch else YOUTUBE_CHANNEL_TYPES)
                 )
-                if channel_type and channel_type not in CHANNEL_TYPES:
+                if resolved_channel_type and resolved_channel_type not in CHANNEL_TYPES:
                     console.print(
-                        f"[red]Unknown --channel-type:[/red] {channel_type!r} "
+                        f"[red]Unknown --channel-type:[/red] {resolved_channel_type!r} "
                         f"(expected one of {', '.join(CHANNEL_TYPES)})"
                     )
                     raise typer.Exit(2)
-                if channel_type and channel_type not in _valid_types:
+                if resolved_channel_type and resolved_channel_type not in _valid_types:
                     console.print(
-                        f"[red]--channel-type {channel_type!r} does not apply here:[/red] "
+                        f"[red]--channel-type {resolved_channel_type!r} does not apply here:[/red] "
                         f"this listing accepts {', '.join(_valid_types)}"
                     )
                     raise typer.Exit(2)
-                if channel_sort not in CHANNEL_SORTS:
+                if resolved_channel_sort not in CHANNEL_SORTS:
                     console.print(
-                        f"[red]Unknown --channel-sort:[/red] {channel_sort!r} "
+                        f"[red]Unknown --channel-sort:[/red] {resolved_channel_sort!r} "
                         f"(expected one of {', '.join(CHANNEL_SORTS)})"
                     )
                     raise typer.Exit(2)
                 # Default the tab per platform when the user didn't pin
                 # one: archives for Twitch, videos for YouTube.
-                _effective_type = channel_type or ("archives" if _is_twitch else "videos")
+                _effective_type = resolved_channel_type or ("archives" if _is_twitch else "videos")
                 try:
                     _channel_vods = resolve_channel_vods(
                         input_video,
@@ -1770,32 +1895,73 @@ def main(
                 # Title filter (--channel-filter): applied to the RAW
                 # listing before the sort, so the table's numbers refer
                 # to the filtered set the user actually sees and picks.
-                if channel_filter.strip():
+                if resolved_channel_filter.strip():
                     try:
                         _before = len(_channel_vods)
-                        _channel_vods = filter_channel_vods(_channel_vods, channel_filter)
+                        _channel_vods = filter_channel_vods(_channel_vods, resolved_channel_filter)
                     except ValueError as e:
                         console.print(f"[red]Bad --channel-filter:[/red] {e}")
                         raise typer.Exit(2) from None
                     if not _channel_vods:
                         console.print(
-                            f"[yellow]--channel-filter {channel_filter!r} matched "
+                            f"[yellow]--channel-filter {resolved_channel_filter!r} matched "
                             f"none of the {_before} listed entries.[/yellow]"
                         )
                         raise typer.Exit(1)
                     console.print(
-                        f"[dim]Filter {channel_filter!r}: "
+                        f"[dim]Filter {resolved_channel_filter!r}: "
                         f"{len(_channel_vods)}/{_before} entries match[/dim]"
+                    )
+
+                # Metadata filters (--channel-min-dur / --channel-since):
+                # drop the noise tail (trailers, shorts, 30s
+                # announcements) and/or everything older than a date.
+                # Applied AFTER the title filter, same numbering rule:
+                # the table shows only what survived. Entries with an
+                # unknown duration/date are KEPT (see the channel
+                # module's rationale) — the filters only drop entries
+                # they can positively judge.
+                if resolved_channel_min_duration > 0 or resolved_channel_since.strip():
+                    _before = len(_channel_vods)
+                    try:
+                        _channel_vods = filter_channel_vods_by_meta(
+                            _channel_vods,
+                            min_duration=resolved_channel_min_duration,
+                            since=resolved_channel_since,
+                        )
+                    except ValueError as e:
+                        console.print(f"[red]Bad --channel-since:[/red] {e}")
+                        raise typer.Exit(2) from None
+                    if not _channel_vods:
+                        console.print(
+                            f"[yellow]Metadata filters (min-dur "
+                            f"{resolved_channel_min_duration:.0f}s"
+                            + (
+                                f", since {resolved_channel_since!r}"
+                                if resolved_channel_since.strip()
+                                else ""
+                            )
+                            + f") matched none of the {_before} listed entries.[/yellow]"
+                        )
+                        raise typer.Exit(1)
+                    _meta_bits: list[str] = []
+                    if resolved_channel_min_duration > 0:
+                        _meta_bits.append(f"min-dur {resolved_channel_min_duration:.0f}s")
+                    if resolved_channel_since.strip():
+                        _meta_bits.append(f"since {resolved_channel_since!r}")
+                    console.print(
+                        f"[dim]Filters ({', '.join(_meta_bits)}): "
+                        f"{len(_channel_vods)}/{_before} entries kept[/dim]"
                     )
 
                 # Sort the table per the user's key (the listing arrives
                 # newest-first; duration/views reorder it).
-                _channel_vods = sort_channel_vods(_channel_vods, channel_sort)
+                _channel_vods = sort_channel_vods(_channel_vods, resolved_channel_sort)
 
                 # Numbered table — the "checkboxes" of the CLI: the user
                 # reads the numbers and answers with them.
                 console.print(
-                    f"\n[bold]Listing[/bold] ({_effective_type}, sorted by {channel_sort}):"
+                    f"\n[bold]Listing[/bold] ({_effective_type}, sorted by {resolved_channel_sort}):"
                 )
                 for _i, v in enumerate(_channel_vods, start=1):
                     _views = f"{v.view_count:,}" if v.view_count is not None else "?"
@@ -2082,17 +2248,143 @@ def main(
                     if resolved_completion_sound:
                         _play_sound("attention")
 
-                # Channel batch: the resolved listing (newest first) or a
-                # one-entry "batch" for the ordinary single-video run, so
-                # the loop below has exactly one shape to handle. Each
-                # VOD runs the SAME validated config — only input_raw is
-                # swapped per entry (a frozen dataclass copy), so every
-                # per-video behaviour (project dirs, silence cache,
-                # resume, frame-hole gates) applies unchanged.
+                # --batch-file queue: every non-empty, non-comment line
+                # is an input (single video URL / local path / listing
+                # URL). Listing lines resolve through the SAME picker
+                # flags as a direct listing argument — non-interactively
+                # (--channel-select selects entries per listing), so a
+                # queue file is a scriptable surface. Single entries go
+                # into the queue verbatim.
+                _batch_queue: list[tuple[str | None, str]] | None = None
+                if batch_file is not None:
+                    if _channel_vods is not None:
+                        console.print(
+                            "[red]--batch-file cannot be combined with a "
+                            "channel/playlist INPUT_VIDEO.[/red]"
+                        )
+                        console.print(
+                            "  The queue file IS the batch; list the listing "
+                            "URL as a line inside it instead."
+                        )
+                        raise typer.Exit(2)
+                    if _pcfg.dry_run:
+                        console.print("[red]--batch-file cannot be combined with --dry-run.[/red]")
+                        console.print(
+                            "  A queue is for unattended processing; dry-run "
+                            "each entry individually to tune it first."
+                        )
+                        raise typer.Exit(2)
+                    try:
+                        if str(batch_file) == "-":
+                            _raw_lines = sys.stdin.read().splitlines()
+                        else:
+                            _raw_lines = batch_file.read_text(encoding="utf-8").splitlines()
+                    except OSError as e:
+                        console.print(f"[red]Cannot read --batch-file:[/red] {e}")
+                        raise typer.Exit(2) from None
+                    _batch_queue = []
+                    for _line_no, _line in enumerate(_raw_lines, start=1):
+                        _entry = _line.strip()
+                        if not _entry or _entry.startswith("#"):
+                            continue
+                        if is_listing_url(_entry):
+                            # A listing line: resolve + select entries
+                            # non-interactively (the queue is scriptable;
+                            # an interactive prompt mid-queue would block
+                            # the whole file on one entry). The listing
+                            # window: explicit --channel-limit, else the
+                            # picker default.
+                            _q_window = (
+                                resolved_channel_limit
+                                if resolved_channel_limit >= 1
+                                else _CHANNEL_PICK_WINDOW
+                            )
+                            try:
+                                _lv = resolve_channel_vods(
+                                    _entry,
+                                    _q_window,
+                                    category=resolved_channel_type,
+                                    cancel_callback=(lambda: cancel_event.is_set()),
+                                    proxy=resolved_proxy,
+                                    low_process_priority=resolved_low_process_priority,
+                                )
+                            except ChannelImportError as e:
+                                console.print(
+                                    f"[red]Queue line {_line_no} ({_entry}): "
+                                    f"listing failed — {e}[/red]"
+                                )
+                                raise typer.Exit(1) from None
+                            if resolved_channel_filter.strip():
+                                try:
+                                    _lv = filter_channel_vods(_lv, resolved_channel_filter)
+                                except ValueError as e:
+                                    console.print(f"[red]Bad --channel-filter:[/red] {e}")
+                                    raise typer.Exit(2) from None
+                            if resolved_channel_min_duration > 0 or resolved_channel_since.strip():
+                                try:
+                                    _lv = filter_channel_vods_by_meta(
+                                        _lv,
+                                        min_duration=resolved_channel_min_duration,
+                                        since=resolved_channel_since,
+                                    )
+                                except ValueError as e:
+                                    console.print(f"[red]Bad --channel-since:[/red] {e}")
+                                    raise typer.Exit(2) from None
+                            _lv = sort_channel_vods(_lv, resolved_channel_sort)
+                            if channel_select.strip():
+                                try:
+                                    _picks = parse_channel_selection(
+                                        channel_select.strip(), len(_lv)
+                                    )
+                                except ValueError as e:
+                                    console.print(
+                                        f"[red]Queue line {_line_no}: bad "
+                                        f"--channel-select {channel_select!r} "
+                                        f"({e}).[/red]"
+                                    )
+                                    raise typer.Exit(2) from None
+                                _lv = [_lv[i - 1] for i in _picks]
+                            else:
+                                console.print(
+                                    f"[red]Queue line {_line_no} ({_entry}): "
+                                    "a listing needs --channel-select in a "
+                                    "queue file (entries to take, e.g. '1-5')."
+                                )
+                                raise typer.Exit(2)
+                            _batch_queue.extend((v.title, v.url) for v in _lv)
+                        else:
+                            _batch_queue.append((None, _entry))
+                    if not _batch_queue:
+                        console.print("[red]--batch-file has no entries.[/red]")
+                        raise typer.Exit(2)
+                    console.print(
+                        f"[cyan]Batch queue:[/cyan] {len(_batch_queue)} "
+                        f"entry(ies) from {batch_file}"
+                    )
+                    # The queue replaces the direct input: the loop
+                    # below runs over it, same progress bar, same
+                    # per-entry error isolation.
+
+                # Channel batch: the resolved listing (newest first), a
+                # --batch-file queue, or a one-entry "batch" for the
+                # ordinary single-video run — the loop below has one
+                # shape to handle. Each entry runs the SAME validated
+                # config - only input_raw is swapped per entry (a frozen
+                # dataclass copy), so every per-video behaviour (project
+                # dirs, silence cache, resume, frame-hole gates) applies
+                # unchanged.
                 _batch_targets: list[tuple[str | None, str]] = (
-                    [(v.title, v.url) for v in _channel_vods]
-                    if _channel_vods is not None
-                    else [(None, input_video)]
+                    _batch_queue
+                    if _batch_queue is not None
+                    else (
+                        _resume_queue
+                        if _resume_queue is not None
+                        else (
+                            [(v.title, v.url) for v in _channel_vods]
+                            if _channel_vods is not None
+                            else [(None, input_video)]
+                        )
+                    )
                 )
                 _batch_results: list[tuple[str, str]] = []  # (url, status)
                 _batch_cancelled = False
@@ -2107,7 +2399,17 @@ def main(
                 # bar is the "where am I in the batch" answer.
                 _batch_total = len(_batch_targets)
                 task_batch: TaskID | None = None
-                if _channel_vods is not None:
+                _is_multi_batch = (
+                    _channel_vods is not None
+                    or _batch_queue is not None
+                    or _resume_queue is not None
+                )
+                # The batch's manifest home: the ROOT output dir, captured
+                # before the loop — on_output_resolved rebinds ``output_dir``
+                # to each entry's per-video project dir mid-loop, which
+                # would scatter the manifest into the last VOD's dir.
+                _batch_root_dir = output_dir
+                if _is_multi_batch:
                     _batch_first_label = _batch_targets[0][0]
                     task_batch = progress.add_task(
                         f"[magenta]Batch 1/{_batch_total}[/magenta]"
@@ -2152,7 +2454,7 @@ def main(
                         task_concat = None
 
                     _v_pcfg = _pcfg
-                    if _channel_vods is not None:
+                    if _is_multi_batch:
                         import dataclasses as _dc
 
                         _v_pcfg = _dc.replace(_pcfg, input_raw=_v_url)
@@ -2170,9 +2472,7 @@ def main(
                             # historical no-op (their per-phase bars are
                             # the view).
                             on_progress=(
-                                _batch_on_progress
-                                if _channel_vods is not None
-                                else (lambda f: None)
+                                _batch_on_progress if _is_multi_batch else (lambda f: None)
                             ),
                             on_status=lambda text, *, force=False: None,
                             on_log=_console_log_line,
@@ -2233,21 +2533,21 @@ def main(
                             logger.exception("Download error")
                             _v_code = 1
                         _play_attention_sound()
-                        if _channel_vods is None:
+                        if not _is_multi_batch:
                             raise typer.Exit(_v_code) from None
                         _v_failed = True
                     except PipelineSilenceError as e:
                         console.print(f"[red]Silence detection failed:[/red] {e}")
                         logger.exception("Silence detection error")
                         _play_attention_sound()
-                        if _channel_vods is None:
+                        if not _is_multi_batch:
                             raise typer.Exit(1) from None
                         _v_failed = True
                     except PipelineConcatError as e:
                         console.print(f"[red]Concatenation failed:[/red] {e}")
                         logger.exception("Concatenation error")
                         _play_attention_sound()
-                        if _channel_vods is None:
+                        if not _is_multi_batch:
                             raise typer.Exit(1) from None
                         _v_failed = True
                     except PipelineUnexpectedError as e:
@@ -2259,7 +2559,7 @@ def main(
                         # rest of the queued imports.
                         console.print(f"[red]Unexpected error:[/red] {e}")
                         _play_attention_sound()
-                        if _channel_vods is None:
+                        if not _is_multi_batch:
                             raise typer.Exit(1) from e
                         _v_failed = True
 
@@ -2289,11 +2589,11 @@ def main(
                     if _pcfg.dry_run:
                         # --dry-run: the controller stopped after silence
                         # detection. Show the "what would be cut" summary and
-                        # exit before the encode phase starts. This is the
-                        # tuning loop: a user adjusts threshold / min_silence /
-                        # margin in the config, runs --dry-run, reads the
-                        # stats, and iterates without spending CPU on a
-                        # throwaway encode. See tests/test_cli_dry_run.py.
+                        # skip the encode phase. This is the tuning loop: a
+                        # user adjusts threshold / min_silence / margin in
+                        # the config, runs --dry-run, reads the stats, and
+                        # iterates without spending CPU on a throwaway
+                        # encode. See tests/test_cli_dry_run.py.
                         if result.silence_segments is None or result.keep_segments is None:
                             # Defensive: both segment lists are part of the
                             # dry-run contract. Checked explicitly rather than
@@ -2314,6 +2614,15 @@ def main(
                                 keep_segments=result.keep_segments,
                             )
                         )
+                        if _is_multi_batch:
+                            # Batch dry-run: every selected entry gets its
+                            # stats (the whole point of a channel-wide
+                            # dry-run is comparing entries against each
+                            # other), then the loop moves on — the batch
+                            # epilogue below prints the queue outcome.
+                            # Single-video runs keep the historical
+                            # early exit right here.
+                            continue
                         raise typer.Exit(0)
 
                     output_video = result.output_path
@@ -2345,12 +2654,12 @@ def main(
                             tc, completed=100, description="[green]+[/green] Concatenating done"
                         )
 
-                # Channel-batch epilogue (AFTER the loop, not per VOD): the
+                # Batch epilogue (AFTER the loop, not per VOD): the
                 # per-VOD completion summaries above already printed; this
                 # shows the queue outcome at a glance (which URLs failed,
                 # so a re-run can target them). The single-video path falls
                 # through to the rich summary below.
-                if _channel_vods is not None:
+                if _is_multi_batch:
                     if task_batch is not None:
                         progress.update(
                             task_batch,
@@ -2360,10 +2669,49 @@ def main(
                         )
                     _ok = [u for u, s in _batch_results if s == "ok"]
                     _fail = [u for u, s in _batch_results if s == "failed"]
+                    # Batch manifest (channel_batch.json in the output
+                    # dir): the queue + what completed, so
+                    # --channel-continue can re-run only the missing
+                    # entries. A resume MERGES into the previous
+                    # manifest (its own selections are the unfinished
+                    # tail; completed_before + this run's ok's = the
+                    # new completed set) — a fresh batch overwrites.
+                    try:
+                        import json as _json
+
+                        _manifest_path = _batch_root_dir / "channel_batch.json"
+                        _completed_before = (
+                            set(_resume_manifest.get("completed_urls") or [])
+                            if _resume_manifest is not None
+                            else set()
+                        )
+                        _entries_meta = (
+                            list(_resume_manifest.get("entries") or [])
+                            if _resume_manifest is not None
+                            else [{"title": label, "url": url} for label, url in _batch_targets]
+                        )
+                        _manifest = {
+                            "version": 1,
+                            "entries": _entries_meta,
+                            "completed_urls": sorted(_completed_before | set(_ok)),
+                            "dry_run": bool(_pcfg.dry_run),
+                        }
+                        _manifest_path.write_text(
+                            _json.dumps(_manifest, ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                        logger.debug(f"Batch manifest written: {_manifest_path}")
+                    except OSError as e:
+                        # The manifest is a convenience for resume; a
+                        # write failure (read-only dir, locked file) must
+                        # not fail an otherwise-successful batch.
+                        logger.warning(f"Could not write batch manifest: {e}")
                     console.print()
+                    # --dry-run batches say "analysed" — nothing was
+                    # compressed; the epilogue wording must not claim it was.
+                    _verb = "analysed (dry run)" if _pcfg.dry_run else "compressed"
                     console.print(
-                        f"[bold]Channel batch:[/bold] {len(_ok)}/{len(_batch_results)} "
-                        f"VOD(s) compressed"
+                        f"[bold]Batch:[/bold] {len(_ok)}/{len(_batch_results)} entry(ies) {_verb}"
                     )
                     if _fail:
                         console.print("[red]Failed:[/red]")

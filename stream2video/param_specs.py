@@ -156,7 +156,7 @@ DEFAULT_PRESET = "balanced"
 #   * ``auto_or_int`` — accepts the literal string "auto" OR a positive int
 #                       (encoder_threads, memory_limit_mb)
 #   * ``proxy``       — special: CLI --proxy implies proxy_active=True
-ParamKind = Literal["enum", "bool", "int", "float", "auto_or_int", "proxy"]
+ParamKind = Literal["enum", "bool", "int", "float", "auto_or_int", "proxy", "str"]
 
 # Bool parameters carry BOTH spellings in the spec table because a copied
 # command must be able to pin either direction: the emitted form is chosen
@@ -398,6 +398,54 @@ PARAM_SPECS: dict[str, dict[str, Any]] = {
         "min": 1,
         "max": 10485760,
         "flag": "--min-part-bytes",
+    },
+    # Channel/playlist import tunables (the listing picker). These are
+    # config-parity keys like every other tunable: the CLI flag wins,
+    # then the YAML `channel_*` key, then the default here. Deliberately
+    # WITHOUT min/max: numeric bounds would flow into CONFIG_RANGES,
+    # whose validate_pipeline_config loop getattr's every key off
+    # PipelineConfig — and the channel keys are SESSION listing
+    # parameters, not pipeline config. The channel module and the CLI
+    # gate validate them (limit >= 0 at resolve time; negative
+    # min_duration is a no-op filter).
+    # ``channel_limit`` 0 = the picker's default window (50) applies.
+    "channel_limit": {
+        "kind": "int",
+        "default": 0,
+        "flag": "--channel-limit",
+    },
+    # Empty = the platform's default tab (Twitch archives / YouTube
+    # videos); the platform-specific valid set is enforced by the
+    # channel module at listing time (a playlist rejects tabs outright).
+    "channel_type": {
+        "kind": "str",
+        "default": "",
+        "flag": "--channel-type",
+    },
+    "channel_sort": {
+        "kind": "enum",
+        "default": "date",
+        "valid": ["date", "duration", "views"],
+        "flag": "--channel-sort",
+    },
+    # Free-form glob spec; syntax errors are caught by the channel
+    # module's parser at listing time (fail fast with the term named).
+    "channel_filter": {
+        "kind": "str",
+        "default": "",
+        "flag": "--channel-filter",
+    },
+    "channel_min_duration": {
+        "kind": "float",
+        "default": 0.0,
+        "flag": "--channel-min-dur",
+    },
+    # Empty = no date floor. Parsed lazily at listing time (ISO date or
+    # -Nd/-Nw/-Nm sugar) so a typo fails with the input echoed.
+    "channel_since": {
+        "kind": "str",
+        "default": "",
+        "flag": "--channel-since",
     },
     "rlimit_as_mb": {
         "kind": "int",

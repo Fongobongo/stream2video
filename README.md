@@ -103,6 +103,10 @@ silencecut --show-completion      # Print the completion script for manual insta
 | `--channel-type` | — | Channel/playlist import: which tab to list — Twitch: `archives` (default), `highlights`, `uploads`, `all`, `clips`; YouTube: `videos` (default), `shorts`, `streams`. Playlists have no tabs |
 | `--channel-sort` | `date` | Channel/playlist import: table sort — `date` (newest first), `duration` (longest first) or `views` (most-watched first) |
 | `--channel-filter` | — | Channel/playlist import: title globs, comma-separated — `!` excludes, `+`/bare includes, `*` any chars, `?` one char (case-insensitive). E.g. `'*undertale*'`, `'!archive*,*day*'`, `'+*speedrun*,!*glitch*'` |
+| `--channel-min-dur` | `0` | Channel/playlist import: drop entries shorter than N seconds (e.g. `300` skips trailers/shorts). Unknown-duration entries are kept |
+| `--channel-since` | — | Channel/playlist import: keep entries uploaded since a date — `2026-08-01` or `-7d`/`-2w`/`-1m`. Unknown-date entries (Twitch) are kept |
+| `--channel-continue` | off | Channel import: resume the LAST batch in the output dir — re-queues only the unfinished/failed entries from `channel_batch.json` |
+| `--batch-file` | — | Queue file: every non-empty, non-`#` line is a separate input (video URLs, local paths, or listing URLs that expand via `--channel-select`). `-` reads from stdin |
 | `--channel-select` | — | Channel/playlist import: non-interactive selection by the table's 1-based numbers, e.g. `'1,3-5'` |
 | `--channel-pick` | off | Channel/playlist import: force the interactive numbered-table picker (the default for listing URLs without `--channel-select`) |
 | `-m, --method` | `segment` | `segment` (per-segment encode + concat demuxer), `batch` (frame-exact trim+concat filter), or `cut_then_encode` (lossless cut + single final encode, best quality) |
