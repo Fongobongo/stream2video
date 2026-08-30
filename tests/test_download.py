@@ -164,6 +164,121 @@ class TestDownloadFunction:
         assert "before_dl:%(extractor_key)s" in cmd
         assert ("--print", "after_move:filepath") in pairwise(cmd)
 
+    def test_youtube_403_retries_with_android_client(self, tmp_path: Path):
+        """A YouTube CDN 403 (googlevideo blocking the exit IP) triggers
+        ONE retry with the classic android player client — its
+        progressive 360p format downloads where the default client's
+        DASH URLs are blocked (verified live through a proxy,
+        2026-08-29). A 360p download beats a failed entry."""
+        import subprocess as _sp
+
+        calls: list[list[str]] = []
+        # A real file the fake "download" reports having written.
+        fake_video = tmp_path / "video.mp4"
+        fake_video.write_bytes(b"downloaded bytes")
+        reported = str(fake_video).replace("\\", "/")
+
+        def fake_popen(cmd, **kwargs):
+            calls.append(list(cmd))
+            # First spawn: exit 1 with a 403 stderr (the CDN block).
+            # Second spawn (the retry): succeed and print the file path.
+            if len(calls) == 1:
+                return _sp.Popen(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import sys; sys.stderr.write("
+                        "'ERROR: unable to download video data: "
+                        "HTTP Error 403: Forbidden\\n'); sys.exit(1)",
+                    ],
+                    stdout=_sp.PIPE,
+                    stderr=_sp.PIPE,
+                    text=True,
+                )
+            return _sp.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    f"import sys; sys.stdout.write('after_move:{reported}\\n'); sys.exit(0)",
+                ],
+                stdout=_sp.PIPE,
+                stderr=_sp.PIPE,
+                text=True,
+            )
+
+        with patch("stream2video.download.popen_with_retry", side_effect=fake_popen):
+            result = download("https://www.youtube.com/watch?v=abc123", tmp_path)
+        # Two spawns: the original + the android-client retry.
+        assert len(calls) == 2
+        # The retry carries the android player_client extractor-arg.
+        assert "--extractor-args" in calls[1]
+        i = calls[1].index("--extractor-args")
+        assert calls[1][i + 1] == "youtube:player_client=android"
+        # The first attempt did NOT carry it.
+        assert "--extractor-args" not in calls[0]
+        assert result.is_downloaded is True
+        assert result.path == fake_video
+
+    def test_youtube_403_retry_only_once(self):
+        """The retry itself surfacing another 403 raises the classified
+        error — no infinite ping-pong between client configs."""
+        import subprocess as _sp
+
+        calls: list[list[str]] = []
+
+        def fake_popen(cmd, **kwargs):
+            calls.append(list(cmd))
+            return _sp.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stderr.write("
+                    "'ERROR: unable to download video data: "
+                    "HTTP Error 403: Forbidden\\n'); sys.exit(1)",
+                ],
+                stdout=_sp.PIPE,
+                stderr=_sp.PIPE,
+                text=True,
+            )
+
+        with (
+            patch("stream2video.download.popen_with_retry", side_effect=fake_popen),
+            pytest.raises(DownloadError, match="403"),
+        ):
+            download("https://www.youtube.com/watch?v=abc123", Path("out"))
+        # Exactly two spawns: original + one retry.
+        assert len(calls) == 2
+
+    def test_non_youtube_403_does_not_retry(self):
+        """A 403 from a non-YouTube source (CDN block, expired signed
+        URL) raises immediately — the android player_client retry is a
+        YouTube-specific move."""
+        import subprocess as _sp
+
+        calls: list[list[str]] = []
+
+        def fake_popen(cmd, **kwargs):
+            calls.append(list(cmd))
+            return _sp.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stderr.write("
+                    "'ERROR: unable to download video data: "
+                    "HTTP Error 403: Forbidden\\n'); sys.exit(1)",
+                ],
+                stdout=_sp.PIPE,
+                stderr=_sp.PIPE,
+                text=True,
+            )
+
+        with (
+            patch("stream2video.download.popen_with_retry", side_effect=fake_popen),
+            pytest.raises(DownloadError, match="403"),
+        ):
+            download("https://example.com/video", Path("out"))
+        assert len(calls) == 1
+
 
 class TestFindDownloadedFile:
     """Locate the downloaded file via expected path or glob fallback."""

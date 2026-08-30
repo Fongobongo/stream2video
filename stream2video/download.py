@@ -882,6 +882,8 @@ def download(
     proxy: str = "",
     low_process_priority: bool = False,
     rlimit_as_mb: int = 0,
+    *,
+    _youtube_retry_android: bool = False,
 ) -> DownloadResult:
     """
     Download video from URL via yt-dlp CLI, or pass through a local file.
@@ -1011,6 +1013,13 @@ def download(
 
     if proxy:
         cmd.extend(["--proxy", proxy])
+    if _youtube_retry_android:
+        # YouTube 403 fallback (see the raise site below): the classic
+        # ``android`` player client serves a progressive 360p format the
+        # CDN allows even when the default client's DASH URLs are
+        # 403-blocked for the exit IP. Quality floors at 360p on this
+        # path — a 360p download beats no download.
+        cmd.extend(["--extractor-args", "youtube:player_client=android"])
 
     logger.info(f"Downloading: {redact_input_url(url)}")
     try:
@@ -1211,7 +1220,47 @@ def download(
 
             if process.returncode != 0:
                 stderr_text = "".join(stderr_chunks)
-                raise _classify_error(_scrub(stderr_text)) from None
+                classified = _classify_error(_scrub(stderr_text))
+                # YouTube CDN 403 fallback (verified empirically through
+                # a proxy, 2026-08-29): the default player client's
+                # googlevideo URLs are IP-blocked on some videos while
+                # the classic ``android`` client's progressive format
+                # downloads fine. One retry with that client; a 360p
+                # floor beats a failed entry. Non-YouTube inputs and the
+                # retry itself surface the original error unchanged.
+                _is_yt_403 = (
+                    isinstance(classified, DownloadError)
+                    and not isinstance(
+                        classified,
+                        VideoNotAvailableError
+                        | DiskSpaceError
+                        | FileBusyError
+                        | PermissionDeniedError,
+                    )
+                    and "403" in stderr_text
+                    and "forbidden" in stderr_text.lower()
+                    and "youtube.com" in url.lower()
+                )
+                if _is_yt_403 and not _youtube_retry_android:
+                    logger.warning(
+                        "YouTube CDN returned 403; retrying once with the "
+                        "android player client (progressive 360p)"
+                    )
+                    return download(
+                        url,
+                        out_dir,
+                        cancel_callback=cancel_callback,
+                        quality=quality,
+                        progress_callback=progress_callback,
+                        download_timeout=download_timeout,
+                        connect_timeout=connect_timeout,
+                        no_progress_timeout=no_progress_timeout,
+                        proxy=proxy,
+                        low_process_priority=low_process_priority,
+                        rlimit_as_mb=rlimit_as_mb,
+                        _youtube_retry_android=True,
+                    )
+                raise classified from None
 
             if not stdout_lines:
                 stderr_text = "".join(stderr_chunks)

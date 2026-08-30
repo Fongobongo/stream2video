@@ -86,6 +86,20 @@
   flat-playlist path as the CLI; the listing knobs (window/type/
   filter/sort) come from the GUI's saved settings.
 
+### Fixed
+
+- **YouTube CDN 403 fallback** — some videos download-fail with
+  `HTTP Error 403: Forbidden` when googlevideo blocks the exit IP
+  (observed on 2/5 NASA entries through a proxy; the metadata fetch
+  works, only the CDN transfer is blocked). The downloader now retries
+  ONCE with yt-dlp's classic `android` player client, whose progressive
+  360p format transfers where the default client's DASH URLs are
+  blocked (verified live: the previously-failing entry now downloads).
+  Trade-off: the fallback floors quality at 360p — a 360p download
+  beats a failed entry. Non-YouTube 403s (expired signed URLs, CDN
+  blocks elsewhere) and a 403 on the retry itself surface the original
+  error unchanged; no ping-pong.
+
 ## [0.3.3] - 2026-08-29
 
 Concat-filter hardening for multi-hour content. The v0.3.2 benchmark left
